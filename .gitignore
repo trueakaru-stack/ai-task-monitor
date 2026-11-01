@@ -1,0 +1,23 @@
+# Local and generated files
+*.exe
+*.msi
+*.msix
+*.msixbundle
+*.pfx
+*.cer
+*.log
+*.jsonl
+dist/
+release/
+build/
+conversation/
+.vs/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local task data and settings
+task-progress.json
+claude-events.jsonl
+settings.local.json
+
