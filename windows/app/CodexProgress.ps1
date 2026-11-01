@@ -7,7 +7,8 @@
  [switch]$PreviewSettingsBackHover,
  [ValidateRange(-1,3)][int]$PreviewActiveTasks = -1,
  [ValidateSet("all","codex","claude")][string]$PreviewProvider = "all",
- [string]$ClaudeEventFile = ""
+ [string]$ClaudeEventFile = "",
+ [string]$HintSnapshotFile = ""
 )
 
 Set-StrictMode -Version 2.0
@@ -55,10 +56,36 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
   <SolidColorBrush x:Key="Track" Color="#3A3A3A"/>
   <SolidColorBrush x:Key="ScrollThumbBrush" Color="#555555"/>
   <SolidColorBrush x:Key="ScrollThumbHoverBrush" Color="#747474"/>
+  <SolidColorBrush x:Key="TooltipSurface" Color="#171717"/>
+  <SolidColorBrush x:Key="TooltipBorder" Color="#3D3D3D"/>
+  <Style TargetType="ToolTip">
+   <Setter Property="OverridesDefaultStyle" Value="True"/>
+   <Setter Property="Background" Value="Transparent"/>
+   <Setter Property="BorderBrush" Value="Transparent"/>
+   <Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="Padding" Value="0"/>
+   <Setter Property="SnapsToDevicePixels" Value="True"/>
+   <Setter Property="UseLayoutRounding" Value="True"/>
+   <Setter Property="Placement" Value="Bottom"/>
+   <Setter Property="VerticalOffset" Value="4"/>
+   <Setter Property="MaxWidth" Value="360"/>
+   <Setter Property="HasDropShadow" Value="False"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToolTip">
+    <Grid Background="Transparent" SnapsToDevicePixels="True" UseLayoutRounding="True">
+     <Border Background="{DynamicResource TooltipSurface}" BorderBrush="{DynamicResource TooltipBorder}" BorderThickness="1" CornerRadius="10" Padding="12,10" SnapsToDevicePixels="True">
+      <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="5" Direction="270" Opacity="0.42" Color="#000000" RenderingBias="Quality"/></Border.Effect>
+      <TextBlock Text="{TemplateBinding Content}" TextWrapping="Wrap" FontFamily="Segoe UI Variable Text" FontSize="12" LineHeight="17" Foreground="{DynamicResource TextPrimary}"/>
+     </Border>
+    </Grid>
+   </ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="KeyboardFocusStyle">
+   <Setter Property="Control.Template"><Setter.Value><ControlTemplate><Border BorderBrush="{DynamicResource Accent}" BorderThickness="1" CornerRadius="6"/></ControlTemplate></Setter.Value></Setter>
+  </Style>
   <Style TargetType="Button">
    <Setter Property="FontFamily" Value="Segoe UI Variable Text"/>
    <Setter Property="Cursor" Value="Hand"/>
-   <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+   <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusStyle}"/>
   </Style>
   <Style x:Key="TitleButton" TargetType="Button">
    <Setter Property="Width" Value="36"/><Setter Property="Height" Value="34"/>
@@ -72,7 +99,6 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
      <ControlTemplate.Triggers>
       <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ButtonSurface" Property="Background" Value="{DynamicResource SurfaceHover}"/></Trigger>
       <Trigger Property="IsPressed" Value="True"><Setter TargetName="ButtonSurface" Property="Background" Value="{DynamicResource SurfacePressed}"/></Trigger>
-      <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="ButtonSurface" Property="BorderBrush" Value="{DynamicResource Accent}"/><Setter TargetName="ButtonSurface" Property="BorderThickness" Value="1"/></Trigger>
      </ControlTemplate.Triggers>
     </ControlTemplate></Setter.Value>
    </Setter>
@@ -88,7 +114,6 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
     <ControlTemplate.Triggers>
      <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="OptionSurface" Property="Background" Value="{DynamicResource SurfaceHover}"/></Trigger>
      <Trigger Property="IsPressed" Value="True"><Setter TargetName="OptionSurface" Property="Background" Value="{DynamicResource SurfacePressed}"/></Trigger>
-     <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="OptionSurface" Property="BorderBrush" Value="{DynamicResource Accent}"/><Setter TargetName="OptionSurface" Property="BorderThickness" Value="1"/></Trigger>
     </ControlTemplate.Triggers>
    </ControlTemplate></Setter.Value></Setter>
   </Style>
@@ -100,9 +125,6 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
     <Border x:Name="FooterSurface" Background="{TemplateBinding Background}" BorderBrush="Transparent" BorderThickness="0" CornerRadius="7" Padding="{TemplateBinding Padding}">
      <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
     </Border>
-    <ControlTemplate.Triggers>
-     <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="FooterSurface" Property="BorderBrush" Value="{DynamicResource Accent}"/><Setter TargetName="FooterSurface" Property="BorderThickness" Value="1"/></Trigger>
-    </ControlTemplate.Triggers>
    </ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style x:Key="CompactDotStyle" TargetType="Button">
@@ -110,7 +132,6 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
    <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
     <Border x:Name="CompactDotSurface" Background="Transparent" BorderBrush="Transparent" BorderThickness="0" CornerRadius="7"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
-    <ControlTemplate.Triggers><Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="CompactDotSurface" Property="BorderBrush" Value="{DynamicResource Accent}"/><Setter TargetName="CompactDotSurface" Property="BorderThickness" Value="1"/></Trigger></ControlTemplate.Triggers>
    </ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style x:Key="SourceActionStyle" TargetType="Button">
@@ -118,20 +139,14 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
    <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="BorderThickness" Value="0"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
     <Border x:Name="SourceActionSurface" Background="{TemplateBinding Background}" BorderBrush="Transparent" BorderThickness="0" CornerRadius="7" Padding="{TemplateBinding Padding}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
-    <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="SourceActionSurface" Property="Background" Value="{DynamicResource SurfacePressed}"/></Trigger><Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="SourceActionSurface" Property="BorderBrush" Value="{DynamicResource Accent}"/><Setter TargetName="SourceActionSurface" Property="BorderThickness" Value="1"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger></ControlTemplate.Triggers>
+    <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="SourceActionSurface" Property="Background" Value="{DynamicResource SurfacePressed}"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45"/></Trigger></ControlTemplate.Triggers>
    </ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style x:Key="ProviderTabStyle" TargetType="Button">
    <Setter Property="Height" Value="34"/><Setter Property="Padding" Value="13,0"/><Setter Property="Margin" Value="0,0,4,0"/>
    <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/><Setter Property="BorderThickness" Value="0"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-    <Border x:Name="TabSurface" Background="{TemplateBinding Background}" BorderBrush="Transparent" BorderThickness="0" CornerRadius="8" Padding="{TemplateBinding Padding}">
-     <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-    </Border>
-    <ControlTemplate.Triggers>
-     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="TabSurface" Property="Background" Value="{DynamicResource SurfaceHover}"/></Trigger>
-     <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="TabSurface" Property="BorderBrush" Value="{DynamicResource Accent}"/><Setter TargetName="TabSurface" Property="BorderThickness" Value="1"/></Trigger>
-    </ControlTemplate.Triggers>
+    <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
    </ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style x:Key="RefreshButtonStyle" TargetType="Button">
@@ -143,7 +158,6 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
     </Border>
     <ControlTemplate.Triggers>
      <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="RefreshSurface" Property="Background" Value="#363636"/></Trigger>
-     <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="RefreshSurface" Property="BorderBrush" Value="#8C8C8C"/></Trigger>
     </ControlTemplate.Triggers>
    </ControlTemplate></Setter.Value></Setter>
   </Style>
@@ -217,10 +231,10 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
      <Grid Margin="20,18,20,17">
       <StackPanel>
        <TextBlock Text="Ход выполнения" FontFamily="Segoe UI Variable Display Semibold" FontSize="22" Foreground="{DynamicResource TextPrimary}"/>
-       <TextBlock x:Name="SummaryText" Text="Поиск задач Codex" Margin="0,4,0,0" FontSize="12.5" Foreground="{DynamicResource TextSecondary}"/>
-       <Border x:Name="ProviderTabsHost" Visibility="Collapsed" Margin="0,13,0,0" Padding="3" HorizontalAlignment="Left" Background="{DynamicResource SurfaceRaised}" CornerRadius="10">
-        <StackPanel x:Name="ProviderTabsPanel" Orientation="Horizontal"/>
-       </Border>
+       <Grid x:Name="ProviderTabsHost" Visibility="Collapsed" Margin="0,13,0,0" HorizontalAlignment="Left">
+        <Path x:Name="ProviderTabsShape" Fill="{DynamicResource SurfaceRaised}"/>
+        <Border Padding="3"><StackPanel x:Name="ProviderTabsPanel" Orientation="Horizontal"/></Border>
+       </Grid>
       </StackPanel>
      </Grid>
     </Border>
@@ -289,8 +303,9 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
      </StackPanel>
     </Grid>
 
-    <ScrollViewer Grid.Row="1" Margin="20,10,20,20" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-     <StackPanel>
+    <Grid Grid.Row="1">
+     <ScrollViewer x:Name="SettingsScroll" Margin="20,10,28,20" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled">
+      <StackPanel>
       <TextBlock Text="Настройки" FontFamily="Segoe UI Variable Display Semibold" FontSize="22" Foreground="{DynamicResource TextPrimary}"/>
       <TextBlock Text="Внешний вид" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
       <Border Margin="0,12,0,0" Padding="6" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10">
@@ -321,10 +336,13 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
       </Border>
       <TextBlock Text="О приложении" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
       <TextBlock Text="AI task monitor · версия 0.2.0 alpha" Margin="0,12,0,0" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
-      <TextBlock Margin="0,8,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Показывает активные задачи Codex и Claude Code, текущее действие и прогресс, когда его можно определить. Точный процент выводится числом, приблизительный — со знаком ≈; без надёжной оценки показывается только активность."/>
+      <TextBlock Margin="0,8,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Показывает активные задачи Codex и Claude Code, текущее действие и прогресс, когда его можно определить. Если задача публикует план, приложение пошагово показывает выполненные, текущий и следующие этапы. Без плана остаётся доступна текущая активность, но этапы и надёжный процент могут отсутствовать."/>
+      <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Точный процент выводится числом, приблизительный — со знаком ≈; без надёжной оценки процент и полоса прогресса не показываются."/>
       <TextBlock Margin="0,12,0,8" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Данные обрабатываются локально. Для Codex приложение читает локальные данные задач; для Claude Code после подключения используются локальные hooks. Вход в аккаунт, токены и права администратора не требуются."/>
-     </StackPanel>
-    </ScrollViewer>
+      </StackPanel>
+     </ScrollViewer>
+     <ScrollBar x:Name="SettingsScrollBar" Orientation="Vertical" HorizontalAlignment="Right" Margin="0,10,7,20" Visibility="Hidden"/>
+    </Grid>
    </Grid>
 
    <Path x:Name="WindowOutline" Stroke="{DynamicResource Border}" StrokeThickness="1" IsHitTestVisible="False" Panel.ZIndex="20"/>
@@ -344,8 +362,8 @@ $settingsView = $window.FindName("SettingsView")
 $tasksPanel = $window.FindName("TasksPanel")
 $tasksScroll = $window.FindName("TasksScroll")
 $tasksScrollBar = $window.FindName("TasksScrollBar")
-$summaryText = $window.FindName("SummaryText")
 $providerTabsHost = $window.FindName("ProviderTabsHost")
+$providerTabsShape = $window.FindName("ProviderTabsShape")
 $providerTabsPanel = $window.FindName("ProviderTabsPanel")
 $pinButton = $window.FindName("PinButton")
 $pinIcon = $window.FindName("PinIcon")
@@ -362,6 +380,8 @@ $settingsFooterButton = $window.FindName("SettingsFooterButton")
 $settingsBackButton = $window.FindName("SettingsBackButton")
 $settingsTaskbarMinimizeButton = $window.FindName("SettingsTaskbarMinimizeButton")
 $settingsCloseButton = $window.FindName("SettingsCloseButton")
+$settingsScroll = $window.FindName("SettingsScroll")
+$settingsScrollBar = $window.FindName("SettingsScrollBar")
 $systemThemeButton = $window.FindName("SystemThemeButton")
 $darkThemeButton = $window.FindName("DarkThemeButton")
 $lightThemeButton = $window.FindName("LightThemeButton")
@@ -370,8 +390,12 @@ $claudeSourceStatus = $window.FindName("ClaudeSourceStatus")
 $claudeSourceAction = $window.FindName("ClaudeSourceAction")
 $script:isCompact = $false
 $script:showingSettings = $false
+$script:navigationByKeyboard = $false
 $script:expandedBounds = $null
 $script:selectedProvider = $PreviewProvider
+$script:cardRadius = 12.0
+$script:tabPadding = 3.0
+$script:previewHintTarget = $null
 $tasksScroll.Add_ScrollChanged({
  $tasksScrollBar.Maximum=$tasksScroll.ScrollableHeight
  $tasksScrollBar.ViewportSize=$tasksScroll.ViewportHeight
@@ -379,6 +403,13 @@ $tasksScroll.Add_ScrollChanged({
  $tasksScrollBar.Visibility=$(if($tasksScroll.ScrollableHeight -gt 0){"Visible"}else{"Hidden"})
 })
 $tasksScrollBar.Add_ValueChanged({if([Math]::Abs($tasksScroll.VerticalOffset-$tasksScrollBar.Value) -gt 0.5){$tasksScroll.ScrollToVerticalOffset($tasksScrollBar.Value)}})
+$settingsScroll.Add_ScrollChanged({
+ $settingsScrollBar.Maximum=$settingsScroll.ScrollableHeight
+ $settingsScrollBar.ViewportSize=$settingsScroll.ViewportHeight
+ $settingsScrollBar.Value=$settingsScroll.VerticalOffset
+ $settingsScrollBar.Visibility=$(if($settingsScroll.ScrollableHeight -gt 0){"Visible"}else{"Hidden"})
+})
+$settingsScrollBar.Add_ValueChanged({if([Math]::Abs($settingsScroll.VerticalOffset-$settingsScrollBar.Value) -gt 0.5){$settingsScroll.ScrollToVerticalOffset($settingsScrollBar.Value)}})
 
 function Prop($object, [string]$name, $fallback = $null) {
  if ($null -ne $object -and $null -ne $object.PSObject.Properties[$name]) { return $object.$name }
@@ -411,6 +442,9 @@ function Update-SquircleGeometry {
  if($windowFrame.ActualWidth -gt 0 -and $windowFrame.ActualHeight -gt 0){
   $windowFrame.Clip=Squircle-Geometry $windowFrame.ActualWidth $windowFrame.ActualHeight 16 0
   $windowOutline.Data=Squircle-Geometry $windowFrame.ActualWidth $windowFrame.ActualHeight 16 0.5
+ }
+ if($providerTabsHost.ActualWidth -gt 0 -and $providerTabsHost.ActualHeight -gt 0){
+  $providerTabsShape.Data=Squircle-Geometry $providerTabsHost.ActualWidth $providerTabsHost.ActualHeight $script:cardRadius 0
  }
 }
 
@@ -493,11 +527,11 @@ function Apply-Theme([string]$mode,[bool]$persist) {
  $resolved=if($mode -eq "system"){Windows-Theme}else{$mode}
  $script:themeMode=$mode; $script:resolvedTheme=$resolved
  if($resolved -eq "light"){
-  $script:palette=@{Surface="#F6F6F6";Raised="#FFFFFF";Border="#D7D7D7";Primary="#1F1F1F";Secondary="#575757";Muted="#707070";Hover="#EAEAEA";Pressed="#DFDFDF";Divider="#E2E2E2";Track="#D8D8D8";Scroll="#B3B3B3";ScrollHover="#8F8F8F";CardBorder="#DADADA";Activity="#707070";Done="#707070";Pending="#4F4F4F"}
+  $script:palette=@{Surface="#F6F6F6";Raised="#FFFFFF";TooltipSurface="#ECECEC";TooltipBorder="#CDCDCD";Border="#D7D7D7";Primary="#1F1F1F";Secondary="#575757";Muted="#707070";Hover="#EAEAEA";Pressed="#DFDFDF";Divider="#E2E2E2";Track="#D8D8D8";Scroll="#B3B3B3";ScrollHover="#8F8F8F";CardBorder="#DADADA";Activity="#707070";Done="#707070";Pending="#4F4F4F"}
  }else{
-  $script:palette=@{Surface="#202020";Raised="#282828";Border="#414141";Primary="#F1F1F1";Secondary="#ACACAC";Muted="#989898";Hover="#333333";Pressed="#3B3B3B";Divider="#343434";Track="#3A3A3A";Scroll="#555555";ScrollHover="#747474";CardBorder="#474747";Activity="#989898";Done="#989898";Pending="#B8B8B8"}
+  $script:palette=@{Surface="#202020";Raised="#282828";TooltipSurface="#171717";TooltipBorder="#3D3D3D";Border="#414141";Primary="#F1F1F1";Secondary="#ACACAC";Muted="#989898";Hover="#333333";Pressed="#3B3B3B";Divider="#343434";Track="#3A3A3A";Scroll="#555555";ScrollHover="#747474";CardBorder="#474747";Activity="#989898";Done="#989898";Pending="#B8B8B8"}
  }
- $resources=@{Surface=$script:palette.Surface;SurfaceRaised=$script:palette.Raised;Border=$script:palette.Border;TextPrimary=$script:palette.Primary;TextSecondary=$script:palette.Secondary;TextMuted=$script:palette.Muted;SurfaceHover=$script:palette.Hover;SurfacePressed=$script:palette.Pressed;Divider=$script:palette.Divider;Track=$script:palette.Track;ScrollThumbBrush=$script:palette.Scroll;ScrollThumbHoverBrush=$script:palette.ScrollHover}
+ $resources=@{Surface=$script:palette.Surface;SurfaceRaised=$script:palette.Raised;TooltipSurface=$script:palette.TooltipSurface;TooltipBorder=$script:palette.TooltipBorder;Border=$script:palette.Border;TextPrimary=$script:palette.Primary;TextSecondary=$script:palette.Secondary;TextMuted=$script:palette.Muted;SurfaceHover=$script:palette.Hover;SurfacePressed=$script:palette.Pressed;Divider=$script:palette.Divider;Track=$script:palette.Track;ScrollThumbBrush=$script:palette.Scroll;ScrollThumbHoverBrush=$script:palette.ScrollHover}
  foreach($key in $resources.Keys){$window.Resources[$key]=Brush $resources[$key]}
  if($persist){Save-ThemeMode $mode}
  Update-ThemeButtons
@@ -807,6 +841,39 @@ function Text([string]$value, [double]$size, [string]$color, [string]$weight = "
  return $block
 }
 
+function Update-ConditionalHint($block) {
+ $data=$block.Tag
+ if($null -eq $data -or $block.ActualWidth -le 0){return}
+ $probe=New-Object Windows.Controls.TextBlock
+ $probe.Text=[string]$data.Text
+ $probe.FontFamily=$block.FontFamily
+ $probe.FontSize=$block.FontSize
+ $probe.FontWeight=$block.FontWeight
+ $probe.FontStyle=$block.FontStyle
+ $probe.FontStretch=$block.FontStretch
+ $probe.LineHeight=$block.LineHeight
+ $probe.TextTrimming="None"
+ if([string]$data.Mode -eq "wrap"){
+  $probe.TextWrapping="Wrap"
+  $probe.Width=$block.ActualWidth
+  $probe.Measure([Windows.Size]::new($block.ActualWidth,[double]::PositiveInfinity))
+  $truncated=$probe.DesiredSize.Height -gt ($block.ActualHeight+0.5)
+ }else{
+  $probe.TextWrapping="NoWrap"
+  $probe.Measure([Windows.Size]::new([double]::PositiveInfinity,[double]::PositiveInfinity))
+  $truncated=$probe.DesiredSize.Width -gt ($block.ActualWidth+0.5)
+ }
+ $block.ToolTip=$(if($truncated){[string]$data.Text}else{$null})
+}
+
+function Add-ConditionalHint($block,[string]$text,[ValidateSet("line","wrap")][string]$mode="line") {
+ $block.Tag=[PSCustomObject]@{Text=$text;Mode=$mode}
+ [Windows.Controls.ToolTipService]::SetInitialShowDelay($block,350)
+ [Windows.Controls.ToolTipService]::SetShowDuration($block,30000)
+ $block.Add_Loaded({param($sender,$args) Update-ConditionalHint $sender})
+ $block.Add_SizeChanged({param($sender,$args) Update-ConditionalHint $sender})
+}
+
 function Progress-Label($task) {
  $kind=[string](Prop $task "ProgressKind" "none")
  $value=Prop $task "Progress"
@@ -845,7 +912,7 @@ function Add-Steps($container, $steps) {
   $labelWeight=if($state -eq "active"){"SemiBold"}else{"Normal"}
   $stepTitle=[string](Prop $step "title" "Без названия")
   $label=Text $stepTitle 13 $labelColor $labelWeight
-  $label.Margin=New-Object Windows.Thickness(4,0,0,0); $label.TextWrapping="NoWrap"; $label.TextTrimming="CharacterEllipsis"; $label.ToolTip=$stepTitle; $label.VerticalAlignment="Center"; [Windows.Controls.Grid]::SetColumn($label,1)
+  $label.Margin=New-Object Windows.Thickness(4,0,0,0); $label.TextWrapping="NoWrap"; $label.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $label $stepTitle "line"; $label.VerticalAlignment="Center"; [Windows.Controls.Grid]::SetColumn($label,1)
   $row.Children.Add($marker)|Out-Null; $row.Children.Add($label)|Out-Null; $rail.Children.Add($row)|Out-Null
   $stepIndex++
  }
@@ -868,23 +935,31 @@ function Add-Steps($container, $steps) {
 
 function Add-Card($task) {
  $stepCount=@($task.Steps).Count
- $card=New-Object Windows.Controls.Border; if($stepCount -gt 0){$card.Height=$(if($script:showProviderLabels){278}else{258})}; $card.Background=Brush $script:palette.Raised; $card.BorderBrush=Brush $(if($task.Active){$script:palette.CardBorder}else{$script:palette.Border}); $card.BorderThickness=New-Object Windows.Thickness(1); $card.CornerRadius=New-Object Windows.CornerRadius(8); $card.Padding=New-Object Windows.Thickness(16,15,16,14); $card.Margin=New-Object Windows.Thickness(0,0,0,12)
+ $card=New-Object Windows.Controls.Grid; if($stepCount -gt 0){$card.Height=$(if($script:showProviderLabels){278}else{258})}; $card.Margin=New-Object Windows.Thickness(0,0,0,12)
+ $cardShape=New-Object Windows.Shapes.Path; $cardShape.Fill=Brush $script:palette.Raised; $cardShape.Stroke=Brush $(if($task.Active){$script:palette.CardBorder}else{$script:palette.Border}); $cardShape.StrokeThickness=1; $cardShape.IsHitTestVisible=$false
+ $cardContent=New-Object Windows.Controls.Border; $cardContent.Padding=New-Object Windows.Thickness(16,15,16,14)
+ $card.Children.Add($cardShape)|Out-Null; $card.Children.Add($cardContent)|Out-Null
+ $card.Tag=$cardShape
+ $card.Add_SizeChanged({param($sender,$args) if($sender.ActualWidth -gt 0 -and $sender.ActualHeight -gt 0){$sender.Tag.Data=Squircle-Geometry $sender.ActualWidth $sender.ActualHeight $script:cardRadius 0.5}})
  $stack=New-Object Windows.Controls.StackPanel
  if($script:showProviderLabels){$providerLabel=Text ([string]$task.ProviderName) 11.5 $script:accentHex "SemiBold";$providerLabel.Margin=New-Object Windows.Thickness(0,0,0,3);$stack.Children.Add($providerLabel)|Out-Null}
  $header=New-Object Windows.Controls.Grid
  $c1=New-Object Windows.Controls.ColumnDefinition; $c1.Width=New-Object Windows.GridLength(1,"Star"); $c2=New-Object Windows.Controls.ColumnDefinition; $c2.Width=[Windows.GridLength]::Auto; $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2)
  $titleStack=New-Object Windows.Controls.StackPanel
- $title=Text $task.Title 16 $script:palette.Primary "SemiBold"; $title.Margin=New-Object Windows.Thickness(0,0,14,0); $title.Height=22; $title.MaxWidth=390; $title.HorizontalAlignment="Left"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; $title.ToolTip=$task.Title; $titleStack.Children.Add($title)|Out-Null
- $activityText=[string]$task.Activity; $activity=Text $activityText 12 $script:palette.Activity; $activity.Margin=New-Object Windows.Thickness(0,5,14,0); $activity.Width=390; $activity.HorizontalAlignment="Left"; $activity.Height=34; $activity.MaxHeight=34; $activity.TextTrimming="CharacterEllipsis"; if($activityText){$activity.ToolTip=$activityText}; $titleStack.Children.Add($activity)|Out-Null
+ $title=Text $task.Title 16 $script:palette.Primary "SemiBold"; $title.Margin=New-Object Windows.Thickness(0,0,14,0); $title.Height=22; $title.MaxWidth=390; $title.HorizontalAlignment="Left"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $title ([string]$task.Title) "line"; $titleStack.Children.Add($title)|Out-Null
+ $activityText=[string]$task.Activity; $activity=Text $activityText 12 $script:palette.Activity; $activity.Margin=New-Object Windows.Thickness(0,5,14,0); $activity.Width=390; $activity.HorizontalAlignment="Left"; $activity.Height=34; $activity.MaxHeight=34; $activity.TextTrimming="CharacterEllipsis"; if($activityText){Add-ConditionalHint $activity $activityText "wrap"}; $titleStack.Children.Add($activity)|Out-Null
+ if(-not $CompactMode -and $PreviewActiveTasks -ge 0 -and $null -eq $script:previewHintTarget -and $activityText){$script:previewHintTarget=$activity}
  $progressLabel=Progress-Label $task
  $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.Height=22; $percent.VerticalAlignment="Top"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip="Приблизительная оценка"}; [Windows.Controls.Grid]::SetColumn($percent,1)
  $header.Children.Add($titleStack)|Out-Null; $header.Children.Add($percent)|Out-Null; $stack.Children.Add($header)|Out-Null
  if($task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Margin=New-Object Windows.Thickness(0,14,0,0); $stack.Children.Add($bar)|Out-Null}
- Add-Steps $stack $task.Steps
- $metaText=$(if($script:showProviderLabels){"$stepCount этапов"}else{$task.ProviderName+" · "+$task.Source+" · "+$stepCount+" этапов"})
- if($task.Updated -ne [DateTime]::MinValue){$metaText += " · "+$task.Updated.ToString("HH:mm")}
- $meta=Text $metaText 11.5 $script:palette.Muted; $meta.Margin=New-Object Windows.Thickness(0,11,0,0); $stack.Children.Add($meta)|Out-Null
- $card.Child=$stack; $tasksPanel.Children.Add($card)|Out-Null
+ if($stepCount -gt 0){
+  Add-Steps $stack $task.Steps
+  $metaText="План задачи · $stepCount этапов"
+  if($task.Updated -ne [DateTime]::MinValue){$metaText += " · "+$task.Updated.ToString("HH:mm")}
+  $meta=Text $metaText 11.5 $script:palette.Muted; $meta.Margin=New-Object Windows.Thickness(0,11,0,0); $stack.Children.Add($meta)|Out-Null
+ }
+ $cardContent.Child=$stack; $tasksPanel.Children.Add($card)|Out-Null
 }
 
 function Add-CompactTask($task) {
@@ -901,7 +976,7 @@ function Add-CompactTask($task) {
  $c3=New-Object Windows.Controls.ColumnDefinition; $c3.Width=[Windows.GridLength]::Auto
  $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2); $header.ColumnDefinitions.Add($c3)
  $dot=New-Object Windows.Controls.Border; $dot.Width=6; $dot.Height=6; $dot.CornerRadius=New-Object Windows.CornerRadius(3); $dot.Background=Brush $script:accentHex; $dot.VerticalAlignment="Center"; $dot.HorizontalAlignment="Left"
- $title=Text $task.Title 13.5 $script:palette.Primary "SemiBold"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; $title.Margin=New-Object Windows.Thickness(0,0,10,0); [Windows.Automation.AutomationProperties]::SetName($title,[string]$task.Title)
+ $title=Text $task.Title 13.5 $script:palette.Primary "SemiBold"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; $title.Margin=New-Object Windows.Thickness(0,0,10,0); Add-ConditionalHint $title ([string]$task.Title) "line"; [Windows.Controls.ToolTipService]::SetPlacement($title,[Windows.Controls.Primitives.PlacementMode]::Left); [Windows.Controls.ToolTipService]::SetHorizontalOffset($title,-4); [Windows.Automation.AutomationProperties]::SetName($title,[string]$task.Title)
  $progressLabel=Progress-Label $task
  $percent=Text $progressLabel 13.5 $script:palette.Primary "SemiBold"; $percent.VerticalAlignment="Center"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip="Приблизительная оценка"}
  [Windows.Controls.Grid]::SetColumn($dot,0); [Windows.Controls.Grid]::SetColumn($title,1); [Windows.Controls.Grid]::SetColumn($percent,2)
@@ -909,7 +984,8 @@ function Add-CompactTask($task) {
  [Windows.Controls.Grid]::SetRow($header,0); $container.Children.Add($header)|Out-Null
 
  $activityText=if($task.Activity){[string]$task.Activity}else{"Выполняется"}
- $activity=Text $activityText 11.5 $script:palette.Activity; $activity.TextWrapping="NoWrap"; $activity.TextTrimming="CharacterEllipsis"; $activity.Margin=New-Object Windows.Thickness(12,2,0,0); [Windows.Automation.AutomationProperties]::SetName($activity,$activityText)
+ $activity=Text $activityText 11.5 $script:palette.Activity; $activity.TextWrapping="NoWrap"; $activity.TextTrimming="CharacterEllipsis"; $activity.Margin=New-Object Windows.Thickness(12,2,0,0); Add-ConditionalHint $activity $activityText "line"; [Windows.Controls.ToolTipService]::SetPlacement($activity,[Windows.Controls.Primitives.PlacementMode]::Left); [Windows.Controls.ToolTipService]::SetHorizontalOffset($activity,-4); [Windows.Automation.AutomationProperties]::SetName($activity,$activityText)
+ if($CompactMode -and $PreviewActiveTasks -ge 0 -and $null -eq $script:previewHintTarget){$script:previewHintTarget=$activity}
  [Windows.Controls.Grid]::SetRow($activity,1); $container.Children.Add($activity)|Out-Null
  if($task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Height=2; $bar.Margin=New-Object Windows.Thickness(12,7,0,0); [Windows.Controls.Grid]::SetRow($bar,2); $container.Children.Add($bar)|Out-Null}
  $compactTasksPanel.Children.Add($container)|Out-Null
@@ -987,20 +1063,20 @@ function Set-CompactMode([bool]$compact) {
  }
 }
 
-function Show-SettingsView {
+function Show-SettingsView([bool]$keyboardNavigation = $false) {
  if($script:isCompact){Set-CompactMode $false}
  $expandedView.Visibility="Collapsed"
  $compactView.Visibility="Collapsed"
  $settingsView.Visibility="Visible"
  Update-SourceSettings
- $settingsBackButton.Focus()|Out-Null
+ if($keyboardNavigation){$settingsBackButton.Focus()|Out-Null}else{[Windows.Input.Keyboard]::ClearFocus()|Out-Null}
 }
 
-function Show-TasksView {
+function Show-TasksView([bool]$keyboardNavigation = $false) {
  $settingsView.Visibility="Collapsed"
  $compactView.Visibility="Collapsed"
  $expandedView.Visibility="Visible"
- $settingsFooterButton.Focus()|Out-Null
+ if($keyboardNavigation){$settingsFooterButton.Focus()|Out-Null}else{[Windows.Input.Keyboard]::ClearFocus()|Out-Null}
 }
 
 function Minimize-ToTaskbar {
@@ -1022,6 +1098,12 @@ function Add-ProviderTab([string]$id,[string]$label,[int]$count){
  $button=New-Object Windows.Controls.Button
  $button.Style=$window.Resources["ProviderTabStyle"]
  $button.Tag=$id
+ $surfaceGrid=New-Object Windows.Controls.Grid
+ $tabShape=New-Object Windows.Shapes.Path
+ $tabShape.IsHitTestVisible=$false
+ $surfaceGrid.Children.Add($tabShape)|Out-Null
+ $contentBorder=New-Object Windows.Controls.Border
+ $contentBorder.Padding=New-Object Windows.Thickness(13,0,13,0)
  $content=New-Object Windows.Controls.Grid
  $labelColumn=New-Object Windows.Controls.ColumnDefinition;$labelColumn.Width=[Windows.GridLength]::Auto
  $countColumn=New-Object Windows.Controls.ColumnDefinition;$countColumn.Width=[Windows.GridLength]::Auto
@@ -1034,9 +1116,15 @@ function Add-ProviderTab([string]$id,[string]$label,[int]$count){
  $countText=Text $count.ToString() 11.5 $script:palette.Secondary "SemiBold"
  $countText.Foreground=$tabForeground;$countText.Margin=New-Object Windows.Thickness(3,-5,0,0);$countText.VerticalAlignment="Center"
  [Windows.Controls.Grid]::SetColumn($countText,1);$content.Children.Add($labelText)|Out-Null;$content.Children.Add($countText)|Out-Null
- $button.Content=$content
+ $contentBorder.Child=$content
+ $surfaceGrid.Children.Add($contentBorder)|Out-Null
+ $button.Content=$surfaceGrid
+ $button.DataContext=$tabShape
+ $button.Add_SizeChanged({param($sender,$args) if($sender.ActualWidth -gt 0 -and $sender.ActualHeight -gt 0){$sender.DataContext.Data=Squircle-Geometry $sender.ActualWidth $sender.ActualHeight ($script:cardRadius-$script:tabPadding) 0}})
+ $button.Add_MouseEnter({param($sender,$args) if($script:selectedProvider -ne [string]$sender.Tag){$sender.DataContext.Fill=Brush $script:palette.Hover}})
+ $button.Add_MouseLeave({param($sender,$args) if($script:selectedProvider -ne [string]$sender.Tag){$sender.DataContext.Fill=[Windows.Media.Brushes]::Transparent}})
  [Windows.Automation.AutomationProperties]::SetName($button,"Показать задачи: $label, $count")
- if($selected){$button.Background=Brush $script:accentHex}
+ $tabShape.Fill=$(if($selected){Brush $script:accentHex}else{[Windows.Media.Brushes]::Transparent})
  $button.Add_Click({param($sender,$args) $script:selectedProvider=[string]$sender.Tag;$script:fingerprint="";Update-View})
  $providerTabsPanel.Children.Add($button)|Out-Null
 }
@@ -1050,6 +1138,9 @@ function Render-ProviderTabs($tasks){
  Add-ProviderTab "all" "Все" @($tasks|Where-Object Active).Count
  Add-ProviderTab "codex" "Codex" @($tasks|Where-Object {$_.Active -and $_.Provider -eq "codex"}).Count
  Add-ProviderTab "claude" "Claude Code" @($tasks|Where-Object {$_.Active -and $_.Provider -eq "claude"}).Count
+ if($providerTabsPanel.Children.Count -gt 0){$providerTabsPanel.Children[$providerTabsPanel.Children.Count-1].Margin=New-Object Windows.Thickness(0)}
+ $providerTabsHost.UpdateLayout()
+ Update-SquircleGeometry
 }
 
 function Update-View {
@@ -1057,11 +1148,32 @@ function Update-View {
   $allTasks=@(Codex-Tasks)+@(Claude-Tasks)
   if($PreviewActiveTasks -ge 0){
    $previewTitles=@("Создать индикатор прогресса задач","Проверить локальную CMS","Подготовить перенос проекта")
-   $previewActivities=@("Проверяю компактный режим","Запускаю визуальную проверку","Собираю данные для переноса")
-   $previewProgress=@(74,46,$null);$previewKinds=@("exact","approximate","none");$previewProviders=@("codex","claude","claude");$previewProviderNames=@("Codex","Claude Code","Claude Code")
+   $previewActivities=@("Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний","Запускаю визуальную проверку","Собираю данные для переноса")
+   $previewProgress=@(50,46,$null);$previewKinds=@("exact","approximate","none");$previewProviders=@("codex","claude","claude");$previewProviderNames=@("Codex","Claude Code","Claude Code")
    $allTasks=@()
    for($i=0;$i -lt $PreviewActiveTasks;$i++){
-    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivities[$i];Active=$true;Paused=$false;Progress=$previewProgress[$i];ProgressKind=$previewKinds[$i];Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status="В работе";Updated=[DateTime]::Now;Steps=@();Source="Предпросмотр"}
+    $previewSteps=$(if($i -eq 0){
+     @(
+      [PSCustomObject]@{title="Синхронизировать список задач";status="done"},
+      [PSCustomObject]@{title="Восстановить карточки планов";status="done"},
+      [PSCustomObject]@{title="Исправить прокрутку этапов";status="done"},
+      [PSCustomObject]@{title="Применить системный акцент";status="done"},
+      [PSCustomObject]@{title="Проверить скругления и фокус";status="active"},
+      [PSCustomObject]@{title="Снять тёмный и светлый экран";status="pending"},
+      [PSCustomObject]@{title="Провести финальную проверку";status="pending"},
+      [PSCustomObject]@{title="Опубликовать исходники";status="pending"}
+     )
+    }elseif($i -eq 1){
+     @(
+      [PSCustomObject]@{title="Проверить локальное окружение";status="done"},
+      [PSCustomObject]@{title="Подготовить тестовые данные";status="done"},
+      [PSCustomObject]@{title="Запустить визуальную проверку";status="active"},
+      [PSCustomObject]@{title="Проверить светлую тему";status="pending"},
+      [PSCustomObject]@{title="Зафиксировать результат";status="pending"},
+      [PSCustomObject]@{title="Очистить временные данные";status="pending"}
+     )
+    }else{@()})
+    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivities[$i];Active=$true;Paused=$false;Progress=$previewProgress[$i];ProgressKind=$previewKinds[$i];Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status="В работе";Updated=[DateTime]::Now;Steps=$previewSteps;Source="Предпросмотр"}
    }
   }
   Render-ProviderTabs $allTasks
@@ -1074,9 +1186,12 @@ function Update-View {
    if($tasks.Count -eq 0){$empty=Text "Активных задач сейчас нет" 14 $script:palette.Secondary; $empty.Margin=New-Object Windows.Thickness(4,24,0,0); $tasksPanel.Children.Add($empty)|Out-Null}
    Render-CompactTasks $tasks
   }
-  $activeCount=@($tasks|Where-Object Active).Count
-  $summaryText.Text="$activeCount в работе · $($tasks.Count) показано · обновление каждые 2 сек"
- } catch {$summaryText.Text="Ошибка синхронизации"}
+ } catch {
+  $tasksPanel.Children.Clear()
+  $errorText=Text "Не удалось обновить задачи" 14 $script:palette.Secondary
+  $errorText.Margin=New-Object Windows.Thickness(4,24,0,0)
+  $tasksPanel.Children.Add($errorText)|Out-Null
+ }
 }
 
 $window.Add_MouseLeftButtonDown({if($_.ButtonState -eq [Windows.Input.MouseButtonState]::Pressed){$window.DragMove()}})
@@ -1086,8 +1201,12 @@ $expandButton.Add_Click({Set-CompactMode $false})
 $taskbarMinimizeButton.Add_Click({Minimize-ToTaskbar})
 $compactTaskbarMinimizeButton.Add_Click({Minimize-ToTaskbar})
 $settingsTaskbarMinimizeButton.Add_Click({Minimize-ToTaskbar})
-$settingsFooterButton.Add_Click({Show-SettingsView})
-$settingsBackButton.Add_Click({Show-TasksView})
+$settingsFooterButton.Add_PreviewMouseLeftButtonDown({$script:navigationByKeyboard=$false;[Windows.Input.Keyboard]::ClearFocus()|Out-Null})
+$settingsBackButton.Add_PreviewMouseLeftButtonDown({$script:navigationByKeyboard=$false;[Windows.Input.Keyboard]::ClearFocus()|Out-Null})
+$settingsFooterButton.Add_PreviewKeyDown({param($sender,$eventArgs) if($eventArgs.Key -in @([Windows.Input.Key]::Enter,[Windows.Input.Key]::Space)){$script:navigationByKeyboard=$true}})
+$settingsBackButton.Add_PreviewKeyDown({param($sender,$eventArgs) if($eventArgs.Key -in @([Windows.Input.Key]::Enter,[Windows.Input.Key]::Space)){$script:navigationByKeyboard=$true}})
+$settingsFooterButton.Add_Click({Show-SettingsView $script:navigationByKeyboard;$script:navigationByKeyboard=$false})
+$settingsBackButton.Add_Click({Show-TasksView $script:navigationByKeyboard;$script:navigationByKeyboard=$false})
 $systemThemeButton.Add_Click({Apply-Theme "system" $true;Update-View})
 $darkThemeButton.Add_Click({Apply-Theme "dark" $true;Update-View})
 $lightThemeButton.Add_Click({Apply-Theme "light" $true;Update-View})
@@ -1113,6 +1232,15 @@ Apply-Theme $initialTheme $false
 Update-View
 if($CompactMode){Set-CompactMode $true}
 if ($SnapshotFile) {
+ $hintBackdrop=$null
+ if($HintSnapshotFile -and $CompactMode){
+  $work=[Windows.SystemParameters]::WorkArea
+  $hintBackdrop=New-Object Windows.Window
+  $hintBackdrop.Width=900;$hintBackdrop.Height=280;$hintBackdrop.Left=$work.Right-900;$hintBackdrop.Top=$work.Bottom-280
+  $hintBackdrop.WindowStyle="None";$hintBackdrop.ResizeMode="NoResize";$hintBackdrop.ShowInTaskbar=$false;$hintBackdrop.ShowActivated=$false;$hintBackdrop.Topmost=$true
+  $hintBackdrop.Background=Brush "#111111"
+  $hintBackdrop.Show()
+ }
  $window.Show(); $window.UpdateLayout()
  $width=[Math]::Max(1,[int][Math]::Ceiling($window.ActualWidth)); $height=[Math]::Max(1,[int][Math]::Ceiling($window.ActualHeight))
  $bitmap=[Windows.Media.Imaging.RenderTargetBitmap]::new($width,$height,96,96,[Windows.Media.PixelFormats]::Pbgra32)
@@ -1121,6 +1249,35 @@ if ($SnapshotFile) {
  $encoder.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($bitmap))
  $stream=[IO.File]::Create($SnapshotFile)
  try {$encoder.Save($stream)} finally {$stream.Dispose()}
+ if($HintSnapshotFile -and $null -ne $script:previewHintTarget -and $script:previewHintTarget.ToolTip){
+  $hint=New-Object Windows.Controls.ToolTip
+  $hint.Content=[string]$script:previewHintTarget.ToolTip
+  $hint.PlacementTarget=$script:previewHintTarget
+  if($CompactMode){$hint.Placement=[Windows.Controls.Primitives.PlacementMode]::Left;$hint.HorizontalOffset=-4}else{$hint.Placement=[Windows.Controls.Primitives.PlacementMode]::Bottom;$hint.VerticalOffset=4}
+  $hint.StaysOpen=$true
+  $hint.IsOpen=$true
+  $window.Dispatcher.Invoke([Action]{},[Windows.Threading.DispatcherPriority]::ApplicationIdle)
+  Start-Sleep -Milliseconds 180
+  $frameOrigin=$windowFrame.PointToScreen([Windows.Point]::new(0,0))
+  $hintOrigin=$hint.PointToScreen([Windows.Point]::new(0,0))
+  $dpi=[Windows.Media.VisualTreeHelper]::GetDpi($window)
+  $frameRight=$frameOrigin.X+($windowFrame.ActualWidth*$dpi.DpiScaleX)
+  $frameBottom=$frameOrigin.Y+($windowFrame.ActualHeight*$dpi.DpiScaleY)
+  $hintRight=$hintOrigin.X+($hint.ActualWidth*$dpi.DpiScaleX)
+  $hintBottom=$hintOrigin.Y+($hint.ActualHeight*$dpi.DpiScaleY)
+  $captureLeft=[int][Math]::Floor([Math]::Min($frameOrigin.X,$hintOrigin.X)-12)
+  $captureTop=[int][Math]::Floor([Math]::Min($frameOrigin.Y,$hintOrigin.Y)-12)
+  $captureRight=[int][Math]::Ceiling([Math]::Max($frameRight,$hintRight)+12)
+  $captureBottom=[int][Math]::Ceiling([Math]::Max($frameBottom,$hintBottom)+12)
+  $captureWidth=[Math]::Max(1,$captureRight-$captureLeft)
+  $captureHeight=[Math]::Max(1,$captureBottom-$captureTop)
+  $hintBitmap=[Drawing.Bitmap]::new($captureWidth,$captureHeight)
+  $hintGraphics=[Drawing.Graphics]::FromImage($hintBitmap)
+  try{
+   $hintGraphics.CopyFromScreen($captureLeft,$captureTop,0,0,[Drawing.Size]::new($captureWidth,$captureHeight))
+   $hintBitmap.Save($HintSnapshotFile,[Drawing.Imaging.ImageFormat]::Png)
+  }finally{$hintGraphics.Dispose();$hintBitmap.Dispose();$hint.IsOpen=$false}
+ }
  if($SettingsSnapshotFile){
   Show-SettingsView
   if($PreviewSettingsBackHover){$settingsBackButton.Background=Brush $script:palette.Hover}
@@ -1130,6 +1287,7 @@ if ($SnapshotFile) {
   $settingsEncoder=New-Object Windows.Media.Imaging.PngBitmapEncoder; $settingsEncoder.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($settingsBitmap)); $settingsStream=[IO.File]::Create($SettingsSnapshotFile)
   try{$settingsEncoder.Save($settingsStream)}finally{$settingsStream.Dispose()}
  }
+ if($null -ne $hintBackdrop){$hintBackdrop.Close()}
  $window.Close()
 } else {
  $window.ShowDialog()|Out-Null
