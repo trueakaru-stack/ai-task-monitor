@@ -1,0 +1,75 @@
+﻿{
+    "tasks":  [
+                  {
+                      "threadId":  "019ff76f-4637-73e3-b2bb-73eb83eef537",
+                      "title":  "Создать индикатор прогресса задач",
+                      "status":  "Готово",
+                      "progress":  100,
+                      "steps":  [
+                                    {
+                                        "title":  "Синхронизировать список задач Codex",
+                                        "status":  "done"
+                                    },
+                                    {
+                                        "title":  "Исправить компоновку этапов",
+                                        "status":  "done"
+                                    },
+                                    {
+                                        "title":  "Собрать установщик Windows",
+                                        "status":  "done"
+                                    },
+                                    {
+                                        "title":  "Проверить базовый интерфейс и безопасность",
+                                        "status":  "done"
+                                    },
+                                    {
+                                        "title":  "Сравнить дизайн со скриншотом Codex",
+                                        "status":  "done"
+                                    },
+                                    {
+                                        "title":  "Адаптировать визуальный стиль Codex",
+                                        "status":  "done"
+                                    },
+                                    {
+                                        "title":  "Показать локальную версию и получить утверждение",
+                                        "status":  "done"
+                                    },
+                                    {
+                                        "title":  "Собрать установщик после утверждения",
+                                        "status":  "done"
+                                    }
+                                ],
+                      "paused":  false
+                  },
+                  {
+                      "threadId":  "019ff75e-188d-7783-8051-d7fc3a85fbbb",
+                      "title":  "Завершить локальную CMS-админку",
+                      "status":  "Готово",
+                      "progress":  100,
+                      "steps":  [
+                                    {
+                                        "title":  "Восстановить локальную D1",
+                                        "status":  "done"
+                                    },
+                                    {
+                                        "title":  "Завершить админку и тесты",
+                                        "status":  "done"
+                                    },
+                                    {
+                                        "title":  "Проверить сборки",
+                                        "status":  "done"
+                                    },
+                                    {
+                                        "title":  "Проверить UI и fallback",
+                                        "status":  "done"
+                                    },
+                                    {
+                                        "title":  "Обновить документацию",
+                                        "status":  "done"
+                                    }
+                                ],
+                      "paused":  false
+                  }
+              ]
+}
+
