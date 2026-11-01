@@ -252,11 +252,11 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
       <TextBlock Text="AI task monitor" FontFamily="Segoe UI Variable Display Semibold" FontSize="14" Foreground="{DynamicResource TextPrimary}"/>
      </StackPanel>
      <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-      <Button x:Name="ExpandButton" Style="{StaticResource TitleButton}" AutomationProperties.Name="Развернуть">
-       <Path Data="M 4,13 L 10,7 L 16,13" Stroke="{DynamicResource TextSecondary}" StrokeThickness="1.3" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stretch="Uniform" Width="13" Height="13"/>
-      </Button>
       <Button x:Name="CompactTaskbarMinimizeButton" Style="{StaticResource TitleButton}" AutomationProperties.Name="Свернуть в панель задач">
        <Path Data="M 4,10 L 16,10" Stroke="{DynamicResource TextSecondary}" StrokeThickness="1.3" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Stretch="Uniform" Width="13" Height="13"/>
+      </Button>
+      <Button x:Name="ExpandButton" Style="{StaticResource TitleButton}" AutomationProperties.Name="Развернуть">
+       <Path Data="M 4,13 L 10,7 L 16,13" Stroke="{DynamicResource TextSecondary}" StrokeThickness="1.3" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stretch="Uniform" Width="13" Height="13"/>
       </Button>
       <Button x:Name="CompactCloseButton" Style="{StaticResource TitleButton}" AutomationProperties.Name="Закрыть">
        <Path Data="M 4,4 L 16,16 M 16,4 L 4,16" Stroke="{DynamicResource TextSecondary}" StrokeThickness="1.3" Stretch="Uniform" Width="13" Height="13"/>
