@@ -12,55 +12,77 @@ enum ClaudeIntegration {
     }
 
     static func connectionState(settingsURL: URL = AppPaths.claudeSettings) throws -> Bool {
-        let data: Data
-        do { data = try Data(contentsOf: settingsURL) }
-        catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return false }
-        guard !data.isEmpty else { return false }
-        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw IntegrationError.invalidSettings }
-        guard let value = root["hooks"] else { return false }
-        guard let hooks = value as? [String: Any] else { throw IntegrationError.invalidSettings }
-        return events.contains { event in
-            guard let groups = hooks[event] as? [[String: Any]] else { return false }
-            return groups.contains { group in
-                (group["hooks"] as? [[String: Any]])?.contains(where: isOwnedHook) == true
+        let root = try settingsObject(from: readSettingsData(at: settingsURL))
+        let hooks = try hooksObject(from: root)
+        var connected = false
+        for event in events {
+            for group in try groupsForEvent(event, in: hooks) {
+                if try commandsForGroup(group).contains(where: isOwnedHook) { connected = true }
             }
         }
+        return connected
     }
 
-    static func setConnected(_ connect: Bool) throws {
-        let directory = AppPaths.claudeSettings.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        var root = try readSettings()
-        var hooks = root["hooks"] as? [String: Any] ?? [:]
-        if connect, FileManager.default.fileExists(atPath: AppPaths.claudeSettings.path) {
-            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-            try FileManager.default.copyItem(at: AppPaths.claudeSettings, to: directory.appendingPathComponent("settings.json.ai-task-monitor-backup-\(stamp)"))
-        }
+    static func setConnected(_ connect: Bool, settingsURL: URL = AppPaths.claudeSettings,
+                             executable: String? = nil, beforeCommit: (() throws -> Void)? = nil) throws {
+        let fileManager = FileManager.default
+        let original = try readSettingsData(at: settingsURL)
+        if !connect && original == nil { return }
+        var root = try settingsObject(from: original)
+        var hooks = try hooksObject(from: root)
+        let executable = executable ?? executablePath
+        let expectedCommand = hookCommand(for: executable)
+        var changed = false
         for event in events {
-            var groups = hooks[event] as? [[String: Any]] ?? []
-            groups = groups.compactMap { group in
+            let groups = try groupsForEvent(event, in: hooks)
+            var keptGroups: [[String: Any]] = []
+            var hasCurrent = false
+            for group in groups {
+                guard group["hooks"] != nil else { keptGroups.append(group); continue }
                 var updated = group
-                guard var commands = group["hooks"] as? [[String: Any]] else { return connect ? group : group }
-                commands.removeAll(where: isOwnedHook)
-                guard !commands.isEmpty else { return nil }
-                updated["hooks"] = commands
-                return updated
+                var keptCommands: [[String: Any]] = []
+                var removedOwned = false
+                for command in try commandsForGroup(group) {
+                    if isOwnedHook(command, executable: executable) {
+                        if connect && (command["command"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) == expectedCommand {
+                            hasCurrent = true
+                            keptCommands.append(command)
+                        } else {
+                            changed = true
+                            removedOwned = true
+                        }
+                    } else {
+                        keptCommands.append(command)
+                    }
+                }
+                if removedOwned && keptCommands.isEmpty { continue }
+                if removedOwned { updated["hooks"] = keptCommands }
+                keptGroups.append(updated)
             }
-            if connect {
-                groups.append(["hooks": [["type": "command", "command": hookCommand, "timeout": 10]]])
+            if connect && !hasCurrent {
+                keptGroups.append(["hooks": [["type": "command", "command": expectedCommand, "timeout": 10]]])
+                changed = true
             }
-            if groups.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = groups }
+            if keptGroups.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = keptGroups }
         }
+        guard changed else { return }
         root["hooks"] = hooks
         let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) + Data([0x0A])
-        try data.write(to: AppPaths.claudeSettings, options: .atomic)
+        let directory = settingsURL.deletingLastPathComponent()
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        try beforeCommit?()
+        guard try readSettingsData(at: settingsURL) == original else { throw IntegrationError.settingsChanged }
+        if original != nil {
+            let backup = directory.appendingPathComponent("settings.json.ai-task-monitor-backup-\(UUID().uuidString)")
+            try fileManager.copyItem(at: settingsURL, to: backup)
+            guard try readSettingsData(at: settingsURL) == original else { throw IntegrationError.settingsChanged }
+        }
+        try data.write(to: settingsURL, options: .atomic)
     }
 
     private static var executablePath: String {
         Bundle.main.executablePath ?? CommandLine.arguments[0]
     }
-
-    private static var hookCommand: String { hookCommand(for: executablePath) }
 
     static func hookCommand(for executable: String) -> String {
         "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "' --claude-hook"
@@ -79,17 +101,44 @@ enum ClaudeIntegration {
         return normalized == hookCommand(for: executable) || normalized == legacy
     }
 
-    private static func readSettings() throws -> [String: Any] {
-        guard FileManager.default.fileExists(atPath: AppPaths.claudeSettings.path) else { return [:] }
-        let data = try Data(contentsOf: AppPaths.claudeSettings)
-        guard !data.isEmpty else { return [:] }
+    private static func readSettingsData(at url: URL) throws -> Data? {
+        do { return try Data(contentsOf: url) }
+        catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return nil }
+    }
+
+    private static func settingsObject(from data: Data?) throws -> [String: Any] {
+        guard let data, !data.isEmpty else { return [:] }
         let value = try JSONSerialization.jsonObject(with: data)
         guard let settings = value as? [String: Any] else { throw IntegrationError.invalidSettings }
         return settings
     }
 
+    private static func hooksObject(from root: [String: Any]) throws -> [String: Any] {
+        guard let value = root["hooks"] else { return [:] }
+        guard let hooks = value as? [String: Any] else { throw IntegrationError.invalidSettings }
+        return hooks
+    }
+
+    private static func groupsForEvent(_ event: String, in hooks: [String: Any]) throws -> [[String: Any]] {
+        guard let value = hooks[event] else { return [] }
+        guard let groups = value as? [[String: Any]] else { throw IntegrationError.invalidSettings }
+        return groups
+    }
+
+    private static func commandsForGroup(_ group: [String: Any]) throws -> [[String: Any]] {
+        guard let value = group["hooks"] else { return [] }
+        guard let commands = value as? [[String: Any]] else { throw IntegrationError.invalidSettings }
+        return commands
+    }
+
     private enum IntegrationError: LocalizedError {
         case invalidSettings
-        var errorDescription: String? { "Настройки Claude Code имеют неподдерживаемый формат и не были изменены." }
+        case settingsChanged
+        var errorDescription: String? {
+            switch self {
+            case .invalidSettings: return "Настройки Claude Code имеют неподдерживаемый формат и не были изменены."
+            case .settingsChanged: return "Настройки Claude Code изменились во время подключения. Попробуйте ещё раз."
+            }
+        }
     }
 }
