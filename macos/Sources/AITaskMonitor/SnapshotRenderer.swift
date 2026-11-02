@@ -13,11 +13,25 @@ enum SnapshotRenderer {
             try render(name: "compact-light", mode: .light, compact: true, settings: false, outputDirectory: outputDirectory)
             try render(name: "settings-dark", mode: .dark, compact: false, settings: true, outputDirectory: outputDirectory)
             try render(name: "settings-light", mode: .light, compact: false, settings: true, outputDirectory: outputDirectory)
+            try renderHint(name: "hint-dark", mode: .dark, outputDirectory: outputDirectory)
+            try renderHint(name: "hint-light", mode: .light, outputDirectory: outputDirectory)
             return 0
         } catch {
             FileHandle.standardError.write(Data("Snapshot error: \(error)\n".utf8))
             return 1
         }
+    }
+
+    private static func renderHint(name: String, mode: AppearanceMode, outputDirectory: URL) throws {
+        let field = TruncatingTextField(labelWithString: "")
+        field.appearance = NSAppearance(named: mode == .dark ? .darkAqua : .aqua)
+        let panel = field.makeHintPanel(text: "Проверяю нативную сборку, локальные источники и создание установочного образа для macOS")
+        guard let content = panel.contentView else { throw SnapshotError.bitmap }
+        content.layoutSubtreeIfNeeded()
+        guard let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { throw SnapshotError.bitmap }
+        content.cacheDisplay(in: content.bounds, to: bitmap)
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { throw SnapshotError.png }
+        try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
     private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL) throws {

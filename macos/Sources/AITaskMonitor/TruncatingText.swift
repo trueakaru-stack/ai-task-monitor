@@ -73,7 +73,7 @@ final class TruncatingTextField: NSTextField {
         if window == nil { closeHint() }
     }
 
-    private func makeHintPanel(text: String) -> NSPanel {
+    func makeHintPanel(text: String) -> NSPanel {
         let label = NSTextField(wrappingLabelWithString: text)
         label.font = .systemFont(ofSize: 12)
         label.textColor = .labelColor
