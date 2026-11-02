@@ -2,7 +2,7 @@
 
 Native SwiftUI alpha for macOS 13 and newer. The application runs locally, stays above ordinary windows, and shows active Codex and Claude Code work in expanded or compact form.
 
-This branch includes unverified changes for tooltip placement and Claude prompt privacy. They require the Mac checks below before they can be considered complete. The new diagnostic journal, verified approval-wait status, and loop warnings are not yet available on macOS.
+The diagnostic journal, approval-wait status, and loop warnings are not yet available on macOS.
 
 ## Behavior
 
