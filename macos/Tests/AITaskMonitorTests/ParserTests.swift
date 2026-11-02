@@ -237,6 +237,12 @@ final class ParserTests: XCTestCase {
         XCTAssertNil(unavailable.progressLabel)
     }
 
+    @MainActor
+    func testPreviewPercentageMatchesItsSyntheticPlan() throws {
+        let task = try XCTUnwrap(TaskStore.preview().tasks.first { !$0.steps.isEmpty })
+        XCTAssertEqual(task.progress, MonitoredTask.progress(for: task.steps))
+    }
+
     func testPreviouslyObservedTaskBecomesUnconfirmedInsteadOfDisappearing() {
         let previous = MonitoredTask(id: "one", provider: .codex, title: "Synthetic task", activity: "Working", isActive: true, progress: nil, progressKind: .none, steps: [], updatedAt: Date())
         let uncertain = TaskSnapshotMerger.merge(previous: [previous], current: [], terminalIDs: [])

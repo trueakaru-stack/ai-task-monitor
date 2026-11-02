@@ -39,7 +39,7 @@ final class TaskStore: ObservableObject {
                 id: "codex-preview", provider: .codex,
                 title: "Создать индикатор прогресса задач",
                 activity: "Проверяю нативную сборку и формирую установочный образ",
-                isActive: true, progress: 60, progressKind: .exact,
+                isActive: true, progress: 50, progressKind: .exact,
                 steps: [
                     TaskStep(title: "Собрать модель активных задач", status: .done),
                     TaskStep(title: "Подключить локальные источники", status: .done),
