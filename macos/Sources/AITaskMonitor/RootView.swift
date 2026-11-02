@@ -88,14 +88,14 @@ struct RootView: View {
                         Text("\(store.count(for: filter))").font(.system(size: 11.5, weight: .semibold)).baselineOffset(4)
                     }
                     .frame(maxWidth: .infinity, minHeight: 34)
-                    .background(store.selectedProvider == filter ? Squircle().fill(MonitorTheme.raised) : nil)
+                    .background(store.selectedProvider == filter ? Squircle(radius: 10).fill(MonitorTheme.raised) : nil)
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(store.selectedProvider == filter ? .isSelected : [])
             }
         }
         .padding(4)
-        .background(Squircle().fill(MonitorTheme.track.opacity(0.5)))
+        .background(Squircle(radius: 14).fill(MonitorTheme.track.opacity(0.5)))
         .padding(.horizontal, 20)
     }
 

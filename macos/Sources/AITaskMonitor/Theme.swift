@@ -12,7 +12,9 @@ enum MonitorTheme {
 }
 
 struct Squircle: Shape {
+    var radius: CGFloat = 14
+
     func path(in rect: CGRect) -> Path {
-        Path(roundedRect: rect, cornerRadius: min(rect.width, rect.height) * 0.18, style: .continuous)
+        Path(roundedRect: rect, cornerRadius: radius, style: .continuous)
     }
 }
