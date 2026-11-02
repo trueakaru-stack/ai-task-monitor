@@ -52,12 +52,24 @@ struct CodexTaskReader {
     }
 
     func isRunning(tail: String) -> Bool {
-        let pattern = #"\"type\":\"event_msg\",\"payload\":\{\"type\":\"(task_started|task_complete)\""#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
-        let range = NSRange(tail.startIndex..., in: tail)
-        guard let match = regex.matches(in: tail, range: range).last,
-              let stateRange = Range(match.range(at: 1), in: tail) else { return false }
-        return tail[stateRange] == "task_started"
+        var running = false
+        var turnID = ""
+        for line in tail.split(whereSeparator: \.isNewline) {
+            guard let record = FileHelpers.jsonObject(line), record.string("type") == "event_msg",
+                  let payload = record.object("payload") else { continue }
+            let eventTurnID = payload.string("turn_id")
+            switch payload.string("type") {
+            case "task_started", "turn_started":
+                running = true
+                turnID = eventTurnID
+            case "task_complete", "turn_complete", "turn_aborted":
+                if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { continue }
+                running = false
+            default:
+                continue
+            }
+        }
+        return running
     }
 
     func parsePlan(from tail: String) -> [TaskStep] {

@@ -11,6 +11,17 @@ final class ParserTests: XCTestCase {
         XCTAssertFalse(reader.isRunning(tail: started + "\n" + completed))
     }
 
+    func testCodexInterruptedTurnAndNewerTurnAreDistinguished() {
+        let reader = CodexTaskReader(codexHome: URL(fileURLWithPath: "/tmp/unused"))
+        let started = #"{ "payload": { "turn_id": "new-turn", "type": "turn_started" }, "type": "event_msg" }"#
+        let oldAbort = #"{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"old-turn"}}"#
+        let currentAbort = #"{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"new-turn"}}"#
+        let nextStart = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"next-turn"}}"#
+        XCTAssertTrue(reader.isRunning(tail: started + "\n" + oldAbort))
+        XCTAssertFalse(reader.isRunning(tail: started + "\n" + oldAbort + "\n" + currentAbort))
+        XCTAssertTrue(reader.isRunning(tail: started + "\n" + currentAbort + "\n" + nextStart))
+    }
+
     func testCodexPlanUsesLatestPublishedPlan() {
         let reader = CodexTaskReader(codexHome: URL(fileURLWithPath: "/tmp/unused"))
         let first = record(plan: [["step": "Первый", "status": "in_progress"]])
