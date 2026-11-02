@@ -8,7 +8,7 @@ enum ClaudeIntegration {
     }
 
     static var isConnected: Bool {
-        guard let root = readSettings(), let hooks = root["hooks"] as? [String: Any] else { return false }
+        guard let root = try? readSettings(), let hooks = root["hooks"] as? [String: Any] else { return false }
         return events.contains { event in
             guard let groups = hooks[event] as? [[String: Any]] else { return false }
             return groups.contains { group in
@@ -20,7 +20,7 @@ enum ClaudeIntegration {
     static func setConnected(_ connect: Bool) throws {
         let directory = AppPaths.claudeSettings.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        var root = readSettings() ?? [:]
+        var root = try readSettings()
         var hooks = root["hooks"] as? [String: Any] ?? [:]
         if connect, FileManager.default.fileExists(atPath: AppPaths.claudeSettings.path) {
             let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
@@ -56,8 +56,17 @@ enum ClaudeIntegration {
         return command.contains("AI Task Monitor.app/Contents/MacOS/AITaskMonitor") && command.contains("--claude-hook")
     }
 
-    private static func readSettings() -> [String: Any]? {
-        guard let data = try? Data(contentsOf: AppPaths.claudeSettings), !data.isEmpty else { return [:] }
-        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    private static func readSettings() throws -> [String: Any] {
+        guard FileManager.default.fileExists(atPath: AppPaths.claudeSettings.path) else { return [:] }
+        let data = try Data(contentsOf: AppPaths.claudeSettings)
+        guard !data.isEmpty else { return [:] }
+        let value = try JSONSerialization.jsonObject(with: data)
+        guard let settings = value as? [String: Any] else { throw IntegrationError.invalidSettings }
+        return settings
+    }
+
+    private enum IntegrationError: LocalizedError {
+        case invalidSettings
+        var errorDescription: String? { "Настройки Claude Code имеют неподдерживаемый формат и не были изменены." }
     }
 }

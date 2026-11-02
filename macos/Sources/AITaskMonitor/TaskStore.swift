@@ -85,7 +85,7 @@ final class TaskStore: ObservableObject {
             try ClaudeIntegration.setConnected(connected)
             sourceMessage = connected ? "Подключено. Перезапустите Claude Code." : "Отключено"
         } catch {
-            sourceMessage = "Не удалось изменить настройки Claude Code"
+            sourceMessage = error.localizedDescription
         }
     }
 }

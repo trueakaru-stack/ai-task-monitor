@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum ClaudeHook {
     static func run() -> Int32 {
@@ -30,6 +31,12 @@ enum ClaudeHook {
         ]
         do {
             try FileManager.default.createDirectory(at: AppPaths.supportDirectory, withIntermediateDirectories: true)
+            let lockPath = AppPaths.supportDirectory.appendingPathComponent("claude-events.lock").path
+            let lockDescriptor = lockPath.withCString { open($0, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR) }
+            guard lockDescriptor >= 0 else { throw HookError.lock }
+            defer { Darwin.close(lockDescriptor) }
+            guard flock(lockDescriptor, LOCK_EX) == 0 else { throw HookError.lock }
+            defer { flock(lockDescriptor, LOCK_UN) }
             try rotateIfNeeded()
             let line = try JSONSerialization.data(withJSONObject: record) + Data([0x0A])
             if !FileManager.default.fileExists(atPath: AppPaths.claudeEvents.path) {
@@ -67,4 +74,6 @@ enum ClaudeHook {
         let trimmed = tail.split(separator: "\n", omittingEmptySubsequences: false).dropFirst().joined(separator: "\n")
         try Data(trimmed.utf8).write(to: AppPaths.claudeEvents, options: .atomic)
     }
+
+    private enum HookError: Error { case lock }
 }
