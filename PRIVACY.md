@@ -31,7 +31,15 @@ AI Task Monitor does not transmit task data to the developer, OpenAI, Anthropic,
 
 The application reads Codex session data from `~/.codex`. When Claude Code integration is enabled, it stores normalized hook events in the v2 file described above. Enabling integration modifies only the application-owned hook entries in `~/.claude/settings.json` and first creates a timestamped backup. Disconnecting removes only those owned hook commands.
 
+The diagnostic journal is stored separately under `~/Library/Application Support/AI Task Monitor/diagnostics`. It records event time, provider, type and pseudonymous task and event identifiers. It does not record task names, activity or plan text, prompts, commands, tool outputs, or project paths. Task titles shown in the journal filter are read from currently available task data and are not saved to the journal. Its collection depends on observed structured events and is not a complete audit trail.
+
+The diagnostic retention settings allow 1–7 days and 1–10 MB. Cleanup removes the oldest diagnostic records at startup and while the application runs; manual clearing requires confirmation and does not remove the settings, key, provider history, or separate Claude event files. The size and retention settings do not apply to those Claude event files. No background cleanup service is installed.
+
+Identifiers are keyed hashes. On macOS, the installation key is stored as a local owner-only file in an owner-only diagnostic directory; it is not stored in Keychain. The journal itself is not encrypted. Local metadata and independently stored provider data may still be sensitive.
+
+For possible-loop detection, command and working-directory fingerprints use a fresh key in memory on each launch. The fingerprints, key, exit codes and retry history are not written to the diagnostic journal or settings. The configurable limits are stored with the diagnostic settings. A warning does not stop a task and can also flag an intentional retry.
+
 ## Removal
 
-The Windows uninstaller removes the application files, shortcut, and AI Task Monitor local data directory. It does not remove Codex, Claude Code, or unrelated provider settings.
+Removing the macOS application does not automatically remove its data in Application Support. For Windows removal behavior, see the privacy notice on the `windows` branch. Neither action removes Codex or Claude Code itself.
 
