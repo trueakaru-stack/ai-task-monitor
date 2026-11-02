@@ -48,14 +48,15 @@ struct ClaudeTaskReader {
         }
 
         return sessions.values.compactMap { state in
-            guard state.isActive, freshIDs.contains(state.id), now.timeIntervalSince(state.updatedAt) < 7_200 else { return nil }
+            guard state.isActive, freshIDs.contains(state.id) else { return nil }
             let steps = state.stepsOrder.compactMap { state.steps[$0] }
             let progress = MonitoredTask.progress(for: steps)
+            let unconfirmed = now.timeIntervalSince(state.updatedAt) >= 7_200
             return MonitoredTask(
                 id: "claude:\(state.id)", provider: .claude, title: "Задача Claude Code",
-                activity: state.activity, isActive: true, progress: progress,
+                activity: unconfirmed ? "Статус не подтверждён" : state.activity, isActive: !unconfirmed, progress: progress,
                 progressKind: progress == nil ? .none : .exact,
-                steps: steps, updatedAt: state.updatedAt
+                steps: steps, updatedAt: state.updatedAt, isUnconfirmed: unconfirmed
             )
         }.sorted { $0.updatedAt > $1.updatedAt }
     }

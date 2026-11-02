@@ -57,6 +57,28 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(reader.readTasks(now: now, observedSince: since).map(\.title), ["Synthetic task"])
     }
 
+    func testCodexReaderKeepsObservedQuietTaskAsUnconfirmed() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let sessions = directory.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let index = directory.appendingPathComponent("session_index.jsonl")
+        let session = sessions.appendingPathComponent("rollout-test-session.jsonl")
+        let now = Date()
+        let eventTime = now.addingTimeInterval(-8_000)
+        let formatter = ISO8601DateFormatter()
+        let start = #"{"timestamp":"\#(formatter.string(from: eventTime))","type":"event_msg","payload":{"type":"task_started"}}"#
+        try #"{"id":"test-session","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
+        try (start + "\n").write(to: session, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: eventTime], ofItemAtPath: session.path)
+        let reader = CodexTaskReader(codexHome: directory)
+        let task = try XCTUnwrap(reader.readTasks(now: now, observedSince: now.addingTimeInterval(-9_000)).first)
+        XCTAssertFalse(task.isActive)
+        XCTAssertTrue(task.isUnconfirmed)
+        XCTAssertEqual(task.activity, "Статус не подтверждён")
+        XCTAssertTrue(reader.readTasks(now: now, observedSince: now.addingTimeInterval(-1)).isEmpty)
+    }
+
     func testCodexPlanUsesLatestPublishedPlan() {
         let reader = CodexTaskReader(codexHome: URL(fileURLWithPath: "/tmp/unused"))
         let first = record(plan: [["step": "Первый", "status": "in_progress"]])
@@ -91,7 +113,7 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(reader.parseActivity(from: first + "\n" + second), "Новое действие")
     }
 
-    func testClaudeReaderHidesStoppedAndStaleSessions() throws {
+    func testClaudeReaderHidesStoppedAndMarksObservedQuietSessionsUnconfirmed() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -108,9 +130,16 @@ final class ParserTests: XCTestCase {
         let stepLine = String(decoding: try JSONSerialization.data(withJSONObject: step), as: UTF8.self)
         try ([active, stepLine, stopped, stale].joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
         let tasks = ClaudeTaskReader(eventFile: file).readTasks(now: now)
-        XCTAssertEqual(tasks.map(\.title), ["Задача Claude Code"])
-        XCTAssertEqual(tasks.first?.steps.map(\.title), ["Первый этап"])
-        XCTAssertEqual(tasks.first?.steps.map(\.status), [.active])
+        XCTAssertEqual(tasks.count, 2)
+        let activeTask = try XCTUnwrap(tasks.first { $0.id == "claude:active" })
+        let quietTask = try XCTUnwrap(tasks.first { $0.id == "claude:stale" })
+        XCTAssertEqual(activeTask.title, "Задача Claude Code")
+        XCTAssertEqual(activeTask.steps.map(\.title), ["Первый этап"])
+        XCTAssertEqual(activeTask.steps.map(\.status), [.active])
+        XCTAssertFalse(quietTask.isActive)
+        XCTAssertTrue(quietTask.isUnconfirmed)
+        XCTAssertEqual(quietTask.activity, "Статус не подтверждён")
+        XCTAssertEqual(ClaudeTaskReader(eventFile: file).readTasks(now: now, observedSince: now.addingTimeInterval(-100)).map(\.id), ["claude:active"])
     }
 
     func testLegacyClaudeSessionsRequireANewEventAndPreservePlan() throws {

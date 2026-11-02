@@ -30,23 +30,24 @@ struct CodexTaskReader {
             guard !id.isEmpty, title != "Guardian review", let file = sessionFile(id: id) else { return nil }
             guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
                   let modified = attributes[.modificationDate] as? Date,
-                  now.timeIntervalSince(modified) < 7_200,
                   let tail = try? FileHelpers.tail(of: file, maximumBytes: 4_194_304),
                   isRunning(tail: tail, observedSince: observedSince) else { return nil }
 
             let steps = parsePlan(from: tail)
             let activity = parseActivity(from: tail)
             let progress = MonitoredTask.progress(for: steps)
+            let unconfirmed = now.timeIntervalSince(modified) >= 7_200
             return MonitoredTask(
                 id: id,
                 provider: .codex,
                 title: title.isEmpty ? "Задача Codex" : title,
-                activity: activity,
-                isActive: true,
+                activity: unconfirmed ? "Статус не подтверждён" : activity,
+                isActive: !unconfirmed,
                 progress: progress,
                 progressKind: progress == nil ? .none : .exact,
                 steps: steps,
-                updatedAt: modified
+                updatedAt: modified,
+                isUnconfirmed: unconfirmed
             )
         }.sorted { $0.updatedAt > $1.updatedAt }
     }

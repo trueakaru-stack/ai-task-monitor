@@ -65,15 +65,15 @@ final class TaskStore: ObservableObject {
 
     func count(for filter: ProviderFilter) -> Int {
         switch filter {
-        case .all: return tasks.count
-        case .codex: return tasks.filter { $0.provider == .codex }.count
-        case .claude: return tasks.filter { $0.provider == .claude }.count
+        case .all: return tasks.filter(\.isActive).count
+        case .codex: return tasks.filter { $0.isActive && $0.provider == .codex }.count
+        case .claude: return tasks.filter { $0.isActive && $0.provider == .claude }.count
         }
     }
 
     func refresh() {
         let combined = (codexReader.readTasks(observedSince: monitoringStartedAt) + claudeReader.readTasks(observedSince: monitoringStartedAt))
-            .filter(\.isActive)
+            .filter { $0.isActive || $0.isUnconfirmed }
             .sorted { $0.updatedAt > $1.updatedAt }
         tasks = combined
         if compactIndex >= max(combined.count, 1) { compactIndex = 0 }
