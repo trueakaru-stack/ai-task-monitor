@@ -46,14 +46,27 @@ enum ClaudeIntegration {
         try data.write(to: AppPaths.claudeSettings, options: .atomic)
     }
 
-    private static var hookCommand: String {
-        let executable = Bundle.main.executablePath ?? CommandLine.arguments[0]
-        return "\"\(executable.replacingOccurrences(of: "\"", with: "\\\""))\" --claude-hook"
+    private static var executablePath: String {
+        Bundle.main.executablePath ?? CommandLine.arguments[0]
+    }
+
+    private static var hookCommand: String { hookCommand(for: executablePath) }
+
+    static func hookCommand(for executable: String) -> String {
+        "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "' --claude-hook"
     }
 
     private static func isOwnedHook(_ hook: [String: Any]) -> Bool {
-        let command = hook["command"] as? String ?? ""
-        return command.contains("AI Task Monitor.app/Contents/MacOS/AITaskMonitor") && command.contains("--claude-hook")
+        isOwnedHook(hook, executable: executablePath)
+    }
+
+    static func isOwnedHook(_ hook: [String: Any], executable: String) -> Bool {
+        guard hook.keys.allSatisfy({ ["type", "command", "timeout"].contains($0) }),
+              hook["type"] as? String == "command",
+              let command = hook["command"] as? String else { return false }
+        let legacy = "\"\(executable.replacingOccurrences(of: "\"", with: "\\\""))\" --claude-hook"
+        let normalized = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized == hookCommand(for: executable) || normalized == legacy
     }
 
     private static func readSettings() throws -> [String: Any] {

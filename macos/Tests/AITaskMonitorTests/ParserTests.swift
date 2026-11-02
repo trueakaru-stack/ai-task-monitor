@@ -201,6 +201,21 @@ final class ParserTests: XCTestCase {
         try overLimit.close()
     }
 
+    func testClaudeIntegrationQuotesPathAndRecognizesOnlyItsOwnCommand() {
+        let path = "/tmp/John's $(echo marker)/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
+        let expected = "'/tmp/John'\\''s $(echo marker)/AI Task Monitor.app/Contents/MacOS/AITaskMonitor' --claude-hook"
+        XCTAssertEqual(ClaudeIntegration.hookCommand(for: path), expected)
+        XCTAssertTrue(ClaudeIntegration.isOwnedHook(["type": "command", "command": expected], executable: path))
+        let legacy = "\"\(path)\" --claude-hook"
+        XCTAssertTrue(ClaudeIntegration.isOwnedHook(["type": "command", "command": legacy], executable: path))
+        XCTAssertFalse(ClaudeIntegration.isOwnedHook(["type": "command", "command": expected + " --other-hook"], executable: path))
+        XCTAssertFalse(ClaudeIntegration.isOwnedHook(["type": "command", "command": expected, "args": ["--other-hook"]], executable: path))
+        XCTAssertFalse(ClaudeIntegration.isOwnedHook(["type": "command", "command": expected, "shell": "powershell"], executable: path))
+        XCTAssertFalse(ClaudeIntegration.isOwnedHook(["type": "prompt", "command": expected], executable: path))
+        let unrelated = "'/tmp/other/AI Task Monitor.app/Contents/MacOS/AITaskMonitor' --claude-hook"
+        XCTAssertFalse(ClaudeIntegration.isOwnedHook(["type": "command", "command": unrelated], executable: path))
+    }
+
     func testProgressLabelsPreserveCertainty() {
         let base = MonitoredTask(id: "1", provider: .codex, title: "Task", activity: "", isActive: true, progress: 40, progressKind: .exact, steps: [], updatedAt: Date())
         XCTAssertEqual(base.progressLabel, "40%")
