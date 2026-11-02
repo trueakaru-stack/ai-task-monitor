@@ -2,9 +2,11 @@
 
 Native SwiftUI alpha for macOS 13 and newer. The application runs locally, stays above ordinary windows, and shows active Codex and Claude Code work in expanded or compact form.
 
+This branch includes unverified changes for tooltip placement and Claude prompt privacy. They require the Mac checks below before they can be considered complete. The new diagnostic journal, verified approval-wait status, and loop warnings are not yet available on macOS.
+
 ## Behavior
 
-- Only active sessions are shown. Completed, stopped, and stale sessions are excluded.
+- Activity is inferred from local session events. Old or quiet sessions can be misclassified; completed and stale sessions are filtered on a best-effort basis.
 - Codex task data is read from the local `~/.codex` session store.
 - Claude Code support is optional. The Settings screen adds local hooks to `~/.claude/settings.json` without replacing unrelated hooks.
 - A published plan produces ordered stages and an exact completed-stage percentage.
@@ -26,6 +28,8 @@ swift test
 ./scripts/smoke-test.sh "dist/AI Task Monitor.app"
 ./scripts/create-dmg.sh
 ```
+
+For the current test changes, also check the truncated-text tooltip in light and dark themes, in expanded and compact windows, near each edge of the screen. The tooltip should appear above the pointer when there is room, move to stay visible at an edge, and remain absent when the text fits. Share test results and screenshots made with synthetic task data only.
 
 The result is a universal Apple silicon and Intel application inside `dist/AITaskMonitor-macOS-0.3.0-alpha.dmg`.
 

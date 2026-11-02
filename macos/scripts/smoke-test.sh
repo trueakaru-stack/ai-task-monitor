@@ -14,3 +14,7 @@ AI_TASK_MONITOR_SUPPORT_DIR="$TMP/data" AI_TASK_MONITOR_AUDIT=1 "$APP/Contents/M
 JSON
 test -s "$TMP/data/claude-events.jsonl"
 grep -q 'smoke-session' "$TMP/data/claude-events.jsonl"
+if grep -Eq 'Smoke test|/tmp/project|"prompt"|"cwd"' "$TMP/data/claude-events.jsonl"; then
+  echo "Claude hook persisted synthetic prompt or working-directory data." >&2
+  exit 1
+fi

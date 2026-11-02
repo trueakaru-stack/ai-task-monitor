@@ -1,6 +1,23 @@
 import AppKit
 import SwiftUI
 
+func cursorHintOrigin(pointer: NSPoint, size: NSSize, workArea: NSRect) -> NSPoint {
+    let gap: CGFloat = 4
+    let maximumX = max(workArea.minX, workArea.maxX - size.width)
+    let x = max(workArea.minX, min(pointer.x - size.width / 2, maximumX))
+    let above = pointer.y + gap
+    let below = pointer.y - gap - size.height
+    let y: CGFloat
+    if above + size.height <= workArea.maxY {
+        y = above
+    } else if below >= workArea.minY {
+        y = below
+    } else {
+        y = max(workArea.minY, min(above, workArea.maxY - size.height))
+    }
+    return NSPoint(x: x, y: y)
+}
+
 struct TruncatingText: NSViewRepresentable {
     let text: String
     var font: NSFont
@@ -52,12 +69,10 @@ final class TruncatingTextField: NSTextField {
     override func mouseEntered(with event: NSEvent) {
         guard isTruncated, hintPanel == nil, let owner = window else { return }
         let panel = makeHintPanel(text: fullText)
-        let local = convert(bounds, to: nil)
-        let anchor = owner.convertToScreen(local)
-        let screen = owner.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
-        var origin = NSPoint(x: anchor.midX - panel.frame.width / 2, y: anchor.minY - panel.frame.height - 4)
-        if origin.y < screen.minY + 4 { origin.y = anchor.maxY + 4 }
-        origin.x = min(max(origin.x, screen.minX + 4), screen.maxX - panel.frame.width - 4)
+        let pointer = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first(where: { $0.frame.contains(pointer) })?.visibleFrame
+            ?? owner.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
+        let origin = cursorHintOrigin(pointer: pointer, size: panel.frame.size, workArea: screen)
         panel.setFrameOrigin(origin)
         owner.addChildWindow(panel, ordered: .above)
         panel.orderFront(nil)

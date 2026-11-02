@@ -16,12 +16,8 @@ struct ClaudeTaskReader {
             guard !id.isEmpty else { continue }
             var state = sessions[id] ?? SessionState(id: id)
             state.updatedAt = FileHelpers.isoDate(event["timestamp"]) ?? state.updatedAt
-            if !event.string("cwd").isEmpty { state.cwd = event.string("cwd") }
             if !event.string("activity").isEmpty { state.activity = localizedActivity(event) }
             state.isActive = event["active"] as? Bool ?? state.isActive
-            if event.string("event") == "UserPromptSubmit", !event.string("prompt").isEmpty {
-                state.title = FileHelpers.normalized(event.string("prompt"), limit: 240)
-            }
             updateSteps(event, state: &state)
             sessions[id] = state
         }
@@ -29,10 +25,9 @@ struct ClaudeTaskReader {
         return sessions.values.compactMap { state in
             guard state.isActive, now.timeIntervalSince(state.updatedAt) < 7_200 else { return nil }
             let steps = state.stepsOrder.compactMap { state.steps[$0] }
-            let title = state.title.isEmpty ? fallbackTitle(cwd: state.cwd) : state.title
             let progress = MonitoredTask.progress(for: steps)
             return MonitoredTask(
-                id: "claude:\(state.id)", provider: .claude, title: title,
+                id: "claude:\(state.id)", provider: .claude, title: "Задача Claude Code",
                 activity: state.activity, isActive: true, progress: progress,
                 progressKind: progress == nil ? .none : .exact,
                 steps: steps, updatedAt: state.updatedAt
@@ -70,19 +65,13 @@ struct ClaudeTaskReader {
         }
     }
 
-    private func fallbackTitle(cwd: String) -> String {
-        let name = URL(fileURLWithPath: cwd).lastPathComponent
-        return name.isEmpty ? "Claude Code" : "Claude Code · \(name)"
-    }
 }
 
 private struct SessionState {
     let id: String
-    var title = ""
     var activity = ""
     var isActive = false
     var updatedAt = Date.distantPast
-    var cwd = ""
     var steps: [String: TaskStep] = [:]
     var stepsOrder: [String] = []
 }

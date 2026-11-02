@@ -4,6 +4,14 @@ import SwiftUI
 @MainActor
 enum SnapshotRenderer {
     static func run(outputDirectory: URL) -> Int32 {
+        let previousAppearance = UserDefaults.standard.object(forKey: "appearanceMode")
+        defer {
+            if let previousAppearance {
+                UserDefaults.standard.set(previousAppearance, forKey: "appearanceMode")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "appearanceMode")
+            }
+        }
         do {
             try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
             NSApplication.shared.setActivationPolicy(.prohibited)

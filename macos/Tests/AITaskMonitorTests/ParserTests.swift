@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 @testable import AITaskMonitor
 
 final class ParserTests: XCTestCase {
@@ -39,9 +40,31 @@ final class ParserTests: XCTestCase {
         let active = event(session: "active", name: "UserPromptSubmit", active: true, date: now, prompt: "Активная задача")
         let stopped = event(session: "stopped", name: "SessionEnd", active: false, date: now, prompt: "Завершённая задача")
         let stale = event(session: "stale", name: "UserPromptSubmit", active: true, date: now.addingTimeInterval(-8_000), prompt: "Старая задача")
-        try ([active, stopped, stale].joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+        let step: [String: Any] = [
+            "timestamp": ISO8601DateFormatter().string(from: now), "session_id": "active",
+            "event": "TaskCreated", "active": true, "task_id": "step-1",
+            "task_subject": "Первый этап", "task_status": "in_progress"
+        ]
+        let stepLine = String(decoding: try JSONSerialization.data(withJSONObject: step), as: UTF8.self)
+        try ([active, stepLine, stopped, stale].joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
         let tasks = ClaudeTaskReader(eventFile: file).readTasks(now: now)
-        XCTAssertEqual(tasks.map(\.title), ["Активная задача"])
+        XCTAssertEqual(tasks.map(\.title), ["Задача Claude Code"])
+        XCTAssertEqual(tasks.first?.steps.map(\.title), ["Первый этап"])
+        XCTAssertEqual(tasks.first?.steps.map(\.status), [.active])
+    }
+
+    func testClaudeHookDoesNotStorePromptOrWorkingPath() throws {
+        let secret = "SYNTHETIC_ONLY_SECRET_9D42EBF6"
+        let input: [String: Any] = [
+            "hook_event_name": "UserPromptSubmit", "session_id": "synthetic-session",
+            "prompt": secret, "cwd": "/synthetic/project"
+        ]
+        let record = ClaudeHook.makeRecord(from: input)
+        let output = String(decoding: try JSONSerialization.data(withJSONObject: record), as: UTF8.self)
+        XCTAssertNil(record["prompt"])
+        XCTAssertNil(record["cwd"])
+        XCTAssertFalse(output.contains(secret))
+        XCTAssertEqual(record["activity"] as? String, "New request")
     }
 
     func testProgressLabelsPreserveCertainty() {
@@ -54,6 +77,18 @@ final class ParserTests: XCTestCase {
         unavailable.progress = nil
         unavailable.progressKind = .none
         XCTAssertNil(unavailable.progressLabel)
+    }
+
+    func testCursorHintPositionsRespectScreenEdges() {
+        let workArea = NSRect(x: 0, y: 0, width: 400, height: 300)
+        let size = NSSize(width: 160, height: 70)
+        XCTAssertEqual(cursorHintOrigin(pointer: NSPoint(x: 200, y: 150), size: size, workArea: workArea), NSPoint(x: 120, y: 154))
+        XCTAssertEqual(cursorHintOrigin(pointer: NSPoint(x: 10, y: 150), size: size, workArea: workArea), NSPoint(x: 0, y: 154))
+        XCTAssertEqual(cursorHintOrigin(pointer: NSPoint(x: 395, y: 150), size: size, workArea: workArea), NSPoint(x: 240, y: 154))
+        XCTAssertEqual(cursorHintOrigin(pointer: NSPoint(x: 200, y: 299), size: size, workArea: workArea), NSPoint(x: 120, y: 225))
+        XCTAssertEqual(cursorHintOrigin(pointer: NSPoint(x: 200, y: 2), size: size, workArea: workArea), NSPoint(x: 120, y: 6))
+        let leftMonitor = NSRect(x: -1920, y: 0, width: 1920, height: 1080)
+        XCTAssertEqual(cursorHintOrigin(pointer: NSPoint(x: -1915, y: 500), size: size, workArea: leftMonitor), NSPoint(x: -1920, y: 504))
     }
 
     private func record(plan: [[String: String]]) -> String {

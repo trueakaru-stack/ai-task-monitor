@@ -1,6 +1,6 @@
 # AI Task Monitor
 
-AI Task Monitor is an open-source desktop utility for viewing active Codex and Claude Code tasks in one compact window.
+AI Task Monitor is a source-available desktop utility for viewing active Codex and Claude Code tasks in one compact window.
 
 The application shows the current action and displays progress only when it can be supported by available task data. When a task publishes a plan, AI Task Monitor shows completed, current, and upcoming steps, keeps five steps visible in each card, and lets the user scroll through the rest. Without a plan, the current activity remains visible, but step details and a reliable percentage may be unavailable.
 
@@ -39,5 +39,5 @@ The Windows package is unsigned. The macOS package is ad-hoc signed but not nota
 
 ## License
 
-No open-source license has been selected yet. Until a license is added, the source is available for review but reuse and redistribution are not granted.
+The [source-available license](LICENSE) permits free use, including internal workplace use, while restricting monetization of products containing the code. People who use or modify the code must send a first-use notice; simply running the application does not require a notice. This is not an OSI-approved open-source license.
 

@@ -45,7 +45,7 @@ final class TaskStore: ObservableObject {
             ),
             MonitoredTask(
                 id: "claude-preview", provider: .claude,
-                title: "Проверить интеграцию Claude Code с длинным названием задачи",
+                title: "Задача Claude Code",
                 activity: "Выполняет проверку локальных lifecycle hooks и сохранения событий",
                 isActive: true, progress: nil, progressKind: .none,
                 steps: [], updatedAt: Date().addingTimeInterval(-15)

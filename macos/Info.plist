@@ -5,6 +5,7 @@
     <key>CFBundleDevelopmentRegion</key><string>ru</string>
     <key>CFBundleDisplayName</key><string>AI Task Monitor</string>
     <key>CFBundleExecutable</key><string>AITaskMonitor</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundleIdentifier</key><string>io.github.trueakaru-stack.ai-task-monitor</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AI Task Monitor</string>

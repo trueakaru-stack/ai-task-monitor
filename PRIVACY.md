@@ -15,7 +15,13 @@ AI Task Monitor processes task information locally on the user's computer. The a
 - Theme preference.
 - A bounded local Claude Code event log when the optional integration is enabled.
 
-Claude hook input is size-limited. Stored text is truncated, transcript paths are not retained, and the event log is rotated. Disconnecting Claude Code removes only the exact hook command installed by AI Task Monitor and preserves unrelated hooks.
+## Claude Code event data
+
+In the current development sources, new hook events do not include the user's prompt or working-directory path. When no independent task title is available, the interface uses a neutral title. Events can still include a session identifier, tool name, step title, status, timestamp, and generated activity description; step titles and other text may themselves contain sensitive information. Hook input is size-limited and the event log is rotated by size, not by age.
+
+Events written by older versions may still contain prompt text and working-directory paths. This change does not remove or rewrite existing event files. Disconnecting Claude Code removes only the exact hook command installed by AI Task Monitor and preserves unrelated hooks.
+
+The event file is `%LOCALAPPDATA%\CodexTaskProgress\claude-events.jsonl` on Windows and `~/Library/Application Support/AI Task Monitor/claude-events.jsonl` on macOS by default. The proposed seven-day retention applies to a separate diagnostic journal, which has not yet been implemented.
 
 ## Data transmission
 

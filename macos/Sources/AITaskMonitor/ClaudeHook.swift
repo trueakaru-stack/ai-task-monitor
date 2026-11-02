@@ -8,27 +8,7 @@ enum ClaudeHook {
               let value = try? JSONSerialization.jsonObject(with: data),
               let input = value as? [String: Any] else { return 0 }
 
-        let toolInput = input.object("tool_input") ?? [:]
-        let eventName = input.string("hook_event_name").isEmpty ? "Unknown" : input.string("hook_event_name")
-        let toolName = FileHelpers.normalized(input.string("tool_name"), limit: 120)
-        let subject = FileHelpers.normalized(input.string("task_subject").isEmpty ? toolInput.string("subject") : input.string("task_subject"), limit: 240)
-        let prompt = FileHelpers.normalized(input.string("prompt"), limit: 240)
-        let taskID = input.string("task_id").isEmpty ? (toolInput.string("taskId").isEmpty ? toolInput.string("task_id") : toolInput.string("taskId")) : input.string("task_id")
-        let active = !["Stop", "SessionEnd", "StopFailure"].contains(eventName)
-        let record: [String: Any] = [
-            "timestamp": ISO8601DateFormatter().string(from: Date()),
-            "provider": "claude",
-            "session_id": input.string("session_id"),
-            "event": eventName,
-            "active": active,
-            "cwd": FileHelpers.normalized(input.string("cwd"), limit: 1_024),
-            "prompt": prompt,
-            "activity": activity(event: eventName, tool: toolName, subject: subject, prompt: prompt),
-            "task_id": taskID,
-            "task_subject": subject,
-            "task_status": toolInput.string("status"),
-            "tool_name": toolName
-        ]
+        let record = makeRecord(from: input)
         do {
             try FileManager.default.createDirectory(at: AppPaths.supportDirectory, withIntermediateDirectories: true)
             let lockPath = AppPaths.supportDirectory.appendingPathComponent("claude-events.lock").path
@@ -52,9 +32,30 @@ enum ClaudeHook {
         }
     }
 
-    private static func activity(event: String, tool: String, subject: String, prompt: String) -> String {
+    static func makeRecord(from input: [String: Any]) -> [String: Any] {
+        let toolInput = input.object("tool_input") ?? [:]
+        let eventName = input.string("hook_event_name").isEmpty ? "Unknown" : input.string("hook_event_name")
+        let toolName = FileHelpers.normalized(input.string("tool_name"), limit: 120)
+        let subject = FileHelpers.normalized(input.string("task_subject").isEmpty ? toolInput.string("subject") : input.string("task_subject"), limit: 240)
+        let taskID = input.string("task_id").isEmpty ? (toolInput.string("taskId").isEmpty ? toolInput.string("task_id") : toolInput.string("taskId")) : input.string("task_id")
+        let active = !["Stop", "SessionEnd", "StopFailure"].contains(eventName)
+        return [
+            "timestamp": ISO8601DateFormatter().string(from: Date()),
+            "provider": "claude",
+            "session_id": input.string("session_id"),
+            "event": eventName,
+            "active": active,
+            "activity": activity(event: eventName, tool: toolName, subject: subject),
+            "task_id": taskID,
+            "task_subject": subject,
+            "task_status": toolInput.string("status"),
+            "tool_name": toolName
+        ]
+    }
+
+    private static func activity(event: String, tool: String, subject: String) -> String {
         switch event {
-        case "UserPromptSubmit": return prompt.isEmpty ? "New request" : prompt
+        case "UserPromptSubmit": return "New request"
         case "PreToolUse": return tool.isEmpty ? "Running tool" : "Running: \(tool)"
         case "PostToolUse": return tool.isEmpty ? "Tool completed" : "Completed: \(tool)"
         case "PostToolUseFailure": return tool.isEmpty ? "Tool failed" : "Failed: \(tool)"
