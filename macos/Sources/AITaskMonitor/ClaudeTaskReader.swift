@@ -9,7 +9,7 @@ struct ClaudeTaskReader {
         self.legacyFile = legacyFile ?? (eventFile == nil ? AppPaths.legacyClaudeEvents : nil)
     }
 
-    func readTasks(now: Date = Date()) -> [MonitoredTask] {
+    func readTasks(now: Date = Date(), observedSince: Date? = nil) -> [MonitoredTask] {
         guard let text = try? FileHelpers.tail(of: eventFile, maximumBytes: 4_194_304) else { return [] }
         let current: [([String: Any], Date)] = text.split(whereSeparator: \.isNewline).compactMap { line in
             guard let event = FileHelpers.jsonObject(line), !event.string("session_id").isEmpty,
@@ -17,6 +17,11 @@ struct ClaudeTaskReader {
             return (event, timestamp)
         }
         let observedIDs = Set(current.map { $0.0.string("session_id") })
+        let freshIDs = Set(current.compactMap { item -> String? in
+            if let observedSince, item.1 < observedSince { return nil }
+            guard item.0["active"] as? Bool == true else { return nil }
+            return item.0.string("session_id")
+        })
         var legacy: [([String: Any], Date)] = []
         if let legacyFile, !observedIDs.isEmpty,
            let legacyText = try? FileHelpers.tail(of: legacyFile, maximumBytes: 4_194_304) {
@@ -43,7 +48,7 @@ struct ClaudeTaskReader {
         }
 
         return sessions.values.compactMap { state in
-            guard state.isActive, now.timeIntervalSince(state.updatedAt) < 7_200 else { return nil }
+            guard state.isActive, freshIDs.contains(state.id), now.timeIntervalSince(state.updatedAt) < 7_200 else { return nil }
             let steps = state.stepsOrder.compactMap { state.steps[$0] }
             let progress = MonitoredTask.progress(for: steps)
             return MonitoredTask(

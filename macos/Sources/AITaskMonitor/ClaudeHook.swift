@@ -50,8 +50,10 @@ enum ClaudeHook {
         let subject = FileHelpers.normalized(input.string("task_subject").isEmpty ? toolInput.string("subject") : input.string("task_subject"), limit: 240)
         let taskID = input.string("task_id").isEmpty ? (toolInput.string("taskId").isEmpty ? toolInput.string("task_id") : toolInput.string("taskId")) : input.string("task_id")
         let active = !["Stop", "SessionEnd", "StopFailure"].contains(eventName)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return [
-            "timestamp": ISO8601DateFormatter().string(from: Date()),
+            "timestamp": formatter.string(from: Date()),
             "provider": "claude",
             "session_id": input.string("session_id"),
             "event": eventName,

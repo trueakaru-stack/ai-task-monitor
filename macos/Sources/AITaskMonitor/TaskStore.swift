@@ -72,7 +72,7 @@ final class TaskStore: ObservableObject {
     }
 
     func refresh() {
-        let combined = (codexReader.readTasks(observedSince: monitoringStartedAt) + claudeReader.readTasks())
+        let combined = (codexReader.readTasks(observedSince: monitoringStartedAt) + claudeReader.readTasks(observedSince: monitoringStartedAt))
             .filter(\.isActive)
             .sorted { $0.updatedAt > $1.updatedAt }
         tasks = combined
