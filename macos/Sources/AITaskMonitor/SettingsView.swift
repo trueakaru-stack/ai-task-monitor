@@ -76,6 +76,24 @@ struct SettingsView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                    section("Возможный цикл") {
+                        HStack {
+                            Text("Количество повторов").font(.system(size: 13))
+                            Spacer()
+                            Picker("Количество повторов", selection: loopThreshold) {
+                                ForEach(3...10, id: \.self) { value in Text("\(value)").tag(value) }
+                            }
+                            .labelsHidden().pickerStyle(.menu).frame(width: 120)
+                        }
+                        HStack {
+                            Text("Период проверки").font(.system(size: 13))
+                            Spacer()
+                            Picker("Период проверки", selection: loopWindowMinutes) {
+                                ForEach(1...30, id: \.self) { value in Text("\(value) мин").tag(value) }
+                            }
+                            .labelsHidden().pickerStyle(.menu).frame(width: 120)
+                        }
+                    }
                     section("О приложении") {
                         Text("AI Task Monitor показывает активные локальные задачи Codex и Claude Code, текущие действия и опубликованные этапы плана. Точный процент отображается только по известным этапам; приблизительная оценка отмечается знаком ≈; без надёжных данных процент скрыт.")
                             .font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
@@ -107,6 +125,22 @@ struct SettingsView: View {
         Binding(get: { store.diagnosticSettings.maximumMB }, set: { value in
             var settings = store.diagnosticSettings
             settings.maximumMB = value
+            store.setDiagnosticSettings(settings)
+        })
+    }
+
+    private var loopThreshold: Binding<Int> {
+        Binding(get: { store.diagnosticSettings.loopThreshold }, set: { value in
+            var settings = store.diagnosticSettings
+            settings.loopThreshold = value
+            store.setDiagnosticSettings(settings)
+        })
+    }
+
+    private var loopWindowMinutes: Binding<Int> {
+        Binding(get: { store.diagnosticSettings.loopWindowMinutes }, set: { value in
+            var settings = store.diagnosticSettings
+            settings.loopWindowMinutes = value
             store.setDiagnosticSettings(settings)
         })
     }

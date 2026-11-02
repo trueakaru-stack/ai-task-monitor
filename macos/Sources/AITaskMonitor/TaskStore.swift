@@ -25,6 +25,7 @@ final class TaskStore: ObservableObject {
     private var sawCodexHome = false
     private var sawClaudeEvents = false
     private var nextJournalMaintenance = Date.distantPast
+    private var loopDetectors: [String: LoopDetector] = [:]
     private var timer: Timer?
 
     init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil) {
@@ -101,6 +102,12 @@ final class TaskStore: ObservableObject {
         return store
     }
 
+    static func loopPreview(unavailableSources: [TaskProvider] = []) -> TaskStore {
+        let store = preview(unavailableSources: unavailableSources)
+        if !store.tasks.isEmpty { store.tasks[0].loopWarning = LoopWarning(threshold: 5, windowMinutes: 10) }
+        return store
+    }
+
     var providers: Set<TaskProvider> { Set(tasks.map(\.provider)) }
     var unavailableMessage: String {
         guard !unavailableSources.isEmpty else { return "" }
@@ -128,13 +135,15 @@ final class TaskStore: ObservableObject {
         var unavailable: [TaskProvider] = []
         var terminalIDs: Set<String> = []
         var interruptedIDs: Set<String> = []
+        var codexToolEvents: [String: [CodexToolEvent]] = [:]
         do {
             let exists = FileManager.default.fileExists(atPath: codexReader.codexHome.path)
             if !exists && sawCodexHome { throw CocoaError(.fileReadNoSuchFile) }
             if exists { sawCodexHome = true }
-            let snapshot = try codexReader.readSnapshot(observedSince: monitoringStartedAt)
+            let snapshot = try codexReader.readSnapshot(observedSince: monitoringStartedAt, previouslyObserved: Set(previousCodex.map(\.id)))
             terminalIDs.formUnion(snapshot.terminalIDs)
             interruptedIDs.formUnion(snapshot.interruptedIDs)
+            codexToolEvents = snapshot.toolEvents
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
         } catch {
             unavailable.append(.codex)
@@ -155,15 +164,48 @@ final class TaskStore: ObservableObject {
             previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         }
         unavailableSources = unavailable
-        let combined = (previousCodex + previousClaude)
+        var combined = (previousCodex + previousClaude)
             .filter { $0.isActive || $0.isUnconfirmed }
             .sorted { $0.updatedAt > $1.updatedAt }
+        let now = Date()
+        for id in Array(loopDetectors.keys) {
+            guard var detector = loopDetectors[id] else { continue }
+            detector.configure(threshold: diagnosticSettings.loopThreshold, windowMinutes: diagnosticSettings.loopWindowMinutes)
+            detector.refresh(now: now)
+            loopDetectors[id] = detector
+        }
+        let knownTasks = previousTasks + combined
+        var toolInputs: [DiagnosticInput] = []
+        for (id, events) in codexToolEvents {
+            guard knownTasks.contains(where: { $0.provider == .codex && $0.id == id }) else { continue }
+            var detector = loopDetectors[id] ?? LoopDetector(threshold: diagnosticSettings.loopThreshold, windowMinutes: diagnosticSettings.loopWindowMinutes)
+            for event in events {
+                if let type = detector.consume(event, now: now) {
+                    toolInputs.append(DiagnosticInput(source: .codex, taskID: id, type: type, time: event.time,
+                                                      reference: event.kind.rawValue + "-" + event.id))
+                }
+            }
+            detector.refresh(now: now)
+            loopDetectors[id] = detector
+        }
+        for id in terminalIDs {
+            if var detector = loopDetectors[id] { detector.finishTurn(); loopDetectors[id] = detector }
+        }
+        for index in combined.indices where combined[index].provider == .codex && combined[index].isActive {
+            combined[index].loopWarning = loopDetectors[combined[index].id]?.warning
+        }
+        let trackedIDs = Set(combined.filter { $0.provider == .codex }.map(\.id))
+        if loopDetectors.count > 256 {
+            for id in Array(loopDetectors.keys) where !trackedIDs.contains(id) && loopDetectors.count > 256 {
+                loopDetectors.removeValue(forKey: id)
+            }
+        }
         tasks = combined
         if compactIndex >= max(combined.count, 1) { compactIndex = 0 }
         if selectedProvider == .codex, !providers.contains(.codex) { selectedProvider = .all }
         if selectedProvider == .claude, !providers.contains(.claude) { selectedProvider = .all }
         recordChanges(previousTasks: previousTasks, previousUnavailable: previousUnavailable,
-                      terminalIDs: terminalIDs, interruptedIDs: interruptedIDs)
+                      terminalIDs: terminalIDs, interruptedIDs: interruptedIDs, toolInputs: toolInputs)
     }
 
     func setDiagnosticSettings(_ settings: DiagnosticSettings) {
@@ -202,6 +244,16 @@ final class TaskStore: ObservableObject {
         }
     }
 
+    func dismissLoop(for taskID: String) {
+        guard var detector = loopDetectors[taskID] else {
+            if diagnosticWorker == nil, let index = tasks.firstIndex(where: { $0.id == taskID }) { tasks[index].loopWarning = nil }
+            return
+        }
+        detector.dismiss()
+        loopDetectors[taskID] = detector
+        if let index = tasks.firstIndex(where: { $0.id == taskID }) { tasks[index].loopWarning = nil }
+    }
+
     private func journalID(for task: MonitoredTask) -> String? {
         let id = task.provider == .claude && task.id.hasPrefix("claude:") ? String(task.id.dropFirst(7)) : task.id
         guard !id.isEmpty, id.utf8.count <= 128, id.unicodeScalars.allSatisfy({
@@ -234,12 +286,12 @@ final class TaskStore: ObservableObject {
     }
 
     private func recordChanges(previousTasks: [MonitoredTask], previousUnavailable: [TaskProvider],
-                               terminalIDs: Set<String>, interruptedIDs: Set<String>) {
+                               terminalIDs: Set<String>, interruptedIDs: Set<String>, toolInputs: [DiagnosticInput]) {
         guard diagnosticWorker != nil else { return }
         let now = Date()
         let oldByID = Dictionary(previousTasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let currentIDs = Set(tasks.map(\.id))
-        var inputs: [DiagnosticInput] = []
+        var inputs = toolInputs
         for task in tasks {
             guard let id = journalID(for: task) else { continue }
             let previous = oldByID[task.id]

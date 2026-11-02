@@ -23,6 +23,11 @@ enum SnapshotRenderer {
             try render(name: "settings-light", mode: .light, compact: false, settings: true, outputDirectory: outputDirectory)
             try render(name: "journal-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory, journal: true)
             try render(name: "journal-light", mode: .light, compact: false, settings: false, outputDirectory: outputDirectory, journal: true)
+            try render(name: "loop-full-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory, loopWarning: true)
+            try render(name: "loop-full-light", mode: .light, compact: false, settings: false, outputDirectory: outputDirectory, loopWarning: true)
+            try render(name: "loop-compact-dark", mode: .dark, compact: true, settings: false, outputDirectory: outputDirectory, loopWarning: true)
+            try render(name: "loop-compact-light", mode: .light, compact: true, settings: false, outputDirectory: outputDirectory, loopWarning: true)
+            try render(name: "loop-source-compact-dark", mode: .dark, compact: true, settings: false, outputDirectory: outputDirectory, unavailableSources: [.claude], loopWarning: true)
             try render(name: "source-unavailable-full-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory, unavailableSources: [.codex])
             try render(name: "source-unavailable-full-light", mode: .light, compact: false, settings: false, outputDirectory: outputDirectory, unavailableSources: [.codex])
             try render(name: "source-unavailable-compact-dark", mode: .dark, compact: true, settings: false, outputDirectory: outputDirectory, unavailableSources: [.codex])
@@ -48,13 +53,14 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
-        let store = journal ? TaskStore.journalPreview() : TaskStore.preview(unavailableSources: unavailableSources)
+        let store = journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources) : TaskStore.preview(unavailableSources: unavailableSources))
         store.isCompact = compact
         store.showsSettings = settings || journal
         store.showsJournal = journal
-        let size = compact ? NSSize(width: 372, height: unavailableSources.isEmpty ? 182 : 206) : NSSize(width: 560, height: 700)
+        let compactHeight: CGFloat = 182 + (unavailableSources.isEmpty ? 0 : 24) + (loopWarning ? 64 : 0)
+        let size = compact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)
         let scheme: ColorScheme = mode == .dark ? .dark : .light
         let view = RootView()
             .environmentObject(store)

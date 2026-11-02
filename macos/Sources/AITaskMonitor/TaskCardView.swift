@@ -27,6 +27,9 @@ struct TaskCardView: View {
                     .frame(maxWidth: .infinity, minHeight: 17, alignment: .leading)
                     .padding(.top, 4)
             }
+            if task.loopWarning != nil {
+                LoopWarningView(task: task, compact: false).padding(.top, 8)
+            }
             if let progress = task.progress, task.progressKind != .none {
                 GeometryReader { proxy in
                     ZStack(alignment: .leading) {
@@ -62,6 +65,27 @@ struct TaskCardView: View {
         .overlay(Squircle().stroke(MonitorTheme.border, lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(task.provider.displayName), \(task.title)")
+    }
+}
+
+struct LoopWarningView: View {
+    @EnvironmentObject private var store: TaskStore
+    let task: MonitoredTask
+    let compact: Bool
+
+    var body: some View {
+        if let warning = task.loopWarning {
+            HStack(alignment: .top, spacing: 8) {
+                Text(warning.description)
+                    .font(.system(size: compact ? 11.5 : 12))
+                    .foregroundStyle(MonitorTheme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+                Button("Скрыть") { store.dismissLoop(for: task.id) }
+                    .controlSize(.small)
+                    .accessibilityLabel("Скрыть предупреждение о возможном цикле для задачи: \(task.title)")
+            }
+        }
     }
 }
 

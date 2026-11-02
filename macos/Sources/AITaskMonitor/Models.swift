@@ -43,6 +43,7 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
     var steps: [TaskStep]
     var updatedAt: Date
     var isUnconfirmed: Bool = false
+    var loopWarning: LoopWarning? = nil
 
     var progressLabel: String? {
         guard let progress else { return nil }

@@ -48,6 +48,7 @@ struct DiagnosticInput {
     let taskID: String?
     let type: DiagnosticEventType
     let time: Date
+    var reference: String? = nil
 }
 
 struct DiagnosticEvent: Codable, Identifiable, Equatable {
@@ -96,6 +97,7 @@ final class DiagnosticJournal {
         try locked {
             let settings = try readSettings()
             var events = try readEvents()
+            var knownIDs = Set(events.map(\.id))
             let key = try loadKey()
             for input in inputs {
                 let task: String?
@@ -106,7 +108,19 @@ final class DiagnosticJournal {
                     guard let id = input.taskID, isSafeTaskID(id) else { throw JournalError.invalidEvent }
                     task = try makeTaskKey(source: input.source, taskID: id, key: key)
                 }
-                events.append(DiagnosticEvent(version: 1, time: input.time, source: input.source, task: task, type: input.type, id: UUID()))
+                let eventID: UUID
+                if let reference = input.reference, let taskID = input.taskID {
+                    guard !reference.isEmpty, reference.utf8.count <= 256, reference.unicodeScalars.allSatisfy({
+                        (48...57).contains($0.value) || (65...90).contains($0.value) || (97...122).contains($0.value) || $0.value == 45 || $0.value == 95
+                    }) else { throw JournalError.invalidEvent }
+                    eventID = makeEventID(source: input.source, taskID: taskID, type: input.type, reference: reference, key: key)
+                } else {
+                    guard input.reference == nil else { throw JournalError.invalidEvent }
+                    eventID = UUID()
+                }
+                if knownIDs.insert(eventID).inserted {
+                    events.append(DiagnosticEvent(version: 1, time: input.time, source: input.source, task: task, type: input.type, id: eventID))
+                }
             }
             try writeEvents(events, settings: settings, now: now)
         }
@@ -199,6 +213,13 @@ final class DiagnosticJournal {
         let message = Data((source.rawValue + "\0" + taskID).utf8)
         return HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: key))
             .map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func makeEventID(source: TaskProvider, taskID: String, type: DiagnosticEventType, reference: String, key: Data) -> UUID {
+        let message = Data(("event\0" + source.rawValue + "\0" + taskID + "\0" + type.rawValue + "\0" + reference).utf8)
+        let bytes = Array(HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: key)).prefix(16))
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
     }
 
     private func loadKey() throws -> Data {

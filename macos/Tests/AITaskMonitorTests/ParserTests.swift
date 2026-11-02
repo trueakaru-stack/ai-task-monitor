@@ -55,6 +55,9 @@ final class ParserTests: XCTestCase {
         XCTAssertTrue(reader.readTasks(now: now, observedSince: since).isEmpty)
         try (oldStart + "\n" + newEvent + "\n").write(to: session, atomically: true, encoding: .utf8)
         XCTAssertEqual(reader.readTasks(now: now, observedSince: since).map(\.title), ["Synthetic task"])
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-20)], ofItemAtPath: session.path)
+        XCTAssertTrue(reader.readTasks(now: now, observedSince: since).isEmpty)
+        XCTAssertEqual(try reader.readSnapshot(now: now, observedSince: since, previouslyObserved: ["test-session"]).tasks.count, 1)
         let terminal = #"{"timestamp":"\#(formatter.string(from: now.addingTimeInterval(1)))","type":"event_msg","payload":{"type":"task_complete"}}"#
         try (oldStart + "\n" + newEvent + "\n" + terminal + "\n").write(to: session, atomically: true, encoding: .utf8)
         let snapshot = try reader.readSnapshot(now: now, observedSince: since)
@@ -241,6 +244,56 @@ final class ParserTests: XCTestCase {
     func testPreviewPercentageMatchesItsSyntheticPlan() throws {
         let task = try XCTUnwrap(TaskStore.preview().tasks.first { !$0.steps.isEmpty })
         XCTAssertEqual(task.progress, MonitoredTask.progress(for: task.steps))
+    }
+
+    @MainActor
+    func testLoopPreviewCanDismissWarning() throws {
+        let store = TaskStore.loopPreview()
+        let task = try XCTUnwrap(store.tasks.first)
+        XCTAssertNotNil(task.loopWarning)
+        store.dismissLoop(for: task.id)
+        XCTAssertNil(store.tasks.first?.loopWarning)
+    }
+
+    @MainActor
+    func testCodexLoopWarningTracksAndResetsPerTask() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let codexHome = directory.appendingPathComponent("codex", isDirectory: true)
+        let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let index = codexHome.appendingPathComponent("session_index.jsonl")
+        let session = sessions.appendingPathComponent("rollout-test-session.jsonl")
+        let claude = directory.appendingPathComponent("claude-events.jsonl")
+        try #"{"id":"test-session","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
+        try "".write(to: session, atomically: true, encoding: .utf8)
+        let journal = DiagnosticJournal(directory: directory.appendingPathComponent("diagnostics", isDirectory: true))
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: codexHome), claudeReader: ClaudeTaskReader(eventFile: claude), journal: journal)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let now = Date()
+        let start = #"{"timestamp":"\#(formatter.string(from: now.addingTimeInterval(1)))","type":"event_msg","payload":{"type":"task_started"}}"#
+        func item(_ id: String, _ type: String, _ seconds: Double) throws -> String {
+            let data: [String: Any] = ["id": id, "type": type, "command": ["synthetic"], "cwd": "/synthetic", "status": "failed", "exit_code": 1]
+            let record: [String: Any] = ["timestamp": formatter.string(from: now.addingTimeInterval(seconds)), "type": "event_msg", "payload": ["type": "item_completed", "item": data]]
+            return String(decoding: try JSONSerialization.data(withJSONObject: record), as: UTF8.self)
+        }
+        var lines = [start]
+        for index in 0..<5 { lines.append(try item("first-\(index)", "CommandExecution", Double(index + 2))) }
+        try (lines.joined(separator: "\n") + "\n").write(to: session, atomically: true, encoding: .utf8)
+        store.refresh()
+        XCTAssertEqual(store.tasks.first?.loopWarning, LoopWarning(threshold: 5, windowMinutes: 10))
+        store.dismissLoop(for: "test-session")
+        XCTAssertNil(store.tasks.first?.loopWarning)
+        lines.append(try item("first-5", "CommandExecution", 7))
+        try (lines.joined(separator: "\n") + "\n").write(to: session, atomically: true, encoding: .utf8)
+        store.refresh()
+        XCTAssertNil(store.tasks.first?.loopWarning)
+        lines.append(try item("changed", "FileChange", 8))
+        for index in 0..<5 { lines.append(try item("next-\(index)", "CommandExecution", Double(index + 9))) }
+        try (lines.joined(separator: "\n") + "\n").write(to: session, atomically: true, encoding: .utf8)
+        store.refresh()
+        XCTAssertNotNil(store.tasks.first?.loopWarning)
     }
 
     func testPreviouslyObservedTaskBecomesUnconfirmedInsteadOfDisappearing() {

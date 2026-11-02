@@ -4,6 +4,7 @@ struct CodexTaskSnapshot {
     var tasks: [MonitoredTask] = []
     var terminalIDs: Set<String> = []
     var interruptedIDs: Set<String> = []
+    var toolEvents: [String: [CodexToolEvent]] = [:]
 }
 
 struct CodexTaskReader {
@@ -24,7 +25,7 @@ struct CodexTaskReader {
         (try? readSnapshot(now: now, observedSince: observedSince).tasks) ?? []
     }
 
-    func readSnapshot(now: Date = Date(), observedSince: Date? = nil) throws -> CodexTaskSnapshot {
+    func readSnapshot(now: Date = Date(), observedSince: Date? = nil, previouslyObserved: Set<String> = []) throws -> CodexTaskSnapshot {
         let index = codexHome.appendingPathComponent("session_index.jsonl")
         if !fileManager.fileExists(atPath: codexHome.path) { return CodexTaskSnapshot() }
         let text = try FileHelpers.tail(of: index, maximumBytes: 2_000_000)
@@ -35,15 +36,17 @@ struct CodexTaskReader {
             if !id.isEmpty { sessions[id] = item }
         }
 
+        let files = try sessionFiles(for: Set(sessions.keys))
         var result = CodexTaskSnapshot()
         for session in sessions.values {
             let id = session.string("id")
             let title = session.string("thread_name")
-            guard !id.isEmpty, title != "Guardian review", let file = sessionFile(id: id) else { continue }
+            guard !id.isEmpty, title != "Guardian review", let file = files[id] else { continue }
             let attributes = try fileManager.attributesOfItem(atPath: file.path)
             guard let modified = attributes[.modificationDate] as? Date else { throw CocoaError(.fileReadUnknown) }
+            if let observedSince, modified < observedSince && !previouslyObserved.contains(id) { continue }
             let tail = try FileHelpers.tail(of: file, maximumBytes: 4_194_304)
-            let state = lifecycle(tail: tail, observedSince: observedSince)
+            let state = lifecycle(tail: tail, observedSince: previouslyObserved.contains(id) ? nil : observedSince)
             if state.terminal {
                 var recognized = false
                 if let observedSince {
@@ -54,10 +57,16 @@ struct CodexTaskReader {
                 if recognized {
                     result.terminalIDs.insert(id)
                     if state.interrupted { result.interruptedIDs.insert(id) }
+                    if previouslyObserved.contains(id), let observedSince {
+                        result.toolEvents[id] = CodexToolEventParser.parse(tail: tail, since: observedSince, now: now)
+                    }
                 }
                 continue
             }
             guard state.running else { continue }
+            if let observedSince {
+                result.toolEvents[id] = CodexToolEventParser.parse(tail: tail, since: observedSince, now: now)
+            }
 
             let steps = parsePlan(from: tail)
             let activity = parseActivity(from: tail)
@@ -190,10 +199,23 @@ struct CodexTaskReader {
         return FileHelpers.normalized(latest.replacingOccurrences(of: #"^\*\*(.*?)\*\*$"#, with: "$1", options: .regularExpression), limit: 600)
     }
 
-    private func sessionFile(id: String) -> URL? {
+    private func sessionFiles(for ids: Set<String>) throws -> [String: URL] {
+        guard !ids.isEmpty else { return [:] }
         let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
-        guard let enumerator = fileManager.enumerator(at: sessions, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return nil }
-        for case let url as URL in enumerator where url.lastPathComponent.hasSuffix("\(id).jsonl") { return url }
-        return nil
+        var enumerationError: Error?
+        guard let enumerator = fileManager.enumerator(at: sessions, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles], errorHandler: { _, error in
+            enumerationError = error
+            return false
+        }) else { throw CocoaError(.fileReadNoSuchFile) }
+        let nonUUIDs = ids.filter { UUID(uuidString: $0) == nil }
+        var files: [String: URL] = [:]
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            let stem = url.deletingPathExtension().lastPathComponent
+            let candidate = String(stem.suffix(36))
+            if ids.contains(candidate) { files[candidate] = url; continue }
+            for id in nonUUIDs where stem == id || stem.hasSuffix("-" + id) { files[id] = url }
+        }
+        if let enumerationError { throw enumerationError }
+        return files
     }
 }

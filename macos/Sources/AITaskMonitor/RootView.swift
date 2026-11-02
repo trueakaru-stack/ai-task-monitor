@@ -131,6 +131,7 @@ struct RootView: View {
                     TruncatingText(text: task.activity, font: .systemFont(ofSize: 11.5), color: .secondaryLabelColor)
                         .frame(maxWidth: .infinity, minHeight: 17, alignment: .leading)
                 }
+                if task.loopWarning != nil { LoopWarningView(task: task, compact: true) }
                 if !store.unavailableMessage.isEmpty {
                     Text(store.unavailableMessage)
                         .font(.system(size: 11.5))
@@ -166,7 +167,10 @@ struct RootView: View {
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     private var compactHeight: CGFloat {
         let base: CGFloat = store.tasks.count > 1 ? 182 : 156
-        return base + (!store.tasks.isEmpty && !store.unavailableMessage.isEmpty ? 24 : 0)
+        let sourceExtra: CGFloat = !store.tasks.isEmpty && !store.unavailableMessage.isEmpty ? 24 : 0
+        let selected = store.tasks.isEmpty ? nil : store.tasks[min(store.compactIndex, store.tasks.count - 1)]
+        let loopExtra: CGFloat = selected?.loopWarning == nil ? 0 : 64
+        return base + sourceExtra + loopExtra
     }
 }
 

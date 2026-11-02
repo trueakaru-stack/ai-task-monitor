@@ -65,6 +65,20 @@ final class DiagnosticJournalTests: XCTestCase {
         }
     }
 
+    func testRepeatedSourceEventIsDeduplicatedWithoutStoringItsReference() throws {
+        try withJournal { journal, directory in
+            let now = Date()
+            let reference = "SYNTHETIC_REFERENCE_217"
+            let input = DiagnosticInput(source: .codex, taskID: "session-1", type: .toolStarted, time: now, reference: reference)
+            try journal.append([input, input], now: now)
+            try journal.append([input], now: now)
+            XCTAssertEqual(try journal.read(now: now).count, 1)
+            let text = try String(contentsOf: directory.appendingPathComponent("events-v1.jsonl"), encoding: .utf8)
+            XCTAssertFalse(text.contains(reference))
+            XCTAssertFalse(text.contains("session-1"))
+        }
+    }
+
     func testInvalidInputAndForeignFilesAreNotOverwritten() throws {
         try withJournal { journal, directory in
             let now = Date()
