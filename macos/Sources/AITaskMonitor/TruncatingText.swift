@@ -76,7 +76,7 @@ final class TruncatingTextField: NSTextField {
     func makeHintPanel(text: String) -> NSPanel {
         let label = NSTextField(wrappingLabelWithString: text)
         label.font = .systemFont(ofSize: 12)
-        label.textColor = .labelColor
+        label.textColor = isDarkAppearance ? NSColor(calibratedWhite: 0.94, alpha: 1) : NSColor(calibratedWhite: 0.12, alpha: 1)
         label.maximumNumberOfLines = 0
         let textSize = (text as NSString).boundingRect(
             with: NSSize(width: 336, height: 1_000),
@@ -105,8 +105,11 @@ final class TruncatingTextField: NSTextField {
     }
 
     private var hintBackground: NSColor {
-        let match = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua])
-        return match == .darkAqua ? NSColor(calibratedWhite: 0.09, alpha: 1) : NSColor(calibratedWhite: 0.88, alpha: 1)
+        isDarkAppearance ? NSColor(calibratedWhite: 0.09, alpha: 1) : NSColor(calibratedWhite: 0.88, alpha: 1)
+    }
+
+    private var isDarkAppearance: Bool {
+        effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
     }
 
     private func closeHint() {
