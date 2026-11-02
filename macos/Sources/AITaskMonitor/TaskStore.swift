@@ -10,22 +10,39 @@ final class TaskStore: ObservableObject {
     @Published var compactIndex = 0
     @Published var sourceMessage = ""
     @Published private(set) var unavailableSources: [TaskProvider] = []
+    @Published var showsJournal = false
+    @Published private(set) var diagnosticSettings = DiagnosticSettings()
+    @Published private(set) var journalEvents: [DiagnosticEvent] = []
+    @Published private(set) var journalTaskNames: [String: String] = [:]
+    @Published private(set) var journalError = ""
 
     private let codexReader: CodexTaskReader
     private let claudeReader: ClaudeTaskReader
+    private let diagnosticWorker: DiagnosticWorker?
     private let monitoringStartedAt = Date()
     private var previousCodex: [MonitoredTask] = []
     private var previousClaude: [MonitoredTask] = []
     private var sawCodexHome = false
     private var sawClaudeEvents = false
+    private var nextJournalMaintenance = Date.distantPast
     private var timer: Timer?
 
-    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil) {
+    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil) {
         self.codexReader = codexReader
         self.claudeReader = claudeReader
+        self.diagnosticWorker = previewTasks == nil ? DiagnosticWorker(journal: journal ?? DiagnosticJournal()) : nil
         if let previewTasks {
             tasks = previewTasks
             return
+        }
+        diagnosticWorker?.load { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let settings): self.diagnosticSettings = settings
+                case .failure(let error): self.journalError = error.localizedDescription
+                }
+            }
         }
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -69,6 +86,21 @@ final class TaskStore: ObservableObject {
         return store
     }
 
+    static func journalPreview() -> TaskStore {
+        let store = preview()
+        let key = String(repeating: "a", count: 64)
+        let now = Date()
+        store.journalEvents = [
+            DiagnosticEvent(version: 1, time: now.addingTimeInterval(-30), source: .codex, task: key, type: .taskObserved, id: UUID()),
+            DiagnosticEvent(version: 1, time: now.addingTimeInterval(-10), source: .codex, task: key, type: .toolStarted, id: UUID()),
+            DiagnosticEvent(version: 1, time: now, source: .claude, task: nil, type: .sourceUnavailable, id: UUID())
+        ]
+        store.journalTaskNames = [key: "Создать индикатор прогресса задач"]
+        store.showsSettings = true
+        store.showsJournal = true
+        return store
+    }
+
     var providers: Set<TaskProvider> { Set(tasks.map(\.provider)) }
     var unavailableMessage: String {
         guard !unavailableSources.isEmpty else { return "" }
@@ -91,12 +123,18 @@ final class TaskStore: ObservableObject {
     }
 
     func refresh() {
+        let previousTasks = tasks
+        let previousUnavailable = unavailableSources
         var unavailable: [TaskProvider] = []
+        var terminalIDs: Set<String> = []
+        var interruptedIDs: Set<String> = []
         do {
             let exists = FileManager.default.fileExists(atPath: codexReader.codexHome.path)
             if !exists && sawCodexHome { throw CocoaError(.fileReadNoSuchFile) }
             if exists { sawCodexHome = true }
             let snapshot = try codexReader.readSnapshot(observedSince: monitoringStartedAt)
+            terminalIDs.formUnion(snapshot.terminalIDs)
+            interruptedIDs.formUnion(snapshot.interruptedIDs)
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
         } catch {
             unavailable.append(.codex)
@@ -108,6 +146,8 @@ final class TaskStore: ObservableObject {
             if exists {
                 sawClaudeEvents = true
                 let snapshot = try claudeReader.readSnapshot(observedSince: monitoringStartedAt)
+                terminalIDs.formUnion(snapshot.terminalIDs)
+                interruptedIDs.formUnion(snapshot.interruptedIDs)
                 previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
             }
         } catch {
@@ -122,6 +162,108 @@ final class TaskStore: ObservableObject {
         if compactIndex >= max(combined.count, 1) { compactIndex = 0 }
         if selectedProvider == .codex, !providers.contains(.codex) { selectedProvider = .all }
         if selectedProvider == .claude, !providers.contains(.claude) { selectedProvider = .all }
+        recordChanges(previousTasks: previousTasks, previousUnavailable: previousUnavailable,
+                      terminalIDs: terminalIDs, interruptedIDs: interruptedIDs)
+    }
+
+    func setDiagnosticSettings(_ settings: DiagnosticSettings) {
+        guard settings.isValid else { return }
+        let previous = diagnosticSettings
+        diagnosticSettings = settings
+        guard let diagnosticWorker else { return }
+        diagnosticWorker.save(settings) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success: self.updateJournal([], showEvents: self.showsJournal)
+                case .failure(let error):
+                    if self.diagnosticSettings == settings { self.diagnosticSettings = previous }
+                    self.journalError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func openJournal() {
+        showsJournal = true
+        updateJournal([], showEvents: true)
+    }
+
+    func clearJournal() {
+        guard let diagnosticWorker else { journalEvents = []; return }
+        diagnosticWorker.clear { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success: self.journalEvents = []; self.journalTaskNames = [:]; self.journalError = ""
+                case .failure(let error): self.journalError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func journalID(for task: MonitoredTask) -> String? {
+        let id = task.provider == .claude && task.id.hasPrefix("claude:") ? String(task.id.dropFirst(7)) : task.id
+        guard !id.isEmpty, id.utf8.count <= 128, id.unicodeScalars.allSatisfy({
+            (48...57).contains($0.value) || (65...90).contains($0.value) || (97...122).contains($0.value) || $0.value == 45 || $0.value == 95
+        }) else { return nil }
+        return id
+    }
+
+    private func journalReferences() -> [DiagnosticTaskReference] {
+        tasks.compactMap { task in
+            guard let id = journalID(for: task) else { return nil }
+            return DiagnosticTaskReference(source: task.provider, id: id, title: task.title)
+        }
+    }
+
+    private func updateJournal(_ inputs: [DiagnosticInput], showEvents: Bool) {
+        guard let diagnosticWorker else { return }
+        let references = showEvents ? journalReferences() : nil
+        diagnosticWorker.update(inputs, references: references) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let view):
+                    self.journalError = ""
+                    if let view { self.journalEvents = view.events; self.journalTaskNames = view.taskNames }
+                case .failure(let error): self.journalError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func recordChanges(previousTasks: [MonitoredTask], previousUnavailable: [TaskProvider],
+                               terminalIDs: Set<String>, interruptedIDs: Set<String>) {
+        guard diagnosticWorker != nil else { return }
+        let now = Date()
+        let oldByID = Dictionary(previousTasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let currentIDs = Set(tasks.map(\.id))
+        var inputs: [DiagnosticInput] = []
+        for task in tasks {
+            guard let id = journalID(for: task) else { continue }
+            let previous = oldByID[task.id]
+            if previous == nil || previous?.isActive != task.isActive || previous?.isUnconfirmed != task.isUnconfirmed {
+                inputs.append(DiagnosticInput(source: task.provider, taskID: id,
+                                              type: task.isUnconfirmed ? .taskUnconfirmed : .taskObserved, time: now))
+            }
+        }
+        for task in previousTasks where !currentIDs.contains(task.id) && terminalIDs.contains(task.id) {
+            guard let id = journalID(for: task) else { continue }
+            inputs.append(DiagnosticInput(source: task.provider, taskID: id,
+                                          type: interruptedIDs.contains(task.id) ? .taskInterrupted : .taskCompleted, time: now))
+        }
+        for provider in TaskProvider.allCases {
+            let wasUnavailable = previousUnavailable.contains(provider)
+            let isUnavailable = unavailableSources.contains(provider)
+            if wasUnavailable != isUnavailable {
+                inputs.append(DiagnosticInput(source: provider, taskID: nil,
+                                              type: isUnavailable ? .sourceUnavailable : .sourceRecovered, time: now))
+            }
+        }
+        guard !inputs.isEmpty || now >= nextJournalMaintenance else { return }
+        nextJournalMaintenance = now.addingTimeInterval(300)
+        updateJournal(inputs, showEvents: showsJournal)
     }
 
     func setClaudeConnected(_ connected: Bool) {

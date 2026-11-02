@@ -3,6 +3,7 @@ import Foundation
 struct ClaudeTaskSnapshot {
     var tasks: [MonitoredTask] = []
     var terminalIDs: Set<String> = []
+    var interruptedIDs: Set<String> = []
 }
 
 struct ClaudeTaskReader {
@@ -60,10 +61,16 @@ struct ClaudeTaskReader {
         var result = ClaudeTaskSnapshot()
         for state in sessions.values {
             if !state.isActive && ["Stop", "SessionEnd", "StopFailure"].contains(state.lastEvent) {
+                var recognized = false
                 if let observedSince {
-                    if state.updatedAt >= observedSince { result.terminalIDs.insert("claude:\(state.id)") }
+                    if state.updatedAt >= observedSince { recognized = true }
                 } else {
-                    result.terminalIDs.insert("claude:\(state.id)")
+                    recognized = true
+                }
+                if recognized {
+                    let id = "claude:\(state.id)"
+                    result.terminalIDs.insert(id)
+                    if state.lastEvent != "Stop" { result.interruptedIDs.insert(id) }
                 }
                 continue
             }

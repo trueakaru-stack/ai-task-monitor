@@ -57,6 +57,14 @@ final class DiagnosticJournalTests: XCTestCase {
         }
     }
 
+    func testClockChangeDoesNotDeleteFutureDatedEvents() throws {
+        try withJournal { journal, _ in
+            let now = Date()
+            try journal.append([DiagnosticInput(source: .codex, taskID: "session-1", type: .taskObserved, time: now.addingTimeInterval(3_600))], now: now)
+            XCTAssertEqual(try journal.read(now: now).count, 1)
+        }
+    }
+
     func testInvalidInputAndForeignFilesAreNotOverwritten() throws {
         try withJournal { journal, directory in
             let now = Date()

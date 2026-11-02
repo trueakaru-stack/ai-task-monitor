@@ -10,6 +10,7 @@ struct RootView: View {
         VStack(spacing: 0) {
             titleBar
             if store.isCompact { compactContent }
+            else if store.showsJournal { JournalView() }
             else if store.showsSettings { SettingsView() }
             else { tasksContent }
         }
@@ -29,7 +30,7 @@ struct RootView: View {
             Spacer()
             TitleAction(symbol: "minus", label: "Свернуть") { NSApp.keyWindow?.miniaturize(nil) }
             TitleAction(symbol: store.isCompact ? "chevron.up" : "chevron.down", label: store.isCompact ? "Развернуть" : "Компактный вид") {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { store.isCompact.toggle(); store.showsSettings = false }
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { store.isCompact.toggle(); store.showsSettings = false; store.showsJournal = false }
             }
             TitleAction(symbol: "xmark", label: "Закрыть") { NSApp.terminate(nil) }
         }

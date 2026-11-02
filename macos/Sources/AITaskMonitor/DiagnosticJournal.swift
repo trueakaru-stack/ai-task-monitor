@@ -165,8 +165,7 @@ final class DiagnosticJournal {
     private func retainedEvents(_ events: [DiagnosticEvent], settings: DiagnosticSettings, now: Date) throws -> [DiagnosticEvent] {
         guard settings.isValid else { throw JournalError.invalidSettings }
         let cutoff = now.addingTimeInterval(-Double(settings.retentionDays) * 86_400)
-        let latest = now.addingTimeInterval(300)
-        let ordered = events.filter { $0.time >= cutoff && $0.time <= latest }.sorted { $0.time < $1.time }
+        let ordered = events.filter { $0.time >= cutoff }.sorted { $0.time < $1.time }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         encoder.outputFormatting = [.sortedKeys]

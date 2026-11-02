@@ -267,7 +267,8 @@ final class ParserTests: XCTestCase {
         let indexLine = #"{"id":"test-session","thread_name":"Synthetic task"}"#
         try (indexLine + "\n").write(to: index, atomically: true, encoding: .utf8)
         try "".write(to: session, atomically: true, encoding: .utf8)
-        let store = TaskStore(codexReader: CodexTaskReader(codexHome: codexHome), claudeReader: ClaudeTaskReader(eventFile: claude))
+        let journal = DiagnosticJournal(directory: directory.appendingPathComponent("diagnostics", isDirectory: true))
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: codexHome), claudeReader: ClaudeTaskReader(eventFile: claude), journal: journal)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let start = #"{"timestamp":"\#(formatter.string(from: Date().addingTimeInterval(1)))","type":"event_msg","payload":{"type":"task_started"}}"#

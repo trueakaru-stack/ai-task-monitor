@@ -3,6 +3,7 @@ import Foundation
 struct CodexTaskSnapshot {
     var tasks: [MonitoredTask] = []
     var terminalIDs: Set<String> = []
+    var interruptedIDs: Set<String> = []
 }
 
 struct CodexTaskReader {
@@ -44,10 +45,15 @@ struct CodexTaskReader {
             let tail = try FileHelpers.tail(of: file, maximumBytes: 4_194_304)
             let state = lifecycle(tail: tail, observedSince: observedSince)
             if state.terminal {
+                var recognized = false
                 if let observedSince {
-                    if let ended = state.terminalDate, ended >= observedSince { result.terminalIDs.insert(id) }
+                    if let ended = state.terminalDate, ended >= observedSince { recognized = true }
                 } else {
+                    recognized = true
+                }
+                if recognized {
                     result.terminalIDs.insert(id)
+                    if state.interrupted { result.interruptedIDs.insert(id) }
                 }
                 continue
             }
@@ -78,10 +84,11 @@ struct CodexTaskReader {
         lifecycle(tail: tail, observedSince: observedSince).running
     }
 
-    private func lifecycle(tail: String, observedSince: Date?) -> (running: Bool, terminal: Bool, terminalDate: Date?) {
+    private func lifecycle(tail: String, observedSince: Date?) -> (running: Bool, terminal: Bool, terminalDate: Date?, interrupted: Bool) {
         var running = false
         var terminal = false
         var terminalDate: Date?
+        var interrupted = false
         var observed = observedSince == nil
         var turnID = ""
         for line in tail.split(whereSeparator: \.isNewline) {
@@ -93,6 +100,7 @@ struct CodexTaskReader {
                 running = true
                 terminal = false
                 terminalDate = nil
+                interrupted = false
                 turnID = eventTurnID
                 observed = observedSince == nil
             case "task_complete", "turn_complete", "turn_aborted":
@@ -100,6 +108,7 @@ struct CodexTaskReader {
                 running = false
                 terminal = true
                 terminalDate = FileHelpers.isoDate(record["timestamp"])
+                interrupted = payload.string("type") == "turn_aborted"
             default:
                 if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { continue }
             }
@@ -108,7 +117,7 @@ struct CodexTaskReader {
                 observed = true
             }
         }
-        return (running && observed, terminal, terminalDate)
+        return (running && observed, terminal, terminalDate, interrupted)
     }
 
     func parsePlan(from tail: String) -> [TaskStep] {
