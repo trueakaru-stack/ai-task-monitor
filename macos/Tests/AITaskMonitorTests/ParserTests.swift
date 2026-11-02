@@ -22,6 +22,41 @@ final class ParserTests: XCTestCase {
         XCTAssertTrue(reader.isRunning(tail: started + "\n" + currentAbort + "\n" + nextStart))
     }
 
+    func testCodexRequiresAnEventAfterMonitorStartForTheCurrentTurn() {
+        let reader = CodexTaskReader(codexHome: URL(fileURLWithPath: "/tmp/unused"))
+        let since = ISO8601DateFormatter().date(from: "2026-11-02T10:00:00Z")!
+        let oldStart = #"{"timestamp":"2026-11-02T09:59:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}"#
+        let newEvent = #"{"timestamp":"2026-11-02T10:00:01Z","type":"event_msg","payload":{"type":"agent_reasoning","turn_id":"one"}}"#
+        let previousTurnEvent = #"{"timestamp":"2026-11-02T10:00:02Z","type":"event_msg","payload":{"type":"agent_reasoning","turn_id":"other"}}"#
+        let completed = #"{"timestamp":"2026-11-02T10:00:03Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"one"}}"#
+        let anotherOldStart = #"{"timestamp":"2026-11-02T09:58:00Z","type":"event_msg","payload":{"type":"task_started","turn_id":"two"}}"#
+        XCTAssertFalse(reader.isRunning(tail: oldStart, observedSince: since))
+        XCTAssertFalse(reader.isRunning(tail: oldStart + "\n" + previousTurnEvent, observedSince: since))
+        XCTAssertTrue(reader.isRunning(tail: oldStart + "\n" + newEvent, observedSince: since))
+        XCTAssertFalse(reader.isRunning(tail: oldStart + "\n" + newEvent + "\n" + completed, observedSince: since))
+        XCTAssertFalse(reader.isRunning(tail: oldStart + "\n" + newEvent + "\n" + completed + "\n" + anotherOldStart, observedSince: since))
+    }
+
+    func testCodexReaderFiltersQuietPreexistingSessions() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let sessions = directory.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let index = directory.appendingPathComponent("session_index.jsonl")
+        let session = sessions.appendingPathComponent("rollout-test-session.jsonl")
+        try #"{"id":"test-session","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
+        let now = Date()
+        let since = now.addingTimeInterval(-2)
+        let formatter = ISO8601DateFormatter()
+        let oldStart = #"{"timestamp":"\#(formatter.string(from: now.addingTimeInterval(-20)))","type":"event_msg","payload":{"type":"task_started"}}"#
+        let newEvent = #"{"timestamp":"\#(formatter.string(from: now))","type":"event_msg","payload":{"type":"agent_reasoning","text":"Synthetic event"}}"#
+        try (oldStart + "\n").write(to: session, atomically: true, encoding: .utf8)
+        let reader = CodexTaskReader(codexHome: directory)
+        XCTAssertTrue(reader.readTasks(now: now, observedSince: since).isEmpty)
+        try (oldStart + "\n" + newEvent + "\n").write(to: session, atomically: true, encoding: .utf8)
+        XCTAssertEqual(reader.readTasks(now: now, observedSince: since).map(\.title), ["Synthetic task"])
+    }
+
     func testCodexPlanUsesLatestPublishedPlan() {
         let reader = CodexTaskReader(codexHome: URL(fileURLWithPath: "/tmp/unused"))
         let first = record(plan: [["step": "Первый", "status": "in_progress"]])

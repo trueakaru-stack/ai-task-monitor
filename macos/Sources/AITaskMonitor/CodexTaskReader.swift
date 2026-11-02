@@ -14,7 +14,7 @@ struct CodexTaskReader {
         }
     }
 
-    func readTasks(now: Date = Date()) -> [MonitoredTask] {
+    func readTasks(now: Date = Date(), observedSince: Date? = nil) -> [MonitoredTask] {
         let index = codexHome.appendingPathComponent("session_index.jsonl")
         guard let text = try? FileHelpers.tail(of: index, maximumBytes: 2_000_000) else { return [] }
         var sessions: [String: [String: Any]] = [:]
@@ -32,7 +32,7 @@ struct CodexTaskReader {
                   let modified = attributes[.modificationDate] as? Date,
                   now.timeIntervalSince(modified) < 7_200,
                   let tail = try? FileHelpers.tail(of: file, maximumBytes: 4_194_304),
-                  isRunning(tail: tail) else { return nil }
+                  isRunning(tail: tail, observedSince: observedSince) else { return nil }
 
             let steps = parsePlan(from: tail)
             let activity = parseActivity(from: tail)
@@ -51,8 +51,9 @@ struct CodexTaskReader {
         }.sorted { $0.updatedAt > $1.updatedAt }
     }
 
-    func isRunning(tail: String) -> Bool {
+    func isRunning(tail: String, observedSince: Date? = nil) -> Bool {
         var running = false
+        var observed = observedSince == nil
         var turnID = ""
         for line in tail.split(whereSeparator: \.isNewline) {
             guard let record = FileHelpers.jsonObject(line), record.string("type") == "event_msg",
@@ -62,14 +63,19 @@ struct CodexTaskReader {
             case "task_started", "turn_started":
                 running = true
                 turnID = eventTurnID
+                observed = observedSince == nil
             case "task_complete", "turn_complete", "turn_aborted":
                 if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { continue }
                 running = false
             default:
-                continue
+                if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { continue }
+            }
+            if running, !observed, let observedSince,
+               let eventDate = FileHelpers.isoDate(record["timestamp"]), eventDate >= observedSince {
+                observed = true
             }
         }
-        return running
+        return running && observed
     }
 
     func parsePlan(from tail: String) -> [TaskStep] {
