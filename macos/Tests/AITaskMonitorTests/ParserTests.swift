@@ -67,6 +67,21 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(record["activity"] as? String, "New request")
     }
 
+    func testClaudeHookBoundsInputWhileReading() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("input.json")
+        try Data(repeating: 0x61, count: 16).write(to: file)
+        let withinLimit = try FileHandle(forReadingFrom: file)
+        XCTAssertEqual(ClaudeHook.readBoundedInput(withinLimit, maximumBytes: 16)?.count, 16)
+        try withinLimit.close()
+        try Data(repeating: 0x61, count: 17).write(to: file)
+        let overLimit = try FileHandle(forReadingFrom: file)
+        XCTAssertNil(ClaudeHook.readBoundedInput(overLimit, maximumBytes: 16))
+        try overLimit.close()
+    }
+
     func testProgressLabelsPreserveCertainty() {
         let base = MonitoredTask(id: "1", provider: .codex, title: "Task", activity: "", isActive: true, progress: 40, progressKind: .exact, steps: [], updatedAt: Date())
         XCTAssertEqual(base.progressLabel, "40%")

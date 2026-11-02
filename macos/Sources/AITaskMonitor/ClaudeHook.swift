@@ -3,8 +3,7 @@ import Darwin
 
 enum ClaudeHook {
     static func run() -> Int32 {
-        let data = FileHandle.standardInput.readDataToEndOfFile()
-        guard data.count <= 1_048_576,
+        guard let data = readBoundedInput(FileHandle.standardInput),
               let value = try? JSONSerialization.jsonObject(with: data),
               let input = value as? [String: Any] else { return 0 }
 
@@ -30,6 +29,18 @@ enum ClaudeHook {
         } catch {
             return ProcessInfo.processInfo.environment["AI_TASK_MONITOR_AUDIT"] == "1" ? 1 : 0
         }
+    }
+
+    static func readBoundedInput(_ handle: FileHandle, maximumBytes: Int = 1_048_576) -> Data? {
+        precondition(maximumBytes >= 0 && maximumBytes < Int.max)
+        var data = Data()
+        while data.count <= maximumBytes {
+            let remaining = maximumBytes + 1 - data.count
+            let chunk = handle.readData(ofLength: min(4096, remaining))
+            if chunk.isEmpty { return data }
+            data.append(chunk)
+        }
+        return nil
     }
 
     static func makeRecord(from input: [String: Any]) -> [String: Any] {
