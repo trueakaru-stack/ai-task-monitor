@@ -29,7 +29,7 @@ AI Task Monitor does not transmit task data to the developer, OpenAI, Anthropic,
 
 ## Data on macOS
 
-The application reads Codex session data from `~/.codex`. When Claude Code integration is enabled, it stores normalized hook events in the v2 file described above. Enabling integration modifies only the application-owned hook entries in `~/.claude/settings.json` and first creates a timestamped backup. Disconnecting removes only those owned hook commands.
+The application reads Codex session data from `~/.codex`. When Claude Code integration is enabled, it stores normalized hook events in the v2 file described above. Connecting or disconnecting changes only application-owned hook entries in `~/.claude/settings.json`; before changing an existing settings file, it creates a uniquely named local backup. Such backups can contain sensitive settings and remain until the user removes them. Unsupported hook structures are not rewritten.
 
 The diagnostic journal is stored separately under `~/Library/Application Support/AI Task Monitor/diagnostics`. It records event time, provider, type and pseudonymous task and event identifiers. It does not record task names, activity or plan text, prompts, commands, tool outputs, or project paths. Task titles shown in the journal filter are read from currently available task data and are not saved to the journal. Its collection depends on observed structured events and is not a complete audit trail.
 

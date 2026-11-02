@@ -125,6 +125,21 @@ final class DiagnosticJournalTests: XCTestCase {
         }
     }
 
+    func testMalformedJournalIsPreservedUntilConfirmedClear() throws {
+        try withJournal { journal, directory in
+            _ = try journal.loadSettings()
+            let file = directory.appendingPathComponent("events-v1.jsonl")
+            let corrupt = Data("{\"format\":\"ai-task-monitor-diagnostics\",\"version\":1}\n{\"partial\":".utf8)
+            try corrupt.write(to: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            XCTAssertThrowsError(try journal.read())
+            XCTAssertThrowsError(try journal.append([DiagnosticInput(source: .codex, taskID: "safe", type: .taskObserved, time: Date())]))
+            XCTAssertEqual(try Data(contentsOf: file), corrupt)
+            try journal.clear()
+            XCTAssertTrue(try journal.read().isEmpty)
+        }
+    }
+
     private func withJournal(_ body: (DiagnosticJournal, URL) throws -> Void) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

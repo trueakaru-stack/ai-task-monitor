@@ -138,7 +138,8 @@ final class DiagnosticJournal {
 
     func clear() throws {
         try locked {
-            _ = try readEvents()
+            if let data = try safeRead(name: journalName, maximumBytes: maximumExistingBytes),
+               !data.starts(with: Data(header.utf8)) { throw JournalError.foreignFile }
             try atomicWrite(Data(header.utf8), name: journalName)
         }
     }
