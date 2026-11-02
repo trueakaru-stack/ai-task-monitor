@@ -35,6 +35,20 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(MonitoredTask.progress(for: steps), 50)
     }
 
+    func testCodexPlanSupportsFunctionCallLegacyAndClearing() throws {
+        let reader = CodexTaskReader(codexHome: URL(fileURLWithPath: "/tmp/unused"))
+        let json = try JSONSerialization.data(withJSONObject: ["plan": [["step": "JSON step", "status": "completed"]]])
+        let direct: [String: Any] = ["payload": ["type": "function_call", "name": "update_plan", "arguments": String(decoding: json, as: UTF8.self)]]
+        let directLine = String(decoding: try JSONSerialization.data(withJSONObject: direct), as: UTF8.self)
+        XCTAssertEqual(reader.parsePlan(from: directLine).map(\.status), [.done])
+        let legacy: [String: Any] = ["payload": ["type": "custom_tool_call", "name": "functions.exec", "input": #"await tools.update_plan({plan:[{step: "Legacy step", status: "pending"}]})"#]]
+        let legacyLine = String(decoding: try JSONSerialization.data(withJSONObject: legacy), as: UTF8.self)
+        XCTAssertEqual(reader.parsePlan(from: directLine + "\n" + legacyLine).map(\.title), ["Legacy step"])
+        let empty: [String: Any] = ["payload": ["type": "function_call", "name": "update_plan", "arguments": #"{"plan":[]}"#]]
+        let emptyLine = String(decoding: try JSONSerialization.data(withJSONObject: empty), as: UTF8.self)
+        XCTAssertTrue(reader.parsePlan(from: legacyLine + "\n" + emptyLine).isEmpty)
+    }
+
     func testActivityUsesLatestCommentary() {
         let reader = CodexTaskReader(codexHome: URL(fileURLWithPath: "/tmp/unused"))
         let first = #"{"type":"event_msg","payload":{"type":"agent_reasoning","text":"Старое действие"}}"#

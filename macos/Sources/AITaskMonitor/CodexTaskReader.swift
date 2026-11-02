@@ -77,23 +77,49 @@ struct CodexTaskReader {
         for line in tail.split(whereSeparator: \.isNewline) where line.contains("update_plan") {
             guard let record = FileHelpers.jsonObject(line),
                   let payload = record.object("payload"),
-                  payload.string("type") == "custom_tool_call",
-                  let inputData = payload.string("input").data(using: .utf8),
-                  let input = try? JSONSerialization.jsonObject(with: inputData) as? [String: Any],
-                  let plan = input["plan"] as? [[String: Any]] else { continue }
-            let candidate = plan.compactMap { item -> TaskStep? in
-                guard let step = item["step"] as? String, !step.isEmpty else { return nil }
-                let status: StepStatus
-                switch item["status"] as? String {
-                case "completed": status = .done
-                case "in_progress": status = .active
-                default: status = .pending
+                  ["custom_tool_call", "function_call"].contains(payload.string("type")) else { continue }
+            let name = payload.string("name")
+            let inputText = payload.string("input").isEmpty ? payload.string("arguments") : payload.string("input")
+            if name == "update_plan", let inputData = inputText.data(using: .utf8),
+               let input = try? JSONSerialization.jsonObject(with: inputData) as? [String: Any],
+               let plan = input["plan"] as? [[String: Any]] {
+                let candidate = plan.compactMap { item -> TaskStep? in
+                    guard let step = item["step"] as? String, !step.isEmpty,
+                          let status = planStatus(item["status"] as? String) else { return nil }
+                    return TaskStep(title: step, status: status)
                 }
-                return TaskStep(title: step, status: status)
+                if plan.isEmpty || !candidate.isEmpty { latest = candidate }
+                continue
             }
+            if name != "update_plan" && !inputText.contains("update_plan(") { continue }
+            let candidate = parseLegacyPlan(inputText)
             if !candidate.isEmpty { latest = candidate }
         }
         return latest
+    }
+
+    private func planStatus(_ value: String?) -> StepStatus? {
+        switch value {
+        case "completed": return .done
+        case "in_progress": return .active
+        case "pending": return .pending
+        default: return nil
+        }
+    }
+
+    private func parseLegacyPlan(_ input: String) -> [TaskStep] {
+        let pattern = #"step\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*status\s*:\s*"(completed|in_progress|pending)""#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(input.startIndex..., in: input)
+        return regex.matches(in: input, range: range).compactMap { match in
+            guard let titleRange = Range(match.range(at: 1), in: input),
+                  let statusRange = Range(match.range(at: 2), in: input),
+                  let status = planStatus(String(input[statusRange])),
+                  let encodedTitle = ("[\"" + String(input[titleRange]) + "\"]").data(using: .utf8),
+                  let titles = try? JSONSerialization.jsonObject(with: encodedTitle) as? [String],
+                  let title = titles.first, !title.isEmpty else { return nil }
+            return TaskStep(title: title, status: status)
+        }
     }
 
     func parseActivity(from tail: String) -> String {
