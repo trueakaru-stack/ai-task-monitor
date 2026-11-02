@@ -1,5 +1,10 @@
 import Foundation
 
+struct CodexTaskSnapshot {
+    var tasks: [MonitoredTask] = []
+    var terminalIDs: Set<String> = []
+}
+
 struct CodexTaskReader {
     let codexHome: URL
     private let fileManager = FileManager.default
@@ -15,8 +20,13 @@ struct CodexTaskReader {
     }
 
     func readTasks(now: Date = Date(), observedSince: Date? = nil) -> [MonitoredTask] {
+        (try? readSnapshot(now: now, observedSince: observedSince).tasks) ?? []
+    }
+
+    func readSnapshot(now: Date = Date(), observedSince: Date? = nil) throws -> CodexTaskSnapshot {
         let index = codexHome.appendingPathComponent("session_index.jsonl")
-        guard let text = try? FileHelpers.tail(of: index, maximumBytes: 2_000_000) else { return [] }
+        if !fileManager.fileExists(atPath: codexHome.path) { return CodexTaskSnapshot() }
+        let text = try FileHelpers.tail(of: index, maximumBytes: 2_000_000)
         var sessions: [String: [String: Any]] = [:]
         for line in text.split(whereSeparator: \.isNewline) {
             guard let item = FileHelpers.jsonObject(line) else { continue }
@@ -24,20 +34,30 @@ struct CodexTaskReader {
             if !id.isEmpty { sessions[id] = item }
         }
 
-        return sessions.values.compactMap { session in
+        var result = CodexTaskSnapshot()
+        for session in sessions.values {
             let id = session.string("id")
             let title = session.string("thread_name")
-            guard !id.isEmpty, title != "Guardian review", let file = sessionFile(id: id) else { return nil }
-            guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
-                  let modified = attributes[.modificationDate] as? Date,
-                  let tail = try? FileHelpers.tail(of: file, maximumBytes: 4_194_304),
-                  isRunning(tail: tail, observedSince: observedSince) else { return nil }
+            guard !id.isEmpty, title != "Guardian review", let file = sessionFile(id: id) else { continue }
+            let attributes = try fileManager.attributesOfItem(atPath: file.path)
+            guard let modified = attributes[.modificationDate] as? Date else { throw CocoaError(.fileReadUnknown) }
+            let tail = try FileHelpers.tail(of: file, maximumBytes: 4_194_304)
+            let state = lifecycle(tail: tail, observedSince: observedSince)
+            if state.terminal {
+                if let observedSince {
+                    if let ended = state.terminalDate, ended >= observedSince { result.terminalIDs.insert(id) }
+                } else {
+                    result.terminalIDs.insert(id)
+                }
+                continue
+            }
+            guard state.running else { continue }
 
             let steps = parsePlan(from: tail)
             let activity = parseActivity(from: tail)
             let progress = MonitoredTask.progress(for: steps)
             let unconfirmed = now.timeIntervalSince(modified) >= 7_200
-            return MonitoredTask(
+            result.tasks.append(MonitoredTask(
                 id: id,
                 provider: .codex,
                 title: title.isEmpty ? "Задача Codex" : title,
@@ -48,12 +68,20 @@ struct CodexTaskReader {
                 steps: steps,
                 updatedAt: modified,
                 isUnconfirmed: unconfirmed
-            )
-        }.sorted { $0.updatedAt > $1.updatedAt }
+            ))
+        }
+        result.tasks.sort { $0.updatedAt > $1.updatedAt }
+        return result
     }
 
     func isRunning(tail: String, observedSince: Date? = nil) -> Bool {
+        lifecycle(tail: tail, observedSince: observedSince).running
+    }
+
+    private func lifecycle(tail: String, observedSince: Date?) -> (running: Bool, terminal: Bool, terminalDate: Date?) {
         var running = false
+        var terminal = false
+        var terminalDate: Date?
         var observed = observedSince == nil
         var turnID = ""
         for line in tail.split(whereSeparator: \.isNewline) {
@@ -63,11 +91,15 @@ struct CodexTaskReader {
             switch payload.string("type") {
             case "task_started", "turn_started":
                 running = true
+                terminal = false
+                terminalDate = nil
                 turnID = eventTurnID
                 observed = observedSince == nil
             case "task_complete", "turn_complete", "turn_aborted":
                 if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { continue }
                 running = false
+                terminal = true
+                terminalDate = FileHelpers.isoDate(record["timestamp"])
             default:
                 if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { continue }
             }
@@ -76,7 +108,7 @@ struct CodexTaskReader {
                 observed = true
             }
         }
-        return running && observed
+        return (running && observed, terminal, terminalDate)
     }
 
     func parsePlan(from tail: String) -> [TaskStep] {

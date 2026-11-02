@@ -55,6 +55,11 @@ final class ParserTests: XCTestCase {
         XCTAssertTrue(reader.readTasks(now: now, observedSince: since).isEmpty)
         try (oldStart + "\n" + newEvent + "\n").write(to: session, atomically: true, encoding: .utf8)
         XCTAssertEqual(reader.readTasks(now: now, observedSince: since).map(\.title), ["Synthetic task"])
+        let terminal = #"{"timestamp":"\#(formatter.string(from: now.addingTimeInterval(1)))","type":"event_msg","payload":{"type":"task_complete"}}"#
+        try (oldStart + "\n" + newEvent + "\n" + terminal + "\n").write(to: session, atomically: true, encoding: .utf8)
+        let snapshot = try reader.readSnapshot(now: now, observedSince: since)
+        XCTAssertTrue(snapshot.tasks.isEmpty)
+        XCTAssertTrue(snapshot.terminalIDs.contains("test-session"))
     }
 
     func testCodexReaderKeepsObservedQuietTaskAsUnconfirmed() throws {
@@ -170,6 +175,10 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(resumed.steps.map(\.title), ["Synthetic plan step"])
         XCTAssertFalse(resumed.activity.contains("SYNTHETIC_SECRET"))
         XCTAssertEqual(try String(contentsOf: legacyFile, encoding: .utf8), oldLine + "\n")
+        let stopped = event(session: "legacy-session", name: "Stop", active: false, date: now.addingTimeInterval(1), prompt: "")
+        try ([unrelated, observed, stopped].joined(separator: "\n") + "\n").write(to: currentFile, atomically: true, encoding: .utf8)
+        let stoppedSnapshot = try reader.readSnapshot(now: now, observedSince: now.addingTimeInterval(-1))
+        XCTAssertTrue(stoppedSnapshot.terminalIDs.contains("claude:legacy-session"))
     }
 
     func testClaudeHookDoesNotStorePromptOrWorkingPath() throws {
@@ -226,6 +235,56 @@ final class ParserTests: XCTestCase {
         unavailable.progress = nil
         unavailable.progressKind = .none
         XCTAssertNil(unavailable.progressLabel)
+    }
+
+    func testPreviouslyObservedTaskBecomesUnconfirmedInsteadOfDisappearing() {
+        let previous = MonitoredTask(id: "one", provider: .codex, title: "Synthetic task", activity: "Working", isActive: true, progress: nil, progressKind: .none, steps: [], updatedAt: Date())
+        let uncertain = TaskSnapshotMerger.merge(previous: [previous], current: [], terminalIDs: [])
+        XCTAssertEqual(uncertain.count, 1)
+        XCTAssertFalse(uncertain[0].isActive)
+        XCTAssertTrue(uncertain[0].isUnconfirmed)
+        XCTAssertEqual(uncertain[0].activity, "Статус не подтверждён")
+        XCTAssertTrue(TaskSnapshotMerger.merge(previous: uncertain, current: [], terminalIDs: ["one"]).isEmpty)
+        XCTAssertEqual(TaskSnapshotMerger.merge(previous: uncertain, current: [previous], terminalIDs: []), [previous])
+    }
+
+    @MainActor
+    func testSourceFailurePreservesObservedTaskAndOtherProvider() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let codexHome = directory.appendingPathComponent("codex", isDirectory: true)
+        let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let index = codexHome.appendingPathComponent("session_index.jsonl")
+        let session = sessions.appendingPathComponent("rollout-test-session.jsonl")
+        let claude = directory.appendingPathComponent("claude-events.jsonl")
+        let indexLine = #"{"id":"test-session","thread_name":"Synthetic task"}"#
+        try (indexLine + "\n").write(to: index, atomically: true, encoding: .utf8)
+        try "".write(to: session, atomically: true, encoding: .utf8)
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: codexHome), claudeReader: ClaudeTaskReader(eventFile: claude))
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let start = #"{"timestamp":"\#(formatter.string(from: Date().addingTimeInterval(1)))","type":"event_msg","payload":{"type":"task_started"}}"#
+        let claudeEvent = event(session: "active-claude", name: "UserPromptSubmit", active: true, date: Date().addingTimeInterval(2), prompt: "")
+        try (start + "\n").write(to: session, atomically: true, encoding: .utf8)
+        try (claudeEvent + "\n").write(to: claude, atomically: true, encoding: .utf8)
+        store.refresh()
+        XCTAssertEqual(store.tasks.count, 2)
+        XCTAssertTrue(store.unavailableSources.isEmpty)
+        try FileManager.default.removeItem(at: index)
+        store.refresh()
+        XCTAssertEqual(store.unavailableSources, [.codex])
+        let uncertain = try XCTUnwrap(store.tasks.first { $0.provider == .codex })
+        XCTAssertTrue(uncertain.isUnconfirmed)
+        XCTAssertFalse(uncertain.isActive)
+        XCTAssertTrue(store.tasks.contains { $0.provider == .claude && $0.isActive })
+        try (indexLine + "\n").write(to: index, atomically: true, encoding: .utf8)
+        let end = #"{"timestamp":"\#(formatter.string(from: Date().addingTimeInterval(3)))","type":"event_msg","payload":{"type":"task_complete"}}"#
+        try (start + "\n" + end + "\n").write(to: session, atomically: true, encoding: .utf8)
+        store.refresh()
+        XCTAssertTrue(store.unavailableSources.isEmpty)
+        XCTAssertFalse(store.tasks.contains { $0.provider == .codex })
+        XCTAssertTrue(store.tasks.contains { $0.provider == .claude && $0.isActive })
     }
 
     func testCursorHintPositionsRespectScreenEdges() {

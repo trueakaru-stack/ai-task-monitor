@@ -1,5 +1,10 @@
 import Foundation
 
+struct ClaudeTaskSnapshot {
+    var tasks: [MonitoredTask] = []
+    var terminalIDs: Set<String> = []
+}
+
 struct ClaudeTaskReader {
     let eventFile: URL
     let legacyFile: URL?
@@ -10,7 +15,11 @@ struct ClaudeTaskReader {
     }
 
     func readTasks(now: Date = Date(), observedSince: Date? = nil) -> [MonitoredTask] {
-        guard let text = try? FileHelpers.tail(of: eventFile, maximumBytes: 4_194_304) else { return [] }
+        (try? readSnapshot(now: now, observedSince: observedSince).tasks) ?? []
+    }
+
+    func readSnapshot(now: Date = Date(), observedSince: Date? = nil) throws -> ClaudeTaskSnapshot {
+        let text = try FileHelpers.tail(of: eventFile, maximumBytes: 4_194_304)
         let current: [([String: Any], Date)] = text.split(whereSeparator: \.isNewline).compactMap { line in
             guard let event = FileHelpers.jsonObject(line), !event.string("session_id").isEmpty,
                   let timestamp = FileHelpers.isoDate(event["timestamp"]) else { return nil }
@@ -41,24 +50,36 @@ struct ClaudeTaskReader {
             let id = event.string("session_id")
             var state = sessions[id] ?? SessionState(id: id)
             state.updatedAt = entry.element.1
+            state.lastEvent = event.string("event")
             if !event.string("activity").isEmpty { state.activity = localizedActivity(event) }
             state.isActive = event["active"] as? Bool ?? state.isActive
             updateSteps(event, state: &state)
             sessions[id] = state
         }
 
-        return sessions.values.compactMap { state in
-            guard state.isActive, freshIDs.contains(state.id) else { return nil }
+        var result = ClaudeTaskSnapshot()
+        for state in sessions.values {
+            if !state.isActive && ["Stop", "SessionEnd", "StopFailure"].contains(state.lastEvent) {
+                if let observedSince {
+                    if state.updatedAt >= observedSince { result.terminalIDs.insert("claude:\(state.id)") }
+                } else {
+                    result.terminalIDs.insert("claude:\(state.id)")
+                }
+                continue
+            }
+            guard state.isActive, freshIDs.contains(state.id) else { continue }
             let steps = state.stepsOrder.compactMap { state.steps[$0] }
             let progress = MonitoredTask.progress(for: steps)
             let unconfirmed = now.timeIntervalSince(state.updatedAt) >= 7_200
-            return MonitoredTask(
+            result.tasks.append(MonitoredTask(
                 id: "claude:\(state.id)", provider: .claude, title: "Задача Claude Code",
                 activity: unconfirmed ? "Статус не подтверждён" : state.activity, isActive: !unconfirmed, progress: progress,
                 progressKind: progress == nil ? .none : .exact,
                 steps: steps, updatedAt: state.updatedAt, isUnconfirmed: unconfirmed
-            )
-        }.sorted { $0.updatedAt > $1.updatedAt }
+            ))
+        }
+        result.tasks.sort { $0.updatedAt > $1.updatedAt }
+        return result
     }
 
     private func updateSteps(_ event: [String: Any], state: inout SessionState) {
@@ -97,6 +118,7 @@ private struct SessionState {
     let id: String
     var activity = ""
     var isActive = false
+    var lastEvent = ""
     var updatedAt = Date.distantPast
     var steps: [String: TaskStep] = [:]
     var stepsOrder: [String] = []

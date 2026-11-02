@@ -56,6 +56,21 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
     }
 }
 
+enum TaskSnapshotMerger {
+    static func merge(previous: [MonitoredTask], current: [MonitoredTask], terminalIDs: Set<String>) -> [MonitoredTask] {
+        let currentIDs = Set(current.map(\.id))
+        var result = current
+        for task in previous where !currentIDs.contains(task.id) && !terminalIDs.contains(task.id) {
+            var uncertain = task
+            uncertain.isActive = false
+            uncertain.isUnconfirmed = true
+            uncertain.activity = "Статус не подтверждён"
+            result.append(uncertain)
+        }
+        return result
+    }
+}
+
 enum ProviderFilter: String, CaseIterable, Identifiable {
     case all
     case codex

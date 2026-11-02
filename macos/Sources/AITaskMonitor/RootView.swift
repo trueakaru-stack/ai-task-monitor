@@ -18,7 +18,7 @@ struct RootView: View {
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(MonitorTheme.border, lineWidth: 1))
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.42 : 0.18), radius: 22, y: 8)
-        .background(WindowConfigurator(isCompact: store.isCompact))
+        .background(WindowConfigurator(isCompact: store.isCompact, compactHeight: compactHeight))
         .preferredColorScheme(preferredScheme)
     }
 
@@ -46,13 +46,22 @@ struct RootView: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
             if store.providers.count > 1 { providerTabs.padding(.top, 16) }
+            if !store.unavailableMessage.isEmpty {
+                Text(store.unavailableMessage)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(MonitorTheme.secondary)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+            }
             if store.filteredTasks.isEmpty {
                 Spacer()
-                VStack(spacing: 8) {
-                    Text("Активных задач нет").font(.system(size: 15, weight: .medium))
-                    Text("Окно обновится автоматически").font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary)
+                if store.unavailableMessage.isEmpty {
+                    VStack(spacing: 8) {
+                        Text("Активных задач нет").font(.system(size: 15, weight: .medium))
+                        Text("Окно обновится автоматически").font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: .infinity)
                 Spacer()
             } else {
                 ScrollView {
@@ -102,7 +111,7 @@ struct RootView: View {
     private var compactContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             if store.tasks.isEmpty {
-                Text("Активных задач нет")
+                Text(store.unavailableMessage.isEmpty ? "Активных задач нет" : store.unavailableMessage)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(MonitorTheme.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -120,6 +129,12 @@ struct RootView: View {
                 if !task.activity.isEmpty {
                     TruncatingText(text: task.activity, font: .systemFont(ofSize: 11.5), color: .secondaryLabelColor)
                         .frame(maxWidth: .infinity, minHeight: 17, alignment: .leading)
+                }
+                if !store.unavailableMessage.isEmpty {
+                    Text(store.unavailableMessage)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(MonitorTheme.secondary)
+                        .lineLimit(2)
                 }
                 if store.tasks.count > 1 {
                     HStack(spacing: 7) {
@@ -148,7 +163,10 @@ struct RootView: View {
     }
 
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
-    private var compactHeight: CGFloat { store.tasks.count > 1 ? 182 : 156 }
+    private var compactHeight: CGFloat {
+        let base: CGFloat = store.tasks.count > 1 ? 182 : 156
+        return base + (!store.tasks.isEmpty && !store.unavailableMessage.isEmpty ? 24 : 0)
+    }
 }
 
 private struct TitleAction: View {
@@ -169,6 +187,7 @@ private struct TitleAction: View {
 
 private struct WindowConfigurator: NSViewRepresentable {
     let isCompact: Bool
+    let compactHeight: CGFloat
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
@@ -193,7 +212,7 @@ private struct WindowConfigurator: NSViewRepresentable {
         window.standardWindowButton(.closeButton)?.isHidden = true
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
-        let size = isCompact ? NSSize(width: 372, height: 182) : NSSize(width: 560, height: 700)
+        let size = isCompact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)
         if window.frame.size != size { window.setContentSize(size) }
         window.minSize = isCompact ? size : NSSize(width: 500, height: 500)
         window.maxSize = isCompact ? size : NSSize(width: 900, height: 1_000)

@@ -28,6 +28,16 @@ jobs:
       - name: Test
         working-directory: macos
         run: swift test
+      - name: Render native source-status previews
+        working-directory: macos
+        run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/ai-task-monitor-previews"
+      - name: Upload source-status previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-source-previews
+          path: ${{ runner.temp }}/ai-task-monitor-previews/*.png
+          if-no-files-found: error
+          retention-days: 7
 
   build:
     if: ${{ !contains(github.event.head_commit.message, '[tests-only]') }}

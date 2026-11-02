@@ -9,10 +9,15 @@ final class TaskStore: ObservableObject {
     @Published var isCompact = false
     @Published var compactIndex = 0
     @Published var sourceMessage = ""
+    @Published private(set) var unavailableSources: [TaskProvider] = []
 
     private let codexReader: CodexTaskReader
     private let claudeReader: ClaudeTaskReader
     private let monitoringStartedAt = Date()
+    private var previousCodex: [MonitoredTask] = []
+    private var previousClaude: [MonitoredTask] = []
+    private var sawCodexHome = false
+    private var sawClaudeEvents = false
     private var timer: Timer?
 
     init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil) {
@@ -28,8 +33,8 @@ final class TaskStore: ObservableObject {
         }
     }
 
-    static func preview() -> TaskStore {
-        TaskStore(previewTasks: [
+    static func preview(unavailableSources: [TaskProvider] = []) -> TaskStore {
+        let store = TaskStore(previewTasks: [
             MonitoredTask(
                 id: "codex-preview", provider: .codex,
                 title: "Создать индикатор прогресса задач",
@@ -52,9 +57,23 @@ final class TaskStore: ObservableObject {
                 steps: [], updatedAt: Date().addingTimeInterval(-15)
             )
         ])
+        store.unavailableSources = unavailableSources
+        store.tasks = store.tasks.map { task in
+            guard unavailableSources.contains(task.provider) else { return task }
+            var uncertain = task
+            uncertain.isActive = false
+            uncertain.isUnconfirmed = true
+            uncertain.activity = "Статус не подтверждён"
+            return uncertain
+        }
+        return store
     }
 
     var providers: Set<TaskProvider> { Set(tasks.map(\.provider)) }
+    var unavailableMessage: String {
+        guard !unavailableSources.isEmpty else { return "" }
+        return "Нет данных от " + unavailableSources.map(\.displayName).joined(separator: ", ")
+    }
     var filteredTasks: [MonitoredTask] {
         switch selectedProvider {
         case .all: return tasks
@@ -72,7 +91,31 @@ final class TaskStore: ObservableObject {
     }
 
     func refresh() {
-        let combined = (codexReader.readTasks(observedSince: monitoringStartedAt) + claudeReader.readTasks(observedSince: monitoringStartedAt))
+        var unavailable: [TaskProvider] = []
+        do {
+            let exists = FileManager.default.fileExists(atPath: codexReader.codexHome.path)
+            if !exists && sawCodexHome { throw CocoaError(.fileReadNoSuchFile) }
+            if exists { sawCodexHome = true }
+            let snapshot = try codexReader.readSnapshot(observedSince: monitoringStartedAt)
+            previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
+        } catch {
+            unavailable.append(.codex)
+            previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
+        }
+        do {
+            let exists = FileManager.default.fileExists(atPath: claudeReader.eventFile.path)
+            if !exists && sawClaudeEvents { throw CocoaError(.fileReadNoSuchFile) }
+            if exists {
+                sawClaudeEvents = true
+                let snapshot = try claudeReader.readSnapshot(observedSince: monitoringStartedAt)
+                previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
+            }
+        } catch {
+            unavailable.append(.claude)
+            previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
+        }
+        unavailableSources = unavailable
+        let combined = (previousCodex + previousClaude)
             .filter { $0.isActive || $0.isUnconfirmed }
             .sorted { $0.updatedAt > $1.updatedAt }
         tasks = combined
