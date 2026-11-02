@@ -1,0 +1,53 @@
+name: macOS build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [macos]
+    paths:
+      - "macos/**"
+      - ".github/workflows/macos-build.yml"
+  pull_request:
+    branches: [macos]
+    paths:
+      - "macos/**"
+      - ".github/workflows/macos-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Test
+        working-directory: macos
+        run: swift test
+      - name: Build universal application
+        working-directory: macos
+        run: ./scripts/build-app.sh
+      - name: Smoke test bundle and hook
+        working-directory: macos
+        run: ./scripts/smoke-test.sh "dist/AI Task Monitor.app"
+      - name: Render native verification screenshots
+        working-directory: macos
+        run: |
+          mkdir -p docs/verification
+          "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor" --render-previews "$PWD/docs/verification"
+      - name: Create disk image
+        working-directory: macos
+        run: ./scripts/create-dmg.sh
+      - name: Upload macOS alpha
+        uses: actions/upload-artifact@v4
+        with:
+          name: AITaskMonitor-macOS-0.3.0-alpha
+          path: |
+            macos/dist/AITaskMonitor-macOS-0.3.0-alpha.dmg
+            macos/dist/SHA256SUMS-macOS.txt
+            macos/docs/verification/*.png
+          if-no-files-found: error
+          retention-days: 30

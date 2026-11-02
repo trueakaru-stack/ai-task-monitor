@@ -21,6 +21,10 @@ Claude hook input is size-limited. Stored text is truncated, transcript paths ar
 
 AI Task Monitor does not transmit task data to the developer, OpenAI, Anthropic, Microsoft, or another service. Codex and Claude Code may have their own independent data practices; consult their respective policies.
 
+## Data on macOS
+
+The application reads Codex session data from `~/.codex`. When Claude Code integration is enabled, it stores normalized hook events at `~/Library/Application Support/AI Task Monitor/claude-events.jsonl`. Enabling integration modifies only the application-owned hook entries in `~/.claude/settings.json` and first creates a timestamped backup. Disconnecting removes only those owned hook commands.
+
 ## Removal
 
 The Windows uninstaller removes the application files, shortcut, and AI Task Monitor local data directory. It does not remove Codex, Claude Code, or unrelated provider settings.

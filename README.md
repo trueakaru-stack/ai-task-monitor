@@ -8,11 +8,11 @@ Exact progress is shown as a number, estimated progress uses `≈`, and activity
 
 ## Current status
 
-Version 0.2.0 alpha is under active review. An unsigned Windows 11 installer is published through GitHub Releases. Windows may show a SmartScreen warning because the executable does not yet have a trusted code-signing certificate.
+Version 0.3.0 alpha is under active review. The Windows 11 installer is published through GitHub Releases, and the native macOS alpha is built from the `macos` branch. Windows may show a SmartScreen warning; the macOS alpha is ad-hoc signed but not notarized.
 
 - `main` contains public documentation and reviewed screenshots.
 - `windows` contains the current Windows 11 implementation.
-- `macos` is reserved for a future native macOS implementation. It does not yet contain a working application.
+- `macos` contains the native SwiftUI implementation and reproducible disk-image workflow.
 
 ## Screenshots
 
@@ -33,9 +33,9 @@ AI Task Monitor is an independent project. It is not affiliated with, endorsed b
 
 ## Releases
 
-Download the current Windows alpha from [GitHub Releases](https://github.com/trueakaru-stack/ai-task-monitor/releases). Verify the SHA-256 value published with the release before running it.
+Download published alpha packages from [GitHub Releases](https://github.com/trueakaru-stack/ai-task-monitor/releases). Verify the accompanying SHA-256 value before opening a package.
 
-The current package is unsigned and intended for alpha testing. A signed public build still requires clean-machine installation and removal tests, malware scanning, and a trusted Windows code-signing certificate. No macOS installer exists yet because the macOS implementation has not been built.
+The Windows package is unsigned. The macOS package is ad-hoc signed but not notarized with an Apple Developer ID. Both are intended for alpha testing. Trusted public builds still require clean-machine installation and removal tests, malware scanning, and platform signing credentials.
 
 ## License
 

@@ -14,6 +14,7 @@ conversation/
 .vs/
 .idea/
 .DS_Store
+macos/.build/
 Thumbs.db
 
 # Local task data and settings
