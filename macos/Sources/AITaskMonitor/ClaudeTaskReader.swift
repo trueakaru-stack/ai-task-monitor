@@ -9,10 +9,12 @@ struct ClaudeTaskSnapshot {
 struct ClaudeTaskReader {
     let eventFile: URL
     let legacyFile: URL?
+    let usesExplicitFile: Bool
 
     init(eventFile: URL? = nil, legacyFile: URL? = nil) {
         self.eventFile = eventFile ?? AppPaths.claudeEvents
         self.legacyFile = legacyFile ?? (eventFile == nil ? AppPaths.legacyClaudeEvents : nil)
+        self.usesExplicitFile = eventFile != nil
     }
 
     func readTasks(now: Date = Date(), observedSince: Date? = nil) -> [MonitoredTask] {

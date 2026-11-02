@@ -40,7 +40,11 @@ final class TaskStore: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch result {
-                case .success(let settings): self.diagnosticSettings = settings
+                case .success(let settings):
+                    let changed = self.diagnosticSettings.loopThreshold != settings.loopThreshold ||
+                        self.diagnosticSettings.loopWindowMinutes != settings.loopWindowMinutes
+                    self.diagnosticSettings = settings
+                    if changed { self.loopDetectors.removeAll(); self.refresh() }
                 case .failure(let error): self.journalError = error.localizedDescription
                 }
             }
@@ -150,14 +154,22 @@ final class TaskStore: ObservableObject {
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
         }
         do {
-            let exists = FileManager.default.fileExists(atPath: claudeReader.eventFile.path)
-            if !exists && sawClaudeEvents { throw CocoaError(.fileReadNoSuchFile) }
-            if exists {
-                sawClaudeEvents = true
-                let snapshot = try claudeReader.readSnapshot(observedSince: monitoringStartedAt)
-                terminalIDs.formUnion(snapshot.terminalIDs)
-                interruptedIDs.formUnion(snapshot.interruptedIDs)
-                previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
+            let connected: Bool
+            if claudeReader.usesExplicitFile { connected = true }
+            else { connected = try ClaudeIntegration.connectionState() }
+            if !connected {
+                previousClaude = []
+                sawClaudeEvents = false
+            } else {
+                let exists = FileManager.default.fileExists(atPath: claudeReader.eventFile.path)
+                if !exists && sawClaudeEvents { throw CocoaError(.fileReadNoSuchFile) }
+                if exists {
+                    sawClaudeEvents = true
+                    let snapshot = try claudeReader.readSnapshot(observedSince: monitoringStartedAt)
+                    terminalIDs.formUnion(snapshot.terminalIDs)
+                    interruptedIDs.formUnion(snapshot.interruptedIDs)
+                    previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
+                }
             }
         } catch {
             unavailable.append(.claude)
@@ -322,6 +334,7 @@ final class TaskStore: ObservableObject {
         do {
             try ClaudeIntegration.setConnected(connected)
             sourceMessage = connected ? "Подключено. Перезапустите Claude Code." : "Отключено"
+            refresh()
         } catch {
             sourceMessage = error.localizedDescription
         }

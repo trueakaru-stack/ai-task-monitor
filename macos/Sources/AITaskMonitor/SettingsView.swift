@@ -34,7 +34,7 @@ struct SettingsView: View {
                             Button(ClaudeIntegration.isConnected ? "Отключить" : "Подключить") {
                                 store.setClaudeConnected(!ClaudeIntegration.isConnected)
                             }
-                            .disabled(!ClaudeIntegration.isClaudeInstalled)
+                            .disabled(!ClaudeIntegration.isClaudeInstalled || store.unavailableSources.contains(.claude))
                         }
                         if !store.sourceMessage.isEmpty {
                             Text(store.sourceMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
@@ -110,6 +110,7 @@ struct SettingsView: View {
 
     private var sourceDescription: String {
         if !ClaudeIntegration.isClaudeInstalled { return "Claude Code не найден. Установите его, затем вернитесь в настройки." }
+        if store.unavailableSources.contains(.claude) { return "Нет данных от Claude Code. Проверьте доступ к настройкам и журналу источника." }
         return "Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Code; задачи будут появляться автоматически."
     }
 

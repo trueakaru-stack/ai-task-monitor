@@ -228,6 +228,23 @@ final class ParserTests: XCTestCase {
         XCTAssertFalse(ClaudeIntegration.isOwnedHook(["type": "command", "command": unrelated], executable: path))
     }
 
+    func testClaudeConnectionDistinguishesDisconnectedAndInvalidSettings() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settings = directory.appendingPathComponent("settings.json")
+        XCTAssertFalse(try ClaudeIntegration.connectionState(settingsURL: settings))
+        try Data("{}".utf8).write(to: settings)
+        XCTAssertFalse(try ClaudeIntegration.connectionState(settingsURL: settings))
+        let executable = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        let hook: [String: Any] = ["type": "command", "command": ClaudeIntegration.hookCommand(for: executable)]
+        let object: [String: Any] = ["hooks": ["PreToolUse": [["hooks": [hook]]]]]
+        try JSONSerialization.data(withJSONObject: object).write(to: settings)
+        XCTAssertTrue(try ClaudeIntegration.connectionState(settingsURL: settings))
+        try Data("[]".utf8).write(to: settings)
+        XCTAssertThrowsError(try ClaudeIntegration.connectionState(settingsURL: settings))
+    }
+
     func testProgressLabelsPreserveCertainty() {
         let base = MonitoredTask(id: "1", provider: .codex, title: "Task", activity: "", isActive: true, progress: 40, progressKind: .exact, steps: [], updatedAt: Date())
         XCTAssertEqual(base.progressLabel, "40%")

@@ -8,7 +8,17 @@ enum ClaudeIntegration {
     }
 
     static var isConnected: Bool {
-        guard let root = try? readSettings(), let hooks = root["hooks"] as? [String: Any] else { return false }
+        (try? connectionState()) ?? false
+    }
+
+    static func connectionState(settingsURL: URL = AppPaths.claudeSettings) throws -> Bool {
+        let data: Data
+        do { data = try Data(contentsOf: settingsURL) }
+        catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return false }
+        guard !data.isEmpty else { return false }
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw IntegrationError.invalidSettings }
+        guard let value = root["hooks"] else { return false }
+        guard let hooks = value as? [String: Any] else { throw IntegrationError.invalidSettings }
         return events.contains { event in
             guard let groups = hooks[event] as? [[String: Any]] else { return false }
             return groups.contains { group in
