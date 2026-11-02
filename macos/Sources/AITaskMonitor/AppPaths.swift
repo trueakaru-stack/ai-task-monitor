@@ -9,7 +9,8 @@ enum AppPaths {
         return base.appendingPathComponent("AI Task Monitor", isDirectory: true)
     }()
 
-    static let claudeEvents = supportDirectory.appendingPathComponent("claude-events.jsonl")
+    static let claudeEvents = supportDirectory.appendingPathComponent("claude-events-v2.jsonl")
+    static let legacyClaudeEvents = supportDirectory.appendingPathComponent("claude-events.jsonl")
     static let claudeSettings = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".claude", isDirectory: true)
         .appendingPathComponent("settings.json")

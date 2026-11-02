@@ -2,20 +2,40 @@ import Foundation
 
 struct ClaudeTaskReader {
     let eventFile: URL
+    let legacyFile: URL?
 
-    init(eventFile: URL = AppPaths.claudeEvents) {
-        self.eventFile = eventFile
+    init(eventFile: URL? = nil, legacyFile: URL? = nil) {
+        self.eventFile = eventFile ?? AppPaths.claudeEvents
+        self.legacyFile = legacyFile ?? (eventFile == nil ? AppPaths.legacyClaudeEvents : nil)
     }
 
     func readTasks(now: Date = Date()) -> [MonitoredTask] {
         guard let text = try? FileHelpers.tail(of: eventFile, maximumBytes: 4_194_304) else { return [] }
+        let current: [([String: Any], Date)] = text.split(whereSeparator: \.isNewline).compactMap { line in
+            guard let event = FileHelpers.jsonObject(line), !event.string("session_id").isEmpty,
+                  let timestamp = FileHelpers.isoDate(event["timestamp"]) else { return nil }
+            return (event, timestamp)
+        }
+        let observedIDs = Set(current.map { $0.0.string("session_id") })
+        var legacy: [([String: Any], Date)] = []
+        if let legacyFile, !observedIDs.isEmpty,
+           let legacyText = try? FileHelpers.tail(of: legacyFile, maximumBytes: 4_194_304) {
+            legacy = legacyText.split(whereSeparator: \.isNewline).compactMap { line in
+                guard let event = FileHelpers.jsonObject(line), observedIDs.contains(event.string("session_id")),
+                      let timestamp = FileHelpers.isoDate(event["timestamp"]) else { return nil }
+                return (event, timestamp)
+            }
+        }
+        let ordered = (legacy + current).enumerated().sorted { left, right in
+            if left.element.1 != right.element.1 { return left.element.1 < right.element.1 }
+            return left.offset < right.offset
+        }
         var sessions: [String: SessionState] = [:]
-        for line in text.split(whereSeparator: \.isNewline) {
-            guard let event = FileHelpers.jsonObject(line) else { continue }
+        for entry in ordered {
+            let event = entry.element.0
             let id = event.string("session_id")
-            guard !id.isEmpty else { continue }
             var state = sessions[id] ?? SessionState(id: id)
-            state.updatedAt = FileHelpers.isoDate(event["timestamp"]) ?? state.updatedAt
+            state.updatedAt = entry.element.1
             if !event.string("activity").isEmpty { state.activity = localizedActivity(event) }
             state.isActive = event["active"] as? Bool ?? state.isActive
             updateSteps(event, state: &state)
@@ -61,7 +81,7 @@ struct ClaudeTaskReader {
         case "TaskCompleted": return subject.isEmpty ? "Завершён этап" : "Завершён этап: \(subject)"
         case "SubagentStart": return "Запущен дополнительный агент"
         case "SubagentStop": return "Дополнительный агент завершён"
-        default: return event.string("activity")
+        default: return ""
         }
     }
 

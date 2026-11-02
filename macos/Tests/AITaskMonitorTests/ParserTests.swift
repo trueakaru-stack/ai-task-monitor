@@ -64,6 +64,33 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(tasks.first?.steps.map(\.status), [.active])
     }
 
+    func testLegacyClaudeSessionsRequireANewEventAndPreservePlan() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let legacyFile = directory.appendingPathComponent("legacy.jsonl")
+        let currentFile = directory.appendingPathComponent("current.jsonl")
+        let now = Date()
+        let old: [String: Any] = [
+            "timestamp": ISO8601DateFormatter().string(from: now.addingTimeInterval(-10)),
+            "session_id": "legacy-session", "event": "TaskCreated", "active": true,
+            "task_id": "step-1", "task_subject": "Synthetic plan step", "task_status": "in_progress",
+            "prompt": "SYNTHETIC_SECRET"
+        ]
+        let oldLine = String(decoding: try JSONSerialization.data(withJSONObject: old), as: UTF8.self)
+        try (oldLine + "\n").write(to: legacyFile, atomically: true, encoding: .utf8)
+        let unrelated = event(session: "other-session", name: "UserPromptSubmit", active: true, date: now, prompt: "")
+        try (unrelated + "\n").write(to: currentFile, atomically: true, encoding: .utf8)
+        let reader = ClaudeTaskReader(eventFile: currentFile, legacyFile: legacyFile)
+        XCTAssertEqual(reader.readTasks(now: now).map(\.id), ["claude:other-session"])
+        let observed = event(session: "legacy-session", name: "PreToolUse", active: true, date: now, prompt: "")
+        try ([unrelated, observed].joined(separator: "\n") + "\n").write(to: currentFile, atomically: true, encoding: .utf8)
+        let resumed = try XCTUnwrap(reader.readTasks(now: now).first { $0.id == "claude:legacy-session" })
+        XCTAssertEqual(resumed.steps.map(\.title), ["Synthetic plan step"])
+        XCTAssertFalse(resumed.activity.contains("SYNTHETIC_SECRET"))
+        XCTAssertEqual(try String(contentsOf: legacyFile, encoding: .utf8), oldLine + "\n")
+    }
+
     func testClaudeHookDoesNotStorePromptOrWorkingPath() throws {
         let secret = "SYNTHETIC_ONLY_SECRET_9D42EBF6"
         let input: [String: Any] = [
