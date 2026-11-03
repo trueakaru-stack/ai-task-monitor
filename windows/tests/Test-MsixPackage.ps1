@@ -120,11 +120,12 @@ if(-not $appProcess.WaitForExit(30000)){throw 'The packaged preview did not exit
 if($null -ne $appProcess.ExitCode -and $appProcess.ExitCode -ne 0){throw ('The packaged preview exited with code '+$appProcess.ExitCode)}
 Write-Output 'MSIX install: test-signed package installed, packaged process identity and synthetic app rendering verified on the disposable runner.'
 
-function Invoke-HiddenPowerShell([string]$Arguments,[string]$InputText=''){
+function Invoke-HiddenPowerShell([string]$Arguments,[string]$InputText='', [switch]$Audit){
  $start=New-Object Diagnostics.ProcessStartInfo
  $start.FileName=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
  $start.Arguments=$Arguments;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
  $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+ if($Audit){$start.EnvironmentVariables['AI_TASK_MONITOR_AUDIT']='1'}
  $process=[Diagnostics.Process]::Start($start)
  try{
   if($InputText){$process.StandardInput.Write($InputText)}
@@ -132,6 +133,7 @@ function Invoke-HiddenPowerShell([string]$Arguments,[string]$InputText=''){
   if(-not $process.WaitForExit(30000)){throw 'The isolated hook process did not exit.'}
   $stdout=$process.StandardOutput.ReadToEnd();$stderr=$process.StandardError.ReadToEnd()
   if($process.ExitCode -ne 0){throw ('The isolated hook process failed: '+$process.ExitCode+' '+$stderr+' '+$stdout)}
+  if($Audit -and ($stdout -or $stderr)){Write-Output ('Isolated hook diagnostic: '+$stderr+' '+$stdout)}
  }finally{$process.Dispose()}
 }
 
@@ -180,14 +182,23 @@ if(-not $activeProcess.WaitForExit(45000)){throw 'The packaged monitor hook prev
 if(($null -ne $activeProcess.ExitCode -and $activeProcess.ExitCode -ne 0) -or -not (Test-Path -LiteralPath $activeSnapshot -PathType Leaf)){throw 'The packaged monitor hook preview failed.'}
 $lockOwner.Dispose()
 $eventFile=Join-Path $storeData 'claude-events-v2.jsonl'
-if(-not (Test-Path -LiteralPath $eventFile -PathType Leaf)){throw 'The installed Claude hook did not write a shared event.'}
+if(-not (Test-Path -LiteralPath $eventFile -PathType Leaf)){
+ $probePackages=@(Get-AppxPackage -Name $identity -ErrorAction Stop|Where-Object{$_.Publisher -ceq $publisher})
+ Write-Output ('Installed hook diagnostic: matching packages='+$probePackages.Count+'; hook readable='+(Test-Path -LiteralPath (Join-Path $installed[0].InstallLocation 'ClaudeTaskHook.ps1') -PathType Leaf))
+ $probeHook=Join-Path $installed[0].InstallLocation 'ClaudeTaskHook.ps1'
+ $probeScript="& '"+$probeHook.Replace("'","''")+"'"
+ $probeEncoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))
+ Invoke-HiddenPowerShell ('-NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$probeEncoded) '{"hook_event_name":"UserPromptSubmit","session_id":"msix-diagnostic"}' -Audit
+ Write-Output ('Direct hook diagnostic: event file present='+(Test-Path -LiteralPath $eventFile -PathType Leaf))
+ throw 'The installed Claude hook did not write a shared event.'
+}
 $rawEvents=Get-Content -Raw -Encoding UTF8 -LiteralPath $eventFile
 if($rawEvents -notmatch 'msix-session-1' -or $rawEvents -match 'private test|C:\\\\private'){throw 'The installed Claude hook lost an event or stored private input.'}
 $journal=Join-Path $diagnostics 'diagnostic-events-v1.jsonl'
 if(-not (Test-Path -LiteralPath $journal -PathType Leaf)){throw 'The packaged monitor did not record its observed Claude task.'}
-$observed=@(Get-Content -Encoding UTF8 -LiteralPath $journal|ForEach-Object{$_|ConvertFrom-Json}|Where-Object{$_.source -ceq 'claude' -and $_.type -ceq 'task_observed'})
+$observed=@(Get-Content -Encoding UTF8 -LiteralPath $journal|Select-Object -Skip 1|ForEach-Object{$_|ConvertFrom-Json}|Where-Object{$_.source -ceq 'claude' -and $_.type -ceq 'task_observed'})
 if($observed.Count -ne 1){throw 'The packaged monitor did not observe the event written by the installed hook.'}
-$observedCodex=@(Get-Content -Encoding UTF8 -LiteralPath $journal|ForEach-Object{$_|ConvertFrom-Json}|Where-Object{$_.source -ceq 'codex' -and $_.type -ceq 'task_observed'})
+$observedCodex=@(Get-Content -Encoding UTF8 -LiteralPath $journal|Select-Object -Skip 1|ForEach-Object{$_|ConvertFrom-Json}|Where-Object{$_.source -ceq 'codex' -and $_.type -ceq 'task_observed'})
 if($observedCodex.Count -ne 1){throw 'The packaged monitor did not observe the Codex session fixture.'}
 Write-Output 'MSIX monitoring: Codex session and external Claude hook events were observed by the packaged monitor.'
 
