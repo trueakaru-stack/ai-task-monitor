@@ -76,13 +76,15 @@ struct CodexTaskReader {
                 id: id,
                 provider: .codex,
                 title: title.isEmpty ? "Задача Codex" : title,
-                activity: unconfirmed ? "Статус не подтверждён" : activity,
+                activity: unconfirmed ? "Статус не подтверждён" : (activity.isEmpty ? "Выполняется" : activity),
                 isActive: !unconfirmed,
                 progress: progress,
                 progressKind: progress == nil ? .none : .exact,
                 steps: steps,
                 updatedAt: modified,
-                isUnconfirmed: unconfirmed
+                isUnconfirmed: unconfirmed,
+                startedAt: state.startedAt ?? .distantPast,
+                startKey: state.startKey
             ))
         }
         result.tasks.sort { $0.updatedAt > $1.updatedAt }
@@ -93,13 +95,15 @@ struct CodexTaskReader {
         lifecycle(tail: tail, observedSince: observedSince).running
     }
 
-    private func lifecycle(tail: String, observedSince: Date?) -> (running: Bool, terminal: Bool, terminalDate: Date?, interrupted: Bool) {
+    private func lifecycle(tail: String, observedSince: Date?) -> (running: Bool, terminal: Bool, terminalDate: Date?, interrupted: Bool, startKey: String, startedAt: Date?) {
         var running = false
         var terminal = false
         var terminalDate: Date?
         var interrupted = false
         var observed = observedSince == nil
         var turnID = ""
+        var startKey = ""
+        var startedAt: Date?
         for line in tail.split(whereSeparator: \.isNewline) {
             guard let record = FileHelpers.jsonObject(line), record.string("type") == "event_msg",
                   let payload = record.object("payload") else { continue }
@@ -111,6 +115,9 @@ struct CodexTaskReader {
                 terminalDate = nil
                 interrupted = false
                 turnID = eventTurnID
+                let timestamp = record.string("timestamp")
+                startKey = !eventTurnID.isEmpty ? "turn:\(eventTurnID)" : (timestamp.isEmpty ? "" : "time:\(timestamp)")
+                startedAt = FileHelpers.isoDate(record["timestamp"])
                 observed = observedSince == nil
             case "task_complete", "turn_complete", "turn_aborted":
                 if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { continue }
@@ -126,7 +133,7 @@ struct CodexTaskReader {
                 observed = true
             }
         }
-        return (running && observed, terminal, terminalDate, interrupted)
+        return (running && observed, terminal, terminalDate, interrupted, startKey, startedAt)
     }
 
     func parsePlan(from tail: String) -> [TaskStep] {
@@ -180,23 +187,53 @@ struct CodexTaskReader {
     }
 
     func parseActivity(from tail: String) -> String {
-        var latest = ""
+        var latestSummary = ""
+        var latestCommentary = ""
+        var turnID = ""
         for line in tail.split(whereSeparator: \.isNewline) {
             guard let record = FileHelpers.jsonObject(line), let payload = record.object("payload") else { continue }
-            if record.string("type") == "event_msg", payload.string("type") == "agent_reasoning" {
-                latest = payload.string("text")
+            let recordType = record.string("type")
+            let kind = payload.string("type")
+            let eventTurnID = payload.string("turn_id")
+            if recordType == "event_msg", ["task_started", "turn_started"].contains(kind) {
+                turnID = eventTurnID
+                latestSummary = ""
+                latestCommentary = ""
+                continue
+            }
+            if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { continue }
+            var summary = ""
+            if recordType == "event_msg", kind == "agent_reasoning" {
+                summary = payload.string("text")
+            } else if recordType == "response_item", kind == "reasoning" {
+                for part in payload.array("summary") where part.string("type") == "summary_text" {
+                    if !part.string("text").isEmpty { summary = part.string("text") }
+                }
             } else if payload.string("type") == "message", payload.string("phase") == "commentary" {
                 for part in payload.array("content") where part.string("type") == "output_text" {
-                    latest = part.string("text")
+                    latestCommentary = part.string("text")
                 }
-            } else if payload.string("type") == "item_completed", let item = payload.object("item"),
-                      item.string("type") == "AgentMessage", item.string("phase") == "commentary" {
-                for part in item.array("content") where part.string("type") == "Text" {
-                    latest = part.string("text")
+            } else if kind == "item_completed", let item = payload.object("item") {
+                if item.string("type") == "Reasoning" {
+                    for part in (item["summary_text"] as? [String] ?? []) where !part.isEmpty { summary = part }
+                } else if item.string("type") == "AgentMessage", item.string("phase") == "commentary" {
+                    for part in item.array("content") where part.string("type") == "Text" {
+                        latestCommentary = part.string("text")
+                    }
                 }
             }
+            if !summary.isEmpty {
+                let firstLine = summary.split(whereSeparator: \.isNewline)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .first { !$0.isEmpty } ?? ""
+                if firstLine.hasPrefix("**") {
+                    let remainder = firstLine.dropFirst(2)
+                    if let end = remainder.range(of: "**") { latestSummary = String(remainder[..<end.lowerBound]) }
+                    else { latestSummary = firstLine }
+                } else { latestSummary = firstLine }
+            }
         }
-        return FileHelpers.normalized(latest.replacingOccurrences(of: #"^\*\*(.*?)\*\*$"#, with: "$1", options: .regularExpression), limit: 600)
+        return FileHelpers.normalized(latestSummary.isEmpty ? latestCommentary : latestSummary, limit: 600)
     }
 
     private func sessionFiles(for ids: Set<String>) throws -> [String: URL] {

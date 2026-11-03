@@ -29,6 +29,7 @@ final class TaskStore: ObservableObject {
     private let monitoringStartedAt = Date()
     private var previousCodex: [MonitoredTask] = []
     private var previousClaude: [MonitoredTask] = []
+    private var taskFocus = TaskFocusTracker()
     private var sawCodexHome = false
     private var sawClaudeEvents = false
     private var nextJournalMaintenance = Date.distantPast
@@ -279,8 +280,11 @@ final class TaskStore: ObservableObject {
                 loopDetectors.removeValue(forKey: id)
             }
         }
+        let selectedID = previousTasks.indices.contains(compactIndex) ? previousTasks[compactIndex].id : nil
+        let focus = taskFocus.reconcile(current: combined, previous: previousTasks, selectedID: selectedID, monitoringStartedAt: monitoringStartedAt)
+        combined = focus.tasks
         tasks = combined
-        if compactIndex >= max(combined.count, 1) { compactIndex = 0 }
+        compactIndex = focus.selectedID.flatMap { id in combined.firstIndex { $0.id == id } } ?? 0
         if selectedProvider == .codex, !providers.contains(.codex) { selectedProvider = .all }
         if selectedProvider == .claude, !providers.contains(.claude) { selectedProvider = .all }
         recordChanges(previousTasks: previousTasks, previousUnavailable: previousUnavailable,

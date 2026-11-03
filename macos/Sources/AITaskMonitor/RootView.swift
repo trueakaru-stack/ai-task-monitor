@@ -132,8 +132,7 @@ struct RootView: View {
                     if let label = task.progressLabel { Text(label).font(.system(size: 13, weight: .semibold)).monospacedDigit() }
                 }
                 if !task.activity.isEmpty {
-                    TruncatingText(text: task.activity, font: .systemFont(ofSize: 11.5), color: .secondaryLabelColor)
-                        .frame(maxWidth: .infinity, minHeight: 17, alignment: .leading)
+                    ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 11.5)
                 }
                 if task.loopWarning != nil { LoopWarningView(task: task, compact: true) }
                 if !store.unavailableMessage.isEmpty {

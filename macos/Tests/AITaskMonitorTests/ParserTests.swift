@@ -121,6 +121,44 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(reader.parseActivity(from: first + "\n" + second), "Новое действие")
     }
 
+    func testActivityReadsCurrentSummaryWithoutExposingRawReasoning() {
+        let reader = CodexTaskReader(codexHome: URL(fileURLWithPath: "/tmp/unused"))
+        let old = #"{"type":"event_msg","payload":{"type":"agent_reasoning","text":"Old action"}}"#
+        let response = #"{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"**Checking screenshot stability**\n\nPRIVATE_REASONING"}],"content":[{"text":"PRIVATE_RAW_CONTENT"}]}}"#
+        let completed = #"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","summary_text":["**Check build**"]}}}"#
+        let commentary = #"{"type":"response_item","payload":{"type":"message","phase":"commentary","content":[{"type":"output_text","text":"Preparing check"}]}}"#
+        let start = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"new-turn"}}"#
+        XCTAssertEqual(reader.parseActivity(from: old + "\n" + response), "Checking screenshot stability")
+        XCTAssertEqual(reader.parseActivity(from: response + "\n" + completed), "Check build")
+        XCTAssertEqual(reader.parseActivity(from: response + "\n" + commentary), "Checking screenshot stability")
+        XCTAssertEqual(reader.parseActivity(from: response + "\n" + start), "")
+        XCTAssertEqual(reader.parseActivity(from: response + "\n" + start + "\n" + commentary), "Preparing check")
+        let rawOnly = #"{"type":"response_item","payload":{"type":"reasoning","summary":[],"content":[{"text":"PRIVATE_RAW_CONTENT"}]}}"#
+        XCTAssertEqual(reader.parseActivity(from: rawOnly), "")
+    }
+
+    func testClaudeStartIdentityChangesOnlyForANewPrompt() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("events.jsonl")
+        let now = Date()
+        let first = event(session: "one", name: "UserPromptSubmit", active: true, date: now.addingTimeInterval(-5), prompt: "")
+        let action = event(session: "one", name: "PreToolUse", active: true, date: now.addingTimeInterval(-4), prompt: "")
+        let next = event(session: "one", name: "UserPromptSubmit", active: true, date: now.addingTimeInterval(-3), prompt: "")
+        let reader = ClaudeTaskReader(eventFile: file)
+        try (first + "\n").write(to: file, atomically: true, encoding: .utf8)
+        let initial = try XCTUnwrap(reader.readTasks(now: now).first)
+        try ([first, action].joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+        let updated = try XCTUnwrap(reader.readTasks(now: now).first)
+        XCTAssertFalse(initial.startKey.isEmpty)
+        XCTAssertEqual(initial.startKey, updated.startKey)
+        try ([first, action, next].joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+        let resumed = try XCTUnwrap(reader.readTasks(now: now).first)
+        XCTAssertNotEqual(resumed.startKey, initial.startKey)
+        XCTAssertGreaterThan(resumed.startedAt, initial.startedAt)
+    }
+
     func testClaudeReaderHidesStoppedAndMarksObservedQuietSessionsUnconfirmed() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

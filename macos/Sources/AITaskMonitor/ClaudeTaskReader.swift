@@ -52,6 +52,12 @@ struct ClaudeTaskReader {
             let event = entry.element.0
             let id = event.string("session_id")
             var state = sessions[id] ?? SessionState(id: id)
+            let isNewPrompt = event.string("event") == "UserPromptSubmit" && (event["active"] as? Bool) != false
+            let becameActive = (event["active"] as? Bool) == true && !state.isActive
+            if isNewPrompt || becameActive {
+                state.startedAt = entry.element.1
+                state.startKey = "event:" + event.string("timestamp")
+            }
             state.updatedAt = entry.element.1
             state.lastEvent = event.string("event")
             if !event.string("activity").isEmpty { state.activity = localizedActivity(event) }
@@ -84,7 +90,8 @@ struct ClaudeTaskReader {
                 id: "claude:\(state.id)", provider: .claude, title: "Задача Claude Code",
                 activity: unconfirmed ? "Статус не подтверждён" : state.activity, isActive: !unconfirmed, progress: progress,
                 progressKind: progress == nil ? .none : .exact,
-                steps: steps, updatedAt: state.updatedAt, isUnconfirmed: unconfirmed
+                steps: steps, updatedAt: state.updatedAt, isUnconfirmed: unconfirmed,
+                startedAt: state.startedAt, startKey: state.startKey
             ))
         }
         result.tasks.sort { $0.updatedAt > $1.updatedAt }
@@ -129,6 +136,8 @@ private struct SessionState {
     var isActive = false
     var lastEvent = ""
     var updatedAt = Date.distantPast
+    var startedAt = Date.distantPast
+    var startKey = ""
     var steps: [String: TaskStep] = [:]
     var stepsOrder: [String] = []
 }

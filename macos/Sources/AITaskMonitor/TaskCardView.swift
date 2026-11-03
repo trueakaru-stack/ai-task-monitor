@@ -23,8 +23,7 @@ struct TaskCardView: View {
                 }
             }
             if !task.activity.isEmpty {
-                TruncatingText(text: task.activity, font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
-                    .frame(maxWidth: .infinity, minHeight: 17, alignment: .leading)
+                ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 12)
                     .padding(.top, 4)
             }
             if task.loopWarning != nil {
