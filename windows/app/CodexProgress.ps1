@@ -27,6 +27,13 @@
  [string]$PreviewStartupReadyFile = "",
  [ValidateRange(0,5000)][int]$PreviewStartupDelayMilliseconds = 0,
  [ValidateRange(-1,3)][int]$PreviewActiveTasks = -1,
+ [ValidateSet("default","planned","unplanned")][string]$PreviewScenario = "default",
+ [switch]$PreviewActivityUiTest,
+ [switch]$PreviewFocusUiTest,
+ [ValidateSet("default","on","off")][string]$PreviewMotion = "default",
+ [ValidateRange(0,2500)][int]$PreviewMotionDelayMilliseconds = 0,
+ [switch]$PreviewMotionUiTest,
+ [switch]$PreviewOffscreen,
  [switch]$PreviewUnconfirmed,
  [ValidateSet("all","codex","claude")][string]$PreviewProvider = "all",
  [string]$ClaudeEventFile = "",
@@ -58,6 +65,11 @@ if($PreviewJournalRecoveryUiTest){
  if(-not $previewDataPath.StartsWith($temporaryRoot,[StringComparison]::OrdinalIgnoreCase)){throw "Journal recovery tests require a diagnostic directory inside the temporary folder."}
 }
 if($PreviewIconUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw "Icon UI tests require a synthetic snapshot."}
+if($PreviewActivityUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or $PreviewScenario -eq "default")){throw "Activity UI tests require one synthetic task, a scenario and a snapshot."}
+if($PreviewFocusUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or -not $CompactMode)){throw "Focus UI tests require a compact synthetic snapshot."}
+if(($PreviewMotion -ne "default" -or $PreviewMotionDelayMilliseconds -gt 0) -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw "Motion previews require synthetic tasks and a snapshot."}
+if($PreviewMotionUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1)){throw "Motion UI tests require one synthetic task and a snapshot."}
+if($PreviewOffscreen -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw "Offscreen previews require synthetic tasks and a snapshot."}
 if(($PreviewAbout -or $PreviewAboutUiTest) -and (-not $PreviewAbout -or -not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw "About previews require synthetic tasks and a snapshot."}
 if(($PreviewUpdate -or $PreviewUpdateUiTest) -and (-not $PreviewUpdate -or -not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw "Update previews require synthetic tasks and a snapshot."}
 if($PreviewStartupReadyFile){
@@ -90,6 +102,8 @@ $script:lastCodexTasks = @()
 $script:lastClaudeTasks = @()
 $script:sourceErrors = @()
 $script:compactTaskId = ""
+$script:taskPriority = @{}
+$script:taskPriorityCounter = 0
 $script:settingsPath = Join-Path $dataDirectory "settings.json"
 $script:diagnosticDirectory = if($DiagnosticDirectory){$DiagnosticDirectory}else{Join-Path (Split-Path -Parent $script:settingsPath) "diagnostics"}
 $script:diagnosticRuntime = $null
@@ -116,7 +130,7 @@ try{
 try { . (Join-Path $PSScriptRoot "ClaudeReaderCore.ps1") }catch{if($PreviewStartupReadyFile){$script:previewReaderFailure=$_.Exception.ToString()}}
 $script:releaseUpdatesAvailable=$false
 try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAvailable=$true }catch{}
-$script:currentVersion='0.2.2-alpha'
+$script:currentVersion='0.2.3-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateClient=$null
@@ -125,6 +139,7 @@ $script:lastUpdateCheck=[DateTime]::MinValue
 $script:themeMode = "system"
 $script:resolvedTheme = "dark"
 $script:palette = @{}
+$script:motionEnabled = $false
 $accentColor = [Windows.SystemParameters]::WindowGlassColor
 $script:accentHex = "#{0:X2}{1:X2}{2:X2}" -f $accentColor.R, $accentColor.G, $accentColor.B
 $accentLuma = (0.299 * $accentColor.R) + (0.587 * $accentColor.G) + (0.114 * $accentColor.B)
@@ -967,17 +982,19 @@ function Lock-State([string]$path) {
 }
 
 function Thread-State([string]$id) {
- if($id -notmatch '^[A-Za-z0-9_-]{1,128}$'){return [PSCustomObject]@{State="unknown";HasStartMarker=$false;UpdatedUtc=[DateTime]::MinValue}}
+ if($id -notmatch '^[A-Za-z0-9_-]{1,128}$'){return [PSCustomObject]@{State="unknown";HasStartMarker=$false;UpdatedUtc=[DateTime]::MinValue;StartKey="";StartedUtc=[DateTime]::MinValue}}
  $path = Session-File $id
- if (-not $path -or -not (Test-Path -LiteralPath $path)) { return [PSCustomObject]@{State="unknown";HasStartMarker=$false;UpdatedUtc=[DateTime]::MinValue} }
+ if (-not $path -or -not (Test-Path -LiteralPath $path)) { return [PSCustomObject]@{State="unknown";HasStartMarker=$false;UpdatedUtc=[DateTime]::MinValue;StartKey="";StartedUtc=[DateTime]::MinValue} }
  $file=Get-Item -LiteralPath $path
  $cached=if($script:lifecycleState.ContainsKey($path)){$script:lifecycleState[$path]}else{$null}
  if($null -ne $cached -and [long]$cached.Length -eq [long]$file.Length -and [long]$cached.Stamp -eq $file.LastWriteTimeUtc.Ticks){
   $lifecycle=[string]$cached.Lifecycle
   $lastEventUtc=[DateTime]$cached.LastEventUtc
+  $startKey=if($null -ne $cached.PSObject.Properties["StartKey"]){[string]$cached.StartKey}else{""}
+  $startedUtc=if($null -ne $cached.PSObject.Properties["StartedUtc"]){[DateTime]$cached.StartedUtc}else{[DateTime]::MinValue}
  }else{
   $tail=Read-TailText $path 2097152
-  $lifecycle=""; $turnId=""; $lastEventUtc=[DateTime]::MinValue
+  $lifecycle=""; $turnId=""; $startKey=""; $startedUtc=[DateTime]::MinValue; $lastEventUtc=[DateTime]::MinValue
   foreach($line in ($tail -split "`r?`n")){
    if($line.Length -gt 1048576 -or $line -notmatch '"event_msg"'){continue}
    try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
@@ -986,7 +1003,11 @@ function Thread-State([string]$id) {
    if($null -eq $payload -or $null -eq $payload.PSObject.Properties["type"]){continue}
    $eventType=[string]$payload.type
    $eventTurn=if($null -ne $payload.PSObject.Properties["turn_id"]){[string]$payload.turn_id}else{""}
-   if($eventType -in @("task_started","turn_started")){$lifecycle="task_started";$turnId=$eventTurn;$lastEventUtc=[DateTime]::MinValue}
+   if($eventType -in @("task_started","turn_started")){
+    $lifecycle="task_started";$turnId=$eventTurn;$lastEventUtc=[DateTime]::MinValue
+    $rawStart=if($null -ne $record.PSObject.Properties["timestamp"]){[string]$record.timestamp}else{""}
+    $startKey=if($eventTurn){"turn:"+$eventTurn}elseif($rawStart){"time:"+$rawStart}else{""}
+   }
    elseif($eventType -notin @("task_complete","turn_complete","turn_aborted") -and $lifecycle -ne "task_started"){continue}
    if($turnId -and $eventTurn -and $eventTurn -ne $turnId){continue}
    if($eventType -in @("task_complete","turn_complete","turn_aborted")){
@@ -998,9 +1019,10 @@ function Thread-State([string]$id) {
    if($timestampValue -is [DateTime]){$timestamp=$timestampValue.ToUniversalTime()}
    elseif($timestampValue -is [DateTimeOffset]){$timestamp=$timestampValue.UtcDateTime}
    elseif($null -ne $timestampValue -and [DateTime]::TryParse([string]$timestampValue,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$timestamp)){$timestamp=$timestamp.ToUniversalTime()}
+   if($eventType -in @("task_started","turn_started")){$startedUtc=$timestamp}
    if($timestamp -gt $lastEventUtc){$lastEventUtc=$timestamp}
   }
-  $script:lifecycleState[$path]=[PSCustomObject]@{Length=[long]$file.Length;Stamp=$file.LastWriteTimeUtc.Ticks;Lifecycle=$lifecycle;LastEventUtc=$lastEventUtc}
+  $script:lifecycleState[$path]=[PSCustomObject]@{Length=[long]$file.Length;Stamp=$file.LastWriteTimeUtc.Ticks;Lifecycle=$lifecycle;LastEventUtc=$lastEventUtc;StartKey=$startKey;StartedUtc=$startedUtc}
  }
  $hasStart=$lifecycle -eq "task_started"
  $lock=if($hasStart){Lock-State (Join-Path $lockDirectory "$id.lock")}else{"missing"}
@@ -1008,7 +1030,7 @@ function Thread-State([string]$id) {
  $state=if($lifecycle -eq "task_complete"){"completed"}elseif($lifecycle -eq "turn_aborted"){"interrupted"}elseif($hasStart -and $lock -eq "held"){
   if($lastEventUtc -ge $script:monitorStartedUtc -or $script:observedCodex.ContainsKey($id)){"active"}else{"unobserved"}
  }else{"unknown"}
- return [PSCustomObject]@{State=$state;HasStartMarker=$hasStart;UpdatedUtc=$file.LastWriteTimeUtc}
+ return [PSCustomObject]@{State=$state;HasStartMarker=$hasStart;UpdatedUtc=$file.LastWriteTimeUtc;StartKey=$startKey;StartedUtc=$startedUtc}
 }
 
 function Codex-Uncertain([string]$id,$threadState) {
@@ -1142,27 +1164,51 @@ function Codex-Activity([string]$id) {
  if (-not $path) { return "" }
  try {
   $tail=Read-TailText $path 2097152
-  $matches = [regex]::Matches($tail, '"type":"event_msg","payload":\{"type":"agent_reasoning","text":"(?<text>(?:\\.|[^"\\])*)"\}')
-  if ($matches.Count -gt 0) {
-   $value = [regex]::Unescape($matches[$matches.Count-1].Groups["text"].Value).Trim()
-   $value = [regex]::Replace($value, '^\*\*(.*?)\*\*$', '$1')
-   return [regex]::Replace($value, '\s+', ' ')
-  }
-  $latest=""
-  foreach($line in ($tail -split "`r?`n")){
-   if($line -notmatch '"phase":"commentary"'){continue}
-   try{$record=$line|ConvertFrom-Json}catch{continue}
+  $lines=$tail -split "`r?`n"; $startIndex=-1; $turnId=""; $latestCommentary=""
+  for($index=$lines.Count-1;$index -ge 0;$index--){
+   $line=$lines[$index]
+   if($line.Length -gt 1048576 -or $line -notmatch '"(task_started|turn_started)"'){continue}
+   try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
    $payload=Prop $record "payload"
-   if([string](Prop $payload "type" "") -eq "message" -and [string](Prop $payload "phase" "") -eq "commentary"){
-    foreach($part in @(Prop $payload "content" @())){if([string](Prop $part "type" "") -eq "output_text"){$latest=[string](Prop $part "text" "")}}
-   }elseif([string](Prop $payload "type" "") -eq "item_completed"){
+   if([string](Prop $record "type" "") -eq "event_msg" -and [string](Prop $payload "type" "") -in @("task_started","turn_started")){
+    $startIndex=$index;$turnId=[string](Prop $payload "turn_id" "");break
+   }
+  }
+  for($index=$lines.Count-1;$index -gt $startIndex;$index--){
+   $line=$lines[$index]
+   if($line.Length -gt 1048576 -or $line -notmatch '"(agent_reasoning|reasoning|Reasoning|commentary)"'){continue}
+   try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
+   $payload=Prop $record "payload"
+   $recordType=[string](Prop $record "type" ""); $kind=[string](Prop $payload "type" "")
+   $eventTurn=[string](Prop $payload "turn_id" "")
+   if($turnId -and $eventTurn -and $turnId -ne $eventTurn){continue}
+   $summary=""
+   if($recordType -eq "event_msg" -and $kind -eq "agent_reasoning"){
+    $summary=[string](Prop $payload "text" "")
+   }elseif($recordType -eq "response_item" -and $kind -eq "reasoning"){
+    foreach($part in @(Prop $payload "summary" @())){
+     if([string](Prop $part "type" "") -eq "summary_text" -and [string](Prop $part "text" "")){$summary=[string](Prop $part "text" "")}
+    }
+   }elseif($kind -eq "item_completed"){
     $item=Prop $payload "item"
-    if([string](Prop $item "type" "") -eq "AgentMessage" -and [string](Prop $item "phase" "") -eq "commentary"){
-     foreach($part in @(Prop $item "content" @())){if([string](Prop $part "type" "") -eq "Text"){$latest=[string](Prop $part "text" "")}}
+    if([string](Prop $item "type" "") -eq "Reasoning"){
+     foreach($part in @(Prop $item "summary_text" @())){if($part -is [string] -and $part.Trim()){$summary=[string]$part}}
+    }elseif(-not $latestCommentary -and [string](Prop $item "type" "") -eq "AgentMessage" -and [string](Prop $item "phase" "") -eq "commentary"){
+     foreach($part in @(Prop $item "content" @())){if([string](Prop $part "type" "") -eq "Text"){$latestCommentary=[string](Prop $part "text" "")}}
+    }
+   }elseif(-not $latestCommentary -and $kind -eq "message" -and [string](Prop $payload "phase" "") -eq "commentary"){
+    foreach($part in @(Prop $payload "content" @())){if([string](Prop $part "type" "") -eq "output_text"){$latestCommentary=[string](Prop $part "text" "")}}
+   }
+   if($summary){
+    $firstLine=@($summary -split "`r?`n" | Where-Object {$_.Trim()} | Select-Object -First 1)
+    if($firstLine.Count -gt 0){
+     $value=$firstLine[0].Trim()
+     if($value -match '^\*\*(?<heading>.+?)\*\*'){$value=$Matches.heading}
+     return [regex]::Replace($value,'\s+',' ')
     }
    }
   }
-  if($latest){return [regex]::Replace($latest.Trim(),'\s+',' ')}
+  if($latestCommentary){return [regex]::Replace($latestCommentary.Trim(),'\s+',' ')}
  } catch {}
  return ""
 }
@@ -1235,8 +1281,10 @@ function Codex-Tasks {
    elseif ($null -ne $progress -and $progress -ge 100) { $progress = 99 }
   }
   $updated = if($threadState.UpdatedUtc -ne [DateTime]::MinValue){$threadState.UpdatedUtc.ToLocalTime()}else{[DateTime]::MinValue}
-  $activity = if($uncertain){"Статус не подтверждён"}elseif($running){Codex-Activity $id}else{""}
-  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; Activity=$activity; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Steps=$steps; Source=$source })
+  $activity = if($uncertain){"Статус не подтверждён"}elseif($running){$currentActivity=Codex-Activity $id;if($currentActivity){$currentActivity}else{"Выполняется"}}else{""}
+  $startKey=[string](Prop $threadState "StartKey" "")
+  $started=[DateTime](Prop $threadState "StartedUtc" ([DateTime]::MinValue))
+  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; Activity=$activity; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source })
  }
  $runningItems = @($items | Where-Object Active | Sort-Object Updated -Descending)
  $trackedItems = @($items | Where-Object { -not $_.Active -and ($_.Status -in @("Статус не подтверждён","Ожидает подтверждения") -or $_.Paused) } | Sort-Object Updated -Descending)
@@ -1268,7 +1316,7 @@ function Claude-Tasks {
   $unconfirmed=[bool]$state.Unconfirmed
   $activity=if($unconfirmed){"Статус не подтверждён"}else{$state.Activity}
   $status=if($unconfirmed){"Статус не подтверждён"}else{"В работе"}
-  $items.Add([PSCustomObject]@{Id="claude:"+$state.Id;Title=$title;Activity=$activity;Active=(-not $unconfirmed);Paused=$false;Progress=$progress;ProgressKind=$kind;Provider="claude";ProviderName="Claude Code";Status=$status;Updated=$state.Updated.ToLocalTime();Steps=$steps;Source="Claude Code"})
+  $items.Add([PSCustomObject]@{Id="claude:"+$state.Id;Title=$title;Activity=$activity;Active=(-not $unconfirmed);Paused=$false;Progress=$progress;ProgressKind=$kind;Provider="claude";ProviderName="Claude Code";Status=$status;Updated=$state.Updated.ToLocalTime();Started=$state.Started;StartKey=$state.StartKey;Steps=$steps;Source="Claude Code"})
  }
  return @($items|Sort-Object Updated -Descending)
 }
@@ -1566,6 +1614,30 @@ function Add-Steps($container, $steps) {
  $scroll.Content=$rail; $container.Children.Add($scroll)|Out-Null
 }
 
+function Refresh-ActivityMotion {
+ $enabled=$PreviewMotion -ne "off"
+ if($enabled -ne $script:motionEnabled){$script:motionEnabled=$enabled;$script:fingerprint=""}
+}
+
+function New-ActivityIndicator([bool]$active) {
+ $track=New-Object Windows.Controls.Canvas; $track.Width=16; $track.Height=4; $track.ClipToBounds=$true; $track.IsHitTestVisible=$false; $track.Tag="ActivityIndicator"
+ $geometry=New-Object Windows.Media.RectangleGeometry; $geometry.Rect=[Windows.Rect]::new(0,0,4,4); $geometry.RadiusX=2; $geometry.RadiusY=2
+ $mark=New-Object Windows.Shapes.Path; $mark.Width=16; $mark.Height=4; $mark.Stretch="None"; $mark.Data=$geometry
+ $mark.Fill=Brush $(if($active){$script:accentHex}else{$script:palette.Muted})
+ $track.Children.Add($mark)|Out-Null
+ if($active -and $script:motionEnabled){
+  $ease=New-Object Windows.Media.Animation.SineEase; $ease.EasingMode="EaseInOut"
+  $animation=New-Object Windows.Media.Animation.RectAnimationUsingKeyFrames
+  $animation.Duration=[Windows.Duration]::new([TimeSpan]::FromMilliseconds(900));$animation.AutoReverse=$true;$animation.RepeatBehavior=[Windows.Media.Animation.RepeatBehavior]::Forever
+  foreach($entry in @(@([Windows.Rect]::new(0,0,16,4),450),@([Windows.Rect]::new(12,0,4,4),900))){
+   $key=New-Object Windows.Media.Animation.EasingRectKeyFrame; $key.Value=$entry[0]; $key.KeyTime=[Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds([int]$entry[1])); $key.EasingFunction=$ease
+   $animation.KeyFrames.Add($key)|Out-Null
+  }
+  $geometry.BeginAnimation([Windows.Media.RectangleGeometry]::RectProperty,$animation)
+ }
+ return $track
+}
+
 function Add-Card($task) {
  $stepCount=@($task.Steps).Count
  $hasLoopWarning=$null -ne (Get-LoopWarning $task)
@@ -1581,7 +1653,11 @@ function Add-Card($task) {
  $c1=New-Object Windows.Controls.ColumnDefinition; $c1.Width=New-Object Windows.GridLength(1,"Star"); $c2=New-Object Windows.Controls.ColumnDefinition; $c2.Width=[Windows.GridLength]::Auto; $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2)
  $titleStack=New-Object Windows.Controls.StackPanel
  $title=Text $task.Title 16 $script:palette.Primary "SemiBold"; $title.Margin=New-Object Windows.Thickness(0,0,14,0); $title.Height=22; $title.MaxWidth=390; $title.HorizontalAlignment="Left"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $title ([string]$task.Title) "line"; $titleStack.Children.Add($title)|Out-Null
- $activityText=[string]$task.Activity; $activity=Text $activityText 12 $script:palette.Activity; $activity.Margin=New-Object Windows.Thickness(0,5,14,0); $activity.Width=390; $activity.HorizontalAlignment="Left"; $activity.Height=34; $activity.MaxHeight=34; $activity.TextTrimming="CharacterEllipsis"; if($activityText){Add-ConditionalHint $activity $activityText "wrap"}; $titleStack.Children.Add($activity)|Out-Null
+ $activityText=[string]$task.Activity; $activity=Text $activityText 12 $script:palette.Activity; $activity.MaxWidth=390; $activity.HorizontalAlignment="Left"; $activity.Height=34; $activity.MaxHeight=34; $activity.TextTrimming="CharacterEllipsis"; if($activityText){Add-ConditionalHint $activity $activityText "wrap"}
+ $activityRow=New-Object Windows.Controls.Grid; $activityRow.Margin=New-Object Windows.Thickness(0,5,14,0)
+ $activityMarkColumn=New-Object Windows.Controls.ColumnDefinition; $activityMarkColumn.Width=New-Object Windows.GridLength(22); $activityTextColumn=New-Object Windows.Controls.ColumnDefinition; $activityTextColumn.Width=New-Object Windows.GridLength(1,"Star"); $activityRow.ColumnDefinitions.Add($activityMarkColumn); $activityRow.ColumnDefinitions.Add($activityTextColumn)
+ if($activityText){$indicator=New-ActivityIndicator ([bool]$task.Active);$indicator.Margin=New-Object Windows.Thickness(0,7,6,0);$indicator.VerticalAlignment="Top";$indicator.HorizontalAlignment="Left";$activityRow.Children.Add($indicator)|Out-Null}
+ [Windows.Controls.Grid]::SetColumn($activity,1);$activityRow.Children.Add($activity)|Out-Null;$titleStack.Children.Add($activityRow)|Out-Null
  if(-not $CompactMode -and $PreviewActiveTasks -ge 0 -and $null -eq $script:previewHintTarget -and $activityText){$script:previewHintTarget=$activity}
  $progressLabel=Progress-Label $task
  $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.Height=22; $percent.VerticalAlignment="Top"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip="Приблизительная оценка"}; [Windows.Controls.Grid]::SetColumn($percent,1)
@@ -1611,18 +1687,21 @@ function Add-CompactTask($task) {
  $c2=New-Object Windows.Controls.ColumnDefinition; $c2.Width=New-Object Windows.GridLength(1,"Star")
  $c3=New-Object Windows.Controls.ColumnDefinition; $c3.Width=[Windows.GridLength]::Auto
  $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2); $header.ColumnDefinitions.Add($c3)
- $dot=New-Object Windows.Controls.Border; $dot.Width=6; $dot.Height=6; $dot.CornerRadius=New-Object Windows.CornerRadius(3); $dot.Background=Brush $(if($task.Active){$script:accentHex}else{$script:palette.Muted}); $dot.VerticalAlignment="Center"; $dot.HorizontalAlignment="Left"
  $title=Text $task.Title 13.5 $script:palette.Primary "SemiBold"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; $title.Margin=New-Object Windows.Thickness(0,0,10,0); Add-ConditionalHint $title ([string]$task.Title) "line"; [Windows.Automation.AutomationProperties]::SetName($title,[string]$task.Title)
  $progressLabel=Progress-Label $task
  $percent=Text $progressLabel 13.5 $script:palette.Primary "SemiBold"; $percent.VerticalAlignment="Center"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip="Приблизительная оценка"}
- [Windows.Controls.Grid]::SetColumn($dot,0); [Windows.Controls.Grid]::SetColumn($title,1); [Windows.Controls.Grid]::SetColumn($percent,2)
- $header.Children.Add($dot)|Out-Null; $header.Children.Add($title)|Out-Null; $header.Children.Add($percent)|Out-Null
+ [Windows.Controls.Grid]::SetColumn($title,1); [Windows.Controls.Grid]::SetColumn($percent,2)
+ $header.Children.Add($title)|Out-Null; $header.Children.Add($percent)|Out-Null
  [Windows.Controls.Grid]::SetRow($header,0); $container.Children.Add($header)|Out-Null
 
  $activityText=if($task.Activity){[string]$task.Activity}else{"Выполняется"}
- $activity=Text $activityText 11.5 $script:palette.Activity; $activity.TextWrapping="NoWrap"; $activity.TextTrimming="CharacterEllipsis"; $activity.Margin=New-Object Windows.Thickness(12,2,0,0); Add-ConditionalHint $activity $activityText "line"; [Windows.Automation.AutomationProperties]::SetName($activity,$activityText)
+ $activity=Text $activityText 11.5 $script:palette.Activity; $activity.TextWrapping="NoWrap"; $activity.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $activity $activityText "line"; [Windows.Automation.AutomationProperties]::SetName($activity,$activityText)
+ $activityRow=New-Object Windows.Controls.Grid; $activityRow.Margin=New-Object Windows.Thickness(12,2,0,0)
+ $activityMarkColumn=New-Object Windows.Controls.ColumnDefinition; $activityMarkColumn.Width=New-Object Windows.GridLength(22); $activityTextColumn=New-Object Windows.Controls.ColumnDefinition; $activityTextColumn.Width=New-Object Windows.GridLength(1,"Star"); $activityRow.ColumnDefinitions.Add($activityMarkColumn); $activityRow.ColumnDefinitions.Add($activityTextColumn)
+ $indicator=New-ActivityIndicator ([bool]$task.Active);$indicator.Margin=New-Object Windows.Thickness(0,7,6,0);$indicator.VerticalAlignment="Top";$indicator.HorizontalAlignment="Left";$activityRow.Children.Add($indicator)|Out-Null
+ [Windows.Controls.Grid]::SetColumn($activity,1);$activityRow.Children.Add($activity)|Out-Null
  if($CompactMode -and $PreviewActiveTasks -ge 0 -and $null -eq $script:previewHintTarget){$script:previewHintTarget=$activity}
- [Windows.Controls.Grid]::SetRow($activity,1); $container.Children.Add($activity)|Out-Null
+ [Windows.Controls.Grid]::SetRow($activityRow,1); $container.Children.Add($activityRow)|Out-Null
  $warningPanel=New-Object Windows.Controls.StackPanel; Add-LoopWarning $warningPanel $task $true; [Windows.Controls.Grid]::SetRow($warningPanel,2); $container.Children.Add($warningPanel)|Out-Null
  if($task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Height=2; $bar.Margin=New-Object Windows.Thickness(12,7,0,0); [Windows.Controls.Grid]::SetRow($bar,3); $container.Children.Add($bar)|Out-Null}
  $compactTasksPanel.Children.Add($container)|Out-Null
@@ -1637,8 +1716,44 @@ function Add-CompactDot($task,[bool]$selected) {
  $dot.Width=7; $dot.Height=7; $dot.CornerRadius=New-Object Windows.CornerRadius(3.5)
  $dot.Background=Brush $(if($selected){$script:accentHex}else{$script:palette.Scroll})
  $button.Content=$dot
- $button.Add_Click({param($sender,$eventArgs) $script:compactTaskId=[string]$sender.Tag; Render-CompactTasks $script:lastTasks})
+ $button.Add_Click({param($sender,$eventArgs) $script:compactTaskId=[string]$sender.Tag; Render-CompactTasks $script:lastAllTasks})
  $compactDotsPanel.Children.Add($button)|Out-Null
+}
+
+function Prioritize-Tasks($tasks,$previous,[string]$selectedId) {
+ $previousById=@{}; $present=@{}; $activated=New-Object Collections.Generic.List[object]
+ foreach($task in @($previous)){$previousById[[string]$task.Id]=$task}
+ foreach($task in @($tasks)){
+  $id=[string]$task.Id; $present[$id]=$true
+  if(-not $script:taskPriority.ContainsKey($id)){$script:taskPriority[$id]=0}
+  $old=if($previousById.ContainsKey($id)){$previousById[$id]}else{$null}
+  $newKey=[string](Prop $task "StartKey" ""); $oldKey=[string](Prop $old "StartKey" "")
+  $newTurn=$newKey -and $newKey -cne $oldKey
+  $started=[DateTime](Prop $task "Started" ([DateTime]::MinValue))
+  $recentUnconfirmed=-not $task.Active -and [string](Prop $task "Status" "") -eq "Статус не подтверждён" -and $newKey -and $started -ne [DateTime]::MinValue -and $started.ToUniversalTime() -ge $script:monitorStartedUtc
+  if(-not $task.Active -and -not $recentUnconfirmed){continue}
+  $becameActive=$null -ne $old -and -not $old.Active -and (-not $newKey -or -not $oldKey)
+  if($null -eq $old -or $newTurn -or ($task.Active -and $becameActive)){$activated.Add($task)}
+ }
+ foreach($id in @($script:taskPriority.Keys)){if(-not $present.ContainsKey($id)){[void]$script:taskPriority.Remove($id)}}
+ $activatedByStart=@($activated | Sort-Object -Property @{
+  Expression={
+   $started=[DateTime](Prop $_ "Started" ([DateTime]::MinValue))
+   if($started -eq [DateTime]::MinValue){$started=[DateTime](Prop $_ "Updated" ([DateTime]::MinValue))}
+   if($started -eq [DateTime]::MinValue){$started}else{$started.ToUniversalTime()}
+  }
+ }, @{Expression={[string]$_.Id}})
+ foreach($task in $activatedByStart){$script:taskPriorityCounter++;$script:taskPriority[[string]$task.Id]=$script:taskPriorityCounter}
+ $ordered=@($tasks | Sort-Object -Property @{
+  Expression={$script:taskPriority[[string]$_.Id]};Descending=$true
+ }, @{
+  Expression={if($_.Active){1}else{0}};Descending=$true
+ }, @{
+  Expression={[DateTime](Prop $_ "Updated" ([DateTime]::MinValue))};Descending=$true
+ })
+ if($activatedByStart.Count -gt 0){$selectedId=[string]$activatedByStart[$activatedByStart.Count-1].Id}
+ elseif(-not @($ordered | Where-Object {[string]$_.Id -eq $selectedId}).Count){$selectedId=if($ordered.Count){[string]$ordered[0].Id}else{""}}
+ return [PSCustomObject]@{Tasks=$ordered;SelectedId=$selectedId}
 }
 
 function Compact-VisibleTasks($tasks) {
@@ -1702,8 +1817,8 @@ function Set-CompactMode([bool]$compact) {
   $expandedView.Visibility="Collapsed"; $settingsView.Visibility="Collapsed"; $aboutView.Visibility="Collapsed"; $journalView.Visibility="Collapsed"; $compactView.Visibility="Visible"
   $script:showingSettings=$false; $script:showingAbout=$false; $script:showingJournal=$false
   $window.ResizeMode="NoResize"; $window.MinWidth=0; $window.MinHeight=0; $window.Width=390
-  $compactCount=@(Compact-VisibleTasks $script:lastTasks).Count
-  $selectedTask=@($script:lastTasks|Where-Object {[string]$_.Id -eq $script:compactTaskId}|Select-Object -First 1)
+  $compactCount=@(Compact-VisibleTasks $script:lastAllTasks).Count
+  $selectedTask=@($script:lastAllTasks|Where-Object {[string]$_.Id -eq $script:compactTaskId}|Select-Object -First 1)
   $hasLoopWarning=$selectedTask.Count -gt 0 -and $null -ne (Get-LoopWarning $selectedTask[0])
   $window.Height=Compact-Height $compactCount ($script:sourceErrors.Count -gt 0) $hasLoopWarning
   $windowFrame.Margin=New-Object Windows.Thickness(16)
@@ -2075,7 +2190,8 @@ function Render-ProviderTabs($tasks){
 
 function Update-View {
  try {
-  $sourceSnapshot=Source-Snapshot
+  $previousAllTasks=@($script:lastAllTasks)
+  $sourceSnapshot=if($PreviewActiveTasks -ge 0){[PSCustomObject]@{Tasks=@();Unavailable=@()}}else{Source-Snapshot}
   $allTasks=@($sourceSnapshot.Tasks)
   $script:sourceErrors=@($sourceSnapshot.Unavailable)
   if($PreviewActiveTasks -ge 0){
@@ -2108,22 +2224,30 @@ function Update-View {
     $previewIsUnconfirmed=$PreviewUnconfirmed -and $i -eq 0
     $previewActivity=if($previewIsUnconfirmed){"Статус не подтверждён"}else{$previewActivities[$i]}
     $previewStatus=if($previewIsUnconfirmed){"Статус не подтверждён"}else{"В работе"}
-    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewProgress[$i];ProgressKind=$previewKinds[$i];Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=[DateTime]::Now;Steps=$previewSteps;Source="Предпросмотр"}
+    $previewValue=$previewProgress[$i];$previewKind=$previewKinds[$i]
+    if($i -eq 0 -and $PreviewScenario -ne "default"){
+     $previewActivity="Checking screenshot stability"
+     if($PreviewScenario -eq "unplanned"){$previewSteps=@();$previewValue=$null;$previewKind="none"}
+    }
+    $previewTime=[DateTime]::Now.AddSeconds(-$i)
+    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр"}
    }
   }
+  $ordered=Prioritize-Tasks $allTasks $previousAllTasks $script:compactTaskId
+  $allTasks=@($ordered.Tasks);$script:compactTaskId=[string]$ordered.SelectedId
   $script:lastAllTasks=$allTasks
   Sync-ClaudeLoopChannel
   Refresh-Diagnostics $allTasks
   Render-ProviderTabs $allTasks
   $tasks=@(Filtered-Tasks $allTasks)
   $script:lastTasks=$tasks
-  $next=$script:selectedProvider+"|"+($script:sourceErrors -join ",")+"|"+(($tasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Active):$($_.ProgressKind):$($_.Progress):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
+  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Active):$($_.ProgressKind):$($_.Progress):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
   if($next -ne $script:fingerprint){
    $script:fingerprint=$next; $tasksPanel.Children.Clear()
    if($script:sourceErrors.Count -gt 0){$warning=Text ("Нет данных от "+($script:sourceErrors -join ", ")) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
    foreach($task in $tasks){Add-Card $task}
    if($tasks.Count -eq 0 -and $script:sourceErrors.Count -eq 0){$empty=Text "Активных задач сейчас нет" 14 $script:palette.Secondary; $empty.Margin=New-Object Windows.Thickness(4,24,0,0); $tasksPanel.Children.Add($empty)|Out-Null}
-   Render-CompactTasks $tasks
+   Render-CompactTasks $allTasks
   }
   if($script:showingJournal){Render-Journal}
   if($script:showingSettings -and -not $journalDaysCombo.IsDropDownOpen -and -not $journalSizeCombo.IsDropDownOpen){Update-JournalSettings}
@@ -2210,7 +2334,7 @@ $journalCloseButton.Add_Click({$window.Close()})
 $windowFrame.Add_SizeChanged({Update-SquircleGeometry})
 $tray=New-Object Windows.Forms.NotifyIcon; $tray.Icon=if($null -ne $script:applicationIcon){$script:applicationIcon}else{[Drawing.SystemIcons]::Application}; $tray.Text="AI task monitor"; $tray.Visible=$true; $tray.Add_DoubleClick({Restore-Window})
 $menu=New-Object Windows.Forms.ContextMenuStrip; $show=$menu.Items.Add("Развернуть"); $exit=$menu.Items.Add("Выход"); $show.Add_Click({Restore-Window;Set-CompactMode $false}); $exit.Add_Click({$window.Close()}); $tray.ContextMenuStrip=$menu
-$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
+$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
 if($script:diagnosticModulesAvailable -and (($PreviewActiveTasks -lt 0 -and -not $SnapshotFile) -or $DiagnosticDirectory)){
@@ -2222,6 +2346,7 @@ if($PreviewStartupReadyFile){
  try{$probe.WriteByte(1)}finally{$probe.Dispose()}
  Start-Sleep -Milliseconds $PreviewStartupDelayMilliseconds
 }
+Refresh-ActivityMotion
 Update-View
 if($PreviewStartupReadyFile){
  $previewResult=[ordered]@{
@@ -2235,7 +2360,61 @@ if($CompactMode){Set-CompactMode $true}
 if($PreviewAbout){Show-AboutView}
 if($PreviewUpdate){$script:availableUpdate=[PSCustomObject]@{Version='0.3.0-alpha';Url='https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.0-alpha/AITaskMonitor.exe'};Show-PendingUpdate}
 if ($SnapshotFile) {
+ if($PreviewOffscreen){$window.WindowStartupLocation="Manual";$window.Left=-10000;$window.Top=-10000;$window.ShowActivated=$false;$window.ShowInTaskbar=$false}
  $window.Show(); $window.UpdateLayout()
+ if($PreviewMotionUiTest){
+  function Find-MotionElement($parent,[string]$kind,[string]$expected){
+   if($kind -eq "indicator" -and $parent -is [Windows.Controls.Canvas] -and $parent.Tag -ceq "ActivityIndicator" -and $parent.IsVisible){return $parent}
+   if($kind -eq "text" -and $parent -is [Windows.Controls.TextBlock] -and $parent.Text -ceq $expected -and $parent.IsVisible){return $parent}
+   for($index=0;$index -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$index++){
+    $found=Find-MotionElement ([Windows.Media.VisualTreeHelper]::GetChild($parent,$index)) $kind $expected
+    if($null -ne $found){return $found}
+   }
+   return $null
+  }
+  $previewRoot=if($script:isCompact){$compactTasksPanel}else{$tasksPanel}
+  $indicator=Find-MotionElement $previewRoot "indicator" ""
+  $activity=Find-MotionElement $previewRoot "text" ([string]$script:lastAllTasks[0].Activity)
+  $title=Find-MotionElement $previewRoot "text" ([string]$script:lastAllTasks[0].Title)
+  if($null -eq $indicator -or $null -eq $activity -or $null -eq $title){throw "The task activity indicator, action or title is missing."}
+  if($script:isCompact -and $compactTasksPanel.Children[0].Children[0].Children.Count -ne 2){throw "The previous title indicator was not removed."}
+  $mark=$indicator.Children[0];$geometry=$mark.Data
+  $expectAnimation=[bool]$script:lastAllTasks[0].Active -and $script:motionEnabled
+  if($geometry -isnot [Windows.Media.RectangleGeometry] -or $geometry.RadiusX -ne 2 -or $geometry.RadiusY -ne 2 -or -not $mark.RenderTransform.Value.IsIdentity){throw "The activity indicator must retain circular ends while moving."}
+  if($geometry.HasAnimatedProperties -ne $expectAnimation){throw "The activity animation does not match task state."}
+  $markPoint=$indicator.TranslatePoint([Windows.Point]::new(0,0),$window);$textPoint=$activity.TranslatePoint([Windows.Point]::new(0,0),$window);$titlePoint=$title.TranslatePoint([Windows.Point]::new(0,0),$window)
+  if([Math]::Abs($indicator.Width-16) -gt 0.01 -or [Math]::Abs($indicator.Height-4) -gt 0.01 -or [Math]::Abs($markPoint.X-$titlePoint.X) -gt 0.5 -or [Math]::Abs(($markPoint.X+22)-$textPoint.X) -gt 0.5 -or $markPoint.Y -le $titlePoint.Y){throw "The 16 by 4 px activity indicator must align under the title and precede the action."}
+  $opticalCenter=$textPoint.Y+[Math]::Min($activity.ActualHeight,$activity.LineHeight)/2+1
+  if([Math]::Abs(($markPoint.Y+2)-$opticalCenter) -gt 1){throw "The activity indicator is not optically aligned with the first text line."}
+  Write-Output "Activity motion UI: placement, task state and motion preference verified."
+ }
+ if($PreviewActivityUiTest){
+  if($script:lastAllTasks.Count -ne 1 -or $script:lastAllTasks[0].Activity -ne "Checking screenshot stability"){throw "The preview task did not expose its current activity."}
+  $stepCount=@($script:lastAllTasks[0].Steps | Where-Object {$null -ne $_}).Count
+  if($PreviewScenario -eq "planned" -and $stepCount -eq 0){throw "The planned preview has no steps."}
+  if($PreviewScenario -eq "unplanned" -and ($stepCount -ne 0 -or $script:lastAllTasks[0].ProgressKind -ne "none")){throw "The unplanned preview invented a plan or percentage."}
+  function Find-PreviewActivity($parent){
+   if($parent -is [Windows.Controls.TextBlock] -and $parent.Text -eq "Checking screenshot stability" -and $parent.IsVisible){return $true}
+   for($index=0;$index -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$index++){
+    if(Find-PreviewActivity ([Windows.Media.VisualTreeHelper]::GetChild($parent,$index))){return $true}
+   }
+   return $false
+  }
+  if(-not (Find-PreviewActivity $(if($script:isCompact){$compactTasksPanel}else{$tasksPanel}))){throw "The current activity is not visible in the task view."}
+  Write-Output "Activity UI: short current status and requested plan mode verified."
+ }
+ if($PreviewFocusUiTest){
+  $PreviewUnconfirmed=$true;$script:fingerprint="";Update-View
+  if($script:lastAllTasks.Count -ne 1 -or $script:lastAllTasks[0].Active){throw "The unconfirmed preview was not prepared."}
+  $script:compactTaskId="preview-0";$script:selectedProvider="codex";$PreviewActiveTasks=2
+  $script:fingerprint="";Update-View;$window.UpdateLayout()
+  if($script:compactTaskId -ne "preview-1" -or $script:lastAllTasks[0].Id -ne "preview-1"){throw "A new task did not take compact focus and first position."}
+  if($script:lastTasks.Count -ne 1 -or $script:lastTasks[0].Id -ne "preview-0"){throw "The expanded provider filter was not preserved."}
+  $script:compactTaskId="preview-0";Update-View
+  if($script:compactTaskId -ne "preview-0"){throw "A normal refresh changed the user's manual compact selection."}
+  $script:compactTaskId="preview-1";Render-CompactTasks $script:lastAllTasks;$window.UpdateLayout()
+  Write-Output "Compact focus UI: new task, provider isolation and manual selection verified."
+ }
  if($PreviewUpdateUiTest){
   if($updateOverlay.Visibility -ne 'Visible' -or $updateVersionText.Text -ne 'Версия 0.3.0-alpha доступна для скачивания'){throw 'Update dialog content is incorrect.'}
   $updateLaterButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
@@ -2336,7 +2515,9 @@ if ($SnapshotFile) {
    }
    if($script:claudeLoopStates['preview-2'].Warning){throw 'A separate Claude session received the warning.'}
   }
-  $script:fingerprint='';Update-View;$window.UpdateLayout()
+  $script:fingerprint='';Update-View
+  if($script:isCompact){$script:compactTaskId='preview-1';Render-CompactTasks $script:lastAllTasks}
+  $window.UpdateLayout()
   $claudeTask=@($script:lastTasks|Where-Object {$_.Provider -eq 'claude' -and $_.Id -eq 'preview-1'})
   if($claudeTask.Count -ne 1 -or $null -eq (Get-LoopWarning $claudeTask[0])){throw 'The Claude task did not expose its warning.'}
   $realId=$claudeTask[0].PSObject.Copy();$realId.Id='claude:preview-1'
@@ -2406,6 +2587,12 @@ if ($SnapshotFile) {
   if($CompactMode){Set-CompactMode $true}
   $window.UpdateLayout()
   Write-Output "Loop warning UI: dismissal and configurable limits passed."
+ }
+ if($PreviewMotionDelayMilliseconds -gt 0){
+  $motionFrame=New-Object Windows.Threading.DispatcherFrame
+  $motionTimer=New-Object Windows.Threading.DispatcherTimer; $motionTimer.Interval=[TimeSpan]::FromMilliseconds($PreviewMotionDelayMilliseconds)
+  $motionTimer.Add_Tick({$motionTimer.Stop();$motionFrame.Continue=$false});$motionTimer.Start();[Windows.Threading.Dispatcher]::PushFrame($motionFrame)
+  $window.UpdateLayout()
  }
  $width=[Math]::Max(1,[int][Math]::Ceiling($window.ActualWidth)); $height=[Math]::Max(1,[int][Math]::Ceiling($window.ActualHeight))
  $bitmap=[Windows.Media.Imaging.RenderTargetBitmap]::new($width,$height,96,96,[Windows.Media.PixelFormats]::Pbgra32)

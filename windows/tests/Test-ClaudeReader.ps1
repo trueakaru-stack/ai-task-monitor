@@ -41,6 +41,14 @@ if($quietTasks.Count -ne 1 -or -not $quietTasks[0].Unconfirmed){throw "An observ
 $quietResumed=New-Event "quiet" "PostToolUse" $now $true
 $quietTasks=@([AITaskMonitor.Claude.Reader]::Read(($quiet+"`n"+$quietResumed),"",$now,$now.AddHours(-4)))
 if($quietTasks.Count -ne 1 -or $quietTasks[0].Unconfirmed){throw "A new activity event must restore the active state."}
+$firstPrompt=New-Event "same" "UserPromptSubmit" $time $true
+$normalAction=New-Event "same" "PreToolUse" $time.AddSeconds(1) $true
+$firstTask=@([AITaskMonitor.Claude.Reader]::Read($firstPrompt,"",$now))[0]
+$updatedTask=@([AITaskMonitor.Claude.Reader]::Read(($firstPrompt+"`n"+$normalAction),"",$now))[0]
+if(-not $firstTask.StartKey -or $firstTask.StartKey -cne $updatedTask.StartKey -or $firstTask.Started -ne $updatedTask.Started){throw "A normal action changed the Claude turn identity."}
+$nextPrompt=New-Event "same" "UserPromptSubmit" $time.AddSeconds(2) $true
+$nextTask=@([AITaskMonitor.Claude.Reader]::Read(($firstPrompt+"`n"+$normalAction+"`n"+$nextPrompt),"",$now))[0]
+if($nextTask.StartKey -ceq $firstTask.StartKey -or $nextTask.Started -le $firstTask.Started){throw "A continued Claude task did not receive a new start identity."}
 $bulk=(New-Event "bulk" "PreToolUse" $now $true)+"`n"
 $watch=[Diagnostics.Stopwatch]::StartNew()
 $bulkTasks=@([AITaskMonitor.Claude.Reader]::Read(($bulk*5000),($bulk*5000),$now))

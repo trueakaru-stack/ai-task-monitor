@@ -59,7 +59,9 @@ if ((Thread-State "synthetic-id").State -ne "completed") { throw "A completed ev
 $script:fakeTail = '{"type":"event_msg","payload":{"type":"turn_started","turn_id":"turn-b"}}'+"`n"+'{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-a"}}'
 $script:fakeLength = $script:fakeTail.Length
 $script:fakeModified = $script:fakeModified.AddTicks(1)
-if ((Thread-State "synthetic-id").State -ne "active") { throw "An old turn interruption must not stop a newer turn." }
+$turnB = Thread-State "synthetic-id"
+if ($turnB.State -ne "active" -or $turnB.StartKey -ne "turn:turn-b") { throw "An old turn interruption must not stop a newer turn or change its identity." }
+if ((Thread-State "synthetic-id").StartKey -ne "turn:turn-b") { throw "Cached turn identity was lost." }
 $script:fakeTail += "`n"+'{ "payload": { "turn_id": "turn-b", "type": "turn_aborted" }, "type": "event_msg" }'
 $script:fakeLength = $script:fakeTail.Length
 $script:fakeModified = $script:fakeModified.AddTicks(1)
@@ -69,7 +71,8 @@ $newTurnEvent=@{timestamp=$script:monitorStartedUtc.AddSeconds(2).ToString("o");
 $script:fakeTail += "`n"+$newTurnEvent
 $script:fakeLength = $script:fakeTail.Length
 $script:fakeModified = $script:fakeModified.AddTicks(1)
-if ((Thread-State "synthetic-id").State -ne "active") { throw "A new turn after interruption should be active." }
+$turnC = Thread-State "synthetic-id"
+if ($turnC.State -ne "active" -or $turnC.StartKey -ne "turn:turn-c") { throw "A new turn after interruption should be active and identifiable." }
 $script:fakeTail = '{"type":"event_msg","payload":{"type":"unrecognized"}}'
 $script:fakeLength = $script:fakeTail.Length
 $script:fakeModified = $script:fakeModified.AddTicks(1)

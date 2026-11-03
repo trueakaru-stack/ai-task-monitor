@@ -18,6 +18,8 @@ namespace AITaskMonitor.Claude {
   public string Id { get; set; }
   public string Activity { get; set; }
   public DateTime Updated { get; set; }
+  public DateTime Started { get; set; }
+  public string StartKey { get; set; }
   public Step[] Steps { get; set; }
   public bool Unconfirmed { get; set; }
  }
@@ -29,9 +31,9 @@ namespace AITaskMonitor.Claude {
   internal bool? Active;
  }
  internal sealed class State {
-  internal string Id, Activity = "";
+  internal string Id, Activity = "", StartKey = "";
   internal bool Active, Observed;
-  internal DateTimeOffset Updated;
+  internal DateTimeOffset Updated, Started;
   internal readonly Dictionary<string, Step> Steps = new Dictionary<string, Step>(StringComparer.Ordinal);
   internal readonly List<string> StepOrder = new List<string>();
  }
@@ -97,6 +99,10 @@ namespace AITaskMonitor.Claude {
     State state;
     if(!states.TryGetValue(item.Id, out state)) { state = new State { Id=item.Id }; states.Add(item.Id, state); }
     if(item.Source == 1 && item.Active == true && item.Time >= observedSince) state.Observed = true;
+    if((item.Name == "UserPromptSubmit" && item.Active != false) || (item.Active == true && !state.Active)) {
+     state.Started = item.Time;
+     state.StartKey = "event:" + item.Time.ToString("o", CultureInfo.InvariantCulture);
+    }
     state.Updated = item.Time;
     string activity = Activity(item);
     if(activity.Length > 0) state.Activity = activity;
@@ -118,7 +124,7 @@ namespace AITaskMonitor.Claude {
    DateTimeOffset now = new DateTimeOffset(DateTime.SpecifyKind(utcNow, DateTimeKind.Utc));
    foreach(State state in states.Values) {
     if(!state.Active || !state.Observed) continue;
-    result.Add(new Task { Id=state.Id, Activity=state.Activity, Updated=state.Updated.UtcDateTime, Steps=state.StepOrder.Select(id => state.Steps[id]).ToArray(), Unconfirmed=(now-state.Updated).TotalMinutes >= 120 });
+    result.Add(new Task { Id=state.Id, Activity=state.Activity, Updated=state.Updated.UtcDateTime, Started=state.Started.UtcDateTime, StartKey=state.StartKey, Steps=state.StepOrder.Select(id => state.Steps[id]).ToArray(), Unconfirmed=(now-state.Updated).TotalMinutes >= 120 });
    }
    return result.ToArray();
   }
