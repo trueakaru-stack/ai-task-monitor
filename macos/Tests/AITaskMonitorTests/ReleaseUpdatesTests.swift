@@ -2,6 +2,18 @@ import XCTest
 @testable import AITaskMonitor
 
 final class ReleaseUpdatesTests: XCTestCase {
+    func testReleaseVersionMatchesBundleAndDoesNotOfferItself() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let plistData = try Data(contentsOf: packageRoot.appendingPathComponent("Info.plist"))
+        let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any])
+        let version = try XCTUnwrap(plist["AITaskMonitorReleaseVersion"] as? String)
+        XCTAssertEqual(version, AppVersion.sourceVersion)
+        XCTAssertEqual(plist["CFBundleShortVersionString"] as? String, version.components(separatedBy: "-").first)
+        let data = """
+        [{"tag_name":"v\(version)","draft":false,"assets":[{"name":"app.dmg","browser_download_url":"https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v\(version)/app.dmg"}]}]
+        """.data(using: .utf8)!
+        XCTAssertNil(ReleaseSelector.select(data: data, currentVersion: version))
+    }
     @MainActor func testUpdateIsDeferredInCompactModeAndDismissedForSession() {
         let store = TaskStore.preview()
         store.isCompact = true

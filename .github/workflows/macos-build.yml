@@ -64,12 +64,15 @@ jobs:
       - name: Create disk image
         working-directory: macos
         run: ./scripts/create-dmg.sh
+      - name: Read release version
+        id: release_version
+        run: echo "value=$(plutil -extract AITaskMonitorReleaseVersion raw -o - macos/Info.plist)" >> "$GITHUB_OUTPUT"
       - name: Upload macOS alpha
         uses: actions/upload-artifact@v4
         with:
-          name: AITaskMonitor-macOS-0.3.0-alpha
+          name: AITaskMonitor-macOS-${{ steps.release_version.outputs.value }}
           path: |
-            macos/dist/AITaskMonitor-macOS-0.3.0-alpha.dmg
+            macos/dist/AITaskMonitor-macOS-${{ steps.release_version.outputs.value }}.dmg
             macos/dist/SHA256SUMS-macOS.txt
             macos/docs/verification/*.png
           if-no-files-found: error

@@ -26,7 +26,7 @@ struct AboutView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("О приложении").font(.system(size: 22, weight: .semibold)).padding(.bottom, 6)
-                    Text("AI task monitor · версия 0.3.0 alpha").font(.system(size: 13, weight: .semibold))
+                    Text("AI task monitor · версия \(AppVersion.display)").font(.system(size: 13, weight: .semibold))
                     description("AI Task Monitor показывает активные задачи и текущее действие. Сейчас поддерживаются Codex и Claude Code.")
                     description("При нескольких источниках можно переключать задачи по вкладкам. Компактное окно остаётся поверх других и показывает до трёх задач с переключением между ними. Тему можно выбрать вручную или использовать тему macOS. Если источник недоступен, приложение сообщит об этом.")
                     description("Если задача публикует план, приложение показывает выполненные, текущий и следующие этапы. В карточке одновременно видны до пяти этапов; остальные можно прокрутить. Без плана отображается текущее действие без списка этапов.")

@@ -86,7 +86,7 @@ final class TaskStore: ObservableObject {
     }
 
     func acceptReleaseData(_ data: Data) {
-        if let update = ReleaseSelector.select(data: data, currentVersion: "0.3.0-alpha") { availableUpdate = update }
+        if let update = ReleaseSelector.select(data: data, currentVersion: AppVersion.current) { availableUpdate = update }
     }
 
     func checkForUpdates(now: Date = Date()) {

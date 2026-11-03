@@ -8,7 +8,7 @@ Exact progress is shown as a number, estimated progress uses `≈`, and activity
 
 ## Current status
 
-Version 0.3.0 alpha is under active review. The Windows 11 installer is published through GitHub Releases, and the native macOS alpha is built from the `macos` branch. Windows may show a SmartScreen warning; the macOS alpha is ad-hoc signed but not notarized.
+Version 0.3.1 alpha is under active review. The Windows 11 installer is published through GitHub Releases, and the native macOS alpha is built from the `macos` branch. Windows may show a SmartScreen warning; the macOS alpha is ad-hoc signed but not notarized.
 
 - `main` contains public documentation and reviewed screenshots.
 - `windows` contains the current Windows 11 implementation.

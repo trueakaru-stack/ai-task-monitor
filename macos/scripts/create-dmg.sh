@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-VERSION="${VERSION:-0.3.0-alpha}"
+VERSION="${VERSION:-$(plutil -extract AITaskMonitorReleaseVersion raw -o - Info.plist)}"
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
 cp -R "dist/AI Task Monitor.app" "$STAGING/"
