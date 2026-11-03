@@ -112,7 +112,7 @@ try{
 try { . (Join-Path $PSScriptRoot "ClaudeReaderCore.ps1") }catch{}
 $script:releaseUpdatesAvailable=$false
 try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAvailable=$true }catch{}
-$script:currentVersion='0.2.0-alpha'
+$script:currentVersion='0.2.1-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateClient=$null
@@ -552,7 +552,7 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
      <ScrollViewer x:Name="AboutScroll" Margin="20,10,28,20" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled">
       <StackPanel>
        <TextBlock x:Name="AboutHeading" Text="О приложении" FontFamily="Segoe UI Variable Display Semibold" FontSize="22" Foreground="{DynamicResource TextPrimary}"/>
-       <TextBlock Text="AI task monitor · версия 0.2.0 alpha" Margin="0,18,0,0" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+       <TextBlock x:Name="AboutVersionText" Text="AI task monitor · версия $($script:currentVersion.Replace('-',' '))" Margin="0,18,0,0" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
        <TextBlock x:Name="AboutProviders" Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="AI Task Monitor показывает активные задачи и текущее действие. Сейчас поддерживаются Codex и Claude Code."/>
        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="При нескольких источниках можно переключать задачи по вкладкам. Компактное окно остаётся поверх других и показывает до трёх задач с переключением между ними. Тему можно выбрать вручную или использовать тему Windows. Если источник недоступен, приложение сообщит об этом."/>
        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Если задача публикует план, приложение показывает выполненные, текущий и следующие этапы. В карточке одновременно видны до пяти этапов; остальные можно прокрутить. Без плана отображается текущее действие без списка этапов."/>
@@ -705,6 +705,7 @@ $feedbackSettingsButton = $window.FindName("FeedbackSettingsButton")
 $feedbackError = $window.FindName("FeedbackError")
 $aboutBackButton = $window.FindName("AboutBackButton")
 $aboutHeading = $window.FindName("AboutHeading")
+$aboutVersionText = $window.FindName("AboutVersionText")
 $aboutProviders = $window.FindName("AboutProviders")
 $aboutTaskbarMinimizeButton = $window.FindName("AboutTaskbarMinimizeButton")
 $aboutCloseButton = $window.FindName("AboutCloseButton")
@@ -2239,7 +2240,7 @@ if ($SnapshotFile) {
   Write-Output 'Update UI: asynchronous result, copy, link rejection, dismissal and compact deferral verified.'
  }
  if($PreviewAboutUiTest){
-  if($aboutView.Visibility -ne "Visible" -or $aboutHeading.Text -ne "О приложении" -or
+  if($aboutView.Visibility -ne "Visible" -or $aboutHeading.Text -ne "О приложении" -or $aboutVersionText.Text -ne ('AI task monitor · версия '+$script:currentVersion.Replace('-',' ')) -or
      -not $aboutProviders.Text.Contains("Codex") -or -not $aboutProviders.Text.Contains("Claude Code")){
    throw "The About page does not expose the expected content."
   }

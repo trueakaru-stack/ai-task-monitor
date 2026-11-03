@@ -25,4 +25,11 @@ Assert ($null -eq (Find-PlatformUpdate '[]' '0.2.0-alpha' 'windows')) 'An empty 
 Assert ($null -eq (Find-PlatformUpdate '{' '0.2.0-alpha' 'windows')) 'Malformed JSON was accepted.'
 Assert ($null -eq (Find-PlatformUpdate ('x' * 1048577) '0.2.0-alpha' 'windows')) 'Oversized payload was accepted.'
 Assert ($null -eq (Get-TrustedReleaseUrl 'https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v1.0.0/setup.exe?x=1' 'v1.0.0' 'setup.exe' 'windows')) 'URL query was accepted.'
+$appSource=[IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'))
+$match=[regex]::Match($appSource, '(?m)^\$script:currentVersion=''([^'']+)''')
+Assert $match.Success 'Application version was not found.'
+$current=$match.Groups[1].Value
+$currentRelease=@(@{tag_name=('v'+$current);draft=$false;assets=@(@{name=('AITaskMonitorSetup-'+$current+'.exe');browser_download_url=('https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v'+$current+'/AITaskMonitorSetup-'+$current+'.exe')})}) | ConvertTo-Json -Depth 5 -Compress
+if(-not $currentRelease.StartsWith('[')){$currentRelease='['+$currentRelease+']'}
+Assert ($null -eq (Find-PlatformUpdate $currentRelease $current 'windows')) 'Application offered its own release as an update.'
 Write-Output 'Release selection: versions, prereleases, platform, drafts, bounds and trusted links verified.'
