@@ -128,7 +128,10 @@ function Invoke-HiddenPowerShell([string]$Arguments,[string]$InputText='', [swit
  if($Audit){$start.EnvironmentVariables['AI_TASK_MONITOR_AUDIT']='1'}
  $process=[Diagnostics.Process]::Start($start)
  try{
-  if($InputText){$process.StandardInput.Write($InputText)}
+  if($InputText){
+   $bytes=[Text.UTF8Encoding]::new($false).GetBytes($InputText)
+   $process.StandardInput.BaseStream.Write($bytes,0,$bytes.Length)
+  }
   $process.StandardInput.Close()
   if(-not $process.WaitForExit(30000)){throw 'The isolated hook process did not exit.'}
   $stdout=$process.StandardOutput.ReadToEnd();$stderr=$process.StandardError.ReadToEnd()
@@ -185,6 +188,9 @@ $eventFile=Join-Path $storeData 'claude-events-v2.jsonl'
 if(-not (Test-Path -LiteralPath $eventFile -PathType Leaf)){
  $probePackages=@(Get-AppxPackage -Name $identity -ErrorAction Stop|Where-Object{$_.Publisher -ceq $publisher})
  Write-Output ('Installed hook diagnostic: matching packages='+$probePackages.Count+'; hook readable='+(Test-Path -LiteralPath (Join-Path $installed[0].InstallLocation 'ClaudeTaskHook.ps1') -PathType Leaf))
+ $inputProbe='[Console]::Out.Write(([Console]::In.ReadToEnd().ToCharArray() | ForEach-Object { [int]$_ }) -join ",")'
+ $inputProbeEncoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($inputProbe))
+ Invoke-HiddenPowerShell ('-NoProfile -EncodedCommand '+$inputProbeEncoded) '{"a":1}' -Audit
  $probeHook=Join-Path $installed[0].InstallLocation 'ClaudeTaskHook.ps1'
  $probeScript="& '"+$probeHook.Replace("'","''")+"'"
  $probeEncoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeScript))
