@@ -2226,7 +2226,7 @@ Update-View
 if($PreviewStartupReadyFile){
  $previewResult=[ordered]@{
   diagnosticModulesAvailable=$script:diagnosticModulesAvailable;diagnosticRuntimeAvailable=($null -ne $script:diagnosticRuntime)
-  diagnosticFailure=$script:previewDiagnosticFailure;claudeReaderAvailable=[bool]("AITaskMonitor.Claude.Reader" -as [type]);claudeReaderFailure=$script:previewReaderFailure
+  diagnosticFailure=$script:previewDiagnosticFailure;diagnosticStatus=$script:diagnosticError;claudeReaderAvailable=[bool]("AITaskMonitor.Claude.Reader" -as [type]);claudeReaderFailure=$script:previewReaderFailure
   claudeTaskCount=$script:lastClaudeTasks.Count;codexTaskCount=$script:lastCodexTasks.Count;sourceErrors=@($script:sourceErrors)
  }
  [IO.File]::WriteAllText(($probePath+".result.json"),($previewResult|ConvertTo-Json -Compress -Depth 4),[Text.UTF8Encoding]::new($false))

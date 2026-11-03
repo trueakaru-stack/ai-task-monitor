@@ -37,17 +37,24 @@ foreach($image in @(@('StoreLogo.png',50),@('Square44x44Logo.png',44),@('Square1
  try{if($bitmap.Width -ne [int]$image[1] -or $bitmap.Height -ne [int]$image[1]){throw ('Invalid Store asset size: '+$image[0])}}finally{$bitmap.Dispose()}
 }
 Write-Output 'MSIX structure: Store identity, runtime files, source hashes and asset sizes verified.'
-$previewRoot=Join-Path $root 'host-preview';[void][IO.Directory]::CreateDirectory($previewRoot)
+$previewRoot=Join-Path $root "host's preview";[void][IO.Directory]::CreateDirectory($previewRoot)
 $previewSnapshot=Join-Path $previewRoot 'about.png'
+$previewDiagnostics=Join-Path $previewRoot 'diagnostics'
+$previewReady=Join-Path $previewRoot 'ready.flag'
 $previewStart=New-Object Diagnostics.ProcessStartInfo
 $previewStart.FileName=Join-Path $unpack 'AI task monitor.exe'
-$previewStart.Arguments='-PreviewActiveTasks 1 -PreviewAbout -PreviewAboutUiTest -ThemeOverride dark -SnapshotFile "'+$previewSnapshot+'"'
+$previewStart.Arguments='-PreviewActiveTasks 1 -PreviewAbout -PreviewAboutUiTest -ThemeOverride dark -SnapshotFile "'+$previewSnapshot+'" -DiagnosticDirectory "'+$previewDiagnostics+'" -PreviewStartupReadyFile "'+$previewReady+'" -PreviewStartupDelayMilliseconds 1'
 $previewStart.WorkingDirectory=$unpack;$previewStart.UseShellExecute=$false;$previewStart.CreateNoWindow=$true;$previewStart.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
 $previewStart.EnvironmentVariables['LOCALAPPDATA']=$previewRoot;$previewStart.EnvironmentVariables['USERPROFILE']=$previewRoot;$previewStart.EnvironmentVariables['CODEX_HOME']=Join-Path $previewRoot 'codex'
 $preview=[Diagnostics.Process]::Start($previewStart)
 if(-not $preview.WaitForExit(45000)){throw 'The isolated Store host did not exit; it was not terminated.'}
 if($preview.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $previewSnapshot -PathType Leaf)){throw ('The isolated Store host failed: '+$preview.ExitCode)}
-Write-Output 'MSIX host: in-process PowerShell rendered a synthetic view and exited normally.'
+$previewStatePath=$previewReady+'.result.json'
+if(-not (Test-Path -LiteralPath $previewStatePath -PathType Leaf)){throw 'The isolated Store host did not write its startup probe.'}
+$previewState=Get-Content -Raw -Encoding UTF8 -LiteralPath $previewStatePath|ConvertFrom-Json
+$previewJournal=Join-Path $previewDiagnostics 'diagnostic-events-v1.jsonl'
+if(-not $previewState.diagnosticModulesAvailable -or -not $previewState.diagnosticRuntimeAvailable -or -not $previewState.claudeReaderAvailable -or $previewState.diagnosticStatus -or -not (Test-Path -LiteralPath $previewJournal -PathType Leaf) -or [IO.File]::ReadAllText($previewJournal) -notmatch '"type":"task_observed"'){throw ('The isolated Store host did not initialize monitoring: '+$previewState.diagnosticFailure+' '+$previewState.diagnosticStatus+' '+$previewState.claudeReaderFailure)}
+Write-Output 'MSIX host: in-process PowerShell initialized monitoring, rendered a synthetic view and exited normally.'
 if(-not $InstallInEphemeralCI){Write-Output ('Unsigned package for structural review: '+$package);return}
 if($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted'){throw 'MSIX installation test is restricted to a disposable GitHub-hosted runner.'}
 if(-not $SignToolPath -or -not (Test-Path -LiteralPath $SignToolPath -PathType Leaf)){throw 'SignTool is required for the isolated install test.'}

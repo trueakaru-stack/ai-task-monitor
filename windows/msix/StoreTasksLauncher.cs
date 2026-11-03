@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -36,7 +37,7 @@ internal static class StoreTasksLauncher
                 using (PowerShell shell = PowerShell.Create())
                 {
                     shell.Runspace = runspace;
-                    shell.AddCommand(script);
+                    var forwarded = new Hashtable(StringComparer.OrdinalIgnoreCase);
                     for (int i = 0; i < args.Length; i++)
                     {
                         string argument = args[i];
@@ -44,13 +45,19 @@ internal static class StoreTasksLauncher
                         string name = argument.Substring(1);
                         bool isSwitch;
                         if (!parameters.TryGetValue(name, out isSwitch)) throw new ArgumentException("Unknown monitor argument: " + name);
-                        if (isSwitch) shell.AddParameter(name);
+                        if (isSwitch) forwarded.Add(name, SwitchParameter.Present);
                         else
                         {
                             if (++i >= args.Length) throw new ArgumentException("Missing value for monitor argument: " + name);
-                            shell.AddParameter(name, args[i]);
+                            forwarded.Add(name, args[i]);
                         }
                     }
+                    // Closures in the monitor's modules resolve helper functions in
+                    // the runspace's global scope, as they do with powershell -File.
+                    // Keep the path and parameters as data, never interpolated code.
+                    shell.AddScript("param($MonitorPath, $MonitorParameters) . $MonitorPath @MonitorParameters", false);
+                    shell.AddParameter("MonitorPath", script);
+                    shell.AddParameter("MonitorParameters", forwarded);
                     shell.Invoke();
                     // Handled PowerShell errors can set HadErrors even when the error stream is empty.
                     if (shell.Streams.Error.Count != 0)
