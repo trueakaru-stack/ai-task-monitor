@@ -126,8 +126,13 @@ function Invoke-HiddenPowerShell([string]$Arguments,[string]$InputText='', [swit
  $start.Arguments=$Arguments;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
  $start.RedirectStandardInput=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
  if($Audit){$start.EnvironmentVariables['AI_TASK_MONITOR_AUDIT']='1'}
- $process=[Diagnostics.Process]::Start($start)
+ # Windows PowerShell 5.1 uses Console.InputEncoding for the redirected writer.
+ # Its UTF-8 encoding may otherwise prepend a BOM before the JSON payload.
+ $previousInputEncoding=[Console]::InputEncoding
+ try{[Console]::InputEncoding=[Text.UTF8Encoding]::new($false);$process=[Diagnostics.Process]::Start($start)}
+ finally{[Console]::InputEncoding=$previousInputEncoding}
  try{
+  if($process.StandardInput.Encoding.GetPreamble().Length -ne 0){throw 'The isolated hook input writer would prepend a byte-order mark.'}
   if($InputText){
    $bytes=[Text.UTF8Encoding]::new($false).GetBytes($InputText)
    $process.StandardInput.BaseStream.Write($bytes,0,$bytes.Length)
