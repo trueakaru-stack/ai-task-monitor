@@ -103,6 +103,9 @@ public static class MsixTestActivation {
 $snapshotRoot=Join-Path $env:USERPROFILE ('aitm-msix-smoke-'+[Guid]::NewGuid().ToString('N'))
 if(Test-Path -LiteralPath $snapshotRoot){throw 'Unexpected existing MSIX test directory.'}
 [void][IO.Directory]::CreateDirectory($snapshotRoot)
+$evidence=Join-Path $env:RUNNER_TEMP 'aitm-msix-evidence'
+if(Test-Path -LiteralPath $evidence){throw 'Unexpected existing MSIX evidence directory.'}
+[void][IO.Directory]::CreateDirectory($evidence)
 $snapshot=Join-Path $snapshotRoot 'about-dark.png'
 $arguments='-PreviewActiveTasks 1 -PreviewAbout -PreviewAboutUiTest -ThemeOverride dark -SnapshotFile "'+$snapshot+'"'
 $aumid=$installed[0].PackageFamilyName+'!App'
@@ -116,6 +119,7 @@ $packageName=[MsixTestActivation]::PackageOf([int]$processId)
 if(-not $packageName.StartsWith($identity+'_',[StringComparison]::OrdinalIgnoreCase)){throw 'The monitor process did not retain MSIX package identity.'}
 while(-not (Test-Path -LiteralPath $snapshot -PathType Leaf) -and $watch.Elapsed.TotalSeconds -lt 45){Start-Sleep -Milliseconds 200}
 if(-not (Test-Path -LiteralPath $snapshot -PathType Leaf)){throw 'The installed MSIX did not render its synthetic About view.'}
+Copy-Item -LiteralPath $snapshot -Destination (Join-Path $evidence 'about-dark.png')
 if(-not $appProcess.WaitForExit(30000)){throw 'The packaged preview did not exit.'}
 if($null -ne $appProcess.ExitCode -and $appProcess.ExitCode -ne 0){throw ('The packaged preview exited with code '+$appProcess.ExitCode)}
 Write-Output 'MSIX install: test-signed package installed, packaged process identity and synthetic app rendering verified on the disposable runner.'
@@ -188,6 +192,12 @@ $hookArguments='-NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$encoded
 Invoke-HiddenPowerShell $hookArguments '{"hook_event_name":"UserPromptSubmit","session_id":"msix-session-1","prompt":"private test","cwd":"C:\\private"}'
 if(-not $activeProcess.WaitForExit(45000)){throw 'The packaged monitor hook preview did not exit.'}
 if(($null -ne $activeProcess.ExitCode -and $activeProcess.ExitCode -ne 0) -or -not (Test-Path -LiteralPath $activeSnapshot -PathType Leaf)){throw 'The packaged monitor hook preview failed.'}
+Copy-Item -LiteralPath $activeSnapshot -Destination (Join-Path $evidence 'monitor-dark.png')
+$previewResult=$ready+'.result.json'
+if(Test-Path -LiteralPath $previewResult -PathType Leaf){
+ Copy-Item -LiteralPath $previewResult -Destination (Join-Path $evidence 'preview-result.json')
+ Write-Output ('Packaged monitor probe: '+[IO.File]::ReadAllText($previewResult))
+}else{Write-Output 'Packaged monitor probe: result file unavailable.'}
 $lockOwner.Dispose()
 $eventFile=Join-Path $storeData 'claude-events-v2.jsonl'
 if(-not (Test-Path -LiteralPath $eventFile -PathType Leaf)){

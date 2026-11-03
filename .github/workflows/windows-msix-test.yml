@@ -43,3 +43,11 @@ jobs:
       - name: Build, install and activate MSIX in disposable runner
         shell: powershell
         run: .\windows\tests\Test-MsixPackage.ps1 -MakeAppxPath $env:AITM_MAKEAPPX -SignToolPath $env:AITM_SIGNTOOL -InstallInEphemeralCI
+      - name: Save isolated preview evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msix-preview
+          path: ${{ runner.temp }}/aitm-msix-evidence
+          if-no-files-found: ignore
+          retention-days: 2

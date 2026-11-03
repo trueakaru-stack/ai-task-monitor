@@ -99,19 +99,21 @@ $script:claudeLoopChannel=$null
 $script:claudeLoopStates=New-Object System.Collections.Hashtable ([StringComparer]::Ordinal)
 $script:claudeLoopError=""
 $script:claudeLoopModulesAvailable=$false
+$script:previewDiagnosticFailure=""
+$script:previewReaderFailure=""
 try {
  foreach($module in @("DiagnosticPolicy.ps1","DiagnosticStore.ps1","LoopDetection.ps1","DiagnosticCollector.ps1","DiagnosticRuntime.ps1")){
   $modulePath=Join-Path $PSScriptRoot $module
   if(-not (Test-Path -LiteralPath $modulePath -PathType Leaf)){throw "Diagnostic module missing."}
   . $modulePath
  }
-}catch{$script:diagnosticModulesAvailable=$false;$script:diagnosticError="Журнал недоступен"}
+}catch{$script:diagnosticModulesAvailable=$false;$script:diagnosticError="Журнал недоступен";if($PreviewStartupReadyFile){$script:previewDiagnosticFailure=$_.Exception.ToString()}}
 try{
  . (Join-Path $PSScriptRoot "ClaudeLoopDetection.ps1")
  if(-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot "ClaudeLoopChannel.cs") -PathType Leaf)){throw "Claude loop channel missing."}
  $script:claudeLoopModulesAvailable=$true
 }catch{$script:claudeLoopModulesAvailable=$false}
-try { . (Join-Path $PSScriptRoot "ClaudeReaderCore.ps1") }catch{}
+try { . (Join-Path $PSScriptRoot "ClaudeReaderCore.ps1") }catch{if($PreviewStartupReadyFile){$script:previewReaderFailure=$_.Exception.ToString()}}
 $script:releaseUpdatesAvailable=$false
 try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAvailable=$true }catch{}
 $script:currentVersion='0.2.1-alpha'
@@ -2213,7 +2215,7 @@ $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
 if($script:diagnosticModulesAvailable -and (($PreviewActiveTasks -lt 0 -and -not $SnapshotFile) -or $DiagnosticDirectory)){
  try{$script:diagnosticRuntime=New-DiagnosticRuntime -Directory $script:diagnosticDirectory -Since ([DateTimeOffset]$script:monitorStartedUtc) -Now ([DateTimeOffset]::UtcNow);$script:diagnosticError=""}
- catch{$script:diagnosticError="Журнал недоступен"}
+ catch{$script:diagnosticError="Журнал недоступен";if($PreviewStartupReadyFile){$script:previewDiagnosticFailure=$_.Exception.ToString()}}
 }
 if($PreviewStartupReadyFile){
  $probe=[IO.File]::Open($probePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
@@ -2221,6 +2223,14 @@ if($PreviewStartupReadyFile){
  Start-Sleep -Milliseconds $PreviewStartupDelayMilliseconds
 }
 Update-View
+if($PreviewStartupReadyFile){
+ $previewResult=[ordered]@{
+  diagnosticModulesAvailable=$script:diagnosticModulesAvailable;diagnosticRuntimeAvailable=($null -ne $script:diagnosticRuntime)
+  diagnosticFailure=$script:previewDiagnosticFailure;claudeReaderAvailable=[bool]("AITaskMonitor.Claude.Reader" -as [type]);claudeReaderFailure=$script:previewReaderFailure
+  claudeTaskCount=$script:lastClaudeTasks.Count;codexTaskCount=$script:lastCodexTasks.Count;sourceErrors=@($script:sourceErrors)
+ }
+ [IO.File]::WriteAllText(($probePath+".result.json"),($previewResult|ConvertTo-Json -Compress -Depth 4),[Text.UTF8Encoding]::new($false))
+}
 if($CompactMode){Set-CompactMode $true}
 if($PreviewAbout){Show-AboutView}
 if($PreviewUpdate){$script:availableUpdate=[PSCustomObject]@{Version='0.3.0-alpha';Url='https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.0-alpha/AITaskMonitor.exe'};Show-PendingUpdate}
