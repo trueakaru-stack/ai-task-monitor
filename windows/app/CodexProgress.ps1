@@ -112,6 +112,7 @@ try{
 try { . (Join-Path $PSScriptRoot "ClaudeReaderCore.ps1") }catch{}
 $script:releaseUpdatesAvailable=$false
 try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAvailable=$true }catch{}
+$script:isStoreEdition=Test-Path -LiteralPath (Join-Path $PSScriptRoot "store-channel.marker") -PathType Leaf
 $script:currentVersion='0.2.1-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
@@ -560,7 +561,7 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Диагностический журнал хранится локально. В настройках можно выбрать срок и размер хранения, просмотреть события или очистить журнал."/>
        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Приложение может предупредить о возможном цикле при повторных ошибках одной команды. Это предположение, оно не останавливает задачу."/>
        <TextBlock Margin="0,12,0,8" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Данные задач обрабатываются локально. Для Claude Code после подключения используются локальные hooks. Самому монитору не нужны вход в аккаунт, токены или права администратора."/>
-       <TextBlock Margin="0,4,0,8" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="При запуске и раз в сутки приложение проверяет новые версии на GitHub, не отправляя данные задач. Отзыв можно написать через почтовое приложение; сообщение отправляется только по вашему решению."/>
+       <TextBlock x:Name="AboutUpdatesText" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="При запуске и раз в сутки приложение проверяет новые версии на GitHub, не отправляя данные задач. Отзыв можно написать через почтовое приложение; сообщение отправляется только по вашему решению."/>
       </StackPanel>
      </ScrollViewer>
      <ScrollBar x:Name="AboutScrollBar" Orientation="Vertical" HorizontalAlignment="Right" Margin="0,10,7,20" Visibility="Hidden"/>
@@ -706,6 +707,8 @@ $feedbackError = $window.FindName("FeedbackError")
 $aboutBackButton = $window.FindName("AboutBackButton")
 $aboutHeading = $window.FindName("AboutHeading")
 $aboutVersionText = $window.FindName("AboutVersionText")
+$aboutUpdatesText = $window.FindName("AboutUpdatesText")
+if($script:isStoreEdition){$aboutUpdatesText.Text="Обновления этой версии устанавливаются через Microsoft Store. Отзыв можно написать через почтовое приложение; сообщение отправляется только по вашему решению."}
 $aboutProviders = $window.FindName("AboutProviders")
 $aboutTaskbarMinimizeButton = $window.FindName("AboutTaskbarMinimizeButton")
 $aboutCloseButton = $window.FindName("AboutCloseButton")
@@ -1734,7 +1737,7 @@ function Invoke-UpdateDownload {
 }
 
 function Invoke-UpdateCheckTick {
- if(-not $script:releaseUpdatesAvailable){return}
+ if($script:isStoreEdition -or -not $script:releaseUpdatesAvailable){return}
  if($null -ne $script:updateRequest){
   if(-not $script:updateRequest.IsCompleted){return}
   try{
@@ -2247,6 +2250,11 @@ if ($SnapshotFile) {
   $aboutBackButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
   if($settingsView.Visibility -ne "Visible" -or $aboutView.Visibility -ne "Collapsed"){throw "The About back action did not return to settings."}
   if((Get-FeedbackUri) -notmatch '^mailto:truea\.k\.a\.ru@gmail\.com\?subject=' -or (Get-FeedbackUri) -match '&body='){throw "The feedback draft is not private or correctly addressed."}
+  if($script:isStoreEdition){
+   if(-not $aboutUpdatesText.Text.Contains('Microsoft Store') -or $aboutUpdatesText.Text.Contains('GitHub')){throw 'Store edition update description is incorrect.'}
+   $script:lastUpdateCheck=[DateTime]::MinValue;Invoke-UpdateCheckTick
+   if($null -ne $script:updateClient -or $null -ne $script:updateRequest){throw 'Store edition must not request GitHub updates.'}
+  }elseif(-not $aboutUpdatesText.Text.Contains('GitHub')){throw 'Standalone update description is incorrect.'}
   if($settingsView.Visibility -ne "Visible" -or $aboutView.Visibility -ne "Collapsed"){throw "Settings and About cannot be visible together."}
   $aboutSettingsButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
   if($aboutView.Visibility -ne "Visible" -or $settingsView.Visibility -ne "Collapsed"){throw "The About entry did not open the page."}

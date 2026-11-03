@@ -1,0 +1,108 @@
+[CmdletBinding()]
+param(
+ [Parameter(Mandatory=$true)][string]$MakeAppxPath,
+ [string]$SignToolPath='',
+ [switch]$InstallInEphemeralCI
+)
+Set-StrictMode -Version 2.0
+$ErrorActionPreference='Stop'
+$identity='imatrue.AITaskMonitor'
+$publisher='CN=115CA8A1-932E-47B0-A1AB-4491DF2684C5'
+$publisherDisplay='imatrue'
+$root=[IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ('aitm-msix-test-'+[Guid]::NewGuid().ToString('N'))))
+$tempPrefix=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
+if(-not $root.StartsWith($tempPrefix,[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe test directory.'}
+[void][IO.Directory]::CreateDirectory($root)
+$package=Join-Path $root 'AITaskMonitor-Store.msix'
+$builder=Join-Path $PSScriptRoot '..\msix\Build-StorePackage.ps1'
+& $builder -IdentityName $identity -Publisher $publisher -PublisherDisplayName $publisherDisplay -MakeAppxPath $MakeAppxPath -WorkingDirectory (Join-Path $root 'build') -OutputFile $package
+if(-not (Test-Path -LiteralPath $package -PathType Leaf)){throw 'The MSIX package was not created.'}
+$unpack=Join-Path $root 'unpacked'
+& $MakeAppxPath unpack /p $package /d $unpack | Out-Null
+if($LASTEXITCODE -ne 0){throw 'The MSIX package could not be unpacked.'}
+[xml]$manifest=[IO.File]::ReadAllText((Join-Path $unpack 'AppxManifest.xml'))
+if($manifest.Package.Identity.Name -cne $identity -or $manifest.Package.Identity.Publisher -cne $publisher -or
+   $manifest.Package.Identity.Version -cne '1.0.0.0' -or $manifest.Package.Identity.ProcessorArchitecture -cne 'x64' -or
+   $manifest.Package.Properties.PublisherDisplayName -cne $publisherDisplay){throw 'The MSIX package identity is incorrect.'}
+foreach($name in @('CodexProgress.ps1','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','ClaudeLoopChannel.cs','Configure-ClaudeIntegration.ps1','ReleaseUpdates.ps1','AI task monitor.exe','store-channel.marker','LICENSE','assets\app-icon.ico','assets\StoreLogo.png','assets\Square44x44Logo.png','assets\Square150x150Logo.png')){
+ if(-not (Test-Path -LiteralPath (Join-Path $unpack $name) -PathType Leaf)){throw ('Missing MSIX content: '+$name)}
+}
+$appRoot=Join-Path $PSScriptRoot '..\app'
+foreach($name in @('CodexProgress.ps1','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','Configure-ClaudeIntegration.ps1','ReleaseUpdates.ps1')){
+ if((Get-FileHash -LiteralPath (Join-Path $unpack $name) -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath (Join-Path $appRoot $name) -Algorithm SHA256).Hash){throw ('Packaged source differs: '+$name)}
+}
+Add-Type -AssemblyName System.Drawing
+foreach($image in @(@('StoreLogo.png',50),@('Square44x44Logo.png',44),@('Square150x150Logo.png',150))){
+ $bitmap=[Drawing.Image]::FromFile((Join-Path $unpack ('assets\'+$image[0])))
+ try{if($bitmap.Width -ne [int]$image[1] -or $bitmap.Height -ne [int]$image[1]){throw ('Invalid Store asset size: '+$image[0])}}finally{$bitmap.Dispose()}
+}
+Write-Output 'MSIX structure: Store identity, runtime files, source hashes and asset sizes verified.'
+if(-not $InstallInEphemeralCI){Write-Output ('Unsigned package for structural review: '+$package);return}
+if($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted'){throw 'MSIX installation test is restricted to a disposable GitHub-hosted runner.'}
+if(-not $SignToolPath -or -not (Test-Path -LiteralPath $SignToolPath -PathType Leaf)){throw 'SignTool is required for the isolated install test.'}
+$signtoolSignature=Get-AuthenticodeSignature -LiteralPath $SignToolPath
+if($signtoolSignature.Status -ne 'Valid' -or $signtoolSignature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)'){throw 'SignTool does not have a valid Microsoft signature.'}
+if(@(Get-AppxPackage -Name $identity -ErrorAction SilentlyContinue).Count -ne 0){throw 'The test package identity is already installed; refusing to alter it.'}
+
+$certificate=New-SelfSignedCertificate -Type Custom -Subject $publisher -KeyUsage DigitalSignature -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter ([DateTime]::Now.AddHours(3)) -CertStoreLocation 'Cert:\CurrentUser\My' -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3','2.5.29.19={text}')
+$publicCertificate=Join-Path $root 'test-only.cer'
+Export-Certificate -Cert $certificate -FilePath $publicCertificate | Out-Null
+Import-Certificate -FilePath $publicCertificate -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople' | Out-Null
+$testPackage=Join-Path $root 'test-only-signed.msix'
+Copy-Item -LiteralPath $package -Destination $testPackage
+& $SignToolPath sign /fd SHA256 /sha1 $certificate.Thumbprint $testPackage
+if($LASTEXITCODE -ne 0){throw 'Test-only signing failed.'}
+Add-AppxPackage -Path $testPackage -ErrorAction Stop
+$installed=@(Get-AppxPackage -Name $identity -ErrorAction Stop)
+if($installed.Count -ne 1 -or $installed[0].Publisher -cne $publisher -or $installed[0].Version.ToString() -cne '1.0.0.0'){throw 'MSIX installation identity verification failed.'}
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+[ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
+class ApplicationActivationManager { }
+[ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IApplicationActivationManager {
+    [PreserveSig] int ActivateApplication([MarshalAs(UnmanagedType.LPWStr)] string appUserModelId, [MarshalAs(UnmanagedType.LPWStr)] string arguments, int options, out uint processId);
+}
+public static class MsixTestActivation {
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, int processId);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern int GetPackageFullName(IntPtr process, ref uint length, StringBuilder name);
+    public static int Activate(string id, string args, out uint pid) {
+        return ((IApplicationActivationManager)new ApplicationActivationManager()).ActivateApplication(id, args, 0, out pid);
+    }
+    public static string PackageOf(int pid) {
+        IntPtr process = OpenProcess(0x1000, false, pid);
+        if (process == IntPtr.Zero) return "";
+        try {
+            uint length = 0; int result = GetPackageFullName(process, ref length, null);
+            if (result != 122 || length == 0) return "";
+            var name = new StringBuilder((int)length);
+            return GetPackageFullName(process, ref length, name) == 0 ? name.ToString() : "";
+        } finally { CloseHandle(process); }
+    }
+}
+'@
+$snapshotRoot=Join-Path $env:USERPROFILE ('aitm-msix-smoke-'+[Guid]::NewGuid().ToString('N'))
+if(Test-Path -LiteralPath $snapshotRoot){throw 'Unexpected existing MSIX test directory.'}
+[void][IO.Directory]::CreateDirectory($snapshotRoot)
+$snapshot=Join-Path $snapshotRoot 'about-dark.png'
+$arguments='-PreviewActiveTasks 1 -PreviewAbout -PreviewAboutUiTest -ThemeOverride dark -SnapshotFile "'+$snapshot+'"'
+$aumid=$installed[0].PackageFamilyName+'!App'
+[uint32]$processId=0
+$hr=[MsixTestActivation]::Activate($aumid,$arguments,[ref]$processId)
+if($hr -ne 0 -or $processId -eq 0){throw ('Packaged app activation failed: 0x{0:X8}' -f $hr)}
+$foundProcess=$null;$watch=[Diagnostics.Stopwatch]::StartNew()
+do{
+ $foundProcess=@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object {$null -ne $_.CommandLine -and $_.CommandLine.Contains($snapshot)} | Select-Object -First 1)
+ if($foundProcess.Count -gt 0){break}
+ Start-Sleep -Milliseconds 100
+}while($watch.Elapsed.TotalSeconds -lt 25)
+if($foundProcess.Count -eq 0){throw 'The packaged app did not start its expected PowerShell child.'}
+$packageName=[MsixTestActivation]::PackageOf([int]$foundProcess[0].ProcessId)
+if(-not $packageName.StartsWith($identity+'_',[StringComparison]::OrdinalIgnoreCase)){throw 'The monitor process did not retain MSIX package identity.'}
+while(-not (Test-Path -LiteralPath $snapshot -PathType Leaf) -and $watch.Elapsed.TotalSeconds -lt 45){Start-Sleep -Milliseconds 200}
+if(-not (Test-Path -LiteralPath $snapshot -PathType Leaf)){throw 'The installed MSIX did not render its synthetic About view.'}
+Write-Output 'MSIX install: test-signed package installed, packaged process identity and synthetic app rendering verified on the disposable runner.'

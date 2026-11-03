@@ -1,0 +1,41 @@
+name: Windows MSIX test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [windows]
+    paths:
+      - "windows/msix/**"
+      - "windows/app/**"
+      - "windows/tests/Test-MsixPackage.ps1"
+      - "windows/tests/Test-StoreChannel.ps1"
+      - ".github/workflows/windows-msix-test.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: ${{ github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[msix-test]') }}
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find Windows SDK tools
+        shell: powershell
+        run: |
+          $versions = Get-ChildItem -LiteralPath "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Directory | Sort-Object Name -Descending
+          $tools = $null
+          foreach ($version in $versions) {
+            $candidate = Join-Path $version.FullName 'x64'
+            if ((Test-Path -LiteralPath (Join-Path $candidate 'makeappx.exe')) -and (Test-Path -LiteralPath (Join-Path $candidate 'signtool.exe'))) { $tools = $candidate; break }
+          }
+          if (-not $tools) { throw 'Windows SDK packaging tools are unavailable.' }
+          "AITM_MAKEAPPX=$tools\makeappx.exe" >> $env:GITHUB_ENV
+          "AITM_SIGNTOOL=$tools\signtool.exe" >> $env:GITHUB_ENV
+      - name: Test Store update behavior
+        shell: powershell
+        run: .\windows\tests\Test-StoreChannel.ps1
+      - name: Build, install and activate MSIX in disposable runner
+        shell: powershell
+        run: .\windows\tests\Test-MsixPackage.ps1 -MakeAppxPath $env:AITM_MAKEAPPX -SignToolPath $env:AITM_SIGNTOOL -InstallInEphemeralCI
