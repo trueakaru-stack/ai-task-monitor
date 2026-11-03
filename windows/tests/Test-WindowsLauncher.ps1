@@ -1,4 +1,4 @@
-param([string]$EvidenceDirectory="")
+param([string]$EvidenceDirectory="",[switch]$NoInstaller)
 $ErrorActionPreference = "Stop"
 $appRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\app"))
 $installedRoot = Join-Path $env:LOCALAPPDATA "AITaskMonitor"
@@ -21,31 +21,39 @@ try {
     $probe = Join-Path $root "console probe.exe"
     $testOutput=Join-Path $root "release output"
     $testBuildTemp=Join-Path $root "release intermediate"
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $appRoot "Build-Installer-v2.ps1") -OutputDirectory $testOutput -BuildTempDirectory $testBuildTemp | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "The isolated release build failed." }
-    $launcher=Join-Path $testBuildTemp "AI task monitor.exe"
-    $installer=Join-Path $testOutput "AITaskMonitorSetup.exe"
-    if (-not (Test-Path -LiteralPath $launcher) -or -not (Test-Path -LiteralPath $installer)) { throw "The isolated release build is incomplete." }
+    if($NoInstaller){
+        $launcher=Join-Path $root "AI task monitor.exe"
+        & $compiler /nologo /target:winexe /optimize+ "/out:$launcher" (Join-Path $appRoot "CodexTasksLauncher.cs")
+        if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $launcher)){throw "The isolated test launcher did not compile."}
+    }else{
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $appRoot "Build-Installer-v2.ps1") -OutputDirectory $testOutput -BuildTempDirectory $testBuildTemp | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "The isolated release build failed." }
+        $launcher=Join-Path $testBuildTemp "AI task monitor.exe"
+        $installer=Join-Path $testOutput "AITaskMonitorSetup.exe"
+        if (-not (Test-Path -LiteralPath $launcher) -or -not (Test-Path -LiteralPath $installer)) { throw "The isolated release build is incomplete." }
+    }
     & $compiler /nologo /target:winexe /optimize+ "/out:$probe" (Join-Path $PSScriptRoot "ConsoleAssociationProbe.cs")
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $probe)) { throw "Console-association probe did not compile." }
     $bytes = [IO.File]::ReadAllBytes($launcher)
     $peOffset = [BitConverter]::ToInt32($bytes,0x3c)
     if ([BitConverter]::ToUInt16($bytes,$peOffset+24+68) -ne 2) { throw "The release launcher must use the Windows GUI subsystem." }
-    $assembly=[Reflection.Assembly]::Load([IO.File]::ReadAllBytes($installer))
-    if ($assembly.GetManifestResourceNames() -notcontains "AI task monitor.exe") { throw "The release installer does not contain the GUI launcher." }
-    $installerType=$assembly.GetType("CodexProgressInstaller",$true)
-    $extract=$installerType.GetMethod("Extract",[Reflection.BindingFlags]"NonPublic,Static")
     $extractedLauncher=Join-Path $root "extracted launcher.exe"
-    [string[]]$extractArguments=@("AI task monitor.exe",$extractedLauncher)
-    [void]$extract.Invoke($null,$extractArguments)
-    if ((Get-FileHash -LiteralPath $extractedLauncher -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash) { throw "The installed launcher resource differs from the release launcher." }
-    $shortcutPath=Join-Path $root "test shortcut.lnk"
-    $icon=Join-Path $appRoot "assets\app-icon.ico"
-    $createShortcut=$installerType.GetMethod("CreateShortcut",[Reflection.BindingFlags]"NonPublic,Static")
-    [string[]]$shortcutArguments=@($shortcutPath,$extractedLauncher,$root,$icon)
-    [void]$createShortcut.Invoke($null,$shortcutArguments)
-    $shortcut=(New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
-    if ($shortcut.TargetPath -ne $extractedLauncher -or $shortcut.WorkingDirectory -ne $root) { throw "The installed shortcut does not target the GUI launcher." }
+    if($NoInstaller){Copy-Item -LiteralPath $launcher -Destination $extractedLauncher}else{
+        $assembly=[Reflection.Assembly]::Load([IO.File]::ReadAllBytes($installer))
+        if ($assembly.GetManifestResourceNames() -notcontains "AI task monitor.exe") { throw "The release installer does not contain the GUI launcher." }
+        $installerType=$assembly.GetType("CodexProgressInstaller",$true)
+        $extract=$installerType.GetMethod("Extract",[Reflection.BindingFlags]"NonPublic,Static")
+        [string[]]$extractArguments=@("AI task monitor.exe",$extractedLauncher)
+        [void]$extract.Invoke($null,$extractArguments)
+        if ((Get-FileHash -LiteralPath $extractedLauncher -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash) { throw "The installed launcher resource differs from the release launcher." }
+        $shortcutPath=Join-Path $root "test shortcut.lnk"
+        $icon=Join-Path $appRoot "assets\app-icon.ico"
+        $createShortcut=$installerType.GetMethod("CreateShortcut",[Reflection.BindingFlags]"NonPublic,Static")
+        [string[]]$shortcutArguments=@($shortcutPath,$extractedLauncher,$root,$icon)
+        [void]$createShortcut.Invoke($null,$shortcutArguments)
+        $shortcut=(New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
+        if ($shortcut.TargetPath -ne $extractedLauncher -or $shortcut.WorkingDirectory -ne $root) { throw "The installed shortcut does not target the GUI launcher." }
+    }
 
     $fixtureCodexHome = Join-Path $root "synthetic codex home"
     $locks = Join-Path $fixtureCodexHome "thread-writer-locks"
@@ -61,8 +69,8 @@ try {
     $lockPath = Join-Path $locks ($sessionId+".lock")
     $lockOwner = [IO.File]::Open($lockPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
 
-    $versions=if($installedAvailable){@("installed-release-copy","current-source")}else{@("current-source")}
-    if(-not $installedAvailable){Write-Output "Installed release not found; the copied-release check was skipped."}
+    $versions=if($installedAvailable -and -not $NoInstaller){@("installed-release-copy","current-source")}else{@("current-source")}
+    if($NoInstaller){Write-Output "Installer and installed-release checks were deliberately skipped."}elseif(-not $installedAvailable){Write-Output "Installed release not found; the copied-release check was skipped."}
     foreach ($version in $versions) {
         $fixture = Join-Path $root $version
         [void][IO.Directory]::CreateDirectory($fixture)
