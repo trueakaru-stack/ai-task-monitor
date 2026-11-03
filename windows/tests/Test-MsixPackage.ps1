@@ -24,7 +24,7 @@ if($LASTEXITCODE -ne 0){throw 'The MSIX package could not be unpacked.'}
 if($manifest.Package.Identity.Name -cne $identity -or $manifest.Package.Identity.Publisher -cne $publisher -or
    $manifest.Package.Identity.Version -cne '1.0.0.0' -or $manifest.Package.Identity.ProcessorArchitecture -cne 'x64' -or
    $manifest.Package.Properties.PublisherDisplayName -cne $publisherDisplay){throw 'The MSIX package identity is incorrect.'}
-foreach($name in @('CodexProgress.ps1','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','ClaudeLoopChannel.cs','Configure-ClaudeIntegration.ps1','ReleaseUpdates.ps1','AI task monitor.exe','store-channel.marker','LICENSE','assets\app-icon.ico','assets\StoreLogo.png','assets\Square44x44Logo.png','assets\Square150x150Logo.png')){
+foreach($name in @('CodexProgress.ps1','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','ClaudeLoopChannel.cs','Configure-ClaudeIntegration.ps1','ReleaseUpdates.ps1','AI task monitor.exe','AITaskMonitor.Runtime.dll','store-channel.marker','LICENSE','assets\app-icon.ico','assets\StoreLogo.png','assets\Square44x44Logo.png','assets\Square150x150Logo.png')){
  if(-not (Test-Path -LiteralPath (Join-Path $unpack $name) -PathType Leaf)){throw ('Missing MSIX content: '+$name)}
 }
 $appRoot=Join-Path $PSScriptRoot '..\app'
@@ -37,6 +37,17 @@ foreach($image in @(@('StoreLogo.png',50),@('Square44x44Logo.png',44),@('Square1
  try{if($bitmap.Width -ne [int]$image[1] -or $bitmap.Height -ne [int]$image[1]){throw ('Invalid Store asset size: '+$image[0])}}finally{$bitmap.Dispose()}
 }
 Write-Output 'MSIX structure: Store identity, runtime files, source hashes and asset sizes verified.'
+$previewRoot=Join-Path $root 'host-preview';[void][IO.Directory]::CreateDirectory($previewRoot)
+$previewSnapshot=Join-Path $previewRoot 'about.png'
+$previewStart=New-Object Diagnostics.ProcessStartInfo
+$previewStart.FileName=Join-Path $unpack 'AI task monitor.exe'
+$previewStart.Arguments='-PreviewActiveTasks 1 -PreviewAbout -PreviewAboutUiTest -ThemeOverride dark -SnapshotFile "'+$previewSnapshot+'"'
+$previewStart.WorkingDirectory=$unpack;$previewStart.UseShellExecute=$false;$previewStart.CreateNoWindow=$true;$previewStart.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+$previewStart.EnvironmentVariables['LOCALAPPDATA']=$previewRoot;$previewStart.EnvironmentVariables['USERPROFILE']=$previewRoot;$previewStart.EnvironmentVariables['CODEX_HOME']=Join-Path $previewRoot 'codex'
+$preview=[Diagnostics.Process]::Start($previewStart)
+if(-not $preview.WaitForExit(45000)){throw 'The isolated Store host did not exit; it was not terminated.'}
+if($preview.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $previewSnapshot -PathType Leaf)){throw ('The isolated Store host failed: '+$preview.ExitCode)}
+Write-Output 'MSIX host: in-process PowerShell rendered a synthetic view and exited normally.'
 if(-not $InstallInEphemeralCI){Write-Output ('Unsigned package for structural review: '+$package);return}
 if($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted'){throw 'MSIX installation test is restricted to a disposable GitHub-hosted runner.'}
 if(-not $SignToolPath -or -not (Test-Path -LiteralPath $SignToolPath -PathType Leaf)){throw 'SignTool is required for the isolated install test.'}
@@ -94,14 +105,8 @@ $aumid=$installed[0].PackageFamilyName+'!App'
 [uint32]$processId=0
 $hr=[MsixTestActivation]::Activate($aumid,$arguments,[ref]$processId)
 if($hr -ne 0 -or $processId -eq 0){throw ('Packaged app activation failed: 0x{0:X8}' -f $hr)}
-$foundProcess=$null;$watch=[Diagnostics.Stopwatch]::StartNew()
-do{
- $foundProcess=@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object {$null -ne $_.CommandLine -and $_.CommandLine.Contains($snapshot)} | Select-Object -First 1)
- if($foundProcess.Count -gt 0){break}
- Start-Sleep -Milliseconds 100
-}while($watch.Elapsed.TotalSeconds -lt 25)
-if($foundProcess.Count -eq 0){throw 'The packaged app did not start its expected PowerShell child.'}
-$packageName=[MsixTestActivation]::PackageOf([int]$foundProcess[0].ProcessId)
+$watch=[Diagnostics.Stopwatch]::StartNew()
+$packageName=[MsixTestActivation]::PackageOf([int]$processId)
 if(-not $packageName.StartsWith($identity+'_',[StringComparison]::OrdinalIgnoreCase)){throw 'The monitor process did not retain MSIX package identity.'}
 while(-not (Test-Path -LiteralPath $snapshot -PathType Leaf) -and $watch.Elapsed.TotalSeconds -lt 45){Start-Sleep -Milliseconds 200}
 if(-not (Test-Path -LiteralPath $snapshot -PathType Leaf)){throw 'The installed MSIX did not render its synthetic About view.'}

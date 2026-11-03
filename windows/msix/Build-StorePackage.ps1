@@ -43,8 +43,13 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $
 
 $compiler=Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if(-not (Test-Path -LiteralPath $compiler -PathType Leaf)){throw 'The Windows C# compiler was not found.'}
+$runtime=Join-Path $layout 'AITaskMonitor.Runtime.dll'
+& $compiler /nologo /target:library /platform:x64 /optimize+ "/out:$runtime" /reference:System.Web.Extensions.dll (Join-Path $appRoot 'AppShellIdentity.cs') (Join-Path $appRoot 'ClaudeLoopChannel.cs')
+if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $runtime -PathType Leaf)){throw 'Runtime assembly compilation failed.'}
+$automation=[System.Management.Automation.PowerShell].Assembly.Location
+if(-not (Test-Path -LiteralPath $automation -PathType Leaf)){throw 'Windows PowerShell runtime assembly was not found.'}
 $launcher=Join-Path $layout 'AI task monitor.exe'
-& $compiler /nologo /target:winexe /platform:x64 /optimize+ "/out:$launcher" "/win32icon:$(Join-Path $appRoot 'assets\app-icon.ico')" (Join-Path $appRoot 'CodexTasksLauncher.cs')
+& $compiler /nologo /target:winexe /platform:x64 /optimize+ "/out:$launcher" "/win32icon:$(Join-Path $appRoot 'assets\app-icon.ico')" "/reference:$automation" (Join-Path $PSScriptRoot 'StoreTasksLauncher.cs')
 if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $launcher -PathType Leaf)){throw 'Launcher compilation failed.'}
 
 Add-Type -AssemblyName System.Drawing
