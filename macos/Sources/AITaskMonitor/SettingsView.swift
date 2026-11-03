@@ -93,6 +93,10 @@ struct SettingsView: View {
                             }
                             .labelsHidden().pickerStyle(.menu).frame(width: 120)
                         }
+                        if !store.claudeLoopError.isEmpty {
+                            Text(store.claudeLoopError).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     section("О приложении") {
                         Text("AI Task Monitor показывает активные локальные задачи Codex и Claude Code, текущие действия и опубликованные этапы плана. Точный процент отображается только по известным этапам; приблизительная оценка отмечается знаком ≈; без надёжных данных процент скрыт.")

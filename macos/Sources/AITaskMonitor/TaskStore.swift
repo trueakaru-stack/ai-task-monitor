@@ -15,10 +15,12 @@ final class TaskStore: ObservableObject {
     @Published private(set) var journalEvents: [DiagnosticEvent] = []
     @Published private(set) var journalTaskNames: [String: String] = [:]
     @Published private(set) var journalError = ""
+    @Published private(set) var claudeLoopError = ""
 
     private let codexReader: CodexTaskReader
     private let claudeReader: ClaudeTaskReader
     private let diagnosticWorker: DiagnosticWorker?
+    private let claudeLoopProfile: URL?
     private let monitoringStartedAt = Date()
     private var previousCodex: [MonitoredTask] = []
     private var previousClaude: [MonitoredTask] = []
@@ -26,11 +28,14 @@ final class TaskStore: ObservableObject {
     private var sawClaudeEvents = false
     private var nextJournalMaintenance = Date.distantPast
     private var loopDetectors: [String: LoopDetector] = [:]
+    private var claudeLoopChannel: ClaudeLoopChannel?
+    private var claudeLoopDetectors: [String: ClaudeLoopTracker] = [:]
     private var timer: Timer?
 
-    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil) {
+    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil) {
         self.codexReader = codexReader
         self.claudeReader = claudeReader
+        self.claudeLoopProfile = claudeLoopProfile
         self.diagnosticWorker = previewTasks == nil ? DiagnosticWorker(journal: journal ?? DiagnosticJournal()) : nil
         if let previewTasks {
             tasks = previewTasks
@@ -44,7 +49,7 @@ final class TaskStore: ObservableObject {
                     let changed = self.diagnosticSettings.loopThreshold != settings.loopThreshold ||
                         self.diagnosticSettings.loopWindowMinutes != settings.loopWindowMinutes
                     self.diagnosticSettings = settings
-                    if changed { self.loopDetectors.removeAll(); self.refresh() }
+                    if changed { self.loopDetectors.removeAll(); self.claudeLoopDetectors.removeAll(); self.refresh() }
                 case .failure(let error): self.journalError = error.localizedDescription
                 }
             }
@@ -53,6 +58,11 @@ final class TaskStore: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
+    }
+
+    deinit {
+        timer?.invalidate()
+        claudeLoopChannel?.stop()
     }
 
     static func preview(unavailableSources: [TaskProvider] = []) -> TaskStore {
@@ -106,9 +116,14 @@ final class TaskStore: ObservableObject {
         return store
     }
 
-    static func loopPreview(unavailableSources: [TaskProvider] = []) -> TaskStore {
+    static func loopPreview(unavailableSources: [TaskProvider] = [], provider: TaskProvider = .codex, showsError: Bool = false) -> TaskStore {
         let store = preview(unavailableSources: unavailableSources)
-        if !store.tasks.isEmpty { store.tasks[0].loopWarning = LoopWarning(threshold: 5, windowMinutes: 10) }
+        if let index = store.tasks.firstIndex(where: { $0.provider == provider }) {
+            store.tasks[index].loopWarning = LoopWarning(threshold: 5, windowMinutes: 10)
+            store.compactIndex = index
+        }
+        if provider == .claude { store.selectedProvider = .claude }
+        if showsError { store.claudeLoopError = "Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение." }
         return store
     }
 
@@ -140,6 +155,7 @@ final class TaskStore: ObservableObject {
         var terminalIDs: Set<String> = []
         var interruptedIDs: Set<String> = []
         var codexToolEvents: [String: [CodexToolEvent]] = [:]
+        var claudeConnected = false
         do {
             let exists = FileManager.default.fileExists(atPath: codexReader.codexHome.path)
             if !exists && sawCodexHome { throw CocoaError(.fileReadNoSuchFile) }
@@ -161,6 +177,7 @@ final class TaskStore: ObservableObject {
                 previousClaude = []
                 sawClaudeEvents = false
             } else {
+                claudeConnected = !claudeReader.usesExplicitFile || claudeLoopProfile != nil
                 let exists = FileManager.default.fileExists(atPath: claudeReader.eventFile.path)
                 if !exists && sawClaudeEvents { throw CocoaError(.fileReadNoSuchFile) }
                 if exists {
@@ -172,6 +189,7 @@ final class TaskStore: ObservableObject {
                 }
             }
         } catch {
+            claudeConnected = false
             unavailable.append(.claude)
             previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         }
@@ -180,6 +198,7 @@ final class TaskStore: ObservableObject {
             .filter { $0.isActive || $0.isUnconfirmed }
             .sorted { $0.updatedAt > $1.updatedAt }
         let now = Date()
+        syncClaudeLoop(connected: claudeConnected, now: now)
         for id in Array(loopDetectors.keys) {
             guard var detector = loopDetectors[id] else { continue }
             detector.configure(threshold: diagnosticSettings.loopThreshold, windowMinutes: diagnosticSettings.loopWindowMinutes)
@@ -202,9 +221,15 @@ final class TaskStore: ObservableObject {
         }
         for id in terminalIDs {
             if var detector = loopDetectors[id] { detector.finishTurn(); loopDetectors[id] = detector }
+            if id.hasPrefix("claude:") { claudeLoopDetectors.removeValue(forKey: String(id.dropFirst(7))) }
         }
         for index in combined.indices where combined[index].provider == .codex && combined[index].isActive {
             combined[index].loopWarning = loopDetectors[combined[index].id]?.warning
+        }
+        for index in combined.indices where combined[index].provider == .claude && combined[index].isActive {
+            let id = combined[index].id
+            let session = id.hasPrefix("claude:") ? String(id.dropFirst(7)) : id
+            combined[index].loopWarning = claudeLoopDetectors[session]?.warning
         }
         let trackedIDs = Set(combined.filter { $0.provider == .codex }.map(\.id))
         if loopDetectors.count > 256 {
@@ -218,6 +243,51 @@ final class TaskStore: ObservableObject {
         if selectedProvider == .claude, !providers.contains(.claude) { selectedProvider = .all }
         recordChanges(previousTasks: previousTasks, previousUnavailable: previousUnavailable,
                       terminalIDs: terminalIDs, interruptedIDs: interruptedIDs, toolInputs: toolInputs)
+    }
+
+    private func syncClaudeLoop(connected: Bool, now: Date) {
+        guard connected, diagnosticWorker != nil else {
+            claudeLoopChannel?.stop()
+            claudeLoopChannel = nil
+            claudeLoopDetectors.removeAll()
+            claudeLoopError = ""
+            return
+        }
+        if claudeLoopChannel == nil {
+            do { claudeLoopChannel = try ClaudeLoopChannel(profile: claudeLoopProfile ?? AppPaths.supportDirectory) }
+            catch {
+                claudeLoopDetectors.removeAll()
+                claudeLoopError = "Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение."
+                return
+            }
+        }
+        guard let channel = claudeLoopChannel else { return }
+        claudeLoopError = ""
+        let batch = channel.drain()
+        if batch.gap { claudeLoopDetectors.removeAll() }
+        for event in batch.events {
+            if claudeLoopDetectors[event.sessionID] == nil {
+                guard event.kind == .start else { continue }
+                if claudeLoopDetectors.count >= 256,
+                   let oldest = claudeLoopDetectors.min(by: { $0.value.lastSeen < $1.value.lastSeen })?.key {
+                    claudeLoopDetectors.removeValue(forKey: oldest)
+                }
+                claudeLoopDetectors[event.sessionID] = ClaudeLoopTracker(threshold: diagnosticSettings.loopThreshold,
+                                                                          windowMinutes: diagnosticSettings.loopWindowMinutes)
+            }
+            guard var detector = claudeLoopDetectors[event.sessionID] else { continue }
+            detector.configure(threshold: diagnosticSettings.loopThreshold, windowMinutes: diagnosticSettings.loopWindowMinutes)
+            detector.consume(event, now: now)
+            if event.kind == .stop { claudeLoopDetectors.removeValue(forKey: event.sessionID) }
+            else { claudeLoopDetectors[event.sessionID] = detector }
+        }
+        for id in Array(claudeLoopDetectors.keys) {
+            guard var detector = claudeLoopDetectors[id] else { continue }
+            detector.configure(threshold: diagnosticSettings.loopThreshold, windowMinutes: diagnosticSettings.loopWindowMinutes)
+            detector.refresh(now: now)
+            if detector.lastSeen < now.addingTimeInterval(-1800) { claudeLoopDetectors.removeValue(forKey: id) }
+            else { claudeLoopDetectors[id] = detector }
+        }
     }
 
     func setDiagnosticSettings(_ settings: DiagnosticSettings) {
@@ -257,6 +327,14 @@ final class TaskStore: ObservableObject {
     }
 
     func dismissLoop(for taskID: String) {
+        if taskID.hasPrefix("claude:") {
+            let session = String(taskID.dropFirst(7))
+            guard var detector = claudeLoopDetectors[session] else { return }
+            detector.dismiss()
+            claudeLoopDetectors[session] = detector
+            if let index = tasks.firstIndex(where: { $0.id == taskID }) { tasks[index].loopWarning = nil }
+            return
+        }
         guard var detector = loopDetectors[taskID] else {
             if diagnosticWorker == nil, let index = tasks.firstIndex(where: { $0.id == taskID }) { tasks[index].loopWarning = nil }
             return

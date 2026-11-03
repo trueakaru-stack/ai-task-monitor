@@ -37,7 +37,9 @@ The diagnostic retention settings allow 1–7 days and 1–10 MB. Cleanup remove
 
 Identifiers are keyed hashes. On macOS, the installation key is stored as a local owner-only file in an owner-only diagnostic directory; it is not stored in Keychain. The journal itself is not encrypted. Local metadata and independently stored provider data may still be sensitive.
 
-For possible-loop detection, command and working-directory fingerprints use a fresh key in memory on each launch. The fingerprints, key, exit codes and retry history are not written to the diagnostic journal or settings. The configurable limits are stored with the diagnostic settings. A warning does not stop a task and can also flag an intentional retry.
+For possible-loop detection in Codex and Claude Code, command and working-directory fingerprints use a fresh key in memory on each launch. Claude's short-lived hook communicates with the running monitor through a local Unix-domain socket in an owner-only directory under `/private/tmp`. The endpoint checks that its peer runs as the current user. The hook sends only a keyed fingerprint, session and tool identifiers, event type, and a reliably parsed exit code; it does not send the command, working directory or error output through the socket. Other processes running under the same account share that trust boundary. The directory may retain an empty ownership-lock file; it contains no key or event data.
+
+The fingerprints, key, exit codes and retry history are not written to the diagnostic journal, Claude event files or settings. The configurable limits are stored with the diagnostic settings. A warning is heuristic, does not stop a task and can also flag an intentional retry. Missing events, unfamiliar error formats and file changes outside observed editing tools can affect detection.
 
 ## Removal
 

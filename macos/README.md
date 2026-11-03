@@ -2,7 +2,7 @@
 
 Native SwiftUI alpha for macOS 13 and newer. The application runs locally, stays above ordinary windows, and shows active Codex and Claude Code work in expanded or compact form.
 
-The local diagnostic journal records minimal event metadata. A configurable, non-blocking warning can flag repeated Codex command failures. A reliable approval-wait signal is not currently available.
+The local diagnostic journal records minimal event metadata. A configurable, non-blocking warning can flag repeated Codex or Claude Code command failures. A reliable approval-wait signal is not currently available.
 
 ## Behavior
 
@@ -20,7 +20,7 @@ The local diagnostic journal records minimal event metadata. A configurable, non
 - Settings provide a local journal with a task filter, confirmed manual clearing, and adjustable limits of 1–7 days and 1–10 MB. Automatic cleanup runs at startup and while the application is open; no background service is installed.
 - The journal stores event time, source, type, and pseudonymous identifiers, not task text, prompts, commands, output, or project paths. The separate Claude event files are not governed by the journal's limits. See [privacy details](../PRIVACY.md).
 - The possible-loop warning defaults to five identical command failures with the same nonzero exit code within ten minutes. The repeat count is configurable from 3 to 10 and the interval from 1 to 30 minutes. It can be dismissed, never stops a task, and may also identify intentional retries.
-- Diagnostic tool events and loop detection depend on structured events that the monitor can observe. Processing is bounded to the recent session-file tail and the last 4,096 matching tool events per refresh, so the journal is not a complete audit trail.
+- Diagnostic tool events and loop detection depend on events the monitor can observe. Claude Code uses a bounded local channel while the monitor is running; unfamiliar failure formats and unobserved file changes can prevent a correct warning. Codex processing is bounded to the recent session-file tail and the last 4,096 matching tool events per refresh, so the journal is not a complete audit trail.
 
 Task titles, activity, plans, and hook events stay on the Mac. See the repository [privacy notice](../PRIVACY.md).
 

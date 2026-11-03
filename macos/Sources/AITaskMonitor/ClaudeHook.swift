@@ -6,25 +6,30 @@ enum ClaudeHook {
         guard let data = readBoundedInput(FileHandle.standardInput),
               let value = try? JSONSerialization.jsonObject(with: data),
               let input = value as? [String: Any] else { return 0 }
+        return process(input)
+    }
 
+    static func process(_ input: [String: Any], directory: URL = AppPaths.supportDirectory) -> Int32 {
         let record = makeRecord(from: input)
         do {
-            try FileManager.default.createDirectory(at: AppPaths.supportDirectory, withIntermediateDirectories: true)
-            let lockPath = AppPaths.supportDirectory.appendingPathComponent("claude-events.lock").path
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let events = directory.appendingPathComponent("claude-events-v2.jsonl")
+            let lockPath = directory.appendingPathComponent("claude-events.lock").path
             let lockDescriptor = lockPath.withCString { open($0, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR) }
             guard lockDescriptor >= 0 else { throw HookError.lock }
             defer { Darwin.close(lockDescriptor) }
             guard flock(lockDescriptor, LOCK_EX) == 0 else { throw HookError.lock }
             defer { flock(lockDescriptor, LOCK_UN) }
-            try rotateIfNeeded()
+            try rotateIfNeeded(at: events)
             let line = try JSONSerialization.data(withJSONObject: record) + Data([0x0A])
-            if !FileManager.default.fileExists(atPath: AppPaths.claudeEvents.path) {
-                FileManager.default.createFile(atPath: AppPaths.claudeEvents.path, contents: nil)
+            if !FileManager.default.fileExists(atPath: events.path) {
+                FileManager.default.createFile(atPath: events.path, contents: nil)
             }
-            let handle = try FileHandle(forWritingTo: AppPaths.claudeEvents)
+            let handle = try FileHandle(forWritingTo: events)
             defer { try? handle.close() }
             try handle.seekToEnd()
             try handle.write(contentsOf: line)
+            ClaudeLoopClient.send(input, profile: directory)
             return 0
         } catch {
             return ProcessInfo.processInfo.environment["AI_TASK_MONITOR_AUDIT"] == "1" ? 1 : 0
@@ -82,11 +87,11 @@ enum ClaudeHook {
         }
     }
 
-    private static func rotateIfNeeded() throws {
-        guard let size = (try? AppPaths.claudeEvents.resourceValues(forKeys: [.fileSizeKey]).fileSize), size > 8_388_608 else { return }
-        let tail = try FileHelpers.tail(of: AppPaths.claudeEvents, maximumBytes: 4_194_304)
+    private static func rotateIfNeeded(at events: URL) throws {
+        guard let size = (try? events.resourceValues(forKeys: [.fileSizeKey]).fileSize), size > 8_388_608 else { return }
+        let tail = try FileHelpers.tail(of: events, maximumBytes: 4_194_304)
         let trimmed = tail.split(separator: "\n", omittingEmptySubsequences: false).dropFirst().joined(separator: "\n")
-        try Data(trimmed.utf8).write(to: AppPaths.claudeEvents, options: .atomic)
+        try Data(trimmed.utf8).write(to: events, options: .atomic)
     }
 
     private enum HookError: Error { case lock }

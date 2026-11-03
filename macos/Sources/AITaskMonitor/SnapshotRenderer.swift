@@ -27,6 +27,12 @@ enum SnapshotRenderer {
             try render(name: "loop-full-light", mode: .light, compact: false, settings: false, outputDirectory: outputDirectory, loopWarning: true)
             try render(name: "loop-compact-dark", mode: .dark, compact: true, settings: false, outputDirectory: outputDirectory, loopWarning: true)
             try render(name: "loop-compact-light", mode: .light, compact: true, settings: false, outputDirectory: outputDirectory, loopWarning: true)
+            try render(name: "claude-loop-full-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory, loopWarning: true, loopProvider: .claude)
+            try render(name: "claude-loop-full-light", mode: .light, compact: false, settings: false, outputDirectory: outputDirectory, loopWarning: true, loopProvider: .claude)
+            try render(name: "claude-loop-compact-dark", mode: .dark, compact: true, settings: false, outputDirectory: outputDirectory, loopWarning: true, loopProvider: .claude)
+            try render(name: "claude-loop-compact-light", mode: .light, compact: true, settings: false, outputDirectory: outputDirectory, loopWarning: true, loopProvider: .claude)
+            try render(name: "claude-loop-error-dark", mode: .dark, compact: false, settings: true, outputDirectory: outputDirectory, loopWarning: true, loopProvider: .claude, loopError: true)
+            try render(name: "claude-loop-error-light", mode: .light, compact: false, settings: true, outputDirectory: outputDirectory, loopWarning: true, loopProvider: .claude, loopError: true)
             try render(name: "loop-source-compact-dark", mode: .dark, compact: true, settings: false, outputDirectory: outputDirectory, unavailableSources: [.claude], loopWarning: true)
             try render(name: "source-unavailable-full-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory, unavailableSources: [.codex])
             try render(name: "source-unavailable-full-light", mode: .light, compact: false, settings: false, outputDirectory: outputDirectory, unavailableSources: [.codex])
@@ -53,9 +59,9 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
-        let store = journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources) : TaskStore.preview(unavailableSources: unavailableSources))
+        let store = journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources))
         store.isCompact = compact
         store.showsSettings = settings || journal
         store.showsJournal = journal
