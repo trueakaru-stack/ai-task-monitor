@@ -76,7 +76,7 @@ try {
   task_status=$taskStatus
   tool_name=$toolName
  }
- $dataDirectory=Join-Path $env:LOCALAPPDATA "CodexTaskProgress"
+ $dataDirectory=if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'store-channel.marker') -PathType Leaf){Join-Path $env:USERPROFILE '.ai-task-monitor'}else{Join-Path $env:LOCALAPPDATA "CodexTaskProgress"}
  [IO.Directory]::CreateDirectory($dataDirectory)|Out-Null
  $eventPath=Join-Path $dataDirectory "claude-events-v2.jsonl"
  $line=($record|ConvertTo-Json -Compress -Depth 8)+[Environment]::NewLine

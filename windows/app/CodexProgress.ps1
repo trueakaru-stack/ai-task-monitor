@@ -72,8 +72,10 @@ $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $env:USER
 $sessionIndex = Join-Path $codexHome "session_index.jsonl"
 $sessionsDirectory = Join-Path $codexHome "sessions"
 $lockDirectory = Join-Path $codexHome "thread-writer-locks"
-$claudeEventPath = if($ClaudeEventFile){$ClaudeEventFile}else{Join-Path (Join-Path $env:LOCALAPPDATA "CodexTaskProgress") "claude-events-v2.jsonl"}
-$claudeLegacyEventPath = if($ClaudeEventFile){""}else{Join-Path (Join-Path $env:LOCALAPPDATA "CodexTaskProgress") "claude-events.jsonl"}
+$script:isStoreEdition=Test-Path -LiteralPath (Join-Path $PSScriptRoot "store-channel.marker") -PathType Leaf
+$dataDirectory=if($script:isStoreEdition){Join-Path $env:USERPROFILE '.ai-task-monitor'}else{Join-Path $env:LOCALAPPDATA 'CodexTaskProgress'}
+$claudeEventPath = if($ClaudeEventFile){$ClaudeEventFile}else{Join-Path $dataDirectory "claude-events-v2.jsonl"}
+$claudeLegacyEventPath = if($ClaudeEventFile){""}else{Join-Path $dataDirectory "claude-events.jsonl"}
 $script:fingerprint = ""
 $script:sessionFiles = @{}
 $script:sessionDates = @{}
@@ -88,7 +90,7 @@ $script:lastCodexTasks = @()
 $script:lastClaudeTasks = @()
 $script:sourceErrors = @()
 $script:compactTaskId = ""
-$script:settingsPath = Join-Path (Join-Path $env:LOCALAPPDATA "CodexTaskProgress") "settings.json"
+$script:settingsPath = Join-Path $dataDirectory "settings.json"
 $script:diagnosticDirectory = if($DiagnosticDirectory){$DiagnosticDirectory}else{Join-Path (Split-Path -Parent $script:settingsPath) "diagnostics"}
 $script:diagnosticRuntime = $null
 $script:diagnosticError = ""
@@ -112,7 +114,6 @@ try{
 try { . (Join-Path $PSScriptRoot "ClaudeReaderCore.ps1") }catch{}
 $script:releaseUpdatesAvailable=$false
 try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAvailable=$true }catch{}
-$script:isStoreEdition=Test-Path -LiteralPath (Join-Path $PSScriptRoot "store-channel.marker") -PathType Leaf
 $script:currentVersion='0.2.1-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
@@ -860,6 +861,10 @@ function Claude-ConnectionState {
  $hookScript="& '"+$hookPath.Replace("'","''")+"'"
  $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hookScript))
  $expected='powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$encoded
+ if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'store-channel.marker') -PathType Leaf){
+  . (Join-Path $PSScriptRoot 'StoreClaudeHook.ps1')
+  $expected=Get-StoreClaudeHookCommand $PSScriptRoot
+ }
  $raw=[IO.File]::ReadAllText($path,[Text.Encoding]::UTF8)
  if(-not $raw.Trim()){return "disconnected"}
  $settings=$raw|ConvertFrom-Json -ErrorAction Stop

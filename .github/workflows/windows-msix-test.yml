@@ -9,6 +9,7 @@ on:
       - "windows/app/**"
       - "windows/tests/Test-MsixPackage.ps1"
       - "windows/tests/Test-StoreChannel.ps1"
+      - "windows/tests/Test-StoreClaudeInterop.ps1"
       - ".github/workflows/windows-msix-test.yml"
 
 permissions:
@@ -36,6 +37,9 @@ jobs:
       - name: Test Store update behavior
         shell: powershell
         run: .\windows\tests\Test-StoreChannel.ps1
+      - name: Test Store Claude hook safety
+        shell: powershell
+        run: .\windows\tests\Test-StoreClaudeInterop.ps1
       - name: Build, install and activate MSIX in disposable runner
         shell: powershell
         run: .\windows\tests\Test-MsixPackage.ps1 -MakeAppxPath $env:AITM_MAKEAPPX -SignToolPath $env:AITM_SIGNTOOL -InstallInEphemeralCI

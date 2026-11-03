@@ -2,7 +2,7 @@
 
 ## Summary
 
-AI Task Monitor processes task information locally on the user's computer. The application does not contain analytics, advertising, or remote logging. It checks public GitHub releases for updates as described below.
+AI Task Monitor processes task information locally on the user's computer. The application does not contain analytics, advertising, or remote logging. The standalone editions check public GitHub releases for updates as described below; the Microsoft Store edition relies on Store updates.
 
 ## Data read on Windows
 
@@ -18,7 +18,7 @@ AI Task Monitor processes task information locally on the user's computer. The a
 
 ## Windows diagnostic journal
 
-The diagnostic journal is stored under `%LOCALAPPDATA%\CodexTaskProgress\diagnostics`. It records the event time, provider, event type and pseudonymous task and event identifiers. The current Windows implementation records task and source-state changes, generic Codex tool starts and finishes when the corresponding source events can be paired, and command failures only when the source supplies a structured failed status and nonzero exit code. It does not record prompts, commands, tool output, task names, step text or project paths in this journal. It does not infer a tool error from arbitrary output. Task names used by the on-screen filter are read from the currently available source data and are not added to the diagnostic journal.
+The standalone Windows diagnostic journal is stored under `%LOCALAPPDATA%\CodexTaskProgress\diagnostics`. The Microsoft Store edition uses `%USERPROFILE%\.ai-task-monitor\diagnostics` so its monitor and the external Claude hook can share data and retain it after package removal; it does not automatically migrate the standalone edition's existing data. The journal records the event time, provider, event type and pseudonymous task and event identifiers. The current Windows implementation records task and source-state changes, generic Codex tool starts and finishes when the corresponding source events can be paired, and command failures only when the source supplies a structured failed status and nonzero exit code. It does not record prompts, commands, tool output, task names, step text or project paths in this journal. It does not infer a tool error from arbitrary output. Task names used by the on-screen filter are read from the currently available source data and are not added to the diagnostic journal.
 
 Settings permit retention from one to seven days and a journal size from 1 to 10 MB. The oldest diagnostic events are removed to meet the configured limits while the application runs and on its next launch; no separate cleanup service runs in the background. Manual clearing requires confirmation and affects this diagnostic journal, not Codex history or the separate Claude Code event log.
 
@@ -44,7 +44,7 @@ In the current development sources, new hook events do not include the user's pr
 
 Events written by older versions may still contain prompt text and working-directory paths. The new hook writes to a separate v2 file and does not remove or rewrite the older file. When a session produces new events, the reader may use matching legacy events to recover its plan without persisting them again. Disconnecting Claude Code removes only the exact hook command installed by AI Task Monitor and preserves unrelated hooks.
 
-The new event file is `%LOCALAPPDATA%\CodexTaskProgress\claude-events-v2.jsonl` on Windows and `~/Library/Application Support/AI Task Monitor/claude-events-v2.jsonl` on macOS by default. The older file is `claude-events.jsonl` in the same directory. The diagnostic journal's age and size controls do not apply to either Claude event file.
+The new event file is `%LOCALAPPDATA%\CodexTaskProgress\claude-events-v2.jsonl` in the standalone Windows edition, `%USERPROFILE%\.ai-task-monitor\claude-events-v2.jsonl` in the Microsoft Store edition, and `~/Library/Application Support/AI Task Monitor/claude-events-v2.jsonl` on macOS. The older file is `claude-events.jsonl` in the same directory. The diagnostic journal's age and size controls do not apply to either Claude event file.
 
 ## Data transmission
 
@@ -56,5 +56,7 @@ In the standalone Windows and macOS editions, at startup and once every 24 hours
 
 ## Removal
 
-The Windows uninstaller removes the application files and shortcut but leaves AI Task Monitor's settings, Claude event files, and diagnostic journal in the local data directory. It does not remove Codex, Claude Code, or unrelated provider settings.
+The standalone Windows uninstaller removes the application files and shortcut but leaves AI Task Monitor's settings, Claude event files, and diagnostic journal in the local data directory. It does not remove Codex, Claude Code, or unrelated provider settings.
+
+The Microsoft Store edition keeps its settings and logs in `%USERPROFILE%\.ai-task-monitor` when the package is removed. Disconnect Claude Code in Settings before removing the package to remove the optional hook entries. If the package is removed first, those entries remain in Claude Code settings but stop without action when the package is no longer installed.
 

@@ -9,6 +9,10 @@ $legacyHookCommand='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'+$
 $hookScript="& '"+$hookPath.Replace("'","''")+"'"
 $encodedHook=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hookScript))
 $hookCommand='powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$encodedHook
+if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'store-channel.marker') -PathType Leaf){
+ . (Join-Path $PSScriptRoot 'StoreClaudeHook.ps1')
+ $hookCommand=Get-StoreClaudeHookCommand $PSScriptRoot
+}
 $events=@("UserPromptSubmit","PreToolUse","PostToolUse","PostToolUseFailure","TaskCreated","TaskCompleted","SubagentStart","SubagentStop","Stop","SessionEnd")
 
 function Is-OurHook($hook) {

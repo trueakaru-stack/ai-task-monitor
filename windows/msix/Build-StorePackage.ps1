@@ -37,6 +37,7 @@ $assets=Join-Path $layout 'assets';[void][IO.Directory]::CreateDirectory($assets
 
 $runtimeFiles=@('CodexProgress.ps1','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','ClaudeLoopDetection.ps1','ClaudeLoopChannel.cs','ClaudeReaderCore.ps1','AppShellIdentity.cs','Configure-ClaudeIntegration.ps1','DiagnosticPolicy.ps1','DiagnosticStore.ps1','LoopDetection.ps1','DiagnosticCollector.ps1','DiagnosticRuntime.ps1','ReleaseUpdates.ps1')
 foreach($name in $runtimeFiles){$path=Join-Path $appRoot $name;if(-not (Test-Path -LiteralPath $path -PathType Leaf)){throw ('Missing runtime file: '+$name)};Copy-Item -LiteralPath $path -Destination (Join-Path $layout $name)}
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'StoreClaudeHook.ps1') -Destination (Join-Path $layout 'StoreClaudeHook.ps1')
 Copy-Item -LiteralPath (Join-Path $appRoot 'assets\app-icon.ico') -Destination (Join-Path $assets 'app-icon.ico')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'LICENSE') -Destination (Join-Path $layout 'LICENSE')
 [IO.File]::WriteAllText((Join-Path $layout 'store-channel.marker'),'store',[Text.UTF8Encoding]::new($false))
