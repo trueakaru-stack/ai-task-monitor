@@ -1,0 +1,7 @@
+# Windows launcher verification
+
+Date: 2026-11-02. The installed Start-menu shortcut pointed to `AI task monitor.cmd`, which starts `cmd.exe` before launching hidden PowerShell. That command-shell entry point is consistent with Windows Terminal appearing before PowerShell's hidden-window setting can apply. The existing installation and shortcut were inspected but not modified.
+
+An isolated Release-style build was compiled in a temporary test directory. The test checked that the installer contains a GUI-subsystem launcher, extracted the same launcher, created a temporary shortcut to it, and launched it with a copy of the installed app and separately with current source files. In both cases the launcher created PowerShell directly; the test found no visible console associated with that PowerShell process, a synthetic active Codex task appeared in the WPF snapshot, and the monitor process exited after its snapshot. The current source also recorded the synthetic task observation in its isolated diagnostic journal. The background provider-setup test checked normal completion and failure propagation.
+
+The two screenshots show the synthetic task in the copied installed source and current source respectively. This is not a verification of a newly updated real installation: the user's installed shortcut still targets the original `.cmd`. The test did not run the installer against the real profile, alter the existing running instance, exercise normal interactive close, or observe every transient desktop window with an independent UI recorder.

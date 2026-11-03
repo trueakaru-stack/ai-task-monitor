@@ -2,7 +2,6 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
-using System.Text;
 using System.Windows.Forms;
 
 internal static class CodexProgressInstaller
@@ -21,17 +20,29 @@ internal static class CodexProgressInstaller
             Extract("Uninstall-CodexProgress.ps1", Path.Combine(installDirectory, "Uninstall-CodexProgress.ps1"));
             Extract("Uninstall-CodexProgress.cmd", Path.Combine(installDirectory, "Uninstall-CodexProgress.cmd"));
             Extract("ClaudeTaskHook.ps1", Path.Combine(installDirectory, "ClaudeTaskHook.ps1"));
+            Extract("ClaudeLoopClient.ps1", Path.Combine(installDirectory, "ClaudeLoopClient.ps1"));
+            Extract("ClaudeLoopDetection.ps1", Path.Combine(installDirectory, "ClaudeLoopDetection.ps1"));
+            Extract("ClaudeLoopChannel.cs", Path.Combine(installDirectory, "ClaudeLoopChannel.cs"));
+            Extract("ClaudeReaderCore.ps1", Path.Combine(installDirectory, "ClaudeReaderCore.ps1"));
+            Extract("AppShellIdentity.cs", Path.Combine(installDirectory, "AppShellIdentity.cs"));
             Extract("Configure-ClaudeIntegration.ps1", Path.Combine(installDirectory, "Configure-ClaudeIntegration.ps1"));
+            Extract("DiagnosticPolicy.ps1", Path.Combine(installDirectory, "DiagnosticPolicy.ps1"));
+            Extract("DiagnosticStore.ps1", Path.Combine(installDirectory, "DiagnosticStore.ps1"));
+            Extract("LoopDetection.ps1", Path.Combine(installDirectory, "LoopDetection.ps1"));
+            Extract("DiagnosticCollector.ps1", Path.Combine(installDirectory, "DiagnosticCollector.ps1"));
+            Extract("DiagnosticRuntime.ps1", Path.Combine(installDirectory, "DiagnosticRuntime.ps1"));
+            Extract("ReleaseUpdates.ps1", Path.Combine(installDirectory, "ReleaseUpdates.ps1"));
+            string assetsDirectory = Path.Combine(installDirectory, "assets");
+            Directory.CreateDirectory(assetsDirectory);
+            string iconPath = Path.Combine(assetsDirectory, "app-icon.ico");
+            Extract("app-icon.ico", iconPath);
 
-            string launcher = Path.Combine(installDirectory, "AI task monitor.cmd");
-            File.WriteAllText(
-                launcher,
-                "@echo off\r\nstart \"AI task monitor\" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Sta -File \"%~dp0CodexProgress.ps1\"\r\n",
-                Encoding.ASCII);
+            string launcher = Path.Combine(installDirectory, "AI task monitor.exe");
+            Extract("AI task monitor.exe", launcher);
 
             string programs = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
             string shortcut = Path.Combine(programs, "AI task monitor.lnk");
-            CreateShortcut(shortcut, launcher, installDirectory);
+            CreateShortcut(shortcut, launcher, installDirectory, iconPath);
 
             bool claudeConnected = false;
             string claudeDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
@@ -58,7 +69,7 @@ internal static class CodexProgressInstaller
                 }
             }
 
-            Process.Start(new ProcessStartInfo(launcher) { WorkingDirectory = installDirectory, UseShellExecute = true });
+            Process.Start(new ProcessStartInfo(launcher) { WorkingDirectory = installDirectory, UseShellExecute = false });
             MessageBox.Show(
                 "AI task monitor установлен. Ярлык добавлен в меню «Пуск»." + (claudeConnected ? " Claude Code подключён. Перезапустите Claude Code." : ""),
                 "AI task monitor",
@@ -82,7 +93,7 @@ internal static class CodexProgressInstaller
         }
     }
 
-    private static void CreateShortcut(string shortcutPath, string targetPath, string workingDirectory)
+    private static void CreateShortcut(string shortcutPath, string targetPath, string workingDirectory, string iconPath)
     {
         Type shellType = Type.GetTypeFromProgID("WScript.Shell");
         if (shellType == null) throw new InvalidOperationException("WScript.Shell is unavailable.");
@@ -91,6 +102,7 @@ internal static class CodexProgressInstaller
         Type linkType = link.GetType();
         linkType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, link, new object[] { targetPath });
         linkType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, link, new object[] { workingDirectory });
+        linkType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, link, new object[] { iconPath + ",0" });
         linkType.InvokeMember("Description", BindingFlags.SetProperty, null, link, new object[] { "AI task monitor" });
         linkType.InvokeMember("Save", BindingFlags.InvokeMethod, null, link, null);
     }

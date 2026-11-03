@@ -1,0 +1,58 @@
+AI Task Monitor Source-Available License
+Version 1.0
+
+Copyright (c) 2026 imatrue
+
+1. Scope
+
+This license applies to the original AI Task Monitor source code made available
+by the copyright holder under this license (the "Code"). A "Code-Based Product"
+means the application or another application, component, or service that
+contains the Code or a modified part of it. Independent software is not a
+Code-Based Product solely because it interoperates with the application or uses
+its output.
+
+Third-party materials remain subject to their own terms. This license does not
+grant rights to third-party trademarks, names, or logos, or to the project's
+name, logos, or other branding assets.
+
+2. Permission
+
+Subject to the conditions below, any person or organization may run the
+application, copy and modify the Code, incorporate the Code into a Code-Based
+Product, and distribute the Code or a Code-Based Product without charge.
+
+Individuals and organizations may use the application and Code-Based Products
+for their own internal work, including work in a for-profit organization.
+Earning income from the organization's ordinary business does not by itself
+count as monetizing the application or a Code-Based Product.
+
+3. No monetization
+
+Without separate permission from the copyright holder, you may not monetize a
+Code-Based Product. For example, you may not sell it, license it for a fee,
+charge for access to it or its use, include it in a paid product or service, or
+earn advertising revenue from it. These restrictions apply whether the product
+contains all of the Code or only a modified or unmodified part.
+
+4. Notice of code use
+
+When you first use or modify the Code, including when incorporating any part of
+it into another project, send a notice to truea.k.a.ru@gmail.com. Identify
+yourself or your organization and state the name or a brief description of the
+project. A link is welcome if the project is public. You do not need to wait
+for a reply. Merely running the application does not require this notice.
+
+5. Redistribution
+
+When distributing the Code or a Code-Based Product, retain this license and the
+copyright notice with the portions covered by this license. This license does
+not grant you rights to third-party material.
+
+6. No warranty
+
+THE CODE AND APPLICATION ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE, AND NON-INFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED BY
+LAW, THE COPYRIGHT HOLDER IS NOT LIABLE FOR CLAIMS OR DAMAGES ARISING FROM
+THE CODE OR ITS USE.

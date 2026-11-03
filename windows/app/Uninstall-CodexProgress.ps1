@@ -9,8 +9,6 @@ $integration = Join-Path $installDirectory "Configure-ClaudeIntegration.ps1"
 if (Test-Path -LiteralPath $integration) { & $integration -Mode Remove }
 $shortcutPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\AI task monitor.lnk"
 Remove-Item -LiteralPath $shortcutPath -Force
-$dataDirectory = Join-Path $env:LOCALAPPDATA "CodexTaskProgress"
-if (Test-Path -LiteralPath $dataDirectory) { Remove-Item -LiteralPath $dataDirectory -Recurse -Force }
 $literalTarget = $installDirectory.Replace("'", "''")
 $cleanupCommand = "Start-Sleep -Seconds 2; Remove-Item -LiteralPath '$literalTarget' -Recurse -Force"
 $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cleanupCommand))

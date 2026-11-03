@@ -1,5 +1,10 @@
+param([string]$LoopTestPipe="")
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
+
+$loopClientAvailable=$false
+try{. (Join-Path $PSScriptRoot "ClaudeLoopClient.ps1");$loopClientAvailable=$true}catch{}
+if($LoopTestPipe -and $env:AI_TASK_MONITOR_AUDIT -ne "1"){exit 0}
 
 function Value($object,[string]$name,$fallback=$null) {
  if($null -ne $object -and $null -ne $object.PSObject.Properties[$name]){return $object.$name}
@@ -30,9 +35,14 @@ function Rotate-EventLog([string]$path) {
 }
 
 try {
- $raw=[Console]::In.ReadToEnd()
+ $inputBuffer=New-Object char[] 4096
+ $inputBuilder=New-Object Text.StringBuilder
+ while(($inputCount=[Console]::In.Read($inputBuffer,0,$inputBuffer.Length)) -gt 0){
+  if($inputBuilder.Length+$inputCount -gt 1048576){exit 0}
+  [void]$inputBuilder.Append($inputBuffer,0,$inputCount)
+ }
+ $raw=$inputBuilder.ToString()
  if(-not $raw){exit 0}
- if($raw.Length -gt 1048576){exit 0}
  $inputEvent=$raw|ConvertFrom-Json
  $eventName=[string](Value $inputEvent "hook_event_name" "Unknown")
  $toolInput=Value $inputEvent "tool_input"
@@ -40,9 +50,8 @@ try {
  $taskStatus=[string](Value $toolInput "status" "")
  $subject=Clip ([string](Value $inputEvent "task_subject" (Value $toolInput "subject" ""))) 240
  $toolName=Clip ([string](Value $inputEvent "tool_name" "")) 120
- $prompt=Clip ([string](Value $inputEvent "prompt" "")) 240
  $activity=switch($eventName){
-  "UserPromptSubmit" {if($prompt){$prompt}else{"New request"}}
+  "UserPromptSubmit" {"New request"}
   "PreToolUse" {if($toolName){"Running: $toolName"}else{"Running tool"}}
   "PostToolUse" {if($toolName){"Completed: $toolName"}else{"Tool completed"}}
   "PostToolUseFailure" {if($toolName){"Failed: $toolName"}else{"Tool failed"}}
@@ -61,8 +70,6 @@ try {
   session_id=[string](Value $inputEvent "session_id" "")
   event=$eventName
   active=$active
-  cwd=Clip ([string](Value $inputEvent "cwd" "")) 1024
-  prompt=$prompt
   activity=$activity
   task_id=$taskId
   task_subject=$subject
@@ -71,12 +78,14 @@ try {
  }
  $dataDirectory=Join-Path $env:LOCALAPPDATA "CodexTaskProgress"
  [IO.Directory]::CreateDirectory($dataDirectory)|Out-Null
- $eventPath=Join-Path $dataDirectory "claude-events.jsonl"
+ $eventPath=Join-Path $dataDirectory "claude-events-v2.jsonl"
  $line=($record|ConvertTo-Json -Compress -Depth 8)+[Environment]::NewLine
  $mutex=New-Object Threading.Mutex($false,"Local\CodexTasksClaudeEvents")
+ $written=$false
  try{
-  if($mutex.WaitOne(5000)){Rotate-EventLog $eventPath;[IO.File]::AppendAllText($eventPath,$line,[Text.UTF8Encoding]::new($false))}
+  if($mutex.WaitOne(5000)){Rotate-EventLog $eventPath;[IO.File]::AppendAllText($eventPath,$line,[Text.UTF8Encoding]::new($false));$written=$true}
  }finally{try{$mutex.ReleaseMutex()}catch{};$mutex.Dispose()}
+ if($written -and $loopClientAvailable){Send-ClaudeLoopEvent $inputEvent $LoopTestPipe}
 }catch{
  if($env:AI_TASK_MONITOR_AUDIT -eq "1"){[Console]::Error.WriteLine($_.Exception.ToString());exit 1}
  exit 0
