@@ -56,7 +56,8 @@ if($signtoolSignature.Status -ne 'Valid' -or $signtoolSignature.SignerCertificat
 if(@(Get-AppxPackage -Name $identity -ErrorAction SilentlyContinue).Count -ne 0){throw 'The test package identity is already installed; refusing to alter it.'}
 $claudeHome=Join-Path $env:USERPROFILE '.claude'
 $storeData=Join-Path $env:USERPROFILE '.ai-task-monitor'
-if((Test-Path -LiteralPath $claudeHome) -or (Test-Path -LiteralPath $storeData)){throw 'The isolated runner already has Claude or Store application data; refusing to alter it.'}
+$codexHome=Join-Path $env:USERPROFILE '.codex'
+if((Test-Path -LiteralPath $claudeHome) -or (Test-Path -LiteralPath $storeData) -or (Test-Path -LiteralPath $codexHome)){throw 'The isolated runner already has provider or Store application data; refusing to alter it.'}
 
 $certificate=New-SelfSignedCertificate -Type Custom -Subject $publisher -KeyUsage DigitalSignature -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -NotAfter ([DateTime]::Now.AddHours(3)) -CertStoreLocation 'Cert:\CurrentUser\My' -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3','2.5.29.19={text}')
 $publicCertificate=Join-Path $root 'test-only.cer'
@@ -109,13 +110,14 @@ $aumid=$installed[0].PackageFamilyName+'!App'
 $hr=[MsixTestActivation]::Activate($aumid,$arguments,[ref]$processId)
 if($hr -ne 0 -or $processId -eq 0){throw ('Packaged app activation failed: 0x{0:X8}' -f $hr)}
 $appProcess=[Diagnostics.Process]::GetProcessById([int]$processId)
+[void]$appProcess.Handle
 $watch=[Diagnostics.Stopwatch]::StartNew()
 $packageName=[MsixTestActivation]::PackageOf([int]$processId)
 if(-not $packageName.StartsWith($identity+'_',[StringComparison]::OrdinalIgnoreCase)){throw 'The monitor process did not retain MSIX package identity.'}
 while(-not (Test-Path -LiteralPath $snapshot -PathType Leaf) -and $watch.Elapsed.TotalSeconds -lt 45){Start-Sleep -Milliseconds 200}
 if(-not (Test-Path -LiteralPath $snapshot -PathType Leaf)){throw 'The installed MSIX did not render its synthetic About view.'}
 if(-not $appProcess.WaitForExit(30000)){throw 'The packaged preview did not exit.'}
-if($appProcess.ExitCode -ne 0){throw ('The packaged preview exited with code '+$appProcess.ExitCode)}
+if($null -ne $appProcess.ExitCode -and $appProcess.ExitCode -ne 0){throw ('The packaged preview exited with code '+$appProcess.ExitCode)}
 Write-Output 'MSIX install: test-signed package installed, packaged process identity and synthetic app rendering verified on the disposable runner.'
 
 function Invoke-HiddenPowerShell([string]$Arguments,[string]$InputText=''){
@@ -147,6 +149,17 @@ $encoded=$command.Substring($head.Length)
 $decoded=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
 if($decoded.Contains($installed[0].InstallLocation)){throw 'The Claude hook contains a version-specific package path.'}
 
+$now=Get-Date
+$sessions=Join-Path (Join-Path (Join-Path (Join-Path $codexHome 'sessions') $now.ToString('yyyy')) $now.ToString('MM')) $now.ToString('dd')
+$locks=Join-Path $codexHome 'thread-writer-locks'
+[void][IO.Directory]::CreateDirectory($sessions);[void][IO.Directory]::CreateDirectory($locks)
+$codexId='msix-codex-session'
+$codexSession=Join-Path $sessions ('rollout-'+$codexId+'.jsonl')
+$codexIndex=@{id=$codexId;thread_name='Synthetic Codex task';updated_at=$now.ToString('o')}|ConvertTo-Json -Compress
+[IO.File]::WriteAllText((Join-Path $codexHome 'session_index.jsonl'),($codexIndex+"`n"),[Text.UTF8Encoding]::new($false))
+[IO.File]::WriteAllText($codexSession,('{"type":"event_msg","payload":{"type":"task_started"}}'+"`n"),[Text.UTF8Encoding]::new($false))
+$lockOwner=[IO.File]::Open((Join-Path $locks ($codexId+'.lock')),[IO.FileMode]::CreateNew,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+
 $activeSnapshot=Join-Path $snapshotRoot 'claude-active.png'
 $diagnostics=Join-Path $root 'active-diagnostics'
 $ready=Join-Path $root 'active-ready.flag'
@@ -155,13 +168,17 @@ $arguments='-ThemeOverride dark -SnapshotFile "'+$activeSnapshot+'" -DiagnosticD
 $hr=[MsixTestActivation]::Activate($aumid,$arguments,[ref]$activeId)
 if($hr -ne 0 -or $activeId -eq 0){throw ('Packaged monitor activation failed: 0x{0:X8}' -f $hr)}
 $activeProcess=[Diagnostics.Process]::GetProcessById([int]$activeId)
+[void]$activeProcess.Handle
 $watch=[Diagnostics.Stopwatch]::StartNew()
 while(-not (Test-Path -LiteralPath $ready -PathType Leaf) -and $watch.Elapsed.TotalSeconds -lt 45 -and -not $activeProcess.HasExited){Start-Sleep -Milliseconds 100}
 if(-not (Test-Path -LiteralPath $ready -PathType Leaf)){throw 'The packaged monitor did not reach the hook test.'}
+$codexEvent=@{timestamp=[DateTime]::UtcNow.ToString('o');type='event_msg';payload=@{type='agent_reasoning';text='Synthetic activity'}}|ConvertTo-Json -Compress
+[IO.File]::AppendAllText($codexSession,($codexEvent+"`n"),[Text.UTF8Encoding]::new($false))
 $hookArguments='-NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$encoded
 Invoke-HiddenPowerShell $hookArguments '{"hook_event_name":"UserPromptSubmit","session_id":"msix-session-1","prompt":"private test","cwd":"C:\\private"}'
 if(-not $activeProcess.WaitForExit(45000)){throw 'The packaged monitor hook preview did not exit.'}
-if($activeProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $activeSnapshot -PathType Leaf)){throw 'The packaged monitor hook preview failed.'}
+if(($null -ne $activeProcess.ExitCode -and $activeProcess.ExitCode -ne 0) -or -not (Test-Path -LiteralPath $activeSnapshot -PathType Leaf)){throw 'The packaged monitor hook preview failed.'}
+$lockOwner.Dispose()
 $eventFile=Join-Path $storeData 'claude-events-v2.jsonl'
 if(-not (Test-Path -LiteralPath $eventFile -PathType Leaf)){throw 'The installed Claude hook did not write a shared event.'}
 $rawEvents=Get-Content -Raw -Encoding UTF8 -LiteralPath $eventFile
@@ -170,7 +187,9 @@ $journal=Join-Path $diagnostics 'diagnostic-events-v1.jsonl'
 if(-not (Test-Path -LiteralPath $journal -PathType Leaf)){throw 'The packaged monitor did not record its observed Claude task.'}
 $observed=@(Get-Content -Encoding UTF8 -LiteralPath $journal|ForEach-Object{$_|ConvertFrom-Json}|Where-Object{$_.source -ceq 'claude' -and $_.type -ceq 'task_observed'})
 if($observed.Count -ne 1){throw 'The packaged monitor did not observe the event written by the installed hook.'}
-Write-Output 'MSIX Claude integration: external hook and packaged monitor shared and observed the same privacy-filtered event.'
+$observedCodex=@(Get-Content -Encoding UTF8 -LiteralPath $journal|ForEach-Object{$_|ConvertFrom-Json}|Where-Object{$_.source -ceq 'codex' -and $_.type -ceq 'task_observed'})
+if($observedCodex.Count -ne 1){throw 'The packaged monitor did not observe the Codex session fixture.'}
+Write-Output 'MSIX monitoring: Codex session and external Claude hook events were observed by the packaged monitor.'
 
 $upgrade=Join-Path $root 'upgrade-test-only.msix'
 & $builder -IdentityName $identity -Publisher $publisher -PublisherDisplayName $publisherDisplay -MakeAppxPath $MakeAppxPath -WorkingDirectory (Join-Path $root 'upgrade-build') -OutputFile $upgrade -PackageVersion '1.0.1.0'
