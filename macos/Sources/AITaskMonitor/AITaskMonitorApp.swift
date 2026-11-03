@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct AITaskMonitorApp: App {
-    @StateObject private var store = TaskStore()
+    @StateObject private var store = TaskStore(enableUpdateChecks: true)
 
     var body: some Scene {
         WindowGroup {

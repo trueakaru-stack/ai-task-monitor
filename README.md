@@ -25,7 +25,7 @@ The preview data in these screenshots is synthetic and contains no user task con
 
 ## Privacy
 
-Task information is processed locally. AI Task Monitor does not upload task titles, actions, plans, or logs. Read [PRIVACY.md](PRIVACY.md) for the exact local data paths and behavior.
+Task information is processed locally. AI Task Monitor does not upload task titles, actions, plans, or logs. The app checks GitHub for platform-specific updates at startup and daily while open; GitHub receives the request and IP address. Feedback opens a user-controlled email draft. Read [PRIVACY.md](PRIVACY.md) for the exact local data paths and behavior.
 
 ## Independence
 

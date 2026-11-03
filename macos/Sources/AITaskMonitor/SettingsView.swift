@@ -1,9 +1,11 @@
+import AppKit
 import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var store: TaskStore
     @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.system.rawValue
     @State private var confirmsJournalClear = false
+    @State private var feedbackError = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -98,13 +100,19 @@ struct SettingsView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    section("О приложении") {
-                        Text("AI Task Monitor показывает активные локальные задачи Codex и Claude Code, текущие действия и опубликованные этапы плана. Точный процент отображается только по известным этапам; приблизительная оценка отмечается знаком ≈; без надёжных данных процент скрыт.")
-                            .font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
-                        Text("Данные задач остаются на этом Mac. Приложение не требует прав администратора, токенов или входа в аккаунт.")
-                            .font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
-                        Text("Версия 0.3.0 alpha").font(.system(size: 11.5)).foregroundStyle(MonitorTheme.muted)
+                    VStack(alignment: .leading, spacing: 14) {
+                        Button("О приложении") { store.showsAbout = true }
+                        Button("Отзывы и предложения") {
+                            guard let url = FeedbackDraft.url else { feedbackError = true; return }
+                            feedbackError = !NSWorkspace.shared.open(url)
+                        }
+                        if feedbackError {
+                            Text("Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com.")
+                                .font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
+                    .font(.system(size: 13)).buttonStyle(.plain)
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 18)

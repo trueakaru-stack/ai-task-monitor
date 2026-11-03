@@ -21,6 +21,10 @@ enum SnapshotRenderer {
             try render(name: "compact-light", mode: .light, compact: true, settings: false, outputDirectory: outputDirectory)
             try render(name: "settings-dark", mode: .dark, compact: false, settings: true, outputDirectory: outputDirectory)
             try render(name: "settings-light", mode: .light, compact: false, settings: true, outputDirectory: outputDirectory)
+            try render(name: "about-dark", mode: .dark, compact: false, settings: true, outputDirectory: outputDirectory, about: true)
+            try render(name: "about-light", mode: .light, compact: false, settings: true, outputDirectory: outputDirectory, about: true)
+            try render(name: "update-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory, update: true)
+            try render(name: "update-light", mode: .light, compact: false, settings: false, outputDirectory: outputDirectory, update: true)
             try render(name: "journal-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory, journal: true)
             try render(name: "journal-light", mode: .light, compact: false, settings: false, outputDirectory: outputDirectory, journal: true)
             try render(name: "loop-full-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory, loopWarning: true)
@@ -59,12 +63,14 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
         let store = journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources))
         store.isCompact = compact
         store.showsSettings = settings || journal
         store.showsJournal = journal
+        store.showsAbout = about
+        if update { store.setPreviewUpdate() }
         let compactHeight: CGFloat = 182 + (unavailableSources.isEmpty ? 0 : 24) + (loopWarning ? 64 : 0)
         let size = compact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)
         let scheme: ColorScheme = mode == .dark ? .dark : .light

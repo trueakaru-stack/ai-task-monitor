@@ -11,11 +11,15 @@ struct RootView: View {
             titleBar
             if store.isCompact { compactContent }
             else if store.showsJournal { JournalView() }
+            else if store.showsAbout { AboutView() }
             else if store.showsSettings { SettingsView() }
             else { tasksContent }
         }
         .frame(width: store.isCompact ? 372 : 560, height: store.isCompact ? compactHeight : 700)
         .background(MonitorTheme.surface)
+        .overlay {
+            if let update = store.visibleUpdate { UpdateDialog(update: update) }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(MonitorTheme.border, lineWidth: 1))
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.42 : 0.18), radius: 22, y: 8)
@@ -30,7 +34,7 @@ struct RootView: View {
             Spacer()
             TitleAction(symbol: "minus", label: "Свернуть") { NSApp.keyWindow?.miniaturize(nil) }
             TitleAction(symbol: store.isCompact ? "chevron.up" : "chevron.down", label: store.isCompact ? "Развернуть" : "Компактный вид") {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { store.isCompact.toggle(); store.showsSettings = false; store.showsJournal = false }
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { store.isCompact.toggle(); store.showsSettings = false; store.showsJournal = false; store.showsAbout = false }
             }
             TitleAction(symbol: "xmark", label: "Закрыть") { NSApp.terminate(nil) }
         }

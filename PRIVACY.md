@@ -2,7 +2,7 @@
 
 ## Summary
 
-AI Task Monitor processes task information locally on the user's computer. The application does not contain analytics, advertising, remote logging, or its own network client.
+AI Task Monitor processes task information locally on the user's computer. The application does not contain analytics, advertising, or remote logging. It checks public GitHub releases for updates as described below.
 
 ## Data read on Windows
 
@@ -26,6 +26,10 @@ On macOS the new event file is `~/Library/Application Support/AI Task Monitor/cl
 ## Data transmission
 
 AI Task Monitor does not transmit task data to the developer, OpenAI, Anthropic, Microsoft, or another service. Codex and Claude Code may have their own independent data practices; consult their respective policies.
+
+At startup and once every 24 hours while open, the application requests the public release list from GitHub without authentication or cookies. GitHub receives the network request and IP address; no task titles, activity, prompts, commands, paths, identifiers, or journal contents are sent. The app checks only for a newer release with a package for the current platform, including alpha releases. Downloads open in the user's browser only after the user chooses «Скачать»; installation remains manual. Choosing «Позже» suppresses that version until the next application launch. The app does not display the notification in compact mode.
+
+«Отзывы и предложения» opens a preaddressed email draft in the user's mail application. No task or diagnostic information is inserted, and the user decides whether to write and send the message.
 
 ## Data on macOS
 

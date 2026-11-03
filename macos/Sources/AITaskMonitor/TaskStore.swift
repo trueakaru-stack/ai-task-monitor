@@ -6,6 +6,7 @@ final class TaskStore: ObservableObject {
     @Published private(set) var tasks: [MonitoredTask] = []
     @Published var selectedProvider: ProviderFilter = .all
     @Published var showsSettings = false
+    @Published var showsAbout = false
     @Published var isCompact = false
     @Published var compactIndex = 0
     @Published var sourceMessage = ""
@@ -16,11 +17,15 @@ final class TaskStore: ObservableObject {
     @Published private(set) var journalTaskNames: [String: String] = [:]
     @Published private(set) var journalError = ""
     @Published private(set) var claudeLoopError = ""
+    @Published private(set) var availableUpdate: AvailableUpdate?
+    @Published private(set) var dismissedUpdateVersion = ""
+    @Published var updateOpenError = false
 
     private let codexReader: CodexTaskReader
     private let claudeReader: ClaudeTaskReader
     private let diagnosticWorker: DiagnosticWorker?
     private let claudeLoopProfile: URL?
+    private let updateChecksEnabled: Bool
     private let monitoringStartedAt = Date()
     private var previousCodex: [MonitoredTask] = []
     private var previousClaude: [MonitoredTask] = []
@@ -31,11 +36,14 @@ final class TaskStore: ObservableObject {
     private var claudeLoopChannel: ClaudeLoopChannel?
     private var claudeLoopDetectors: [String: ClaudeLoopTracker] = [:]
     private var timer: Timer?
+    private var lastUpdateCheck = Date.distantPast
+    private var releaseRequest: ReleaseRequest?
 
-    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil) {
+    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false) {
         self.codexReader = codexReader
         self.claudeReader = claudeReader
         self.claudeLoopProfile = claudeLoopProfile
+        self.updateChecksEnabled = enableUpdateChecks && previewTasks == nil
         self.diagnosticWorker = previewTasks == nil ? DiagnosticWorker(journal: journal ?? DiagnosticJournal()) : nil
         if let previewTasks {
             tasks = previewTasks
@@ -55,14 +63,48 @@ final class TaskStore: ObservableObject {
             }
         }
         refresh()
+        checkForUpdates()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+            Task { @MainActor in self?.refresh(); self?.checkForUpdates() }
         }
     }
 
     deinit {
         timer?.invalidate()
+        releaseRequest?.cancel()
         claudeLoopChannel?.stop()
+    }
+
+    var visibleUpdate: AvailableUpdate? {
+        guard !isCompact, let availableUpdate, availableUpdate.version != dismissedUpdateVersion else { return nil }
+        return availableUpdate
+    }
+
+    func dismissUpdate() {
+        if let availableUpdate { dismissedUpdateVersion = availableUpdate.version }
+        updateOpenError = false
+    }
+
+    func acceptReleaseData(_ data: Data) {
+        if let update = ReleaseSelector.select(data: data, currentVersion: "0.3.0-alpha") { availableUpdate = update }
+    }
+
+    func checkForUpdates(now: Date = Date()) {
+        guard updateChecksEnabled, releaseRequest == nil, now.timeIntervalSince(lastUpdateCheck) >= 24 * 60 * 60 else { return }
+        lastUpdateCheck = now
+        let request = ReleaseRequest { [weak self] data in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.releaseRequest = nil
+                if let data { self.acceptReleaseData(data) }
+            }
+        }
+        releaseRequest = request
+        request.start()
+    }
+
+    func setPreviewUpdate() {
+        availableUpdate = AvailableUpdate(version: "0.4.0-alpha", url: URL(string: "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.4.0-alpha/app.dmg")!)
     }
 
     static func preview(unavailableSources: [TaskProvider] = []) -> TaskStore {
