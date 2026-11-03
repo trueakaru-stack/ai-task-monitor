@@ -8,7 +8,7 @@ Exact progress is shown as a number, estimated progress uses `≈`, and activity
 
 ## Current status
 
-Version 0.2.1 alpha is under active review. An unsigned Windows 11 installer is published through GitHub Releases. Windows may show a SmartScreen warning because the executable does not yet have a trusted code-signing certificate.
+Version 0.2.2 alpha is under active review. An unsigned Windows 11 installer is published through GitHub Releases. Windows may show a SmartScreen warning because the executable does not yet have a trusted code-signing certificate.
 
 - `main` contains public documentation and reviewed screenshots.
 - `windows` contains the current Windows 11 implementation.

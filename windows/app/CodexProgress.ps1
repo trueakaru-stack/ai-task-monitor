@@ -116,7 +116,7 @@ try{
 try { . (Join-Path $PSScriptRoot "ClaudeReaderCore.ps1") }catch{if($PreviewStartupReadyFile){$script:previewReaderFailure=$_.Exception.ToString()}}
 $script:releaseUpdatesAvailable=$false
 try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAvailable=$true }catch{}
-$script:currentVersion='0.2.1-alpha'
+$script:currentVersion='0.2.2-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateClient=$null
