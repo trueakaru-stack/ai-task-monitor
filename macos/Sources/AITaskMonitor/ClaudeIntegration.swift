@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum ClaudeIntegration {
@@ -12,7 +13,8 @@ enum ClaudeIntegration {
     }
 
     static func connectionState(settingsURL: URL = AppPaths.claudeSettings) throws -> Bool {
-        let root = try settingsObject(from: readSettingsData(at: settingsURL))
+        let destination = try settingsDestination(for: settingsURL)
+        let root = try settingsObject(from: readSettingsData(at: destination))
         let hooks = try hooksObject(from: root)
         var connected = false
         for event in events {
@@ -26,7 +28,8 @@ enum ClaudeIntegration {
     static func setConnected(_ connect: Bool, settingsURL: URL = AppPaths.claudeSettings,
                              executable: String? = nil, beforeCommit: (() throws -> Void)? = nil) throws {
         let fileManager = FileManager.default
-        let original = try readSettingsData(at: settingsURL)
+        let destination = try settingsDestination(for: settingsURL)
+        let original = try readSettingsData(at: destination)
         if !connect && original == nil { return }
         var root = try settingsObject(from: original)
         var hooks = try hooksObject(from: root)
@@ -71,13 +74,13 @@ enum ClaudeIntegration {
         let directory = settingsURL.deletingLastPathComponent()
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         try beforeCommit?()
-        guard try readSettingsData(at: settingsURL) == original else { throw IntegrationError.settingsChanged }
+        try ensureSettingsUnchanged(settingsURL, destination: destination, original: original)
         if original != nil {
             let backup = directory.appendingPathComponent("settings.json.ai-task-monitor-backup-\(UUID().uuidString)")
-            try fileManager.copyItem(at: settingsURL, to: backup)
-            guard try readSettingsData(at: settingsURL) == original else { throw IntegrationError.settingsChanged }
+            try fileManager.copyItem(at: destination, to: backup)
+            try ensureSettingsUnchanged(settingsURL, destination: destination, original: original)
         }
-        try data.write(to: settingsURL, options: .atomic)
+        try data.write(to: destination, options: .atomic)
     }
 
     private static var executablePath: String {
@@ -104,6 +107,35 @@ enum ClaudeIntegration {
     private static func readSettingsData(at url: URL) throws -> Data? {
         do { return try Data(contentsOf: url) }
         catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return nil }
+    }
+
+    private static func settingsDestination(for url: URL) throws -> URL {
+        let path = url.standardizedFileURL.path
+        var info = stat()
+        if path.withCString({ lstat($0, &info) }) != 0 {
+            if errno == ENOENT { return URL(fileURLWithPath: path) }
+            throw IntegrationError.invalidSettingsLink
+        }
+        let kind = info.st_mode & mode_t(S_IFMT)
+        guard kind == mode_t(S_IFREG) || kind == mode_t(S_IFLNK),
+              let resolved = path.withCString({ realpath($0, nil) }) else {
+            throw IntegrationError.invalidSettingsLink
+        }
+        defer { free(resolved) }
+        let destination = URL(fileURLWithPath: String(cString: resolved)).standardizedFileURL
+        var targetInfo = stat()
+        guard destination.path.withCString({ lstat($0, &targetInfo) }) == 0,
+              (targetInfo.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
+            throw IntegrationError.invalidSettingsLink
+        }
+        return destination
+    }
+
+    private static func ensureSettingsUnchanged(_ settingsURL: URL, destination: URL, original: Data?) throws {
+        let currentDestination = try settingsDestination(for: settingsURL)
+        guard currentDestination == destination, try readSettingsData(at: destination) == original else {
+            throw IntegrationError.settingsChanged
+        }
     }
 
     private static func settingsObject(from data: Data?) throws -> [String: Any] {
@@ -133,10 +165,12 @@ enum ClaudeIntegration {
 
     private enum IntegrationError: LocalizedError {
         case invalidSettings
+        case invalidSettingsLink
         case settingsChanged
         var errorDescription: String? {
             switch self {
             case .invalidSettings: return "Настройки Claude Code имеют неподдерживаемый формат и не были изменены."
+            case .invalidSettingsLink: return "Файл настроек Claude Code недоступен или содержит некорректную ссылку. Изменения не внесены."
             case .settingsChanged: return "Настройки Claude Code изменились во время подключения. Попробуйте ещё раз."
             }
         }

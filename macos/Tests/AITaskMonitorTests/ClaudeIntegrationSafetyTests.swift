@@ -91,6 +91,91 @@ final class ClaudeIntegrationSafetyTests: XCTestCase {
         XCTAssertTrue(try backups(in: directory).isEmpty)
     }
 
+    func testSettingsSymbolicLinksAndBackupContentsArePreserved() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for kind in ["absolute", "relative", "chain"] {
+            let profile = directory.appendingPathComponent(kind, isDirectory: true)
+            try FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+            let target = directory.appendingPathComponent("\(kind)-target.json")
+            let settings = profile.appendingPathComponent("settings.json")
+            let original = Data("{\"unrelated\":\"keep\"}".utf8)
+            try original.write(to: target)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
+            let relativeTarget = "../\(kind)-target.json"
+            var intermediate: URL?
+            let destination: String
+            if kind == "chain" {
+                let link = profile.appendingPathComponent("intermediate.json")
+                try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: relativeTarget)
+                intermediate = link
+                destination = "intermediate.json"
+            } else {
+                destination = kind == "absolute" ? target.path : relativeTarget
+            }
+            try FileManager.default.createSymbolicLink(atPath: settings.path, withDestinationPath: destination)
+
+            try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: executable)
+            XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: settings.path), destination)
+            if let intermediate {
+                XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: intermediate.path), relativeTarget)
+            }
+            let connected = try readObject(target)
+            XCTAssertEqual(connected["unrelated"] as? String, "keep")
+            XCTAssertNotNil(connected["hooks"])
+            let backup = try XCTUnwrap(backups(in: profile).first)
+            XCTAssertEqual(try Data(contentsOf: backup), original)
+            XCTAssertEqual(try mode(backup), 0o600)
+            XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: backup.path)[.type] as? FileAttributeType, .typeRegular)
+
+            try ClaudeIntegration.setConnected(false, settingsURL: settings, executable: executable)
+            XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: settings.path), destination)
+            XCTAssertEqual(try readObject(target)["unrelated"] as? String, "keep")
+            XCTAssertEqual(try backups(in: profile).count, 2)
+        }
+    }
+
+    func testRetargetedSettingsLinkIsNotOverwrittenEvenWhenBytesMatch() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = directory.appendingPathComponent("first.json")
+        let second = directory.appendingPathComponent("second.json")
+        let settings = directory.appendingPathComponent("settings.json")
+        let original = Data("{\"unrelated\":\"keep\"}".utf8)
+        try original.write(to: first)
+        try original.write(to: second)
+        try FileManager.default.createSymbolicLink(atPath: settings.path, withDestinationPath: first.path)
+        XCTAssertThrowsError(try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: executable) {
+            try FileManager.default.removeItem(at: settings)
+            try FileManager.default.createSymbolicLink(atPath: settings.path, withDestinationPath: second.path)
+        })
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: settings.path), second.path)
+        XCTAssertEqual(try Data(contentsOf: first), original)
+        XCTAssertEqual(try Data(contentsOf: second), original)
+        XCTAssertTrue(try backups(in: directory).isEmpty)
+    }
+
+    func testBrokenAndCyclicSettingsLinksAreLeftUnchanged() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for kind in ["dangling", "cycle"] {
+            let profile = directory.appendingPathComponent(kind, isDirectory: true)
+            try FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+            let settings = profile.appendingPathComponent("settings.json")
+            let other = profile.appendingPathComponent("other.json")
+            if kind == "cycle" {
+                try FileManager.default.createSymbolicLink(atPath: other.path, withDestinationPath: "settings.json")
+            }
+            try FileManager.default.createSymbolicLink(atPath: settings.path, withDestinationPath: "other.json")
+            XCTAssertThrowsError(try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: executable))
+            XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: settings.path), "other.json")
+            if kind == "cycle" {
+                XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: other.path), "settings.json")
+            }
+            XCTAssertTrue(try backups(in: profile).isEmpty)
+        }
+    }
+
     func testDisconnectMissingSettingsDoesNotCreateDirectory() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

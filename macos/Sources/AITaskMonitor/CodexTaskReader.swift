@@ -10,6 +10,7 @@ struct CodexTaskSnapshot {
 struct CodexTaskReader {
     let codexHome: URL
     private let fileManager = FileManager.default
+    private let lifecycleCache = CodexLifecycleCache()
 
     init(codexHome: URL? = nil) {
         if let codexHome {
@@ -45,8 +46,22 @@ struct CodexTaskReader {
             let attributes = try fileManager.attributesOfItem(atPath: file.path)
             guard let modified = attributes[.modificationDate] as? Date else { throw CocoaError(.fileReadUnknown) }
             if let observedSince, modified < observedSince && !previouslyObserved.contains(id) { continue }
-            let tail = try FileHelpers.tail(of: file, maximumBytes: 4_194_304)
-            let state = lifecycle(tail: tail, observedSince: previouslyObserved.contains(id) ? nil : observedSince)
+            let tailLimit = 4_194_304
+            let tail = try FileHelpers.tail(of: file, maximumBytes: tailLimit)
+            let cached = try? lifecycleCache.previous(for: file, attributes: attributes, maximumAppend: UInt64(tailLimit))
+            var historyKnown = cached?.scannedPrior == true || cached?.state.sawStart == true || cached?.state.running == true
+            var state = CodexLifecycleState.parse(tail, seed: cached?.state)
+            let currentSince = previouslyObserved.contains(id) ? nil : observedSince
+            let freshEvent = currentSince.map { since in state.latestEvent.map { $0 >= since } ?? false } ?? true
+            let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+            if !historyKnown && !state.sawStart && size > UInt64(tailLimit) && freshEvent {
+                if let prior = try CodexLifecycleState.previous(in: file) {
+                    state = CodexLifecycleState.parse(tail, seed: prior)
+                }
+                historyKnown = true
+            }
+            if state.sawStart { historyKnown = true }
+            try? lifecycleCache.store(for: file, attributes: attributes, state: state, scannedPrior: historyKnown)
             if state.terminal {
                 var recognized = false
                 if let observedSince {
@@ -63,7 +78,7 @@ struct CodexTaskReader {
                 }
                 continue
             }
-            guard state.running else { continue }
+            guard state.isRunning(observedSince: currentSince) else { continue }
             if let observedSince {
                 result.toolEvents[id] = CodexToolEventParser.parse(tail: tail, since: observedSince, now: now)
             }
@@ -92,48 +107,7 @@ struct CodexTaskReader {
     }
 
     func isRunning(tail: String, observedSince: Date? = nil) -> Bool {
-        lifecycle(tail: tail, observedSince: observedSince).running
-    }
-
-    private func lifecycle(tail: String, observedSince: Date?) -> (running: Bool, terminal: Bool, terminalDate: Date?, interrupted: Bool, startKey: String, startedAt: Date?) {
-        var running = false
-        var terminal = false
-        var terminalDate: Date?
-        var interrupted = false
-        var observed = observedSince == nil
-        var turnID = ""
-        var startKey = ""
-        var startedAt: Date?
-        for line in tail.split(whereSeparator: \.isNewline) {
-            guard let record = FileHelpers.jsonObject(line), record.string("type") == "event_msg",
-                  let payload = record.object("payload") else { continue }
-            let eventTurnID = payload.string("turn_id")
-            switch payload.string("type") {
-            case "task_started", "turn_started":
-                running = true
-                terminal = false
-                terminalDate = nil
-                interrupted = false
-                turnID = eventTurnID
-                let timestamp = record.string("timestamp")
-                startKey = !eventTurnID.isEmpty ? "turn:\(eventTurnID)" : (timestamp.isEmpty ? "" : "time:\(timestamp)")
-                startedAt = FileHelpers.isoDate(record["timestamp"])
-                observed = observedSince == nil
-            case "task_complete", "turn_complete", "turn_aborted":
-                if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { continue }
-                running = false
-                terminal = true
-                terminalDate = FileHelpers.isoDate(record["timestamp"])
-                interrupted = payload.string("type") == "turn_aborted"
-            default:
-                if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { continue }
-            }
-            if running, !observed, let observedSince,
-               let eventDate = FileHelpers.isoDate(record["timestamp"]), eventDate >= observedSince {
-                observed = true
-            }
-        }
-        return (running && observed, terminal, terminalDate, interrupted, startKey, startedAt)
+        CodexLifecycleState.parse(tail).isRunning(observedSince: observedSince)
     }
 
     func parsePlan(from tail: String) -> [TaskStep] {

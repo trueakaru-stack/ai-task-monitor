@@ -65,7 +65,7 @@ enum ClaudeLoopSocket {
         return Int32(min((deadline - now + 999_999) / 1_000_000, UInt64(Int32.max)))
     }
 
-    static func read(_ descriptor: Int32, count: Int, milliseconds: UInt64 = 120) -> Data? {
+    static func read(_ descriptor: Int32, count: Int, milliseconds: UInt64 = 600) -> Data? {
         var bytes = [UInt8](repeating: 0, count: count)
         var offset = 0
         let limit = deadline(milliseconds: milliseconds)
@@ -82,7 +82,7 @@ enum ClaudeLoopSocket {
         return Data(bytes)
     }
 
-    static func write(_ descriptor: Int32, data: Data, milliseconds: UInt64 = 120) -> Bool {
+    static func write(_ descriptor: Int32, data: Data, milliseconds: UInt64 = 600) -> Bool {
         var offset = 0
         let limit = deadline(milliseconds: milliseconds)
         while offset < data.count {
@@ -97,7 +97,7 @@ enum ClaudeLoopSocket {
         return true
     }
 
-    static func connect(path: String, milliseconds: Int32 = 30) -> Int32? {
+    static func connect(path: String, milliseconds: Int32 = 600) -> Int32? {
         guard var address = try? Self.address(path) else { return nil }
         let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
         guard descriptor >= 0 else { return nil }
@@ -239,13 +239,14 @@ final class ClaudeLoopChannel {
     }
 
     private func receive(_ client: Int32) {
-        guard ClaudeLoopSocket.write(client, data: key), let prefix = ClaudeLoopSocket.read(client, count: 4) else {
+        guard ClaudeLoopSocket.write(client, data: key, milliseconds: 400),
+              let prefix = ClaudeLoopSocket.read(client, count: 4, milliseconds: 400) else {
             markGap(); return
         }
         let bytes = [UInt8](prefix)
         let length = Int(bytes[0]) | (Int(bytes[1]) << 8) | (Int(bytes[2]) << 16) | (Int(bytes[3]) << 24)
         guard length >= 2, length <= ClaudeLoopSocket.maximumFrame,
-              let payload = ClaudeLoopSocket.read(client, count: length),
+              let payload = ClaudeLoopSocket.read(client, count: length, milliseconds: 400),
               let event = ClaudeLoopPayload.parse(payload) else { markGap(); return }
         stateLock.lock()
         if events.count >= 2048 { events.removeAll(keepingCapacity: true); gap = true }

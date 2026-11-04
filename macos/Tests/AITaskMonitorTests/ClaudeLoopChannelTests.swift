@@ -50,6 +50,59 @@ final class ClaudeLoopChannelTests: XCTestCase {
         XCTAssertNotEqual(first.fingerprint, afterRestart.fingerprint)
     }
 
+    func testDelayedHandshakeRemainsBoundedAndDoesNotLoseEvent() throws {
+        let profile = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-test-\(UUID().uuidString)")
+        let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
+        let channel = try ClaudeLoopChannel(profile: profile)
+        let blocker = try XCTUnwrap(ClaudeLoopSocket.connect(path: directory + "/events.sock"))
+        let blockerClosed = DispatchSemaphore(value: 0)
+        defer {
+            _ = blockerClosed.wait(timeout: .now() + 2)
+            if channel.stop() { removeEmptyTestDirectory(directory) }
+        }
+        XCTAssertNotNil(ClaudeLoopSocket.read(blocker, count: 32))
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(180)) {
+            Darwin.close(blocker)
+            blockerClosed.signal()
+        }
+        ClaudeLoopClient.send(input(event: "PreToolUse", id: "after-delay"), profile: profile)
+        let deadline = Date().addingTimeInterval(2)
+        var sawGap = false
+        var event: ClaudeLoopEvent?
+        while Date() < deadline && event == nil {
+            let batch = channel.drain()
+            sawGap = sawGap || batch.gap
+            event = batch.events.first
+            if event == nil { Thread.sleep(forTimeInterval: 0.01) }
+        }
+        XCTAssertTrue(sawGap)
+        XCTAssertEqual(event?.kind, .start)
+        XCTAssertEqual(event?.toolID, "after-delay")
+    }
+
+    func testClientAcceptsHandshakeDelayedBeyondOriginalTimeout() throws {
+        var descriptors: [Int32] = [-1, -1]
+        XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors), 0)
+        guard descriptors[0] >= 0, descriptors[1] >= 0 else { throw TestError.socket }
+        let client = descriptors[0]
+        let server = descriptors[1]
+        let serverClosed = DispatchSemaphore(value: 0)
+        defer {
+            _ = serverClosed.wait(timeout: .now() + 2)
+            Darwin.close(client)
+        }
+        XCTAssertTrue(ClaudeLoopSocket.nonblocking(client))
+        XCTAssertTrue(ClaudeLoopSocket.nonblocking(server))
+        XCTAssertTrue(ClaudeLoopSocket.suppressSigpipe(server))
+        let key = Data(repeating: 7, count: 32)
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(220)) {
+            _ = ClaudeLoopSocket.write(server, data: key)
+            Darwin.close(server)
+            serverClosed.signal()
+        }
+        XCTAssertEqual(ClaudeLoopSocket.read(client, count: 32), key)
+    }
+
     func testForeignFileAtSocketPathIsPreserved() throws {
         let profile = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-test-\(UUID().uuidString)")
         let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
