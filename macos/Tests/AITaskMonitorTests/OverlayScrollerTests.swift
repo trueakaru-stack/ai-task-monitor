@@ -106,6 +106,7 @@ final class OverlayScrollerTests: XCTestCase {
         let horizontal = try XCTUnwrap(views.compactMap { $0 as? NSScrollView }.first {
             ($0.documentView?.bounds.width ?? 0) > $0.contentView.bounds.width + 1
         })
+        XCTAssertEqual(horizontal.scrollerStyle, .overlay, "Provider tabs must not draw a persistent scrollbar track")
         XCTAssertEqual(store.visibleProviderFilters.count, 7)
         store.selectedProvider = .opencode
         RunLoop.current.run(until: Date().addingTimeInterval(0.25))

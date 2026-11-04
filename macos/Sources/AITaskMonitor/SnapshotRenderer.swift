@@ -61,6 +61,8 @@ enum SnapshotRenderer {
                     try render(name: "settings-sources-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true)
                     try render(name: "many-providers-\(language.rawValue)-\(mode.rawValue)-expanded", mode: mode, compact: false, settings: false, outputDirectory: outputDirectory, manyProviders: true)
                     try render(name: "many-providers-\(language.rawValue)-\(mode.rawValue)-compact", mode: mode, compact: true, settings: false, outputDirectory: outputDirectory, manyProviders: true)
+                    try render(name: "many-providers-\(language.rawValue)-\(mode.rawValue)-bottom", mode: mode, compact: false, settings: false, outputDirectory: outputDirectory, manyProviders: true, tasksEnd: true)
+                    try render(name: "many-providers-\(language.rawValue)-\(mode.rawValue)-tabs-end", mode: mode, compact: false, settings: false, outputDirectory: outputDirectory, manyProviders: true, tabsEnd: true)
                 }
             }
             return 0
@@ -82,7 +84,7 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, manyProviders: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, manyProviders: Bool = false, tasksEnd: Bool = false, tabsEnd: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
         let store = manyProviders ? TaskStore.manySourcesPreview() : (journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources, planUnconfirmed: planUnconfirmed)))
         store.isCompact = compact
@@ -115,6 +117,28 @@ enum SnapshotRenderer {
         }
         defer { previewWindow?.close() }
         hosting.layoutSubtreeIfNeeded()
+        if tasksEnd || tabsEnd {
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let views = descendants(hosting)
+            let scroll: NSScrollView?
+            if tasksEnd {
+                scroll = views.compactMap { $0 as? OverlayScrollerProbe.Probe }.first { $0.alwaysVisible }?.enclosingScrollView
+            } else {
+                scroll = views.compactMap { $0 as? NSScrollView }.first {
+                    ($0.documentView?.bounds.width ?? 0) > $0.contentView.bounds.width + 1
+                }
+            }
+            if let scroll, let document = scroll.documentView {
+                let x = tabsEnd ? max(0, document.bounds.width - scroll.contentView.bounds.width) : 0
+                let y = tasksEnd && document.isFlipped ? max(0, document.bounds.height - scroll.contentView.bounds.height) : 0
+                scroll.contentView.scroll(to: NSPoint(x: x, y: y))
+                scroll.reflectScrolledClipView(scroll.contentView)
+                hosting.layoutSubtreeIfNeeded()
+                previewWindow?.displayIfNeeded()
+            } else {
+                throw SnapshotError.bitmap
+            }
+        }
         guard let bitmap = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { throw SnapshotError.bitmap }
         hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
         guard let png = bitmap.representation(using: .png, properties: [:]) else { throw SnapshotError.png }

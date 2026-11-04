@@ -113,6 +113,7 @@ struct RootView: View {
                             }
                         }
                         .padding(4)
+                        .background(OverlayScrollerProbe().frame(width: 0, height: 0))
                     }
                     .background(Squircle(radius: 14).fill(MonitorTheme.track.opacity(0.5)))
                     .clipShape(Squircle(radius: 14))
