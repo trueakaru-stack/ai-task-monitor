@@ -15,8 +15,10 @@
  [switch]$PreviewJournalFilterTask,
  [switch]$PreviewSettingsBackHover,
  [switch]$PreviewSettingsEnd,
+ [switch]$PreviewSources,
  [switch]$PreviewAbout,
  [switch]$PreviewAboutUiTest,
+ [switch]$PreviewClipboardUiTest,
  [switch]$PreviewUpdate,
  [switch]$PreviewUpdateUiTest,
  [switch]$PreviewLoopWarning,
@@ -29,7 +31,9 @@
  [switch]$PreviewIconUiTest,
  [string]$PreviewStartupReadyFile = "",
  [ValidateRange(0,5000)][int]$PreviewStartupDelayMilliseconds = 0,
- [ValidateRange(-1,3)][int]$PreviewActiveTasks = -1,
+ [ValidateRange(-1,6)][int]$PreviewActiveTasks = -1,
+ [switch]$PreviewManyProviders,
+ [switch]$PreviewTabsUiTest,
  [ValidateSet("default","planned","unplanned")][string]$PreviewScenario = "default",
  [switch]$PreviewActivityUiTest,
  [switch]$PreviewFocusUiTest,
@@ -40,7 +44,7 @@
  [switch]$PreviewUnconfirmed,
  [switch]$PreviewPlanUnconfirmed,
  [switch]$PreviewPlanUiTest,
- [ValidateSet("all","codex","claude")][string]$PreviewProvider = "all",
+ [ValidateSet("all","codex","claude","kimi","deepseek","hermes","opencode")][string]$PreviewProvider = "all",
  [string]$ClaudeEventFile = "",
  [string]$DiagnosticDirectory = "",
  [string]$HintSnapshotFile = "",
@@ -70,6 +74,8 @@ if($PreviewJournalRecoveryUiTest){
  if(-not $previewDataPath.StartsWith($temporaryRoot,[StringComparison]::OrdinalIgnoreCase)){throw "Journal recovery tests require a diagnostic directory inside the temporary folder."}
 }
 if($PreviewIconUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw "Icon UI tests require a synthetic snapshot."}
+if($PreviewSources -and (-not $SnapshotFile -or -not $SettingsSnapshotFile -or $PreviewActiveTasks -lt 0)){throw 'Source previews require synthetic tasks and settings snapshots.'}
+if(($PreviewManyProviders -or $PreviewTabsUiTest) -and (-not $SnapshotFile -or -not $PreviewManyProviders -or $PreviewActiveTasks -ne 6)){throw 'Provider tab previews require six synthetic tasks and a snapshot.'}
 if($PreviewActivityUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or $PreviewScenario -eq "default")){throw "Activity UI tests require one synthetic task, a scenario and a snapshot."}
 if($PreviewFocusUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or -not $CompactMode)){throw "Focus UI tests require a compact synthetic snapshot."}
 if(($PreviewMotion -ne "default" -or $PreviewMotionDelayMilliseconds -gt 0) -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw "Motion previews require synthetic tasks and a snapshot."}
@@ -84,6 +90,7 @@ if($PreviewLanguageUiTest -and (-not $PreferencesFile -or -not $SnapshotFile -or
 if(($PreviewPlanUnconfirmed -or $PreviewPlanUiTest) -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or $PreviewScenario -ne 'planned')){throw 'Plan UI tests require one synthetic planned task and a snapshot.'}
 if($PreviewOffscreen -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw "Offscreen previews require synthetic tasks and a snapshot."}
 if(($PreviewAbout -or $PreviewAboutUiTest) -and (-not $PreviewAbout -or -not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw "About previews require synthetic tasks and a snapshot."}
+if($PreviewClipboardUiTest -and -not $PreviewAboutUiTest){throw 'Clipboard UI testing requires the isolated About preview.'}
 if(($PreviewUpdate -or $PreviewUpdateUiTest) -and (-not $PreviewUpdate -or -not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw "Update previews require synthetic tasks and a snapshot."}
 if($PreviewStartupReadyFile){
  if(-not $SnapshotFile -or -not $DiagnosticDirectory -or $PreviewStartupDelayMilliseconds -le 0){throw "A startup probe requires an isolated snapshot test."}
@@ -153,7 +160,17 @@ try{
 }catch{}
 $script:releaseUpdatesAvailable=$false
 try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAvailable=$true }catch{}
-$script:currentVersion='0.2.4-alpha'
+$script:externalProviderController=$null
+$script:externalProviderModulesAvailable=$false
+$script:lastExternalTasks=@()
+$script:lastOpenCodeConnected=$false
+try{
+ . (Join-Path $PSScriptRoot 'integrations\ProviderEventView.ps1')
+ . (Join-Path $PSScriptRoot 'integrations\ProviderRuntime.ps1')
+ $script:externalProviderController=New-ExternalProviderController
+ $script:externalProviderModulesAvailable=$true
+}catch{}
+$script:currentVersion='0.2.5-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateClient=$null
@@ -187,6 +204,9 @@ $script:translations=@{
  'Язык'='Language'
  'Источники'='Sources'
  'Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Code. Затем задачи будут появляться автоматически во время работы.'='The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Code after connecting; tasks will appear automatically.'
+ 'Приложение добавит локальный плагин OpenCode. Поддерживаются совместимые версии 1 начиная с 1.18.29 и версия 2. После подключения перезапустите OpenCode.'='The app adds a local OpenCode plugin. Compatible versions 1.18.29 and later within version 1, and version 2, are supported. Restart OpenCode after connecting.'
+ 'Не удалось подтвердить установку или совместимость OpenCode'='Could not confirm the OpenCode installation or compatibility'
+ 'Не удалось прочитать подключение OpenCode'='Could not read the OpenCode connection'
  'Журнал'='Journal'
  'Срок хранения'='Retention period'
  'Срок хранения журнала'='Journal retention period'
@@ -214,12 +234,14 @@ $script:translations=@{
  'О приложении'='About'
  'Отзывы и предложения'='Feedback and suggestions'
  'Адрес для отзывов и предложений'='Feedback email address'
+ 'Скопировать адрес'='Copy email address'
+ 'Не удалось скопировать адрес. Выделите его и скопируйте вручную.'='Could not copy the address. Select and copy it manually.'
  'Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com.'='Could not open your email app. Write to truea.k.a.ru@gmail.com.'
  'Назад к настройкам'='Back to settings'
  'AI Task Monitor показывает активные задачи и текущее действие. Сейчас поддерживаются Codex и Claude Code.'='AI Task Monitor shows active tasks and their current action. Codex and Claude Code are currently supported.'
  'При нескольких источниках можно переключать задачи по вкладкам. Компактное окно остаётся поверх других и показывает до трёх задач с переключением между ними. Тему можно выбрать вручную или использовать тему Windows. Если источник недоступен, приложение сообщит об этом.'='When multiple sources are available, use tabs to switch between them. The compact window stays on top and lets you switch between up to three tasks. Choose a theme or follow Windows. The app reports unavailable sources.'
  'Если задача публикует план, приложение показывает выполненные, текущий и следующие этапы. В карточке одновременно видны до пяти этапов; остальные можно прокрутить. Без плана отображается текущее действие без списка этапов.'='When a task publishes a plan, the app shows completed, current and upcoming steps. Up to five steps are visible at once; scroll to see the rest. Without a plan, only the current action is shown.'
- 'Точный процент показывается числом, приблизительная оценка — со знаком ≈. Если процент рассчитан по плану, он отражает долю выполненных этапов, а не всей работы. Без надёжной оценки процент скрыт.'='An exact percentage is shown as a number; an estimate is marked ≈. A plan percentage is the share of completed steps, not the entire task. No percentage is shown without a reliable value.'
+ 'Если источник сообщает общий прогресс задачи, точный процент показывается числом, а приблизительный — со знаком ≈. Если известен только план, показывается текущий этап или число завершённых этапов.'='When a source reports overall task progress, an exact percentage is shown as a number and an estimate is marked ≈. If only a plan is available, the current step or completed step count is shown.'
  'Диагностический журнал хранится локально. В настройках можно выбрать срок и размер хранения, просмотреть события или очистить журнал.'='The diagnostic journal stays on this device. In Settings you can choose its retention period and size, view events or clear the journal.'
  'Приложение может предупредить о возможном цикле при повторных ошибках одной команды. Это предположение, оно не останавливает задачу.'='The app may warn about a possible loop when one command repeatedly fails. This is a warning only and does not stop the task.'
  'Данные задач обрабатываются локально. Для Claude Code после подключения используются локальные hooks. Самому монитору не нужны вход в аккаунт, токены или права администратора.'='Task data is processed locally. Claude Code uses local hooks after connection. The monitor does not require sign-in, tokens or administrator rights.'
@@ -251,6 +273,11 @@ $script:translations=@{
  'Подключение неполное. Нажмите, чтобы восстановить.'='Connection is incomplete. Select to repair it.'
  'Статус не подтверждён'='Status unconfirmed'
  'Выполняется'='Working'
+ 'Выполняет команду'='Running a command'
+ 'Читает файл'='Reading a file'
+ 'Изменяет файл'='Editing a file'
+ 'Выполняет поиск'='Searching'
+ 'Ожидает подтверждения'='Waiting for confirmation'
  'Задача Claude Code'='Claude Code task'
  'Задача Codex'='Codex task'
  'Обрабатывает новый запрос'='Processing a new request'
@@ -552,11 +579,11 @@ function Tr([string]$text){
 
      <Border Grid.Row="1" BorderBrush="{DynamicResource Divider}" BorderThickness="0,0,0,1">
      <Grid Margin="20,18,20,17">
-      <StackPanel>
+      <StackPanel x:Name="TaskHeaderStack">
        <TextBlock Text="Ход выполнения" FontFamily="Segoe UI Variable Display Semibold" FontSize="22" Foreground="{DynamicResource TextPrimary}"/>
-       <Grid x:Name="ProviderTabsHost" Visibility="Collapsed" Margin="0,13,0,0" HorizontalAlignment="Left">
+       <Grid x:Name="ProviderTabsHost" Visibility="Collapsed" Margin="0,13,0,0" HorizontalAlignment="Left" MaxWidth="{Binding ActualWidth, ElementName=TaskHeaderStack}">
         <Path x:Name="ProviderTabsShape" Fill="{DynamicResource SurfaceRaised}"/>
-        <Border Padding="3"><StackPanel x:Name="ProviderTabsPanel" Orientation="Horizontal"/></Border>
+        <Border Padding="3"><ScrollViewer x:Name="ProviderTabsScroll" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled" CanContentScroll="False" PanningMode="HorizontalOnly" Focusable="False"><StackPanel x:Name="ProviderTabsPanel" Orientation="Horizontal"/></ScrollViewer></Border>
        </Grid>
       </StackPanel>
      </Grid>
@@ -666,6 +693,14 @@ function Tr([string]$text){
          <Button x:Name="ClaudeSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
         </Grid>
         <TextBlock Margin="0,0,0,12" Text="Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Code. Затем задачи будут появляться автоматически во время работы." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+        <Border Height="1" Background="{DynamicResource Divider}"/>
+        <Grid Height="50">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <TextBlock Text="OpenCode" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimary}"/>
+         <TextBlock x:Name="OpenCodeSourceStatus" Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
+         <Button x:Name="OpenCodeSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
+        </Grid>
+        <TextBlock Margin="0,0,0,12" Text="Приложение добавит локальный плагин OpenCode. Поддерживаются совместимые версии 1 начиная с 1.18.29 и версия 2. После подключения перезапустите OpenCode." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
        </StackPanel>
       </Border>
       <TextBlock Text="Журнал" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
@@ -735,11 +770,17 @@ function Tr([string]$text){
       </Border>
       <Button x:Name="AboutSettingsButton" Content="О приложении" Margin="-10,22,0,0" HorizontalAlignment="Left" Style="{StaticResource FooterNavStyle}" FontSize="13" AutomationProperties.Name="О приложении"/>
       <TextBlock Text="Отзывы и предложения" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
-      <RichTextBox x:Name="FeedbackEmailBox" Margin="-5,12,0,0" Padding="0" HorizontalAlignment="Left" BorderThickness="0" Background="Transparent" IsReadOnly="True" IsDocumentEnabled="True" ScrollViewer.VerticalScrollBarVisibility="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="Адрес для отзывов и предложений">
-       <FlowDocument PagePadding="0" FontFamily="Segoe UI Variable Text" FontSize="13">
-        <Paragraph Margin="0"><Hyperlink x:Name="FeedbackEmailLink" Foreground="{DynamicResource Accent}">truea.k.a.ru@gmail.com</Hyperlink></Paragraph>
-       </FlowDocument>
-      </RichTextBox>
+      <Grid Margin="0,8,0,0">
+       <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+       <RichTextBox x:Name="FeedbackEmailBox" Margin="-5,0,0,0" Padding="0" HorizontalAlignment="Left" VerticalAlignment="Center" BorderThickness="0" Background="Transparent" IsReadOnly="True" IsDocumentEnabled="True" ScrollViewer.VerticalScrollBarVisibility="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="Адрес для отзывов и предложений">
+        <FlowDocument PagePadding="0" FontFamily="Segoe UI Variable Text" FontSize="13">
+         <Paragraph Margin="0"><Hyperlink x:Name="FeedbackEmailLink" Foreground="{DynamicResource Accent}">truea.k.a.ru@gmail.com</Hyperlink></Paragraph>
+        </FlowDocument>
+       </RichTextBox>
+       <Button x:Name="FeedbackCopyButton" Grid.Column="1" Width="28" Height="28" Margin="2,0,0,0" VerticalAlignment="Center" Cursor="Hand" Style="{StaticResource TitleButton}" FocusVisualStyle="{StaticResource KeyboardFocusStyle}" AutomationProperties.Name="Скопировать адрес">
+        <TextBlock x:Name="FeedbackCopyGlyph" Text="&#xE8C8;" Width="28" FontFamily="Segoe Fluent Icons" FontSize="13" Foreground="{DynamicResource TextSecondary}" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+       </Button>
+      </Grid>
       <TextBlock x:Name="FeedbackError" Visibility="Collapsed" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextSecondary}" Text="Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com."/>
       </StackPanel>
      </ScrollViewer>
@@ -771,7 +812,7 @@ function Tr([string]$text){
        <TextBlock x:Name="AboutProviders" Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="AI Task Monitor показывает активные задачи и текущее действие. Сейчас поддерживаются Codex и Claude Code."/>
        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="При нескольких источниках можно переключать задачи по вкладкам. Компактное окно остаётся поверх других и показывает до трёх задач с переключением между ними. Тему можно выбрать вручную или использовать тему Windows. Если источник недоступен, приложение сообщит об этом."/>
        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Если задача публикует план, приложение показывает выполненные, текущий и следующие этапы. В карточке одновременно видны до пяти этапов; остальные можно прокрутить. Без плана отображается текущее действие без списка этапов."/>
-       <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Точный процент показывается числом, приблизительная оценка — со знаком ≈. Если процент рассчитан по плану, он отражает долю выполненных этапов, а не всей работы. Без надёжной оценки процент скрыт."/>
+       <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Если источник сообщает общий прогресс задачи, точный процент показывается числом, а приблизительный — со знаком ≈. Если известен только план, показывается текущий этап или число завершённых этапов."/>
        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Диагностический журнал хранится локально. В настройках можно выбрать срок и размер хранения, просмотреть события или очистить журнал."/>
        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Приложение может предупредить о возможном цикле при повторных ошибках одной команды. Это предположение, оно не останавливает задачу."/>
        <TextBlock Margin="0,12,0,8" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Данные задач обрабатываются локально. Для Claude Code после подключения используются локальные hooks. Самому монитору не нужны вход в аккаунт, токены или права администратора."/>
@@ -920,6 +961,7 @@ $tasksScrollBar = $window.FindName("TasksScrollBar")
 $providerTabsHost = $window.FindName("ProviderTabsHost")
 $providerTabsShape = $window.FindName("ProviderTabsShape")
 $providerTabsPanel = $window.FindName("ProviderTabsPanel")
+$providerTabsScroll = $window.FindName("ProviderTabsScroll")
 $pinButton = $window.FindName("PinButton")
 $pinIcon = $window.FindName("PinIcon")
 $minimizeButton = $window.FindName("MinimizeButton")
@@ -940,6 +982,12 @@ $settingsScrollBar = $window.FindName("SettingsScrollBar")
 $aboutSettingsButton = $window.FindName("AboutSettingsButton")
 $feedbackEmailBox = $window.FindName("FeedbackEmailBox")
 $feedbackEmailLink = $window.FindName("FeedbackEmailLink")
+$feedbackCopyButton = $window.FindName("FeedbackCopyButton")
+$feedbackCopyGlyph = $window.FindName("FeedbackCopyGlyph")
+$feedbackAddress=[Windows.Documents.TextRange]::new($feedbackEmailLink.ContentStart,$feedbackEmailLink.ContentEnd).Text.Trim()
+$feedbackTypeface=[Windows.Media.Typeface]::new($feedbackEmailBox.Document.FontFamily,$feedbackEmailBox.Document.FontStyle,$feedbackEmailBox.Document.FontWeight,$feedbackEmailBox.Document.FontStretch)
+$feedbackMetrics=[Windows.Media.FormattedText]::new($feedbackAddress,[Globalization.CultureInfo]::CurrentUICulture,[Windows.FlowDirection]::LeftToRight,$feedbackTypeface,$feedbackEmailBox.Document.FontSize,[Windows.Media.Brushes]::Black,[Windows.Media.VisualTreeHelper]::GetDpi($window).PixelsPerDip)
+$feedbackEmailBox.Width=[Math]::Ceiling($feedbackMetrics.WidthIncludingTrailingWhitespace)+20
 $feedbackError = $window.FindName("FeedbackError")
 $aboutBackButton = $window.FindName("AboutBackButton")
 $aboutHeading = $window.FindName("AboutHeading")
@@ -984,6 +1032,8 @@ $languageSettingsError = $window.FindName("LanguageSettingsError")
 $codexSourceStatus = $window.FindName("CodexSourceStatus")
 $claudeSourceStatus = $window.FindName("ClaudeSourceStatus")
 $claudeSourceAction = $window.FindName("ClaudeSourceAction")
+$openCodeSourceStatus = $window.FindName("OpenCodeSourceStatus")
+$openCodeSourceAction = $window.FindName("OpenCodeSourceAction")
 $script:isCompact = $false
 $script:showingSettings = $false
 $script:showingAbout = $false
@@ -1001,9 +1051,12 @@ $script:journalUiError = ""
 $script:navigationByKeyboard = $false
 $script:expandedBounds = $null
 $script:selectedProvider = $PreviewProvider
+$script:providerTabsFingerprint = ""
+$script:providerLastSelected = ""
 $script:cardRadius = 12.0
 $script:tabPadding = 3.0
 $script:previewHintTarget = $null
+$providerTabsScroll.Add_PreviewMouseWheel({param($sender,$event) if($sender.ScrollableWidth -gt 0){$sender.ScrollToHorizontalOffset($sender.HorizontalOffset - $event.Delta);$event.Handled=$true}})
 $tasksScroll.Add_ScrollChanged({
  $tasksScrollBar.Maximum=$tasksScroll.ScrollableHeight
  $tasksScrollBar.ViewportSize=$tasksScroll.ViewportHeight
@@ -1060,6 +1113,7 @@ function Update-SquircleGeometry {
  }
  if($providerTabsHost.ActualWidth -gt 0 -and $providerTabsHost.ActualHeight -gt 0){
   $providerTabsShape.Data=Squircle-Geometry $providerTabsHost.ActualWidth $providerTabsHost.ActualHeight $script:cardRadius 0
+  $providerTabsHost.Clip=Squircle-Geometry $providerTabsHost.ActualWidth $providerTabsHost.ActualHeight $script:cardRadius 0
  }
 }
 
@@ -1181,6 +1235,7 @@ function Apply-Language([string]$mode,[bool]$persist) {
  foreach($original in $script:staticResourceKeys.Keys){$window.Resources[$script:staticResourceKeys[$original]]=Tr $original}
  $window.Language=[Windows.Markup.XmlLanguage]::GetLanguage($(if($script:resolvedLanguage -eq 'ru'){'ru-RU'}else{'en-US'}))
  $aboutVersionText.Text=$(if($script:resolvedLanguage -eq 'en'){'AI task monitor · version '}else{'AI task monitor · версия '})+$script:currentVersion.Replace('-',' ')
+ if($feedbackError.Visibility -eq 'Visible' -and $feedbackError.Tag){$feedbackError.Text=Tr ([string]$feedbackError.Tag)}
  if($script:isStoreEdition){$aboutUpdatesText.Text=Tr 'Обновления этой версии устанавливаются через Microsoft Store. Отзыв можно написать через почтовое приложение; сообщение отправляется только по вашему решению.'}
  if($null -ne (Get-Variable -Scope Script -Name trayShowMenu -ErrorAction SilentlyContinue)){$script:trayShowMenu.Text=Tr 'Развернуть';$script:trayExitMenu.Text=Tr 'Выход'}
  Update-LanguageButtons
@@ -1268,6 +1323,7 @@ function Claude-InstallationState([string]$profile,[string]$appData,[string]$loc
 
 function Update-SourceSettings {
  $codexSourceStatus.Text=Tr $(if($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
+ Update-OpenCodeSourceSettings
  $installation=Claude-InstallationState $env:USERPROFILE $env:APPDATA $env:LOCALAPPDATA $env:PATH
  try{$connectionState=Claude-ConnectionState;$connected=$connectionState -eq "connected"}
  catch{
@@ -1290,6 +1346,28 @@ function Update-SourceSettings {
  $claudeSourceAction.Tag=$(if($connected){"Remove"}else{"Install"})
  if($connectionState -eq "partial"){$claudeSourceAction.ToolTip=Tr "Подключение неполное. Нажмите, чтобы восстановить."}
  [Windows.Automation.AutomationProperties]::SetName($claudeSourceAction,$claudeSourceAction.Content+" Claude Code")
+}
+
+function Update-OpenCodeSourceSettings {
+ $openCodeSourceAction.Visibility='Visible';$openCodeSourceAction.IsEnabled=$false
+ $openCodeSourceAction.Content=Tr 'Подключить';$openCodeSourceAction.Tag='';$openCodeSourceAction.ToolTip=$null
+ try {
+  if(-not $script:externalProviderModulesAvailable){throw 'Provider runtime unavailable.'}
+  $state=Get-OpenCodeConnectionState -AppRoot $PSScriptRoot
+  if($state -in @('connected','partial')){
+   $openCodeSourceStatus.Text=Tr $(if($state -eq 'partial'){'Подключён частично'}elseif($script:sourceErrors -contains 'OpenCode'){'Нет данных'}else{'Подключён'})
+   $openCodeSourceAction.IsEnabled=$true;$openCodeSourceAction.Content=Tr 'Отключить';$openCodeSourceAction.Tag='Remove'
+  }else{
+   $installed=Test-OpenCodePotentialInstallation
+   $openCodeSourceStatus.Text=Tr $(if($installed){'Не подключён'}else{'Установка не подтверждена'})
+   $openCodeSourceAction.IsEnabled=$installed
+   if($installed){$openCodeSourceAction.Tag='Install'}else{$openCodeSourceAction.ToolTip=Tr 'Не удалось подтвердить установку или совместимость OpenCode'}
+  }
+ }catch{
+  $openCodeSourceStatus.Text=Tr 'Нет данных'
+  $openCodeSourceAction.ToolTip=Tr 'Не удалось прочитать подключение OpenCode'
+ }
+ [Windows.Automation.AutomationProperties]::SetName($openCodeSourceAction,$openCodeSourceAction.Content+' OpenCode')
 }
 
 function Apply-Theme([string]$mode,[bool]$persist) {
@@ -1861,7 +1939,7 @@ function Claude-Tasks {
 }
 
 function Source-Snapshot {
- $codex=@(); $claude=@(); $unavailable=New-Object Collections.Generic.List[string]
+ $codex=@(); $claude=@(); $external=@(); $unavailable=New-Object Collections.Generic.List[string]
  try{$codex=@(Codex-Tasks);$script:lastCodexTasks=$codex}catch{[void]$unavailable.Add("Codex");$codex=@(Unconfirmed-Tasks $script:lastCodexTasks)}
  try{
   $connectionState=if($ClaudeEventFile){"connected"}else{Claude-ConnectionState}
@@ -1869,7 +1947,27 @@ function Source-Snapshot {
   elseif($connectionState -eq "partial"){$claude=@(Unconfirmed-Tasks @(Claude-Tasks));$script:lastClaudeTasks=$claude;[void]$unavailable.Add("Claude Code")}
   else{$script:lastClaudeTasks=@()}
  }catch{[void]$unavailable.Add("Claude Code");$claude=@(Unconfirmed-Tasks $script:lastClaudeTasks)}
- return [PSCustomObject]@{Tasks=@($codex+$claude);Unavailable=$unavailable.ToArray()}
+ if($script:externalProviderModulesAvailable){
+  try{
+   $connection=Get-OpenCodeConnectionState -AppRoot $PSScriptRoot
+   if($connection -eq 'connected'){
+    $script:lastOpenCodeConnected=$true
+    $external=@(Read-ManagedExternalProviderSnapshot -Controller $script:externalProviderController -AllowedProviders @('opencode') -Language $script:resolvedLanguage)
+    $script:lastExternalTasks=$external
+   }elseif($connection -eq 'partial'){
+    [void]$unavailable.Add('OpenCode')
+    $external=@(Unconfirmed-ExternalTasks $script:lastExternalTasks)
+    Stop-ExternalProviderController $script:externalProviderController
+   }else{
+    Stop-ExternalProviderController $script:externalProviderController
+    $script:lastOpenCodeConnected=$false;$script:lastExternalTasks=@()
+   }
+  }catch{
+   if($script:lastOpenCodeConnected){[void]$unavailable.Add('OpenCode');$external=@(Unconfirmed-ExternalTasks $script:lastExternalTasks)}
+   try{Stop-ExternalProviderController $script:externalProviderController}catch{}
+  }
+ }
+ return [PSCustomObject]@{Tasks=@($codex+$claude+$external);Unavailable=$unavailable.ToArray()}
 }
 
 function Sync-ClaudeLoopChannel {
@@ -1954,6 +2052,15 @@ function Unconfirmed-Tasks($tasks) {
   $copy=$task.PSObject.Copy()
   $copy.Active=$false; $copy.Status="Статус не подтверждён"; $copy.Activity="Статус не подтверждён"
   if($null -eq $copy.PSObject.Properties['ActivityGenerated']){$copy|Add-Member -MemberType NoteProperty -Name ActivityGenerated -Value $true}else{$copy.ActivityGenerated=$true}
+  $copy
+ }
+}
+
+function Unconfirmed-ExternalTasks($tasks) {
+ foreach($task in $tasks){
+  $copy=$task.PSObject.Copy()
+  $copy.Active=$false;$copy.Paused=$false;$copy.Status='Статус не подтверждён';$copy.Activity='Статус не подтверждён'
+  $copy.PlanConfirmed=$false
   $copy
  }
 }
@@ -2049,12 +2156,24 @@ function Add-ConditionalHint($block,[string]$text,[ValidateSet("line","wrap")][s
 function Progress-Label($task) {
  $kind=[string](Prop $task "ProgressKind" "none")
  $value=Prop $task "Progress"
+ $steps=@(Prop $task "Steps" @())
+ $basis=[string](Prop $task "ProgressBasis" "")
+ if(-not $basis){$basis=if($steps.Count -gt 0){"steps"}else{"task"}}
+ if(($kind -eq "none" -or $null -eq $value) -and $steps.Count -gt 0){$basis="steps"}
+ if($basis -eq "steps"){
+  if($steps.Count -eq 0 -or -not [bool](Prop $task "PlanConfirmed" $true) -or [string](Prop $task "Status" "") -eq "Статус не подтверждён"){return ""}
+  $active=@();$done=0
+  for($i=0;$i -lt $steps.Count;$i++){
+   $state=[string](Prop $steps[$i] "status" "")
+   if($state -notin @("done","active","pending")){return ""}
+   if($state -eq "active"){$active+=($i+1)}elseif($state -eq "done"){$done++}
+  }
+  if($active.Count -eq 1){if($script:resolvedLanguage -eq 'en'){return "Step $($active[0]) of $($steps.Count)"}else{return "Этап $($active[0]) из $($steps.Count)"}}
+  if($script:resolvedLanguage -eq 'en'){return "Done $done of $($steps.Count)"}else{return "Готово $done из $($steps.Count)"}
+ }
  if($kind -eq "none" -or $null -eq $value){return ""}
  $prefix=if($kind -eq "approximate"){"≈ "}else{""}
- $basis=[string](Prop $task "ProgressBasis" "")
- if(-not $basis){$basis=if(@(Prop $task "Steps" @()).Count -gt 0){"steps"}else{"task"}}
- $suffix=if($basis -eq "steps"){if($script:resolvedLanguage -eq 'en'){' of steps'}else{' этапов'}}else{""}
- return $prefix+([int]$value).ToString()+"%"+$suffix
+ return $prefix+([int]$value).ToString()+"%"
 }
 
 function Localized-TaskTitle($task) {
@@ -2301,7 +2420,8 @@ function Prioritize-Tasks($tasks,$previous,[string]$selectedId) {
   $newTurn=$newKey -and $newKey -cne $oldKey
   $started=[DateTime](Prop $task "Started" ([DateTime]::MinValue))
   $recentUnconfirmed=-not $task.Active -and [string](Prop $task "Status" "") -eq "Статус не подтверждён" -and $newKey -and $started -ne [DateTime]::MinValue -and $started.ToUniversalTime() -ge $script:monitorStartedUtc
-  if(-not $task.Active -and -not $recentUnconfirmed){continue}
+  $recentWaiting=-not $task.Active -and [string](Prop $task "Status" "") -eq "Ожидает подтверждения" -and $newKey -and $started -ne [DateTime]::MinValue -and $started.ToUniversalTime() -ge $script:monitorStartedUtc
+  if(-not $task.Active -and -not $recentUnconfirmed -and -not $recentWaiting){continue}
   $becameActive=$null -ne $old -and -not $old.Active -and (-not $newKey -or -not $oldKey)
   if($null -eq $old -or $newTurn -or ($task.Active -and $becameActive)){$activated.Add($task)}
  }
@@ -2484,7 +2604,24 @@ function Open-FeedbackDraft {
   $info.FileName=Get-FeedbackUri; $info.UseShellExecute=$true
   [void][Diagnostics.Process]::Start($info)
   $feedbackError.Visibility="Collapsed"
- }catch{$feedbackError.Visibility="Visible"}
+ }catch{$feedbackError.Tag='Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com.';$feedbackError.Text=Tr ([string]$feedbackError.Tag);$feedbackError.Visibility="Visible"}
+}
+
+function Copy-FeedbackEmail {
+ try{
+  $address=[Windows.Documents.TextRange]::new($feedbackEmailLink.ContentStart,$feedbackEmailLink.ContentEnd).Text.Trim()
+  if(-not $address){throw 'The feedback address is unavailable.'}
+  if($PreviewAboutUiTest -and $script:previewClipboardFailure){throw 'Simulated clipboard failure.'}
+  if($PreviewAboutUiTest -and -not $PreviewClipboardUiTest){$script:previewClipboardText=$address}
+  else{
+   [Windows.Clipboard]::SetText($address)
+   if($PreviewAboutUiTest){$script:previewClipboardText=[Windows.Clipboard]::GetText()}
+  }
+  $feedbackError.Visibility='Collapsed'
+ }catch{
+  $feedbackError.Tag='Не удалось скопировать адрес. Выделите его и скопируйте вручную.'
+  $feedbackError.Text=Tr ([string]$feedbackError.Tag);$feedbackError.Visibility='Visible'
+ }
 }
 
 function Show-TasksView([bool]$keyboardNavigation = $false) {
@@ -2793,6 +2930,7 @@ function Add-ProviderTab([string]$id,[string]$label,[int]$count){
  $button.Content=$surfaceGrid
  $button.DataContext=$tabShape
  $button.Add_SizeChanged({param($sender,$args) if($sender.ActualWidth -gt 0 -and $sender.ActualHeight -gt 0){$sender.DataContext.Data=Squircle-Geometry $sender.ActualWidth $sender.ActualHeight ($script:cardRadius-$script:tabPadding) 0}})
+ $button.Add_GotKeyboardFocus({param($sender,$args) $sender.BringIntoView()})
  $button.Add_MouseEnter({param($sender,$args) if($script:selectedProvider -ne [string]$sender.Tag){$sender.DataContext.Fill=Brush $script:palette.Hover}})
  $button.Add_MouseLeave({param($sender,$args) if($script:selectedProvider -ne [string]$sender.Tag){$sender.DataContext.Fill=[Windows.Media.Brushes]::Transparent}})
  [Windows.Automation.AutomationProperties]::SetName($button,$(if($script:resolvedLanguage -eq 'en'){"Show tasks: $label, $count"}else{"Показать задачи: $label, $count"}))
@@ -2804,14 +2942,27 @@ function Add-ProviderTab([string]$id,[string]$label,[int]$count){
 function Render-ProviderTabs($tasks){
  $providers=@($tasks|ForEach-Object{[string]$_.Provider}|Where-Object{$_}|Sort-Object -Unique)
  $script:showProviderLabels=$providers.Count -ge 2
- if($providers.Count -lt 2){$providerTabsHost.Visibility="Collapsed";$script:selectedProvider="all";return}
+ if($providers.Count -lt 2){$providerTabsHost.Visibility="Collapsed";$script:selectedProvider="all";$script:providerTabsFingerprint="";return}
  if($script:selectedProvider -ne "all" -and $script:selectedProvider -notin $providers){$script:selectedProvider="all"}
- $providerTabsHost.Visibility="Visible";$providerTabsPanel.Children.Clear()
+ $definitions=@(@("codex","Codex"),@("claude","Claude Code"),@("kimi","Kimi Code"),@("deepseek","DeepSeek Harness"),@("hermes","Hermes Agent"),@("opencode","OpenCode"))
+ $tabState=($definitions|ForEach-Object{if($_[0] -in $providers){$id=$_[0];"${id}:$(@($tasks|Where-Object {$_.Active -and $_.Provider -eq $id}).Count)"}})-join '|'
+ $tabFingerprint="$script:selectedProvider|$script:resolvedLanguage|$script:accentHex|$($script:palette.Secondary)|$($script:palette.Hover)|$tabState"
+ $providerTabsHost.Visibility="Visible"
+ $oldOffset=$providerTabsScroll.HorizontalOffset
+ if($script:providerTabsFingerprint -eq $tabFingerprint -and $providerTabsPanel.Children.Count -gt 0){return}
+ $selectionChanged=$script:providerLastSelected -ne $script:selectedProvider
+ $oldFocused=@($providerTabsPanel.Children|Where-Object {$_.IsKeyboardFocusWithin}|Select-Object -First 1)
+ $focusedId=if($oldFocused.Count){[string]$oldFocused[0].Tag}else{""}
+ $providerTabsPanel.Children.Clear()
+ $script:providerTabsFingerprint=$tabFingerprint
+ $script:providerLastSelected=$script:selectedProvider
  Add-ProviderTab "all" (Tr "Все") @($tasks|Where-Object Active).Count
- Add-ProviderTab "codex" "Codex" @($tasks|Where-Object {$_.Active -and $_.Provider -eq "codex"}).Count
- Add-ProviderTab "claude" "Claude Code" @($tasks|Where-Object {$_.Active -and $_.Provider -eq "claude"}).Count
+ foreach($definition in $definitions){$id=$definition[0];if($id -in $providers){Add-ProviderTab $id $definition[1] @($tasks|Where-Object {$_.Active -and $_.Provider -eq $id}).Count}}
  if($providerTabsPanel.Children.Count -gt 0){$providerTabsPanel.Children[$providerTabsPanel.Children.Count-1].Margin=New-Object Windows.Thickness(0)}
  $providerTabsHost.UpdateLayout()
+ $providerTabsScroll.ScrollToHorizontalOffset($oldOffset)
+ if($selectionChanged){$selectedTab=@($providerTabsPanel.Children|Where-Object {[string]$_.Tag -eq $script:selectedProvider}|Select-Object -First 1);if($selectedTab.Count){$selectedTab[0].BringIntoView()}}
+ if($focusedId){$replacement=@($providerTabsPanel.Children|Where-Object {[string]$_.Tag -eq $focusedId}|Select-Object -First 1);if($replacement.Count){$replacement[0].Focus()|Out-Null}}
  Update-SquircleGeometry
 }
 
@@ -2822,9 +2973,16 @@ function Update-View {
   $allTasks=@($sourceSnapshot.Tasks)
   $script:sourceErrors=@($sourceSnapshot.Unavailable)
   if($PreviewActiveTasks -ge 0){
-   $previewTitles=@("Создать индикатор прогресса задач","Задача Claude Code","Задача Claude Code")
-   $previewActivities=@("Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний","Запускаю визуальную проверку","Собираю данные для переноса")
-   $previewProgress=@(50,33,$null);$previewKinds=@("exact","exact","none");$previewProviders=@("codex","claude","claude");$previewProviderNames=@("Codex","Claude Code","Claude Code")
+   $previewTitles=@("Создать индикатор прогресса задач","Задача Claude Code","Задача Claude Code","Задача DeepSeek Harness","Задача Hermes Agent","Задача OpenCode")
+   $previewActivities=@("Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний","Запускаю визуальную проверку","Собираю данные для переноса","Проверяю план","Проверяю данные","Выполняю действие")
+   $previewProgress=@(50,33,$null,$null,$null,$null);$previewKinds=@("exact","exact","none","none","none","none");$previewProviders=@("codex","claude","claude","deepseek","hermes","opencode");$previewProviderNames=@("Codex","Claude Code","Claude Code","DeepSeek Harness","Hermes Agent","OpenCode")
+   if($PreviewManyProviders){
+    $previewProviders[2]='kimi';$previewProviderNames[2]='Kimi Code'
+    foreach($previewIndex in 2..5){
+     $previewTitles[$previewIndex]=if($script:resolvedLanguage -eq 'en'){$previewProviderNames[$previewIndex]+' task'}else{'Задача '+$previewProviderNames[$previewIndex]}
+     $previewActivities[$previewIndex]='Выполняет действие'
+    }
+   }
    $allTasks=@()
    for($i=0;$i -lt $PreviewActiveTasks;$i++){
     $previewSteps=$(if($i -eq 0){
@@ -2857,7 +3015,7 @@ function Update-View {
      if($PreviewScenario -eq "unplanned"){$previewSteps=@();$previewValue=$null;$previewKind="none"}
     }
     $previewTime=[DateTime]::Now.AddSeconds(-$i)
-    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр";PlanConfirmed=(-not ($PreviewPlanUnconfirmed -and $i -eq 0))}
+    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;ActivityGenerated=($PreviewManyProviders -and $i -ge 2);Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр";PlanConfirmed=(-not ($PreviewPlanUnconfirmed -and $i -eq 0))}
    }
   }
   $ordered=Prioritize-Tasks $allTasks $previousAllTasks $script:compactTaskId
@@ -2911,6 +3069,7 @@ $aboutSettingsButton.Add_PreviewMouseLeftButtonDown({$script:navigationByKeyboar
 $aboutSettingsButton.Add_PreviewKeyDown({param($sender,$eventArgs) if($eventArgs.Key -in @([Windows.Input.Key]::Enter,[Windows.Input.Key]::Space)){$script:navigationByKeyboard=$true}})
 $aboutSettingsButton.Add_Click({Show-AboutView $script:navigationByKeyboard;$script:navigationByKeyboard=$false})
 $feedbackEmailLink.Add_Click({Open-FeedbackDraft})
+$feedbackCopyButton.Add_Click({Copy-FeedbackEmail})
 $aboutBackButton.Add_PreviewMouseLeftButtonDown({$script:navigationByKeyboard=$false;[Windows.Input.Keyboard]::ClearFocus()|Out-Null})
 $aboutBackButton.Add_PreviewKeyDown({param($sender,$eventArgs) if($eventArgs.Key -in @([Windows.Input.Key]::Enter,[Windows.Input.Key]::Space)){$script:navigationByKeyboard=$true}})
 $aboutBackButton.Add_Click({Show-SettingsView $script:navigationByKeyboard $false $true;$script:navigationByKeyboard=$false})
@@ -2959,6 +3118,17 @@ $claudeSourceAction.Add_Click({
   Update-View
  }catch{$claudeSourceStatus.Text=Tr "Ошибка подключения"}
 })
+$openCodeSourceAction.Add_Click({
+ $mode=[string]$openCodeSourceAction.Tag
+ if($mode -notin @('Install','Remove')){return}
+ $configScript=Join-Path $PSScriptRoot 'Configure-OpenCodeIntegration.ps1'
+ if(-not (Test-Path -LiteralPath $configScript)){$openCodeSourceStatus.Text=Tr 'Файл настройки не найден';return}
+ try{
+  Invoke-HiddenProviderSetup $configScript $mode
+  Update-SourceSettings
+  Update-View
+ }catch{$openCodeSourceStatus.Text=Tr 'Ошибка подключения';$openCodeSourceAction.ToolTip=Tr 'Не удалось подтвердить установку или совместимость OpenCode'}
+})
 $closeButton.Add_Click({$window.Close()})
 $compactCloseButton.Add_Click({$window.Close()})
 $settingsCloseButton.Add_Click({$window.Close()})
@@ -2967,7 +3137,7 @@ $journalCloseButton.Add_Click({$window.Close()})
 $windowFrame.Add_SizeChanged({Update-SquircleGeometry})
 $tray=New-Object Windows.Forms.NotifyIcon; $tray.Icon=if($null -ne $script:applicationIcon){$script:applicationIcon}else{[Drawing.SystemIcons]::Application}; $tray.Text="AI task monitor"; $tray.Visible=$true; $tray.Add_DoubleClick({Restore-Window})
 $menu=New-Object Windows.Forms.ContextMenuStrip; $script:trayShowMenu=$menu.Items.Add("Развернуть"); $script:trayExitMenu=$menu.Items.Add("Выход"); $script:trayShowMenu.Add_Click({Restore-Window;Set-CompactMode $false}); $script:trayExitMenu.Add_Click({$window.Close()}); $tray.ContextMenuStrip=$menu
-$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
+$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
 if($script:diagnosticModulesAvailable -and (($PreviewActiveTasks -lt 0 -and -not $SnapshotFile) -or $DiagnosticDirectory)){
@@ -2998,6 +3168,22 @@ if($PreviewUpdate){$script:availableUpdate=[PSCustomObject]@{Version='0.3.0-alph
 if ($SnapshotFile) {
  if($PreviewOffscreen){$window.WindowStartupLocation="Manual";$window.Left=-10000;$window.Top=-10000;$window.ShowActivated=$false;$window.ShowInTaskbar=$false}
  $window.Show(); $window.UpdateLayout()
+ if($PreviewTabsUiTest){
+  if($providerTabsPanel.Children.Count -ne 7 -or $providerTabsScroll.ScrollableWidth -le 0){throw 'The six-provider tab row must overflow in one scrollable row.'}
+  $providerTabsScroll.ScrollToHorizontalOffset($providerTabsScroll.ScrollableWidth);$window.UpdateLayout()
+  $endOffset=$providerTabsScroll.HorizontalOffset
+  if($endOffset -le 0){throw 'The provider tab row did not scroll horizontally.'}
+  $lastTab=@($providerTabsPanel.Children|Where-Object {[string]$_.Tag -eq 'opencode'}|Select-Object -First 1)
+  if($lastTab.Count -ne 1){throw 'The last provider tab is missing.'}
+  $lastTab[0].RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent));$window.UpdateLayout()
+  if($script:selectedProvider -ne 'opencode' -or @($script:lastTasks).Count -ne 1 -or $providerTabsScroll.HorizontalOffset -le 0){throw 'The last provider tab did not select its task while remaining visible.'}
+  $expectedTitle=if($script:resolvedLanguage -eq 'en'){'OpenCode task'}else{'Задача OpenCode'}
+  $expectedActivity=Tr 'Выполняет действие'
+  if((Localized-TaskTitle $script:lastTasks[0]) -cne $expectedTitle -or (Localized-TaskActivity $script:lastTasks[0]) -cne $expectedActivity){throw 'The generated provider preview is not localized.'}
+  Update-View;$window.UpdateLayout()
+  if($providerTabsScroll.HorizontalOffset -le 0){throw 'Refreshing the tasks reset the horizontal tab scroll.'}
+  Write-Output 'Provider tabs: overflow, selection and scroll preservation verified.'
+ }
  if($PreviewPlanUiTest){
   function Find-PlanText($parent,[string]$expected){
    if($parent -is [Windows.Controls.TextBlock] -and $parent.Text -ceq $expected -and $parent.IsVisible){return $true}
@@ -3007,13 +3193,14 @@ if ($SnapshotFile) {
    return $false
   }
   $root=if($script:isCompact){$compactTasksPanel}else{$tasksPanel}
-  $expectedProgress=if($script:resolvedLanguage -eq 'en'){'50% of steps'}else{'50% этапов'}
-  if(-not (Find-PlanText $root $expectedProgress)){throw 'The plan percentage is not identified as a fraction of steps.'}
+  $expectedProgress=if($script:resolvedLanguage -eq 'en'){'Step 5 of 8'}else{'Этап 5 из 8'}
+  if(-not $PreviewPlanUnconfirmed -and -not (Find-PlanText $root $expectedProgress)){throw 'The current plan step is not displayed.'}
+  if($PreviewPlanUnconfirmed -and (Find-PlanText $root $expectedProgress)){throw 'An unconfirmed plan must not claim a current step.'}
   if($PreviewPlanUnconfirmed){
    $expected=if($script:isCompact){Tr 'План не подтверждён'}else{(Tr 'План не подтверждён')+' · 8'+(Tr ' этапов')+' · '+$script:lastAllTasks[0].Updated.ToString('HH:mm')}
    if(-not (Find-PlanText $root $expected)){throw 'The previous plan is not visibly marked unconfirmed.'}
   }
-  Write-Output 'Plan UI: step percentage and confirmation state verified.'
+  Write-Output 'Plan UI: current step and confirmation state verified.'
  }
  if($PreviewLanguageUiTest){
   $originalTitle=[string]$script:lastAllTasks[0].Title
@@ -3121,6 +3308,23 @@ if ($SnapshotFile) {
   if($settingsView.Visibility -ne "Visible" -or $aboutView.Visibility -ne "Collapsed"){throw "The About back action did not return to settings."}
   $feedbackEmailBox.SelectAll()
   if($feedbackEmailBox.Selection.Text.Trim() -cne 'truea.k.a.ru@gmail.com'){throw 'The feedback address cannot be selected for copying.'}
+  $window.UpdateLayout()
+  $emailFirst=$feedbackEmailLink.ContentStart.GetCharacterRect([Windows.Documents.LogicalDirection]::Forward)
+  $emailLast=$feedbackEmailLink.ContentEnd.GetCharacterRect([Windows.Documents.LogicalDirection]::Backward)
+  if($feedbackEmailBox.ActualWidth -lt 100 -or [Math]::Abs($emailFirst.Top-$emailLast.Top) -gt 1){throw 'The feedback address must remain on a single line.'}
+  $copyPosition=$feedbackCopyButton.TranslatePoint([Windows.Point]::new(0,0),$settingsScroll)
+  $emailEnd=$feedbackEmailBox.TranslatePoint([Windows.Point]::new($emailLast.Right,0),$settingsScroll)
+  $glyphPosition=$feedbackCopyGlyph.TranslatePoint([Windows.Point]::new(0,0),$settingsScroll)
+  if([Math]::Abs(($glyphPosition.X-$emailEnd.X)-16) -gt 2){throw 'The feedback copy icon must be 16 pixels from the email text.'}
+  if($feedbackCopyButton.ActualWidth -lt 24 -or $copyPosition.X -lt 0 -or $copyPosition.X+$feedbackCopyButton.ActualWidth -gt $settingsScroll.ViewportWidth+1){throw 'The feedback copy action is clipped.'}
+  if([Windows.Automation.AutomationProperties]::GetName($feedbackCopyButton) -cne (Tr 'Скопировать адрес') -or -not $feedbackCopyButton.IsTabStop){throw 'The feedback copy action is not accessible.'}
+  $script:previewClipboardText='';$script:previewClipboardFailure=$false
+  $feedbackCopyButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+  if($script:previewClipboardText -cne 'truea.k.a.ru@gmail.com'){throw 'The copy action did not request the feedback address.'}
+  $script:previewClipboardFailure=$true
+  $feedbackCopyButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+  if($feedbackError.Visibility -ne 'Visible' -or $feedbackError.Text -cne (Tr 'Не удалось скопировать адрес. Выделите его и скопируйте вручную.')){throw 'A clipboard error was not shown.'}
+  $script:previewClipboardFailure=$false;$feedbackError.Visibility='Collapsed'
   $script:previewFeedbackClicks=0
   $feedbackEmailLink.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Documents.Hyperlink]::ClickEvent))
   if($script:previewFeedbackClicks -ne 1){throw 'The feedback address does not open the feedback action.'}
@@ -3341,6 +3545,11 @@ if ($SnapshotFile) {
   Show-SettingsView
   if($PreviewSettingsBackHover){$settingsBackButton.Background=Brush $script:palette.Hover}
   $window.UpdateLayout()
+  if($PreviewSources){
+   $point=$openCodeSourceAction.TranslatePoint([Windows.Point]::new(0,0),$settingsScroll)
+   $settingsScroll.ScrollToVerticalOffset([Math]::Max(0,$settingsScroll.VerticalOffset+$point.Y-290))
+   $window.Dispatcher.Invoke([Action]{},[Windows.Threading.DispatcherPriority]::ApplicationIdle);$window.UpdateLayout()
+  }
   if($PreviewJournalClearConfirmation){$journalClearConfirmation.Visibility="Visible";Update-JournalSettings;$window.UpdateLayout()}
   if($PreviewJournalSettings -or $PreviewJournalClearConfirmation -or $JournalDropdownSnapshotFile){
    Reveal-JournalSettings

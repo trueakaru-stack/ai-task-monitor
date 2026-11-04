@@ -27,6 +27,11 @@ internal static class CodexProgressInstaller
             Extract("ClaudeRetention.cs", Path.Combine(installDirectory, "ClaudeRetention.cs"));
             Extract("AppShellIdentity.cs", Path.Combine(installDirectory, "AppShellIdentity.cs"));
             Extract("Configure-ClaudeIntegration.ps1", Path.Combine(installDirectory, "Configure-ClaudeIntegration.ps1"));
+            Extract("Configure-OpenCodeIntegration.ps1", Path.Combine(installDirectory, "Configure-OpenCodeIntegration.ps1"));
+            string integrationsDirectory = Path.Combine(installDirectory, "integrations");
+            Directory.CreateDirectory(integrationsDirectory);
+            foreach (string name in new[] { "ProviderEventView.ps1", "ProviderRuntime.ps1", "ProviderEventState.cs", "ProviderEventChannel.cs", "provider-events.mjs", "provider-observers.mjs", "provider-transport.mjs", "opencode-entry.js" })
+                Extract("integrations." + name, Path.Combine(integrationsDirectory, name));
             Extract("DiagnosticPolicy.ps1", Path.Combine(installDirectory, "DiagnosticPolicy.ps1"));
             Extract("DiagnosticStore.ps1", Path.Combine(installDirectory, "DiagnosticStore.ps1"));
             Extract("LoopDetection.ps1", Path.Combine(installDirectory, "LoopDetection.ps1"));

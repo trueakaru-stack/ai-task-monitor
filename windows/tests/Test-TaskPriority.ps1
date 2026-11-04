@@ -69,6 +69,13 @@ Require ($result.SelectedId -eq 'early') 'A repeated unconfirmed update stole ma
 $resumedUnknown = Task 'recent-unknown' $false 'turn-next' 23
 $result = Prioritize-Tasks @($early, $later, $resumedUnknown) @($early, $later, $recentUnknown) 'early'
 Require ($result.SelectedId -eq 'recent-unknown' -and $result.Tasks[0].Id -eq 'recent-unknown') 'A newly resumed unconfirmed task was not selected'
+$waitingLabel = -join @(1054,1078,1080,1076,1072,1077,1090,32,1087,1086,1076,1090,1074,1077,1088,1078,1076,1077,1085,1080,1103 | ForEach-Object { [char]$_ })
+$waiting = Task 'waiting' $false 'waiting-turn' 24
+$waiting.Status = $waitingLabel
+$result = Prioritize-Tasks @($early, $later, $waiting) @($early, $later) 'early'
+Require ($result.SelectedId -eq 'waiting' -and $result.Tasks[0].Id -eq 'waiting' -and -not $result.Tasks[0].Active) 'A new approval request was not selected as waiting.'
+$result = Prioritize-Tasks @($early, $later, $waiting) @($early, $later, $waiting) 'early'
+Require ($result.SelectedId -eq 'early') 'An unchanged approval request stole manual selection.'
 Write-Output 'Task priority: new tasks, resumed turns, manual selection and source recovery verified.'
 '@
 & ([scriptblock]::Create(($definitions -join "`n") + "`n" + $checks))

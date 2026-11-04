@@ -24,12 +24,16 @@ if($LASTEXITCODE -ne 0){throw 'The MSIX package could not be unpacked.'}
 if($manifest.Package.Identity.Name -cne $identity -or $manifest.Package.Identity.Publisher -cne $publisher -or
    $manifest.Package.Identity.Version -cne '1.0.0.0' -or $manifest.Package.Identity.ProcessorArchitecture -cne 'x64' -or
    $manifest.Package.Properties.PublisherDisplayName -cne $publisherDisplay){throw 'The MSIX package identity is incorrect.'}
-foreach($name in @('CodexProgress.ps1','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','ClaudeLoopChannel.cs','Configure-ClaudeIntegration.ps1','StoreClaudeHook.ps1','ReleaseUpdates.ps1','AI task monitor.exe','AITaskMonitor.Runtime.dll','store-channel.marker','LICENSE','assets\app-icon.ico','assets\StoreLogo.png','assets\Square44x44Logo.png','assets\Square150x150Logo.png')){
+foreach($name in @('CodexProgress.ps1','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','ClaudeLoopChannel.cs','Configure-ClaudeIntegration.ps1','Configure-OpenCodeIntegration.ps1','StoreClaudeHook.ps1','ReleaseUpdates.ps1','AI task monitor.exe','AITaskMonitor.Runtime.dll','store-channel.marker','LICENSE','assets\app-icon.ico','assets\StoreLogo.png','assets\Square44x44Logo.png','assets\Square150x150Logo.png')){
  if(-not (Test-Path -LiteralPath (Join-Path $unpack $name) -PathType Leaf)){throw ('Missing MSIX content: '+$name)}
 }
 $appRoot=Join-Path $PSScriptRoot '..\app'
-foreach($name in @('CodexProgress.ps1','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','Configure-ClaudeIntegration.ps1','ReleaseUpdates.ps1')){
+foreach($name in @('CodexProgress.ps1','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','Configure-ClaudeIntegration.ps1','Configure-OpenCodeIntegration.ps1','ReleaseUpdates.ps1')){
  if((Get-FileHash -LiteralPath (Join-Path $unpack $name) -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath (Join-Path $appRoot $name) -Algorithm SHA256).Hash){throw ('Packaged source differs: '+$name)}
+}
+foreach($name in @('ProviderEventView.ps1','ProviderRuntime.ps1','ProviderEventState.cs','ProviderEventChannel.cs','provider-events.mjs','provider-observers.mjs','provider-transport.mjs','opencode-entry.js')){
+ $relative=Join-Path 'integrations' $name
+ if((Get-FileHash -LiteralPath (Join-Path $unpack $relative) -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath (Join-Path $appRoot $relative) -Algorithm SHA256).Hash){throw ('Packaged integration differs: '+$relative)}
 }
 Add-Type -AssemblyName System.Drawing
 foreach($image in @(@('StoreLogo.png',50),@('Square44x44Logo.png',44),@('Square150x150Logo.png',150))){
