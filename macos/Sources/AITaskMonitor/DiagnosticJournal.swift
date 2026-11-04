@@ -30,15 +30,15 @@ enum DiagnosticEventType: String, Codable {
 
     var title: String {
         switch self {
-        case .taskObserved: return "Задача обнаружена"
-        case .taskUnconfirmed: return "Статус не подтверждён"
-        case .taskCompleted: return "Работа завершена"
-        case .taskInterrupted: return "Работа прервана"
-        case .sourceUnavailable: return "Источник недоступен"
-        case .sourceRecovered: return "Источник восстановлен"
-        case .toolStarted: return "Действие началось"
-        case .toolFinished: return "Действие завершено"
-        case .toolFailed: return "Ошибка действия"
+        case .taskObserved: return tr("Задача обнаружена", "Task observed")
+        case .taskUnconfirmed: return tr("Статус не подтверждён", "Status unconfirmed")
+        case .taskCompleted: return tr("Работа завершена", "Task completed")
+        case .taskInterrupted: return tr("Работа прервана", "Task interrupted")
+        case .sourceUnavailable: return tr("Источник недоступен", "Source unavailable")
+        case .sourceRecovered: return tr("Источник восстановлен", "Source restored")
+        case .toolStarted: return tr("Действие началось", "Action started")
+        case .toolFinished: return tr("Действие завершено", "Action completed")
+        case .toolFailed: return tr("Ошибка действия", "Action failed")
         }
     }
 }
@@ -314,6 +314,6 @@ final class DiagnosticJournal {
 
     private enum JournalError: LocalizedError {
         case fileAccess, unsafePermissions, foreignFile, invalidSettings, invalidEvent, randomFailure
-        var errorDescription: String? { "Не удалось безопасно открыть диагностический журнал." }
+        var errorDescription: String? { tr("Не удалось безопасно открыть диагностический журнал.", "Could not safely open the diagnostic journal.") }
     }
 }

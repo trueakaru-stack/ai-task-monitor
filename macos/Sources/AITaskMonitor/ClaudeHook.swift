@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Dispatch
 
 enum ClaudeHook {
     static func run() -> Int32 {
@@ -14,25 +15,42 @@ enum ClaudeHook {
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let events = directory.appendingPathComponent("claude-events-v2.jsonl")
-            let lockPath = directory.appendingPathComponent("claude-events.lock").path
-            let lockDescriptor = lockPath.withCString { open($0, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR) }
-            guard lockDescriptor >= 0 else { throw HookError.lock }
-            defer { Darwin.close(lockDescriptor) }
-            guard flock(lockDescriptor, LOCK_EX) == 0 else { throw HookError.lock }
-            defer { flock(lockDescriptor, LOCK_UN) }
-            try rotateIfNeeded(at: events)
-            let line = try JSONSerialization.data(withJSONObject: record) + Data([0x0A])
-            if !FileManager.default.fileExists(atPath: events.path) {
-                FileManager.default.createFile(atPath: events.path, contents: nil)
+            do {
+                let lockPath = directory.appendingPathComponent("claude-events.lock").path
+                let lockDescriptor = lockPath.withCString { open($0, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR) }
+                guard lockDescriptor >= 0 else { throw HookError.lock }
+                defer { Darwin.close(lockDescriptor) }
+                var lockInfo = stat()
+                guard fstat(lockDescriptor, &lockInfo) == 0, (lockInfo.st_mode & S_IFMT) == S_IFREG else { throw HookError.lock }
+                guard acquireEventLock(lockDescriptor) else { throw HookError.lock }
+                defer { flock(lockDescriptor, LOCK_UN) }
+                var existing = stat()
+                if lstat(events.path, &existing) == 0 && (existing.st_mode & S_IFMT) != S_IFREG { throw HookError.lock }
+                try rotateIfNeeded(at: events)
+                let line = try JSONSerialization.data(withJSONObject: record) + Data([0x0A])
+                let eventDescriptor = open(events.path, O_CREAT | O_WRONLY | O_APPEND | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+                guard eventDescriptor >= 0 else { throw HookError.lock }
+                let handle = FileHandle(fileDescriptor: eventDescriptor, closeOnDealloc: true)
+                defer { try? handle.close() }
+                var opened = stat()
+                guard fstat(eventDescriptor, &opened) == 0, (opened.st_mode & S_IFMT) == S_IFREG else { throw HookError.lock }
+                try handle.write(contentsOf: line)
             }
-            let handle = try FileHandle(forWritingTo: events)
-            defer { try? handle.close() }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: line)
             ClaudeLoopClient.send(input, profile: directory)
             return 0
         } catch {
             return ProcessInfo.processInfo.environment["AI_TASK_MONITOR_AUDIT"] == "1" ? 1 : 0
+        }
+    }
+
+    private static func acquireEventLock(_ descriptor: Int32) -> Bool {
+        let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+        while true {
+            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 { return true }
+            guard errno == EWOULDBLOCK || errno == EAGAIN else { return false }
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline else { return false }
+            usleep(useconds_t(max(1, min(UInt64(20_000), (deadline - now) / 1_000))))
         }
     }
 
@@ -88,8 +106,9 @@ enum ClaudeHook {
     }
 
     private static func rotateIfNeeded(at events: URL) throws {
-        guard let size = (try? events.resourceValues(forKeys: [.fileSizeKey]).fileSize), size > 8_388_608 else { return }
-        let tail = try FileHelpers.tail(of: events, maximumBytes: 4_194_304)
+        guard let policy = ClaudeRetentionPolicy.load(),
+              let size = (try? events.resourceValues(forKeys: [.fileSizeKey]).fileSize), size > policy.maximumMB * 1_000_000 else { return }
+        let tail = try FileHelpers.tail(of: events, maximumBytes: policy.maximumMB * 900_000)
         let trimmed = tail.split(separator: "\n", omittingEmptySubsequences: false).dropFirst().joined(separator: "\n")
         try Data(trimmed.utf8).write(to: events, options: .atomic)
     }

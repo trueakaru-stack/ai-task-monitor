@@ -9,5 +9,7 @@ final class FeedbackDraftTests: XCTestCase {
         XCTAssertEqual(parts.path, "truea.k.a.ru@gmail.com")
         XCTAssertEqual(parts.queryItems?.map(\.name), ["subject"])
         XCTAssertFalse(url.absoluteString.contains("body="))
+        XCTAssertEqual(String(FeedbackDraft.address.characters), "truea.k.a.ru@gmail.com")
+        XCTAssertEqual(FeedbackDraft.address.runs.first?.link, url)
     }
 }

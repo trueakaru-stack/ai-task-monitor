@@ -4,8 +4,8 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var store: TaskStore
     @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.system.rawValue
+    @AppStorage("languageMode") private var languageRaw = AppLanguage.system.rawValue
     @State private var confirmsJournalClear = false
-    @State private var feedbackError = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -13,64 +13,70 @@ struct SettingsView: View {
                 Image(systemName: "arrow.left").frame(width: 28, height: 28)
             }
             .buttonStyle(.plain)
-            .help("Назад")
-            .accessibilityLabel("Назад к задачам")
+            .help(tr("Назад", "Back"))
+            .accessibilityLabel(tr("Назад к задачам", "Back to tasks"))
             .padding(.horizontal, 20)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
-                    Text("Настройки").font(.system(size: 22, weight: .semibold))
-                    section("Внешний вид") {
-                        Picker("Тема", selection: $appearanceRaw) {
+                    Text(tr("Настройки", "Settings")).font(.system(size: 22, weight: .semibold))
+                    section(tr("Внешний вид", "Appearance")) {
+                        Picker(tr("Тема", "Theme"), selection: $appearanceRaw) {
                             ForEach(AppearanceMode.allCases) { mode in Text(mode.title).tag(mode.rawValue) }
                         }
                         .pickerStyle(.segmented)
                     }
-                    section("Источники") {
+                    section(tr("Язык", "Language")) {
+                        Picker(tr("Язык", "Language"), selection: $languageRaw) {
+                            ForEach(AppLanguage.allCases) { language in Text(language.title).tag(language.rawValue) }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                    section(tr("Источники", "Sources")) {
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("Claude Code").font(.system(size: 13, weight: .medium))
                                 Text(sourceDescription).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
                             }
                             Spacer(minLength: 20)
-                            Button(ClaudeIntegration.isConnected ? "Отключить" : "Подключить") {
+                            Button(ClaudeIntegration.isConnected ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
                                 store.setClaudeConnected(!ClaudeIntegration.isConnected)
                             }
-                            .disabled(!ClaudeIntegration.isClaudeInstalled || store.unavailableSources.contains(.claude))
+                            .disabled((!ClaudeIntegration.isClaudeInstalled && !ClaudeIntegration.isConnected && !claudePartiallyConnected) || (store.unavailableSources.contains(.claude) && !claudePartiallyConnected && !ClaudeIntegration.isConnected))
                         }
                         if !store.sourceMessage.isEmpty {
                             Text(store.sourceMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
                         }
                     }
-                    section("Журнал") {
+                    section(tr("Журнал", "Journal")) {
                         HStack {
-                            Text("Срок хранения").font(.system(size: 13))
+                            Text(tr("Срок хранения", "Retention period")).font(.system(size: 13))
                             Spacer()
-                            Picker("Срок хранения", selection: retentionDays) {
+                            Picker(tr("Срок хранения", "Retention period"), selection: retentionDays) {
                                 ForEach(1...7, id: \.self) { value in Text(dayLabel(value)).tag(value) }
                             }
                             .labelsHidden().pickerStyle(.menu).frame(width: 120)
                         }
                         HStack {
-                            Text("Максимальный размер").font(.system(size: 13))
+                            Text(tr("Максимальный размер", "Maximum size")).font(.system(size: 13))
                             Spacer()
-                            Picker("Максимальный размер", selection: maximumMB) {
-                                ForEach(1...10, id: \.self) { value in Text("\(value) МБ").tag(value) }
+                            Picker(tr("Максимальный размер", "Maximum size"), selection: maximumMB) {
+                                ForEach(1...10, id: \.self) { value in Text("\(value) \(tr("МБ", "MB"))").tag(value) }
                             }
                             .labelsHidden().pickerStyle(.menu).frame(width: 120)
                         }
                         HStack {
-                            Button("Открыть журнал") { store.openJournal() }
+                            Button(tr("Открыть журнал", "Open journal")) { store.openJournal() }
                             if !confirmsJournalClear {
-                                Button("Очистить") { confirmsJournalClear = true }
+                                Button(tr("Очистить", "Clear")) { confirmsJournalClear = true }
                             }
                         }
                         if confirmsJournalClear {
-                            Text("Очистить диагностический журнал?")
+                            Text(tr("Очистить диагностический журнал?", "Clear the diagnostic journal?"))
                                 .font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary)
                             HStack {
-                                Button("Очистить журнал", role: .destructive) { store.clearJournal(); confirmsJournalClear = false }
-                                Button("Отмена") { confirmsJournalClear = false }
+                                Button(tr("Очистить журнал", "Clear journal"), role: .destructive) { store.clearJournal(); confirmsJournalClear = false }
+                                Button(tr("Отмена", "Cancel")) { confirmsJournalClear = false }
                             }
                         }
                         if !store.journalError.isEmpty {
@@ -78,20 +84,44 @@ struct SettingsView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    section("Возможный цикл") {
+                    section(tr("Хранение Claude Code", "Claude Code storage")) {
                         HStack {
-                            Text("Количество повторов").font(.system(size: 13))
+                            Text(tr("Срок хранения событий", "Event retention period")).font(.system(size: 13))
                             Spacer()
-                            Picker("Количество повторов", selection: loopThreshold) {
+                            Picker(tr("Срок хранения событий", "Event retention period"), selection: claudeRetentionDays) {
+                                ForEach(1...30, id: \.self) { value in Text(dayLabel(value)).tag(value) }
+                            }
+                            .labelsHidden().pickerStyle(.menu).frame(width: 120).disabled(store.claudeRetentionPolicy == nil)
+                        }
+                        HStack {
+                            Text(tr("Максимальный размер событий", "Maximum event size")).font(.system(size: 13))
+                            Spacer()
+                            Picker(tr("Максимальный размер событий", "Maximum event size"), selection: claudeMaximumMB) {
+                                ForEach(1...100, id: \.self) { value in Text("\(value) \(tr("МБ", "MB"))").tag(value) }
+                            }
+                            .labelsHidden().pickerStyle(.menu).frame(width: 120).disabled(store.claudeRetentionPolicy == nil)
+                        }
+                        Text(tr("События очищаются автоматически. Резервные копии настроек хранятся 30 дней; последняя сохраняется.", "Events are cleaned automatically. Settings backups are kept for 30 days; the most recent is retained."))
+                            .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                        if store.claudeRetentionPolicy == nil || store.claudeRetentionFailed {
+                            Text(store.claudeRetentionPolicy == nil ? tr("Настройки хранения Claude Code повреждены", "Claude Code storage settings are invalid") : tr("Не удалось очистить данные Claude Code", "Could not clean Claude Code data"))
+                                .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    section(tr("Возможный цикл", "Possible loop")) {
+                        HStack {
+                            Text(tr("Количество повторов", "Repeat count")).font(.system(size: 13))
+                            Spacer()
+                            Picker(tr("Количество повторов", "Repeat count"), selection: loopThreshold) {
                                 ForEach(3...10, id: \.self) { value in Text("\(value)").tag(value) }
                             }
                             .labelsHidden().pickerStyle(.menu).frame(width: 120)
                         }
                         HStack {
-                            Text("Период проверки").font(.system(size: 13))
+                            Text(tr("Период проверки", "Time window")).font(.system(size: 13))
                             Spacer()
-                            Picker("Период проверки", selection: loopWindowMinutes) {
-                                ForEach(1...30, id: \.self) { value in Text("\(value) мин").tag(value) }
+                            Picker(tr("Период проверки", "Time window"), selection: loopWindowMinutes) {
+                                ForEach(1...30, id: \.self) { value in Text("\(value) \(tr("мин", "min"))").tag(value) }
                             }
                             .labelsHidden().pickerStyle(.menu).frame(width: 120)
                         }
@@ -101,15 +131,12 @@ struct SettingsView: View {
                         }
                     }
                     VStack(alignment: .leading, spacing: 14) {
-                        Button("О приложении") { store.showsAbout = true }
-                        Button("Отзывы и предложения") {
-                            guard let url = FeedbackDraft.url else { feedbackError = true; return }
-                            feedbackError = !NSWorkspace.shared.open(url)
-                        }
-                        if feedbackError {
-                            Text("Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com.")
-                                .font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
+                        Button(tr("О приложении", "About")) { store.showsAbout = true }
+                        section(tr("Отзывы и предложения", "Feedback and suggestions")) {
+                            Text(FeedbackDraft.address)
+                                .textSelection(.enabled)
+                                .tint(.accentColor)
+                                .accessibilityLabel(tr("Адрес для отзывов и предложений: \(FeedbackDraft.email)", "Feedback email address: \(FeedbackDraft.email)"))
                         }
                     }
                     .font(.system(size: 13)).buttonStyle(.plain)
@@ -118,12 +145,21 @@ struct SettingsView: View {
                 .padding(.vertical, 18)
             }
         }
+        .onChange(of: languageRaw) { _ in store.refresh() }
     }
 
     private var sourceDescription: String {
-        if !ClaudeIntegration.isClaudeInstalled { return "Claude Code не найден. Установите его, затем вернитесь в настройки." }
-        if store.unavailableSources.contains(.claude) { return "Нет данных от Claude Code. Проверьте доступ к настройкам и журналу источника." }
-        return "Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Code; задачи будут появляться автоматически."
+        if claudePartiallyConnected { return tr("Claude Code подключён частично. Нажмите «Подключить», чтобы восстановить недостающие hooks.", "Claude Code is partially connected. Select Connect to restore missing hooks.") }
+        if !ClaudeIntegration.isClaudeInstalled && !ClaudeIntegration.isConnected {
+            if ClaudeIntegration.installationState() == .unconfirmed { return tr("Установку Claude Code не удалось подтвердить. Проверьте доступность команды Claude Code.", "Claude Code installation could not be confirmed. Check that its command is available.") }
+            return tr("Claude Code не найден. Установите его, затем вернитесь в настройки.", "Claude Code was not found. Install it, then return to Settings.")
+        }
+        if store.unavailableSources.contains(.claude) { return tr("Нет данных от Claude Code. Проверьте доступ к настройкам и журналу источника.", "No data from Claude Code. Check access to its settings and event log.") }
+        return tr("Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Code; задачи будут появляться автоматически.", "The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Code after connecting; tasks will appear automatically.")
+    }
+
+    private var claudePartiallyConnected: Bool {
+        (try? ClaudeIntegration.connectionState()) == .partial
     }
 
     private var retentionDays: Binding<Int> {
@@ -150,6 +186,14 @@ struct SettingsView: View {
         })
     }
 
+    private var claudeRetentionDays: Binding<Int> {
+        Binding(get: { store.claudeRetentionPolicy?.days ?? 7 }, set: { store.setClaudeRetention(days: $0) })
+    }
+
+    private var claudeMaximumMB: Binding<Int> {
+        Binding(get: { store.claudeRetentionPolicy?.maximumMB ?? 10 }, set: { store.setClaudeRetention(maximumMB: $0) })
+    }
+
     private var loopWindowMinutes: Binding<Int> {
         Binding(get: { store.diagnosticSettings.loopWindowMinutes }, set: { value in
             var settings = store.diagnosticSettings
@@ -159,7 +203,9 @@ struct SettingsView: View {
     }
 
     private func dayLabel(_ value: Int) -> String {
-        "\(value) " + (value == 1 ? "день" : (2...4).contains(value) ? "дня" : "дней")
+        if AppLanguage.current == .en { return "\(value) " + (value == 1 ? "day" : "days") }
+        let last = value % 10, lastTwo = value % 100
+        return "\(value) " + ((11...14).contains(lastTwo) ? "дней" : last == 1 ? "день" : (2...4).contains(last) ? "дня" : "дней")
     }
 
     private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {

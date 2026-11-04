@@ -9,21 +9,21 @@ struct UpdateDialog: View {
         ZStack {
             Color.black.opacity(0.6).ignoresSafeArea()
             VStack(alignment: .leading, spacing: 0) {
-                Text("Доступна новая версия").font(.system(size: 19, weight: .semibold))
-                Text("Версия \(update.version) доступна для скачивания")
+                Text(tr("Доступна новая версия", "A new version is available")).font(.system(size: 19, weight: .semibold))
+                Text(tr("Версия \(update.version) доступна для скачивания", "Version \(update.version) is available to download"))
                     .font(.system(size: 13)).padding(.top, 14)
-                Text("Скачайте приложение, полностью закройте старую версию и переустановите новую.")
+                Text(tr("Скачайте приложение, полностью закройте старую версию и переустановите новую.", "Download the app, quit the old version completely, and install the new one."))
                     .font(.system(size: 13)).fixedSize(horizontal: false, vertical: true).padding(.top, 12)
                 if store.updateOpenError {
-                    Text("Не удалось открыть страницу загрузки.").font(.system(size: 12))
+                    Text(tr("Не удалось открыть страницу загрузки.", "Could not open the download page.")).font(.system(size: 12))
                         .foregroundStyle(MonitorTheme.secondary).padding(.top, 10)
                 }
                 HStack(spacing: 12) {
-                    Button("Позже") { store.dismissUpdate() }
+                    Button(tr("Позже", "Later")) { store.dismissUpdate() }
                         .keyboardShortcut(.cancelAction)
                         .frame(maxWidth: .infinity, minHeight: 34)
                         .background(Squircle(radius: 7).fill(MonitorTheme.track))
-                    Button("Скачать") { openDownload() }
+                    Button(tr("Скачать", "Download")) { openDownload() }
                         .frame(maxWidth: .infinity, minHeight: 34)
                         .foregroundStyle(accentForeground)
                         .background(Squircle(radius: 7).fill(Color.accentColor))

@@ -53,7 +53,7 @@ struct TaskCardView: View {
                 }
                 .frame(height: 116)
                 .padding(.top, 16)
-                Text("План задачи · \(task.steps.count) этапов")
+                Text("\(task.planConfirmed ? tr("План задачи", "Task plan") : tr("План не подтверждён", "Plan unconfirmed")) · \(task.steps.count) \(tr("этапов", "steps"))")
                     .font(.system(size: 11))
                     .foregroundStyle(MonitorTheme.muted)
                     .padding(.top, 14)
@@ -80,9 +80,9 @@ struct LoopWarningView: View {
                     .foregroundStyle(MonitorTheme.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
-                Button("Скрыть") { store.dismissLoop(for: task.id) }
+                Button(tr("Скрыть", "Hide")) { store.dismissLoop(for: task.id) }
                     .controlSize(.small)
-                    .accessibilityLabel("Скрыть предупреждение о возможном цикле для задачи: \(task.title)")
+                    .accessibilityLabel(tr("Скрыть предупреждение о возможном цикле для задачи: \(task.title)", "Hide possible loop warning for task: \(task.title)"))
             }
         }
     }

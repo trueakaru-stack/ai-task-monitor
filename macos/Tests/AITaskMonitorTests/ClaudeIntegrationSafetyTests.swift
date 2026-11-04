@@ -5,6 +5,21 @@ import XCTest
 final class ClaudeIntegrationSafetyTests: XCTestCase {
     private let executable = "/tmp/AI user's $(sample)/AI Task Monitor"
 
+    func testProfileAloneDoesNotProveClaudeInstallation() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-install-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        XCTAssertEqual(ClaudeIntegration.installationState(home: home, searchPath: "", includeStandardPaths: false), .notFound)
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".claude"), withIntermediateDirectories: true)
+        XCTAssertEqual(ClaudeIntegration.installationState(home: home, searchPath: "", includeStandardPaths: false), .unconfirmed)
+        let bin = home.appendingPathComponent("custom-bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let command = bin.appendingPathComponent("claude")
+        try Data("synthetic".utf8).write(to: command)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: command.path)
+        XCTAssertEqual(ClaudeIntegration.installationState(home: home, searchPath: bin.path, includeStandardPaths: false), .available)
+    }
+
     func testConnectAndDisconnectPreserveUnrelatedSettingsAndPermissions() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

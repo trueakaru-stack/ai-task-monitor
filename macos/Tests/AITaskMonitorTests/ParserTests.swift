@@ -83,7 +83,7 @@ final class ParserTests: XCTestCase {
         let task = try XCTUnwrap(reader.readTasks(now: now, observedSince: now.addingTimeInterval(-9_000)).first)
         XCTAssertFalse(task.isActive)
         XCTAssertTrue(task.isUnconfirmed)
-        XCTAssertEqual(task.activity, "Статус не подтверждён")
+        XCTAssertEqual(task.activity, tr("Статус не подтверждён", "Status unconfirmed"))
         XCTAssertTrue(reader.readTasks(now: now, observedSince: now.addingTimeInterval(-1)).isEmpty)
     }
 
@@ -179,12 +179,12 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(tasks.count, 2)
         let activeTask = try XCTUnwrap(tasks.first { $0.id == "claude:active" })
         let quietTask = try XCTUnwrap(tasks.first { $0.id == "claude:stale" })
-        XCTAssertEqual(activeTask.title, "Задача Claude Code")
+        XCTAssertEqual(activeTask.title, tr("Задача Claude Code", "Claude Code task"))
         XCTAssertEqual(activeTask.steps.map(\.title), ["Первый этап"])
         XCTAssertEqual(activeTask.steps.map(\.status), [.active])
         XCTAssertFalse(quietTask.isActive)
         XCTAssertTrue(quietTask.isUnconfirmed)
-        XCTAssertEqual(quietTask.activity, "Статус не подтверждён")
+        XCTAssertEqual(quietTask.activity, tr("Статус не подтверждён", "Status unconfirmed"))
         XCTAssertEqual(ClaudeTaskReader(eventFile: file).readTasks(now: now, observedSince: now.addingTimeInterval(-100)).map(\.id), ["claude:active"])
     }
 
@@ -271,14 +271,17 @@ final class ParserTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let settings = directory.appendingPathComponent("settings.json")
-        XCTAssertFalse(try ClaudeIntegration.connectionState(settingsURL: settings))
+        XCTAssertEqual(try ClaudeIntegration.connectionState(settingsURL: settings), .disconnected)
         try Data("{}".utf8).write(to: settings)
-        XCTAssertFalse(try ClaudeIntegration.connectionState(settingsURL: settings))
+        XCTAssertEqual(try ClaudeIntegration.connectionState(settingsURL: settings), .disconnected)
         let executable = Bundle.main.executablePath ?? CommandLine.arguments[0]
         let hook: [String: Any] = ["type": "command", "command": ClaudeIntegration.hookCommand(for: executable)]
         let object: [String: Any] = ["hooks": ["PreToolUse": [["hooks": [hook]]]]]
         try JSONSerialization.data(withJSONObject: object).write(to: settings)
-        XCTAssertTrue(try ClaudeIntegration.connectionState(settingsURL: settings))
+        XCTAssertEqual(try ClaudeIntegration.connectionState(settingsURL: settings), .partial)
+        let allHooks = Dictionary(uniqueKeysWithValues: ClaudeIntegration.events.map { ($0, [["hooks": [hook]]]) })
+        try JSONSerialization.data(withJSONObject: ["hooks": allHooks]).write(to: settings)
+        XCTAssertEqual(try ClaudeIntegration.connectionState(settingsURL: settings), .connected)
         try Data("[]".utf8).write(to: settings)
         XCTAssertThrowsError(try ClaudeIntegration.connectionState(settingsURL: settings))
     }
@@ -286,6 +289,9 @@ final class ParserTests: XCTestCase {
     func testProgressLabelsPreserveCertainty() {
         let base = MonitoredTask(id: "1", provider: .codex, title: "Task", activity: "", isActive: true, progress: 40, progressKind: .exact, steps: [], updatedAt: Date())
         XCTAssertEqual(base.progressLabel, "40%")
+        var planned = base
+        planned.steps = [TaskStep(title: "Synthetic", status: .active)]
+        XCTAssertEqual(planned.progressLabel, "40%" + tr(" этапов", " of steps"))
         var approximate = base
         approximate.progressKind = .approximate
         XCTAssertEqual(approximate.progressLabel, "≈40%")
@@ -357,7 +363,7 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(uncertain.count, 1)
         XCTAssertFalse(uncertain[0].isActive)
         XCTAssertTrue(uncertain[0].isUnconfirmed)
-        XCTAssertEqual(uncertain[0].activity, "Статус не подтверждён")
+        XCTAssertEqual(uncertain[0].activity, tr("Статус не подтверждён", "Status unconfirmed"))
         XCTAssertTrue(TaskSnapshotMerger.merge(previous: uncertain, current: [], terminalIDs: ["one"]).isEmpty)
         XCTAssertEqual(TaskSnapshotMerger.merge(previous: uncertain, current: [previous], terminalIDs: []), [previous])
     }

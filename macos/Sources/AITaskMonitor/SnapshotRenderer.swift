@@ -6,6 +6,7 @@ enum SnapshotRenderer {
     static func run(outputDirectory: URL) -> Int32 {
         let previousAppearance = UserDefaults.standard.object(forKey: "appearanceMode")
         defer {
+            AppLanguage.previewOverride = nil
             if let previousAppearance {
                 UserDefaults.standard.set(previousAppearance, forKey: "appearanceMode")
             } else {
@@ -44,6 +45,18 @@ enum SnapshotRenderer {
             try render(name: "source-unavailable-compact-light", mode: .light, compact: true, settings: false, outputDirectory: outputDirectory, unavailableSources: [.codex])
             try renderHint(name: "hint-dark", mode: .dark, outputDirectory: outputDirectory)
             try renderHint(name: "hint-light", mode: .light, outputDirectory: outputDirectory)
+            for language in [AppLanguage.ru, .en] {
+                AppLanguage.previewOverride = language
+                for mode in [AppearanceMode.dark, .light] {
+                    for compact in [false, true] {
+                        for unconfirmed in [false, true] {
+                            let name = "plan-\(language.rawValue)-\(mode.rawValue)-\(compact ? "compact" : "expanded")-\(unconfirmed ? "unconfirmed" : "confirmed")"
+                            try render(name: name, mode: mode, compact: compact, settings: false, outputDirectory: outputDirectory, planUnconfirmed: unconfirmed)
+                        }
+                    }
+                    try render(name: "settings-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory)
+                }
+            }
             return 0
         } catch {
             FileHandle.standardError.write(Data("Snapshot error: \(error)\n".utf8))
@@ -63,15 +76,15 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
-        let store = journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources))
+        let store = journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources, planUnconfirmed: planUnconfirmed))
         store.isCompact = compact
         store.showsSettings = settings || journal
         store.showsJournal = journal
         store.showsAbout = about
         if update { store.setPreviewUpdate() }
-        let compactHeight: CGFloat = 182 + (unavailableSources.isEmpty ? 0 : 24) + (loopWarning ? 64 : 0)
+        let compactHeight: CGFloat = 182 + (unavailableSources.isEmpty ? 0 : 24) + (loopWarning ? 64 : 0) + (planUnconfirmed ? 22 : 0)
         let size = compact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)
         let scheme: ColorScheme = mode == .dark ? .dark : .light
         let view = RootView()

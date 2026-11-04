@@ -87,8 +87,8 @@ struct ClaudeTaskReader {
             let progress = MonitoredTask.progress(for: steps)
             let unconfirmed = now.timeIntervalSince(state.updatedAt) >= 7_200
             result.tasks.append(MonitoredTask(
-                id: "claude:\(state.id)", provider: .claude, title: "Задача Claude Code",
-                activity: unconfirmed ? "Статус не подтверждён" : state.activity, isActive: !unconfirmed, progress: progress,
+                id: "claude:\(state.id)", provider: .claude, title: tr("Задача Claude Code", "Claude Code task"),
+                activity: unconfirmed ? tr("Статус не подтверждён", "Status unconfirmed") : state.activity, isActive: !unconfirmed, progress: progress,
                 progressKind: progress == nil ? .none : .exact,
                 steps: steps, updatedAt: state.updatedAt, isUnconfirmed: unconfirmed,
                 startedAt: state.startedAt, startKey: state.startKey
@@ -103,7 +103,7 @@ struct ClaudeTaskReader {
         guard !taskID.isEmpty else { return }
         if state.steps[taskID] == nil {
             let subject = event.string("task_subject")
-            state.steps[taskID] = TaskStep(id: taskID, title: subject.isEmpty ? "Этап \(taskID)" : subject, status: .pending)
+            state.steps[taskID] = TaskStep(id: taskID, title: subject.isEmpty ? tr("Этап \(taskID)", "Step \(taskID)") : subject, status: .pending)
             state.stepsOrder.append(taskID)
         }
         let status = event.string("task_status")
@@ -116,14 +116,14 @@ struct ClaudeTaskReader {
         let tool = event.string("tool_name")
         let subject = event.string("task_subject")
         switch event.string("event") {
-        case "UserPromptSubmit": return "Обрабатывает новый запрос"
-        case "PreToolUse": return tool.isEmpty ? "Выполняет действие" : "Выполняет: \(tool)"
-        case "PostToolUse": return tool.isEmpty ? "Действие завершено" : "Завершено: \(tool)"
-        case "PostToolUseFailure": return tool.isEmpty ? "Ошибка действия" : "Ошибка: \(tool)"
-        case "TaskCreated": return subject.isEmpty ? "Добавлен этап" : "Добавлен этап: \(subject)"
-        case "TaskCompleted": return subject.isEmpty ? "Завершён этап" : "Завершён этап: \(subject)"
-        case "SubagentStart": return "Запущен дополнительный агент"
-        case "SubagentStop": return "Дополнительный агент завершён"
+        case "UserPromptSubmit": return tr("Обрабатывает новый запрос", "Processing a new request")
+        case "PreToolUse": return tool.isEmpty ? tr("Выполняет действие", "Running an action") : tr("Выполняет: \(tool)", "Running: \(tool)")
+        case "PostToolUse": return tool.isEmpty ? tr("Действие завершено", "Action completed") : tr("Завершено: \(tool)", "Completed: \(tool)")
+        case "PostToolUseFailure": return tool.isEmpty ? tr("Ошибка действия", "Action failed") : tr("Ошибка: \(tool)", "Failed: \(tool)")
+        case "TaskCreated": return subject.isEmpty ? tr("Добавлен этап", "Step added") : tr("Добавлен этап: \(subject)", "Step added: \(subject)")
+        case "TaskCompleted": return subject.isEmpty ? tr("Завершён этап", "Step completed") : tr("Завершён этап: \(subject)", "Step completed: \(subject)")
+        case "SubagentStart": return tr("Запущен дополнительный агент", "Subagent started")
+        case "SubagentStop": return tr("Дополнительный агент завершён", "Subagent finished")
         default: return ""
         }
     }

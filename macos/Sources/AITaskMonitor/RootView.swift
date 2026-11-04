@@ -4,6 +4,7 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var store: TaskStore
     @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.system.rawValue
+    @AppStorage("languageMode") private var languageRaw = AppLanguage.system.rawValue
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -25,6 +26,7 @@ struct RootView: View {
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.42 : 0.18), radius: 22, y: 8)
         .background(WindowConfigurator(isCompact: store.isCompact, compactHeight: compactHeight))
         .preferredColorScheme(preferredScheme)
+        .environment(\.locale, Locale(identifier: AppLanguage.resolve(AppLanguage(rawValue: languageRaw) ?? .system, preferredLanguages: Locale.preferredLanguages).rawValue))
     }
 
     private var titleBar: some View {
@@ -32,11 +34,11 @@ struct RootView: View {
             Text("AI task monitor")
                 .font(.system(size: 13, weight: .medium))
             Spacer()
-            TitleAction(symbol: "minus", label: "Свернуть") { NSApp.keyWindow?.miniaturize(nil) }
-            TitleAction(symbol: store.isCompact ? "chevron.up" : "chevron.down", label: store.isCompact ? "Развернуть" : "Компактный вид") {
+            TitleAction(symbol: "minus", label: tr("Свернуть", "Minimize")) { NSApp.keyWindow?.miniaturize(nil) }
+            TitleAction(symbol: store.isCompact ? "chevron.up" : "chevron.down", label: store.isCompact ? tr("Развернуть", "Expand") : tr("Компактный вид", "Compact view")) {
                 withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) { store.isCompact.toggle(); store.showsSettings = false; store.showsJournal = false; store.showsAbout = false }
             }
-            TitleAction(symbol: "xmark", label: "Закрыть") { NSApp.terminate(nil) }
+            TitleAction(symbol: "xmark", label: tr("Закрыть", "Close")) { NSApp.terminate(nil) }
         }
         .padding(.horizontal, 18)
         .frame(height: 58)
@@ -46,7 +48,7 @@ struct RootView: View {
 
     private var tasksContent: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Ход выполнения")
+            Text(tr("Ход выполнения", "Progress"))
                 .font(.system(size: 22, weight: .semibold))
                 .padding(.horizontal, 20)
                 .padding(.top, 8)
@@ -62,8 +64,8 @@ struct RootView: View {
                 Spacer()
                 if store.unavailableMessage.isEmpty {
                     VStack(spacing: 8) {
-                        Text("Активных задач нет").font(.system(size: 15, weight: .medium))
-                        Text("Окно обновится автоматически").font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary)
+                        Text(tr("Активных задач нет", "No active tasks")).font(.system(size: 15, weight: .medium))
+                        Text(tr("Окно обновится автоматически", "Updates automatically")).font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary)
                     }
                     .frame(maxWidth: .infinity)
                 }
@@ -80,14 +82,14 @@ struct RootView: View {
             Button {
                 store.showsSettings = true
             } label: {
-                Label("Настройки", systemImage: "gearshape")
+                Label(tr("Настройки", "Settings"), systemImage: "gearshape")
                     .font(.system(size: 12.5))
             }
             .buttonStyle(.plain)
             .foregroundStyle(MonitorTheme.secondary)
             .padding(.horizontal, 20)
             .padding(.bottom, 16)
-            .accessibilityHint("Открыть настройки приложения")
+            .accessibilityHint(tr("Открыть настройки приложения", "Open app settings"))
         }
     }
 
@@ -116,7 +118,7 @@ struct RootView: View {
     private var compactContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             if store.tasks.isEmpty {
-                Text(store.unavailableMessage.isEmpty ? "Активных задач нет" : store.unavailableMessage)
+                Text(store.unavailableMessage.isEmpty ? tr("Активных задач нет", "No active tasks") : store.unavailableMessage)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(MonitorTheme.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -134,6 +136,9 @@ struct RootView: View {
                 if !task.activity.isEmpty {
                     ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 11.5)
                 }
+                if !task.steps.isEmpty && !task.planConfirmed {
+                    Text(tr("План не подтверждён", "Plan unconfirmed")).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.muted)
+                }
                 if task.loopWarning != nil { LoopWarningView(task: task, compact: true) }
                 if !store.unavailableMessage.isEmpty {
                     Text(store.unavailableMessage)
@@ -148,7 +153,7 @@ struct RootView: View {
                                 Circle().fill(item == index ? Color.accentColor : MonitorTheme.muted).frame(width: 6, height: 6)
                             }
                             .buttonStyle(.plain)
-                            .accessibilityLabel("Задача \(item + 1)")
+                            .accessibilityLabel(tr("Задача \(item + 1)", "Task \(item + 1)"))
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -173,7 +178,8 @@ struct RootView: View {
         let sourceExtra: CGFloat = !store.tasks.isEmpty && !store.unavailableMessage.isEmpty ? 24 : 0
         let selected = store.tasks.isEmpty ? nil : store.tasks[min(store.compactIndex, store.tasks.count - 1)]
         let loopExtra: CGFloat = selected?.loopWarning == nil ? 0 : 64
-        return base + sourceExtra + loopExtra
+        let planExtra: CGFloat = selected.map { !$0.steps.isEmpty && !$0.planConfirmed } == true ? 22 : 0
+        return base + sourceExtra + loopExtra + planExtra
     }
 }
 

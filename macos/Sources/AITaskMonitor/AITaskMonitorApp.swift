@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct AITaskMonitorApp: App {
-    @StateObject private var store = TaskStore(enableUpdateChecks: true)
+    @StateObject private var store = TaskStore(enableUpdateChecks: true, enableClaudeRetention: true)
 
     var body: some Scene {
         WindowGroup {
@@ -11,7 +11,7 @@ struct AITaskMonitorApp: App {
         .commands {
             CommandGroup(replacing: .newItem) { }
             CommandGroup(after: .appInfo) {
-                Button("Обновить задачи") { store.refresh() }.keyboardShortcut("r")
+                Button(tr("Обновить задачи", "Refresh tasks")) { store.refresh() }.keyboardShortcut("r")
             }
         }
     }

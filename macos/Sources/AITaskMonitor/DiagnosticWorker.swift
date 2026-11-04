@@ -76,6 +76,6 @@ final class DiagnosticWorker {
 
     private enum WorkerError: LocalizedError {
         case eventOverflow
-        var errorDescription: String? { "Журнал был недоступен слишком долго; часть событий не сохранена." }
+        var errorDescription: String? { tr("Журнал был недоступен слишком долго; часть событий не сохранена.", "The journal was unavailable for too long; some events were not saved.") }
     }
 }

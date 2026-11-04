@@ -10,17 +10,17 @@ struct JournalView: View {
                 Image(systemName: "arrow.left").frame(width: 28, height: 28)
             }
             .buttonStyle(.plain)
-            .help("Назад")
-            .accessibilityLabel("Назад к настройкам")
+            .help(tr("Назад", "Back"))
+            .accessibilityLabel(tr("Назад к настройкам", "Back to settings"))
             .padding(.horizontal, 20)
 
-            Text("Журнал")
+            Text(tr("Журнал", "Journal"))
                 .font(.system(size: 22, weight: .semibold))
                 .padding(.horizontal, 20)
                 .padding(.top, 18)
 
-            Picker("Задача", selection: $selectedTask) {
-                Text("Все задачи").tag("")
+            Picker(tr("Задача", "Task"), selection: $selectedTask) {
+                Text(tr("Все задачи", "All tasks")).tag("")
                 ForEach(taskOptions) { option in Text(option.title).tag(option.id) }
             }
             .pickerStyle(.menu)
@@ -35,7 +35,7 @@ struct JournalView: View {
 
             if visibleEvents.isEmpty {
                 Spacer()
-                Text("Событий пока нет")
+                Text(tr("Событий пока нет", "No events yet"))
                     .font(.system(size: 13)).foregroundStyle(MonitorTheme.secondary)
                     .frame(maxWidth: .infinity)
                 Spacer()
@@ -76,7 +76,7 @@ struct JournalView: View {
         var options: [TaskOption] = []
         for event in store.journalEvents.reversed() {
             guard let key = event.task, seen.insert(key).inserted else { continue }
-            let title = store.journalTaskNames[key] ?? "\(event.source.displayName) · задача \(options.count + 1)"
+            let title = store.journalTaskNames[key] ?? "\(event.source.displayName) · \(tr("задача", "task")) \(options.count + 1)"
             options.append(TaskOption(id: key, title: title))
         }
         return options

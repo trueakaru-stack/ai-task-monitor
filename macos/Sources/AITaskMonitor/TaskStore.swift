@@ -17,6 +17,8 @@ final class TaskStore: ObservableObject {
     @Published private(set) var journalTaskNames: [String: String] = [:]
     @Published private(set) var journalError = ""
     @Published private(set) var claudeLoopError = ""
+    @Published private(set) var claudeRetentionPolicy: ClaudeRetentionPolicy? = ClaudeRetentionPolicy.load()
+    @Published private(set) var claudeRetentionFailed = false
     @Published private(set) var availableUpdate: AvailableUpdate?
     @Published private(set) var dismissedUpdateVersion = ""
     @Published var updateOpenError = false
@@ -25,6 +27,8 @@ final class TaskStore: ObservableObject {
     private let claudeReader: ClaudeTaskReader
     private let diagnosticWorker: DiagnosticWorker?
     private let claudeLoopProfile: URL?
+    private let claudeRetentionWorker: ClaudeRetentionWorker?
+    private var nextClaudeRetention = Date.distantPast
     private let updateChecksEnabled: Bool
     private let monitoringStartedAt = Date()
     private var previousCodex: [MonitoredTask] = []
@@ -40,10 +44,11 @@ final class TaskStore: ObservableObject {
     private var lastUpdateCheck = Date.distantPast
     private var releaseRequest: ReleaseRequest?
 
-    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false) {
+    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false) {
         self.codexReader = codexReader
         self.claudeReader = claudeReader
         self.claudeLoopProfile = claudeLoopProfile
+        self.claudeRetentionWorker = enableClaudeRetention && previewTasks == nil ? ClaudeRetentionWorker() : nil
         self.updateChecksEnabled = enableUpdateChecks && previewTasks == nil
         self.diagnosticWorker = previewTasks == nil ? DiagnosticWorker(journal: journal ?? DiagnosticJournal()) : nil
         if let previewTasks {
@@ -64,16 +69,49 @@ final class TaskStore: ObservableObject {
             }
         }
         refresh()
+        maintainClaudeRetention()
         checkForUpdates()
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh(); self?.checkForUpdates() }
+            Task { @MainActor in self?.refresh(); self?.checkForUpdates(); self?.maintainClaudeRetention() }
         }
     }
 
     deinit {
+        claudeRetentionWorker?.invalidate()
         timer?.invalidate()
         releaseRequest?.cancel()
         claudeLoopChannel?.stop()
+    }
+
+    func setClaudeRetention(days: Int? = nil, maximumMB: Int? = nil) {
+        guard let current = claudeRetentionPolicy else { return }
+        let next = ClaudeRetentionPolicy(days: days ?? current.days, maximumMB: maximumMB ?? current.maximumMB)
+        guard (1...30).contains(next.days), (1...100).contains(next.maximumMB) else { return }
+        if days != nil { UserDefaults.standard.set(next.days, forKey: "claudeRetentionDays") }
+        if maximumMB != nil { UserDefaults.standard.set(next.maximumMB, forKey: "claudeMaximumMB") }
+        claudeRetentionPolicy = next
+        claudeRetentionFailed = false
+        nextClaudeRetention = .distantPast
+        maintainClaudeRetention()
+    }
+
+    private func maintainClaudeRetention(now: Date = Date()) {
+        guard let worker = claudeRetentionWorker else { return }
+        guard let policy = ClaudeRetentionPolicy.load() else {
+            if claudeRetentionPolicy != nil { worker.invalidate() }
+            claudeRetentionPolicy = nil
+            return
+        }
+        if claudeRetentionPolicy != policy { claudeRetentionPolicy = policy; nextClaudeRetention = .distantPast }
+        guard now >= nextClaudeRetention else { return }
+        nextClaudeRetention = now.addingTimeInterval(300)
+        worker.schedule(policy: policy, directory: AppPaths.supportDirectory, backups: AppPaths.claudeSettings.deletingLastPathComponent()) { [weak self] success in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.claudeRetentionFailed = !success
+                if !success { self.nextClaudeRetention = Date().addingTimeInterval(30) }
+            }
+        }
     }
 
     var visibleUpdate: AvailableUpdate? {
@@ -108,7 +146,7 @@ final class TaskStore: ObservableObject {
         availableUpdate = AvailableUpdate(version: "0.4.0-alpha", url: URL(string: "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.4.0-alpha/app.dmg")!)
     }
 
-    static func preview(unavailableSources: [TaskProvider] = []) -> TaskStore {
+    static func preview(unavailableSources: [TaskProvider] = [], planUnconfirmed: Bool = false) -> TaskStore {
         let store = TaskStore(previewTasks: [
             MonitoredTask(
                 id: "codex-preview", provider: .codex,
@@ -134,11 +172,13 @@ final class TaskStore: ObservableObject {
         ])
         store.unavailableSources = unavailableSources
         store.tasks = store.tasks.map { task in
-            guard unavailableSources.contains(task.provider) else { return task }
             var uncertain = task
-            uncertain.isActive = false
-            uncertain.isUnconfirmed = true
-            uncertain.activity = "Статус не подтверждён"
+            if task.provider == .codex && planUnconfirmed { uncertain.planConfirmed = false }
+            if unavailableSources.contains(task.provider) {
+                uncertain.isActive = false
+                uncertain.isUnconfirmed = true
+                uncertain.activity = tr("Статус не подтверждён", "Status unconfirmed")
+            }
             return uncertain
         }
         return store
@@ -166,14 +206,14 @@ final class TaskStore: ObservableObject {
             store.compactIndex = index
         }
         if provider == .claude { store.selectedProvider = .claude }
-        if showsError { store.claudeLoopError = "Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение." }
+        if showsError { store.claudeLoopError = tr("Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение.", "Claude Code loop warnings are unavailable. Check access or restart the app.") }
         return store
     }
 
     var providers: Set<TaskProvider> { Set(tasks.map(\.provider)) }
     var unavailableMessage: String {
         guard !unavailableSources.isEmpty else { return "" }
-        return "Нет данных от " + unavailableSources.map(\.displayName).joined(separator: ", ")
+        return tr("Нет данных от ", "No data from ") + unavailableSources.map(\.displayName).joined(separator: ", ")
     }
     var filteredTasks: [MonitoredTask] {
         switch selectedProvider {
@@ -213,14 +253,16 @@ final class TaskStore: ObservableObject {
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
         }
         do {
-            let connected: Bool
-            if claudeReader.usesExplicitFile { connected = true }
-            else { connected = try ClaudeIntegration.connectionState() }
-            if !connected {
+            let connection: ClaudeIntegration.ConnectionState
+            if claudeReader.usesExplicitFile { connection = .connected }
+            else { connection = try ClaudeIntegration.connectionState() }
+            if connection == .disconnected {
                 previousClaude = []
                 sawClaudeEvents = false
             } else {
-                claudeConnected = !claudeReader.usesExplicitFile || claudeLoopProfile != nil
+                let complete = connection == .connected
+                claudeConnected = complete && (!claudeReader.usesExplicitFile || claudeLoopProfile != nil)
+                if !complete { unavailable.append(.claude) }
                 let exists = FileManager.default.fileExists(atPath: claudeReader.eventFile.path)
                 if !exists && sawClaudeEvents { throw CocoaError(.fileReadNoSuchFile) }
                 if exists {
@@ -230,10 +272,13 @@ final class TaskStore: ObservableObject {
                     interruptedIDs.formUnion(snapshot.interruptedIDs)
                     previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
                 }
+                if !complete {
+                    previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
+                }
             }
         } catch {
             claudeConnected = false
-            unavailable.append(.claude)
+            if !unavailable.contains(.claude) { unavailable.append(.claude) }
             previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         }
         unavailableSources = unavailable
@@ -303,7 +348,7 @@ final class TaskStore: ObservableObject {
             do { claudeLoopChannel = try ClaudeLoopChannel(profile: claudeLoopProfile ?? AppPaths.supportDirectory) }
             catch {
                 claudeLoopDetectors.removeAll()
-                claudeLoopError = "Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение."
+                claudeLoopError = tr("Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение.", "Claude Code loop warnings are unavailable. Check access or restart the app.")
                 return
             }
         }
@@ -457,7 +502,7 @@ final class TaskStore: ObservableObject {
     func setClaudeConnected(_ connected: Bool) {
         do {
             try ClaudeIntegration.setConnected(connected)
-            sourceMessage = connected ? "Подключено. Перезапустите Claude Code." : "Отключено"
+            sourceMessage = connected ? tr("Подключено. Перезапустите Claude Code.", "Connected. Restart Claude Code.") : tr("Отключено", "Disconnected")
             refresh()
         } catch {
             sourceMessage = error.localizedDescription

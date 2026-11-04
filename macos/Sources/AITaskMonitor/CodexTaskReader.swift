@@ -11,6 +11,8 @@ struct CodexTaskReader {
     let codexHome: URL
     private let fileManager = FileManager.default
     private let lifecycleCache = CodexLifecycleCache()
+    private let indexCache = CodexSessionIndexCache()
+    private let planCache = CodexPlanHistoryCache()
 
     init(codexHome: URL? = nil) {
         if let codexHome {
@@ -29,13 +31,7 @@ struct CodexTaskReader {
     func readSnapshot(now: Date = Date(), observedSince: Date? = nil, previouslyObserved: Set<String> = []) throws -> CodexTaskSnapshot {
         let index = codexHome.appendingPathComponent("session_index.jsonl")
         if !fileManager.fileExists(atPath: codexHome.path) { return CodexTaskSnapshot() }
-        let text = try FileHelpers.tail(of: index, maximumBytes: 2_000_000)
-        var sessions: [String: [String: Any]] = [:]
-        for line in text.split(whereSeparator: \.isNewline) {
-            guard let item = FileHelpers.jsonObject(line) else { continue }
-            let id = item.string("id")
-            if !id.isEmpty { sessions[id] = item }
-        }
+        let sessions = try indexCache.read(from: index)
 
         let files = try sessionFiles(for: Set(sessions.keys))
         var result = CodexTaskSnapshot()
@@ -83,15 +79,16 @@ struct CodexTaskReader {
                 result.toolEvents[id] = CodexToolEventParser.parse(tail: tail, since: observedSince, now: now)
             }
 
-            let steps = parsePlan(from: tail)
+            let plan = try planCache.read(from: file)
+            let steps = plan.steps
             let activity = parseActivity(from: tail)
             let progress = MonitoredTask.progress(for: steps)
             let unconfirmed = now.timeIntervalSince(modified) >= 7_200
             result.tasks.append(MonitoredTask(
                 id: id,
                 provider: .codex,
-                title: title.isEmpty ? "Задача Codex" : title,
-                activity: unconfirmed ? "Статус не подтверждён" : (activity.isEmpty ? "Выполняется" : activity),
+                title: title.isEmpty ? tr("Задача Codex", "Codex task") : title,
+                activity: unconfirmed ? tr("Статус не подтверждён", "Status unconfirmed") : (activity.isEmpty ? tr("Выполняется", "Working") : activity),
                 isActive: !unconfirmed,
                 progress: progress,
                 progressKind: progress == nil ? .none : .exact,
@@ -99,7 +96,8 @@ struct CodexTaskReader {
                 updatedAt: modified,
                 isUnconfirmed: unconfirmed,
                 startedAt: state.startedAt ?? .distantPast,
-                startKey: state.startKey
+                startKey: state.startKey,
+                planConfirmed: plan.confirmed
             ))
         }
         result.tasks.sort { $0.updatedAt > $1.updatedAt }
@@ -111,53 +109,7 @@ struct CodexTaskReader {
     }
 
     func parsePlan(from tail: String) -> [TaskStep] {
-        var latest: [TaskStep] = []
-        for line in tail.split(whereSeparator: \.isNewline) where line.contains("update_plan") {
-            guard let record = FileHelpers.jsonObject(line),
-                  let payload = record.object("payload"),
-                  ["custom_tool_call", "function_call"].contains(payload.string("type")) else { continue }
-            let name = payload.string("name")
-            let inputText = payload.string("input").isEmpty ? payload.string("arguments") : payload.string("input")
-            if name == "update_plan", let inputData = inputText.data(using: .utf8),
-               let input = try? JSONSerialization.jsonObject(with: inputData) as? [String: Any],
-               let plan = input["plan"] as? [[String: Any]] {
-                let candidate = plan.compactMap { item -> TaskStep? in
-                    guard let step = item["step"] as? String, !step.isEmpty,
-                          let status = planStatus(item["status"] as? String) else { return nil }
-                    return TaskStep(title: step, status: status)
-                }
-                if plan.isEmpty || !candidate.isEmpty { latest = candidate }
-                continue
-            }
-            if name != "update_plan" && !inputText.contains("update_plan(") { continue }
-            let candidate = parseLegacyPlan(inputText)
-            if !candidate.isEmpty { latest = candidate }
-        }
-        return latest
-    }
-
-    private func planStatus(_ value: String?) -> StepStatus? {
-        switch value {
-        case "completed": return .done
-        case "in_progress": return .active
-        case "pending": return .pending
-        default: return nil
-        }
-    }
-
-    private func parseLegacyPlan(_ input: String) -> [TaskStep] {
-        let pattern = #"step\s*:\s*"((?:\\.|[^"\\])*)"\s*,\s*status\s*:\s*"(completed|in_progress|pending)""#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
-        let range = NSRange(input.startIndex..., in: input)
-        return regex.matches(in: input, range: range).compactMap { match in
-            guard let titleRange = Range(match.range(at: 1), in: input),
-                  let statusRange = Range(match.range(at: 2), in: input),
-                  let status = planStatus(String(input[statusRange])),
-                  let encodedTitle = ("[\"" + String(input[titleRange]) + "\"]").data(using: .utf8),
-                  let titles = try? JSONSerialization.jsonObject(with: encodedTitle) as? [String],
-                  let title = titles.first, !title.isEmpty else { return nil }
-            return TaskStep(title: title, status: status)
-        }
+        CodexPlanParser.parse(tail).steps
     }
 
     func parseActivity(from tail: String) -> String {
@@ -228,5 +180,74 @@ struct CodexTaskReader {
         }
         if let enumerationError { throw enumerationError }
         return files
+    }
+}
+
+/// Reads each complete index line without limiting discovery to a fixed tail.
+/// The cached snapshot is reused while the file identity, length and timestamp
+/// remain unchanged. Malformed lines are ignored; oversized lines make the
+/// source unavailable rather than silently hiding an unknown session.
+final class CodexSessionIndexCache {
+    private struct Signature: Equatable {
+        let path: String
+        let device: UInt64
+        let inode: UInt64
+        let size: UInt64
+        let modified: Date
+    }
+
+    private let lock = NSLock()
+    private var signature: Signature?
+    private var cached: [String: [String: Any]] = [:]
+
+    func read(from url: URL) throws -> [String: [String: Any]] {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let current: Signature?
+        if let device = (attributes[.systemNumber] as? NSNumber)?.uint64Value,
+           let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
+           let size = (attributes[.size] as? NSNumber)?.uint64Value,
+           let modified = attributes[.modificationDate] as? Date {
+            current = Signature(path: url.path, device: device, inode: inode, size: size, modified: modified)
+        } else {
+            current = nil
+        }
+        lock.lock()
+        if let current, current == signature {
+            let result = cached
+            lock.unlock()
+            return result
+        }
+        lock.unlock()
+
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var sessions: [String: [String: Any]] = [:]
+        var line = Data()
+        var oversized = false
+        let maximumLine = 1_048_576
+        func consumeLine() throws {
+            if oversized { throw CocoaError(.fileReadTooLarge) }
+            if !oversized, let item = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] {
+                let id = item.string("id")
+                if !id.isEmpty { sessions[id] = item }
+            }
+            line.removeAll(keepingCapacity: true)
+            oversized = false
+        }
+        while let chunk = try handle.read(upToCount: 65_536), !chunk.isEmpty {
+            for byte in chunk {
+                if byte == 10 { try consumeLine() }
+                else if !oversized {
+                    if line.count < maximumLine { line.append(byte) }
+                    else { line.removeAll(keepingCapacity: true); oversized = true }
+                }
+            }
+        }
+        if !line.isEmpty || oversized { try consumeLine() }
+        lock.lock()
+        signature = current
+        cached = sessions
+        lock.unlock()
+        return sessions
     }
 }

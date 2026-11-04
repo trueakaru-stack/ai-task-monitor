@@ -56,7 +56,7 @@ struct LoopWarning: Codable, Equatable {
     let windowMinutes: Int
 
     var description: String {
-        "Возможный цикл: одна команда завершилась с одинаковым кодом ошибки не менее \(threshold) раз за \(windowMinutes) мин."
+        tr("Возможный цикл: одна команда завершилась с одинаковым кодом ошибки не менее \(threshold) раз за \(windowMinutes) мин.", "Possible loop: one command failed with the same code at least \(threshold) times in \(windowMinutes) min.")
     }
 }
 

@@ -4,25 +4,51 @@ import Foundation
 enum ClaudeIntegration {
     static let events = ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "TaskCreated", "TaskCompleted", "SubagentStart", "SubagentStop", "Stop", "SessionEnd"]
 
+    enum ConnectionState: Equatable {
+        case disconnected, partial, connected
+    }
+
+    enum InstallationState: Equatable {
+        case available, unconfirmed, notFound
+    }
+
     static var isClaudeInstalled: Bool {
-        FileManager.default.fileExists(atPath: AppPaths.claudeSettings.deletingLastPathComponent().path)
+        installationState() == .available
+    }
+
+    static func installationState(home: URL = FileManager.default.homeDirectoryForCurrentUser,
+                                  searchPath: String = ProcessInfo.processInfo.environment["PATH"] ?? "",
+                                  includeStandardPaths: Bool = true) -> InstallationState {
+        let manager = FileManager.default
+        var directories = [home.appendingPathComponent(".local/bin", isDirectory: true),
+                           home.appendingPathComponent(".npm-global/bin", isDirectory: true)]
+        if includeStandardPaths {
+            directories += [URL(fileURLWithPath: "/opt/homebrew/bin", isDirectory: true),
+                            URL(fileURLWithPath: "/usr/local/bin", isDirectory: true)]
+        }
+        directories += searchPath.split(separator: ":").map { URL(fileURLWithPath: String($0), isDirectory: true) }
+        if directories.contains(where: { manager.isExecutableFile(atPath: $0.appendingPathComponent("claude").path) }) {
+            return .available
+        }
+        return manager.fileExists(atPath: home.appendingPathComponent(".claude", isDirectory: true).path) ? .unconfirmed : .notFound
     }
 
     static var isConnected: Bool {
-        (try? connectionState()) ?? false
+        (try? connectionState()) == .connected
     }
 
-    static func connectionState(settingsURL: URL = AppPaths.claudeSettings) throws -> Bool {
+    static func connectionState(settingsURL: URL = AppPaths.claudeSettings) throws -> ConnectionState {
         let destination = try settingsDestination(for: settingsURL)
         let root = try settingsObject(from: readSettingsData(at: destination))
         let hooks = try hooksObject(from: root)
-        var connected = false
+        var connectedEvents = Set<String>()
         for event in events {
             for group in try groupsForEvent(event, in: hooks) {
-                if try commandsForGroup(group).contains(where: isOwnedHook) { connected = true }
+                if try commandsForGroup(group).contains(where: isOwnedHook) { connectedEvents.insert(event) }
             }
         }
-        return connected
+        if connectedEvents.count == events.count { return .connected }
+        return connectedEvents.isEmpty ? .disconnected : .partial
     }
 
     static func setConnected(_ connect: Bool, settingsURL: URL = AppPaths.claudeSettings,
@@ -169,9 +195,9 @@ enum ClaudeIntegration {
         case settingsChanged
         var errorDescription: String? {
             switch self {
-            case .invalidSettings: return "Настройки Claude Code имеют неподдерживаемый формат и не были изменены."
-            case .invalidSettingsLink: return "Файл настроек Claude Code недоступен или содержит некорректную ссылку. Изменения не внесены."
-            case .settingsChanged: return "Настройки Claude Code изменились во время подключения. Попробуйте ещё раз."
+            case .invalidSettings: return tr("Настройки Claude Code имеют неподдерживаемый формат и не были изменены.", "Claude Code settings have an unsupported format and were not changed.")
+            case .invalidSettingsLink: return tr("Файл настроек Claude Code недоступен или содержит некорректную ссылку. Изменения не внесены.", "Claude Code settings are unavailable or contain an invalid link. No changes were made.")
+            case .settingsChanged: return tr("Настройки Claude Code изменились во время подключения. Попробуйте ещё раз.", "Claude Code settings changed during connection. Try again.")
             }
         }
     }

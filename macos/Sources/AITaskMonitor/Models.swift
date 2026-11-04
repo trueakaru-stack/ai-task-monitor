@@ -46,10 +46,12 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
     var loopWarning: LoopWarning? = nil
     var startedAt: Date = .distantPast
     var startKey: String = ""
+    var planConfirmed: Bool = true
 
     var progressLabel: String? {
         guard let progress else { return nil }
-        return progressKind == .approximate ? "≈\(progress)%" : "\(progress)%"
+        let value = progressKind == .approximate ? "≈\(progress)%" : "\(progress)%"
+        return steps.isEmpty ? value : value + tr(" этапов", " of steps")
     }
 
     static func progress(for steps: [TaskStep]) -> Int? {
@@ -108,7 +110,7 @@ enum TaskSnapshotMerger {
             var uncertain = task
             uncertain.isActive = false
             uncertain.isUnconfirmed = true
-            uncertain.activity = "Статус не подтверждён"
+            uncertain.activity = tr("Статус не подтверждён", "Status unconfirmed")
             result.append(uncertain)
         }
         return result
@@ -123,7 +125,7 @@ enum ProviderFilter: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .all: return "Все"
+        case .all: return tr("Все", "All")
         case .codex: return "Codex"
         case .claude: return "Claude Code"
         }
@@ -138,9 +140,9 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .system: return "Как в системе"
-        case .light: return "Светлая"
-        case .dark: return "Тёмная"
+        case .system: return tr("Как в системе", "System")
+        case .light: return tr("Светлая", "Light")
+        case .dark: return tr("Тёмная", "Dark")
         }
     }
 }
