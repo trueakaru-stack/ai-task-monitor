@@ -150,10 +150,10 @@ struct SettingsView: View {
                         }
                     }
                     .font(.system(size: 13)).buttonStyle(.plain)
-                    .id("feedback-end")
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 18)
+                .id("feedback-end")
              }
              .onAppear {
                  if settingsPreviewEnd {
