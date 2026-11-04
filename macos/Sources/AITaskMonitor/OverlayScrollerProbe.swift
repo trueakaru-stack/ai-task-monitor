@@ -1,15 +1,36 @@
 import AppKit
 import SwiftUI
 
-/// Applies an overlay scroller to this scroll view without changing scroll behavior.
+/// Keeps native scrolling while choosing the requested trackless indicator style.
 struct OverlayScrollerProbe: NSViewRepresentable {
-    func makeNSView(context: Context) -> Probe { Probe(frame: .zero) }
+    var alwaysVisible = false
 
-    func updateNSView(_ view: Probe, context: Context) { view.configure() }
+    func makeNSView(context: Context) -> Probe { Probe(frame: .zero, alwaysVisible: alwaysVisible) }
+
+    func updateNSView(_ view: Probe, context: Context) {
+        view.alwaysVisible = alwaysVisible
+        view.configure()
+    }
+
+    final class TracklessScroller: NSScroller {
+        override var isOpaque: Bool { false }
+
+        override func draw(_ dirtyRect: NSRect) {
+            if isEnabled && knobProportion < 1 { drawKnob() }
+        }
+    }
 
     final class Probe: NSView {
+        var alwaysVisible: Bool
         private weak var observedScrollView: NSScrollView?
         private var scrollerStyleObservation: NSKeyValueObservation?
+
+        init(frame: NSRect, alwaysVisible: Bool = false) {
+            self.alwaysVisible = alwaysVisible
+            super.init(frame: frame)
+        }
+
+        required init?(coder: NSCoder) { return nil }
 
         override func viewDidMoveToSuperview() {
             super.viewDidMoveToSuperview()
@@ -38,7 +59,16 @@ struct OverlayScrollerProbe: NSViewRepresentable {
                     DispatchQueue.main.async { [weak self] in self?.configure() }
                 }
             }
-            if scrollView.scrollerStyle != .overlay { scrollView.scrollerStyle = .overlay }
+            if alwaysVisible {
+                if scrollView.scrollerStyle != .legacy { scrollView.scrollerStyle = .legacy }
+                if !(scrollView.verticalScroller is TracklessScroller) {
+                    scrollView.verticalScroller = TracklessScroller(frame: .zero)
+                }
+                scrollView.hasVerticalScroller = true
+                scrollView.autohidesScrollers = false
+            } else if scrollView.scrollerStyle != .overlay {
+                scrollView.scrollerStyle = .overlay
+            }
         }
     }
 }

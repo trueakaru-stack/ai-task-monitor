@@ -56,6 +56,9 @@ enum OpenCodeIntegration {
                 guard assets != nil, fixtureHome.hasPrefix(temporaryRoot + "/"),
                       supports(version: fixtureVersion ?? "1.18.29") else { throw OpenCodeIntegrationError.unverifiedVersion }
             } else {
+                guard home.resolvingSymlinksInPath().standardizedFileURL == FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().standardizedFileURL else {
+                    throw OpenCodeIntegrationError.invalidPath
+                }
                 let versions = try installedVersions(home: home)
                 guard !versions.isEmpty, versions.allSatisfy(supports(version:)) else { throw OpenCodeIntegrationError.unverifiedVersion }
             }

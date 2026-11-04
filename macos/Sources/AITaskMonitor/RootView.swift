@@ -75,9 +75,10 @@ struct RootView: View {
                     LazyVStack(spacing: 12) {
                         ForEach(store.filteredTasks) { task in TaskCardView(task: task, showProvider: store.providers.count > 1) }
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 16)
-                    .background(OverlayScrollerProbe().frame(width: 0, height: 0))
+                    .padding(.leading, 20)
+                    .padding(.trailing, max(0, 20 - NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)))
+                    .padding(.top, 16)
+                    .background(OverlayScrollerProbe(alwaysVisible: true).frame(width: 0, height: 0))
                 }
             }
             Button {
@@ -89,6 +90,7 @@ struct RootView: View {
             .buttonStyle(.plain)
             .foregroundStyle(MonitorTheme.secondary)
             .padding(.horizontal, 20)
+            .padding(.top, store.filteredTasks.isEmpty ? 0 : 20)
             .padding(.bottom, 16)
             .accessibilityHint(tr("Открыть настройки приложения", "Open app settings"))
         }
@@ -104,7 +106,7 @@ struct RootView: View {
                 .background(Squircle(radius: 14).fill(MonitorTheme.track.opacity(0.5)))
             } else {
                 ScrollViewReader { proxy in
-                    ScrollView(.horizontal, showsIndicators: false) {
+                    ScrollView(.horizontal) {
                         HStack(spacing: 4) {
                             ForEach(store.visibleProviderFilters) { filter in
                                 providerTab(filter, fillsWidth: false).id(filter)
@@ -147,16 +149,20 @@ struct RootView: View {
             } else {
                 let index = min(store.compactIndex, store.tasks.count - 1)
                 let task = store.tasks[index]
-                if store.providers.count > 1 {
-                    Text(task.provider.displayName).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Color.accentColor)
-                }
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    TruncatingText(text: task.title, font: .systemFont(ofSize: 13, weight: .semibold), color: .labelColor)
-                        .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
-                    if let label = task.progressLabel { Text(label).font(.system(size: 13, weight: .semibold)).monospacedDigit() }
-                }
-                if !task.activity.isEmpty {
-                    ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 11.5)
+                VStack(alignment: .leading, spacing: 0) {
+                    if store.providers.count > 1 {
+                        Text(task.provider.displayName).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Color.accentColor)
+                            .padding(.bottom, 6)
+                    }
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        TruncatingText(text: task.title, font: .systemFont(ofSize: 13, weight: .semibold), color: .labelColor)
+                            .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
+                        if let label = task.progressLabel { Text(label).font(.system(size: 13, weight: .semibold)).monospacedDigit() }
+                    }
+                    if !task.activity.isEmpty {
+                        ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 11.5)
+                            .padding(.top, 2)
+                    }
                 }
                 if !task.steps.isEmpty && !task.planConfirmed {
                     Text(tr("План не подтверждён", "Plan unconfirmed")).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)

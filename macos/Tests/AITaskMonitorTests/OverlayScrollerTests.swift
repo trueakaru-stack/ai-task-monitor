@@ -73,4 +73,42 @@ final class OverlayScrollerTests: XCTestCase {
         XCTAssertEqual(scroll.scrollerStyle, .overlay, "The probe must recover if AppKit changes the style")
         XCTAssertTrue(scroll.hasVerticalScroller)
     }
+
+    @MainActor
+    func testTaskListKeepsTracklessScrollerAndTabsCanReachLastProvider() throws {
+        _ = NSApplication.shared
+        let store = TaskStore.manySourcesPreview()
+        let root = RootView().environmentObject(store).frame(width: 560, height: 700)
+        let host = NSHostingView(rootView: root)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 700),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer { window.close() }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.75))
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let views = descendants(host)
+        let probe = try XCTUnwrap(views.compactMap { $0 as? OverlayScrollerProbe.Probe }.first { $0.alwaysVisible })
+        let tasks = try XCTUnwrap(probe.enclosingScrollView)
+        XCTAssertEqual(tasks.scrollerStyle, .legacy)
+        XCTAssertTrue(tasks.verticalScroller is OverlayScrollerProbe.TracklessScroller)
+        XCTAssertTrue(tasks.hasVerticalScroller)
+        XCTAssertFalse(tasks.autohidesScrollers)
+        XCTAssertGreaterThan(tasks.documentView?.bounds.height ?? 0, tasks.contentView.bounds.height)
+        let scroller = try XCTUnwrap(tasks.verticalScroller)
+        XCTAssertLessThan(scroller.knobProportion, 1)
+        tasks.contentView.scroll(to: NSPoint(x: 0, y: 80))
+        tasks.reflectScrolledClipView(tasks.contentView)
+        XCTAssertGreaterThan(tasks.contentView.bounds.origin.y, 0)
+
+        let horizontal = try XCTUnwrap(views.compactMap { $0 as? NSScrollView }.first {
+            ($0.documentView?.bounds.width ?? 0) > $0.contentView.bounds.width + 1
+        })
+        XCTAssertEqual(store.visibleProviderFilters.count, 7)
+        store.selectedProvider = .opencode
+        RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        XCTAssertGreaterThan(horizontal.contentView.bounds.origin.x, 0, "Selecting the last provider must reveal its tab")
+    }
 }
