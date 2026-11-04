@@ -43,4 +43,33 @@ final class OverlayScrollerTests: XCTestCase {
         XCTAssertNotNil(scroll.documentView)
         XCTAssertGreaterThan(scroll.documentView?.bounds.height ?? 0, scroll.contentView.bounds.height)
     }
+
+    @MainActor
+    func testSettingsProbeConfiguresTheDisplayedScrollView() throws {
+        _ = NSApplication.shared
+        let store = TaskStore.preview()
+        store.showsSettings = true
+        let root = RootView().environmentObject(store).environment(\.settingsPreviewEnd, true)
+            .frame(width: 560, height: 700)
+        let host = NSHostingView(rootView: root)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 700),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer { window.close() }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.75))
+        func descendants(_ view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        let probes = descendants(host).compactMap { $0 as? OverlayScrollerProbe.Probe }
+        let probe = try XCTUnwrap(probes.first)
+        let scroll = try XCTUnwrap(probe.enclosingScrollView)
+        XCTAssertGreaterThan(scroll.documentView?.bounds.height ?? 0, scroll.contentView.bounds.height)
+        scroll.scrollerStyle = .legacy
+        probe.configure()
+        XCTAssertEqual(scroll.scrollerStyle, .overlay)
+        XCTAssertTrue(scroll.hasVerticalScroller)
+    }
 }
