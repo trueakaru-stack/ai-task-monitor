@@ -153,7 +153,7 @@ try{
 }catch{}
 $script:releaseUpdatesAvailable=$false
 try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAvailable=$true }catch{}
-$script:currentVersion='0.2.4-alpha'
+$script:currentVersion='0.2.5-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateClient=$null
