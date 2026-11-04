@@ -1,11 +1,20 @@
 import AppKit
 import SwiftUI
 
+private struct SettingsPreviewEndKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    var settingsPreviewEnd: Bool {
+        get { self[SettingsPreviewEndKey.self] }
+        set { self[SettingsPreviewEndKey.self] = newValue }
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject private var store: TaskStore
     @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.system.rawValue
     @AppStorage("languageMode") private var languageRaw = AppLanguage.system.rawValue
     @State private var confirmsJournalClear = false
+    @Environment(\.settingsPreviewEnd) private var settingsPreviewEnd
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -17,7 +26,8 @@ struct SettingsView: View {
             .accessibilityLabel(tr("Назад к задачам", "Back to tasks"))
             .padding(.horizontal, 20)
 
-            ScrollView {
+            ScrollViewReader { scrollProxy in
+             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     Text(tr("Настройки", "Settings")).font(.system(size: 22, weight: .semibold))
                     section(tr("Внешний вид", "Appearance")) {
@@ -140,9 +150,14 @@ struct SettingsView: View {
                         }
                     }
                     .font(.system(size: 13)).buttonStyle(.plain)
+                    .id("feedback-end")
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 18)
+             }
+             .onAppear {
+                 if settingsPreviewEnd { DispatchQueue.main.async { scrollProxy.scrollTo("feedback-end", anchor: .bottom) } }
+             }
             }
         }
         .onChange(of: languageRaw) { _ in store.refresh() }

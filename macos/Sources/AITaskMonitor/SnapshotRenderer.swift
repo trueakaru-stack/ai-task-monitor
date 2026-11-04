@@ -91,30 +91,27 @@ enum SnapshotRenderer {
         let view = RootView()
             .environmentObject(store)
             .environment(\.colorScheme, scheme)
+            .environment(\.settingsPreviewEnd, settingsEnd)
             .frame(width: size.width, height: size.height)
         let hosting = NSHostingView(rootView: view)
         hosting.appearance = NSAppearance(named: mode == .dark ? .darkAqua : .aqua)
         hosting.frame = NSRect(origin: .zero, size: size)
-        hosting.layoutSubtreeIfNeeded()
+        var previewWindow: NSWindow?
         if settingsEnd {
-            guard scrollToEnd(hosting) else { throw SnapshotError.scroll }
-            hosting.layoutSubtreeIfNeeded()
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = hosting
+            window.orderFrontRegardless()
+            previewWindow = window
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
         }
+        defer { previewWindow?.close() }
+        hosting.layoutSubtreeIfNeeded()
         guard let bitmap = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { throw SnapshotError.bitmap }
         hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
         guard let png = bitmap.representation(using: .png, properties: [:]) else { throw SnapshotError.png }
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func scrollToEnd(_ view: NSView) -> Bool {
-        if let scroll = view as? NSScrollView, let document = scroll.documentView, document.bounds.height > scroll.contentView.bounds.height {
-            let bottom = document.isFlipped ? document.bounds.height - scroll.contentView.bounds.height : 0
-            scroll.contentView.scroll(to: NSPoint(x: 0, y: bottom))
-            scroll.reflectScrolledClipView(scroll.contentView)
-            return true
-        }
-        return view.subviews.contains { scrollToEnd($0) }
-    }
-
-    private enum SnapshotError: Error { case bitmap, png, scroll }
+    private enum SnapshotError: Error { case bitmap, png }
 }
