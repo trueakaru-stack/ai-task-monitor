@@ -160,7 +160,7 @@ namespace AITaskMonitor.ClaudeLoop
                 IAsyncResult pending = stream.BeginRead(result, offset, length - offset, null, null);
                 using (WaitHandle completed = pending.AsyncWaitHandle)
                 {
-                    if (!completed.WaitOne(200)) return null;
+                    if (!completed.WaitOne(500)) return null;
                     int count = stream.EndRead(pending);
                     if (count <= 0) return null;
                     offset += count;
@@ -174,7 +174,7 @@ namespace AITaskMonitor.ClaudeLoop
             IAsyncResult pending = stream.BeginWrite(data, 0, data.Length, null, null);
             using (WaitHandle completed = pending.AsyncWaitHandle)
             {
-                if (!completed.WaitOne(200)) return false;
+                if (!completed.WaitOne(500)) return false;
                 stream.EndWrite(pending);
                 return true;
             }

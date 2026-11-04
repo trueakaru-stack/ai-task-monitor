@@ -130,7 +130,7 @@ try{
 try { . (Join-Path $PSScriptRoot "ClaudeReaderCore.ps1") }catch{if($PreviewStartupReadyFile){$script:previewReaderFailure=$_.Exception.ToString()}}
 $script:releaseUpdatesAvailable=$false
 try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAvailable=$true }catch{}
-$script:currentVersion='0.2.3-alpha'
+$script:currentVersion='0.2.4-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateClient=$null
@@ -981,6 +981,65 @@ function Lock-State([string]$path) {
  }
 }
 
+function Find-PriorLifecycle([string]$path) {
+ $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+ try {
+  $position=$stream.Length;$buffer=New-Object byte[] 262144;$carry='';$discardPartial=$false
+  $terminals=New-Object 'Collections.Generic.List[object]'
+  while($position -gt 0){
+   $count=[int][Math]::Min([long]$buffer.Length,$position);$position-=$count
+   [void]$stream.Seek($position,[IO.SeekOrigin]::Begin)
+   $read=0
+   while($read -lt $count){$n=$stream.Read($buffer,$read,$count-$read);if($n -le 0){throw 'Unable to read Codex session history.'};$read+=$n}
+   $text=[Text.Encoding]::UTF8.GetString($buffer,0,$read)
+   if(-not $discardPartial){$text+=$carry}
+   $lines=$text.Split([char]10)
+   if($lines.Length -eq 1 -and $position -gt 0){
+    if($discardPartial){$carry=''}elseif($text.Length -gt 1048576){$carry='';$discardPartial=$true}else{$carry=$text}
+    continue
+   }
+   $last=$lines.Length-1
+   if($discardPartial){$last--;$discardPartial=$false}
+   $first=if($position -eq 0){0}else{1}
+   for($i=$last;$i -ge $first;$i--){
+    $line=$lines[$i]
+    if($line.Length -gt 1048576 -or $line -notmatch '"event_msg"' -or $line -notmatch '"(task_started|turn_started|task_complete|turn_complete|turn_aborted)"'){continue}
+    try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
+    if($null -eq $record.PSObject.Properties['type'] -or [string]$record.type -ne 'event_msg' -or $null -eq $record.PSObject.Properties['payload']){continue}
+    $payload=$record.payload
+    if($null -eq $payload -or $null -eq $payload.PSObject.Properties['type']){continue}
+    $type=[string]$payload.type
+    if($type -notin @('task_started','turn_started','task_complete','turn_complete','turn_aborted')){continue}
+    $turn=if($null -ne $payload.PSObject.Properties['turn_id']){[string]$payload.turn_id}else{''}
+    if($type -in @('task_started','turn_started')){
+     $raw=if($null -ne $record.PSObject.Properties['timestamp']){[string]$record.timestamp}else{''}
+     $timestamp=[DateTime]::MinValue
+     if($null -ne $record.PSObject.Properties['timestamp']){
+      $value=$record.timestamp
+      if($value -is [DateTime]){$timestamp=$value.ToUniversalTime()}
+      elseif($value -is [DateTimeOffset]){$timestamp=$value.UtcDateTime}
+      elseif($null -ne $value -and [DateTime]::TryParse([string]$value,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$timestamp)){$timestamp=$timestamp.ToUniversalTime()}
+     }
+     $lifecycle='task_started'
+     foreach($terminal in $terminals){
+      if(-not $turn -or -not $terminal.TurnId -or $turn -eq $terminal.TurnId){$lifecycle=$terminal.Lifecycle;break}
+     }
+     $key=if($turn){'turn:'+$turn}elseif($raw){'time:'+$raw}else{''}
+     return [PSCustomObject]@{Lifecycle=$lifecycle;TurnId=$turn;LastEventUtc=$timestamp;StartKey=$key;StartedUtc=$timestamp}
+    }
+    if($terminals.Count -ge 1024){return $null}
+    $terminals.Add([PSCustomObject]@{Lifecycle=$(if($type -eq 'turn_aborted'){'turn_aborted'}else{'task_complete'});TurnId=$turn})
+   }
+   if($position -gt 0){
+    $carry=$lines[0]
+    if($carry.Length -gt 1048576){$carry='';$discardPartial=$true}
+   }
+  }
+  if($terminals.Count){return [PSCustomObject]@{Lifecycle=$terminals[0].Lifecycle;TurnId='';LastEventUtc=[DateTime]::MinValue;StartKey='';StartedUtc=[DateTime]::MinValue}}
+  return $null
+ } finally {$stream.Dispose()}
+}
+
 function Thread-State([string]$id) {
  if($id -notmatch '^[A-Za-z0-9_-]{1,128}$'){return [PSCustomObject]@{State="unknown";HasStartMarker=$false;UpdatedUtc=[DateTime]::MinValue;StartKey="";StartedUtc=[DateTime]::MinValue}}
  $path = Session-File $id
@@ -993,9 +1052,23 @@ function Thread-State([string]$id) {
   $startKey=if($null -ne $cached.PSObject.Properties["StartKey"]){[string]$cached.StartKey}else{""}
   $startedUtc=if($null -ne $cached.PSObject.Properties["StartedUtc"]){[DateTime]$cached.StartedUtc}else{[DateTime]::MinValue}
  }else{
-  $tail=Read-TailText $path 2097152
-  $lifecycle=""; $turnId=""; $startKey=""; $startedUtc=[DateTime]::MinValue; $lastEventUtc=[DateTime]::MinValue
-  foreach($line in ($tail -split "`r?`n")){
+  $tailLimit=2097152
+  $tail=Read-TailText $path $tailLimit
+  $seed=$null
+  if($null -ne $cached -and $cached.Lifecycle -in @('task_started','task_complete','turn_aborted') -and
+     $null -ne $cached.PSObject.Properties['TurnId'] -and [long]$file.Length -ge [long]$cached.Length -and
+     ([long]$file.Length-[long]$cached.Length) -le $tailLimit -and $file.LastWriteTimeUtc.Ticks -ge [long]$cached.Stamp){$seed=$cached}
+  $scannedPrior=($null -ne $cached -and $null -ne $cached.PSObject.Properties['PriorScanComplete'] -and $cached.PriorScanComplete -and
+   [long]$file.Length -ge [long]$cached.Length -and ([long]$file.Length-[long]$cached.Length) -le $tailLimit -and
+   $file.LastWriteTimeUtc.Ticks -ge [long]$cached.Stamp)
+  $parseTail={param($text,$initial)
+   $lifecycle=if($initial){[string]$initial.Lifecycle}else{''}
+   $turnId=if($initial){[string]$initial.TurnId}else{''}
+   $startKey=if($initial){[string]$initial.StartKey}else{''}
+   $startedUtc=if($initial){[DateTime]$initial.StartedUtc}else{[DateTime]::MinValue}
+   $lastEventUtc=if($initial){[DateTime]$initial.LastEventUtc}else{[DateTime]::MinValue}
+   $latestTailEventUtc=[DateTime]::MinValue;$sawStart=$false
+   foreach($line in ($text -split "`r?`n")){
    if($line.Length -gt 1048576 -or $line -notmatch '"event_msg"'){continue}
    try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
    if($null -eq $record.PSObject.Properties["type"] -or [string]$record.type -ne "event_msg" -or $null -eq $record.PSObject.Properties["payload"]){continue}
@@ -1003,7 +1076,14 @@ function Thread-State([string]$id) {
    if($null -eq $payload -or $null -eq $payload.PSObject.Properties["type"]){continue}
    $eventType=[string]$payload.type
    $eventTurn=if($null -ne $payload.PSObject.Properties["turn_id"]){[string]$payload.turn_id}else{""}
+   $timestampValue=if($null -ne $record.PSObject.Properties["timestamp"]){$record.timestamp}else{$null}
+   $timestamp=[DateTime]::MinValue
+   if($timestampValue -is [DateTime]){$timestamp=$timestampValue.ToUniversalTime()}
+   elseif($timestampValue -is [DateTimeOffset]){$timestamp=$timestampValue.UtcDateTime}
+   elseif($null -ne $timestampValue -and [DateTime]::TryParse([string]$timestampValue,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$timestamp)){$timestamp=$timestamp.ToUniversalTime()}
+   if($timestamp -gt $latestTailEventUtc){$latestTailEventUtc=$timestamp}
    if($eventType -in @("task_started","turn_started")){
+    $sawStart=$true
     $lifecycle="task_started";$turnId=$eventTurn;$lastEventUtc=[DateTime]::MinValue
     $rawStart=if($null -ne $record.PSObject.Properties["timestamp"]){[string]$record.timestamp}else{""}
     $startKey=if($eventTurn){"turn:"+$eventTurn}elseif($rawStart){"time:"+$rawStart}else{""}
@@ -1014,15 +1094,24 @@ function Thread-State([string]$id) {
     $lifecycle=if($eventType -eq "turn_aborted"){"turn_aborted"}else{"task_complete"}
     continue
    }
-   $timestampValue=if($null -ne $record.PSObject.Properties["timestamp"]){$record.timestamp}else{$null}
-   $timestamp=[DateTime]::MinValue
-   if($timestampValue -is [DateTime]){$timestamp=$timestampValue.ToUniversalTime()}
-   elseif($timestampValue -is [DateTimeOffset]){$timestamp=$timestampValue.UtcDateTime}
-   elseif($null -ne $timestampValue -and [DateTime]::TryParse([string]$timestampValue,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$timestamp)){$timestamp=$timestamp.ToUniversalTime()}
    if($eventType -in @("task_started","turn_started")){$startedUtc=$timestamp}
    if($timestamp -gt $lastEventUtc){$lastEventUtc=$timestamp}
+   }
+   return [PSCustomObject]@{Lifecycle=$lifecycle;TurnId=$turnId;LastEventUtc=$lastEventUtc;StartKey=$startKey;StartedUtc=$startedUtc;LatestTailEventUtc=$latestTailEventUtc;SawStart=$sawStart}
   }
-  $script:lifecycleState[$path]=[PSCustomObject]@{Length=[long]$file.Length;Stamp=$file.LastWriteTimeUtc.Ticks;Lifecycle=$lifecycle;LastEventUtc=$lastEventUtc;StartKey=$startKey;StartedUtc=$startedUtc}
+  $parsed=& $parseTail $tail $seed
+  if($null -eq $seed -and -not $scannedPrior -and -not $parsed.SawStart -and [long]$file.Length -gt $tailLimit -and $parsed.LatestTailEventUtc -ge $script:monitorStartedUtc){
+   $priorLock=Lock-State (Join-Path $lockDirectory "$id.lock")
+   if($priorLock -eq 'unavailable'){throw 'Codex session lock cannot be checked.'}
+   if($priorLock -eq 'held'){
+    $prior=Find-PriorLifecycle $path
+    $scannedPrior=$true
+    if($null -ne $prior){$parsed=& $parseTail $tail $prior}
+   }
+  }
+  $lifecycle=[string]$parsed.Lifecycle;$turnId=[string]$parsed.TurnId;$lastEventUtc=[DateTime]$parsed.LastEventUtc
+  $startKey=[string]$parsed.StartKey;$startedUtc=[DateTime]$parsed.StartedUtc
+  $script:lifecycleState[$path]=[PSCustomObject]@{Length=[long]$file.Length;Stamp=$file.LastWriteTimeUtc.Ticks;Lifecycle=$lifecycle;TurnId=$turnId;LastEventUtc=$lastEventUtc;StartKey=$startKey;StartedUtc=$startedUtc;PriorScanComplete=$scannedPrior}
  }
  $hasStart=$lifecycle -eq "task_started"
  $lock=if($hasStart){Lock-State (Join-Path $lockDirectory "$id.lock")}else{"missing"}
@@ -2484,13 +2573,15 @@ if ($SnapshotFile) {
    $hookStart.FileName=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
    $hookStart.Arguments='-NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $PSScriptRoot 'ClaudeTaskHook.ps1')+'" -LoopTestPipe '+$PreviewClaudeLoopPipe
    $hookStart.UseShellExecute=$false;$hookStart.CreateNoWindow=$true
-   $hookStart.RedirectStandardInput=$true;$hookStart.RedirectStandardOutput=$true
+   $hookStart.RedirectStandardInput=$true;$hookStart.RedirectStandardOutput=$true;$hookStart.RedirectStandardError=$true
    $hookStart.EnvironmentVariables['LOCALAPPDATA']=$previewDataPath
    $hookStart.EnvironmentVariables['AI_TASK_MONITOR_AUDIT']='1'
+   $hookStart.EnvironmentVariables['AI_TASK_MONITOR_AUDIT_CHANNEL']='1'
    $hook=[Diagnostics.Process]::Start($hookStart)
    try{
     $hook.StandardInput.WriteLine(($testEvent|ConvertTo-Json -Compress -Depth 4));$hook.StandardInput.Close()
     if(-not $hook.WaitForExit(5000) -or $hook.ExitCode -ne 0 -or $hook.StandardOutput.ReadToEnd()){throw 'The synthetic Claude hook failed.'}
+    $transportAudit=$hook.StandardError.ReadToEnd().Trim()
    }finally{$hook.Dispose()}
    $watch=[Diagnostics.Stopwatch]::StartNew()
    do{
@@ -2501,7 +2592,7 @@ if ($SnapshotFile) {
     }
     Start-Sleep -Milliseconds 15
    }while($watch.ElapsedMilliseconds -lt 2000)
-   throw 'A synthetic Claude loop event was not applied.'
+   throw ('A synthetic Claude loop event was not applied: session='+$session+' kind='+$kind+' number='+$number+' transport='+$transportAudit)
   }
   for($number=1;$number -le 5;$number++){
    Send-PreviewClaudeLoop 'preview-1' $number 'start'

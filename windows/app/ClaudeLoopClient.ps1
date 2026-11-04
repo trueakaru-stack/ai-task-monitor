@@ -11,6 +11,8 @@ function Get-ClaudeLoopPipeName {
 }
 
 function Send-ClaudeLoopEvent($InputEvent,[string]$PipeOverride='') {
+ $auditTransport=($PipeOverride -and $env:AI_TASK_MONITOR_AUDIT -eq '1' -and $env:AI_TASK_MONITOR_AUDIT_CHANNEL -eq '1')
+ $phase='validation'
  try{
   $session=[string](Get-ClaudeLoopField $InputEvent 'session_id' '')
   if($session -cnotmatch '^[A-Za-z0-9_-]{1,128}$'){return}
@@ -52,17 +54,21 @@ function Send-ClaudeLoopEvent($InputEvent,[string]$PipeOverride='') {
   }
   $name=if($PipeOverride){$PipeOverride}else{Get-ClaudeLoopPipeName}
   if($name -cnotmatch '^[A-Za-z0-9_.-]{1,120}$'){return}
+  $owner=$null
+  try{$owner=[Threading.Mutex]::OpenExisting('Local\'+$name+'.owner')}catch{return}finally{if($null -ne $owner){$owner.Dispose()}}
   $key=New-Object byte[] 32
   $body=$null;$packet=$null
   $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$name,[IO.Pipes.PipeDirection]::InOut,[IO.Pipes.PipeOptions]::Asynchronous)
   try{
-   $pipe.Connect(30)
+   $phase='connect'
+   $pipe.Connect(600)
+   $phase='handshake'
    $offset=0;$watch=[Diagnostics.Stopwatch]::StartNew()
    while($offset -lt $key.Length){
-    $remaining=[Math]::Max(0,120-[int]$watch.ElapsedMilliseconds)
-    if($remaining -eq 0){return}
+    $remaining=[Math]::Max(0,400-[int]$watch.ElapsedMilliseconds)
+    if($remaining -eq 0){if($auditTransport){[Console]::Error.WriteLine('CLAUDE_LOOP_TRANSPORT_FAILURE:handshake:timeout')};return}
     $read=$pipe.ReadAsync($key,$offset,$key.Length-$offset)
-    if(-not $read.Wait($remaining) -or $read.Result -le 0){return}
+    if(-not $read.Wait($remaining) -or $read.Result -le 0){if($auditTransport){[Console]::Error.WriteLine('CLAUDE_LOOP_TRANSPORT_FAILURE:handshake:read')};return}
     $offset+=$read.Result
    }
    if($message['kind'] -cin @('start','failed','success')){
@@ -78,13 +84,14 @@ function Send-ClaudeLoopEvent($InputEvent,[string]$PipeOverride='') {
    $packet=New-Object byte[] ($body.Length+4)
    [Array]::Copy([BitConverter]::GetBytes([int]$body.Length),0,$packet,0,4)
    [Array]::Copy($body,0,$packet,4,$body.Length)
+   $phase='write'
    $write=$pipe.WriteAsync($packet,0,$packet.Length)
-   [void]$write.Wait(120)
+   if(-not $write.Wait(400) -and $auditTransport){[Console]::Error.WriteLine('CLAUDE_LOOP_TRANSPORT_FAILURE:write:timeout')}
   }finally{
    $pipe.Dispose()
    [Array]::Clear($key,0,$key.Length)
    if($null -ne $body){[Array]::Clear($body,0,$body.Length)}
    if($null -ne $packet){[Array]::Clear($packet,0,$packet.Length)}
   }
- }catch{}
+ }catch{if($auditTransport){[Console]::Error.WriteLine('CLAUDE_LOOP_TRANSPORT_FAILURE:'+$phase+':'+$_.Exception.GetType().Name)}}
 }

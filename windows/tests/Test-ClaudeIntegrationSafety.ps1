@@ -1,3 +1,4 @@
+param([switch]$RequireSymbolicLink,[string]$ApplicationDirectory='')
 $ErrorActionPreference = "Stop"
 $root = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ("ai-task-monitor-integration-" + [Guid]::NewGuid().ToString("N"))))
 $prefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
@@ -8,7 +9,7 @@ $previousLocalAppData = $env:LOCALAPPDATA
 try {
     $env:USERPROFILE = $root
     $env:LOCALAPPDATA = $root
-    $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\app"))
+    $sourceRoot = if ($ApplicationDirectory) { [IO.Path]::GetFullPath($ApplicationDirectory) } else { [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\app")) }
     $setup = Join-Path $sourceRoot "Configure-ClaudeIntegration.ps1"
     $hook = Join-Path $sourceRoot "ClaudeTaskHook.ps1"
     $tokens = $null
@@ -141,7 +142,9 @@ try {
         [void](New-Item -ItemType SymbolicLink -Path $linkPath -Target $linkTarget -ErrorAction Stop)
         $linkSupported = $true
     } catch {
-        Write-Output 'Claude integration symbolic-link fixture skipped: this account cannot create a symbolic link.'
+        $linkError = $_.Exception.Message
+        if ($RequireSymbolicLink) { throw "The symbolic-link fixture could not be created: $linkError" }
+        Write-Output "Claude integration symbolic-link fixture skipped: $linkError"
     }
     if ($linkSupported) {
         $env:USERPROFILE = $linkProfile
@@ -153,7 +156,65 @@ try {
             if ($linked.unrelated -ne 'keep' -or $null -eq $linked.hooks) { throw 'Installing the hook did not update the linked settings target safely.' }
             $linkBackups = @(Get-ChildItem -LiteralPath $linkDirectory -Filter 'settings.json.codex-tasks-backup-*')
             if ($linkBackups.Count -ne 1 -or [IO.File]::ReadAllText($linkBackups[0].FullName) -cne $linkOriginal) { throw 'A backup of the original linked settings was not retained.' }
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setup -Mode Remove
+            if ($LASTEXITCODE -ne 0 -or ([IO.File]::GetAttributes($linkPath) -band [IO.FileAttributes]::ReparsePoint) -eq 0) { throw 'Removing the hook did not preserve the settings symbolic link.' }
+            $unlinked = [IO.File]::ReadAllText($linkTarget) | ConvertFrom-Json
+            if ($unlinked.unrelated -ne 'keep' -or @($unlinked.hooks.PSObject.Properties).Count -ne 0) { throw 'Removing the hook changed unrelated linked settings.' }
         } finally { $env:USERPROFILE = $root }
+        foreach ($case in @('relative', 'chain')) {
+            $caseProfile = Join-Path $root ('symlink-' + $case)
+            $caseDirectory = Join-Path $caseProfile '.claude'
+            [void][IO.Directory]::CreateDirectory($caseDirectory)
+            $caseTarget = Join-Path $root ('linked-' + $case + '.json')
+            [IO.File]::WriteAllText($caseTarget, $linkOriginal, [Text.UTF8Encoding]::new($false))
+            $casePath = Join-Path $caseDirectory 'settings.json'
+            $targetSpec = '..\..\linked-' + $case + '.json'
+            $intermediate = $null
+            if ($case -eq 'chain') {
+                $intermediate = Join-Path $caseDirectory 'settings-target.json'
+                [void](New-Item -ItemType SymbolicLink -Path $intermediate -Target $targetSpec -ErrorAction Stop)
+                $targetSpec = 'settings-target.json'
+            }
+            [void](New-Item -ItemType SymbolicLink -Path $casePath -Target $targetSpec -ErrorAction Stop)
+            $env:USERPROFILE = $caseProfile
+            try {
+                foreach ($mode in @('Install', 'Remove')) {
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setup -Mode $mode
+                    if ($LASTEXITCODE -ne 0) { throw "The $case symbolic link failed in mode $mode." }
+                    if (([IO.File]::GetAttributes($casePath) -band [IO.FileAttributes]::ReparsePoint) -eq 0) { throw "The $case settings link was replaced in mode $mode." }
+                    if ($intermediate -and ([IO.File]::GetAttributes($intermediate) -band [IO.FileAttributes]::ReparsePoint) -eq 0) { throw "The intermediate settings link was replaced in mode $mode." }
+                    $caseSettings = [IO.File]::ReadAllText($caseTarget) | ConvertFrom-Json
+                    if ($caseSettings.unrelated -ne 'keep') { throw "Unrelated $case settings changed in mode $mode." }
+                    if ($mode -eq 'Install' -and $null -eq $caseSettings.hooks) { throw "The $case link target was not updated." }
+                    if ($mode -eq 'Remove' -and @($caseSettings.hooks.PSObject.Properties).Count -ne 0) { throw "The $case hook was not removed." }
+                }
+                $caseBackups = @(Get-ChildItem -LiteralPath $caseDirectory -Filter 'settings.json.codex-tasks-backup-*')
+                if ($caseBackups.Count -ne 1 -or [IO.File]::ReadAllText($caseBackups[0].FullName) -cne $linkOriginal) { throw "The $case settings backup was not retained." }
+            } finally { $env:USERPROFILE = $root }
+        }
+        foreach ($case in @('dangling', 'cycle')) {
+            $caseProfile = Join-Path $root ('symlink-' + $case)
+            $caseDirectory = Join-Path $caseProfile '.claude'
+            [void][IO.Directory]::CreateDirectory($caseDirectory)
+            $casePath = Join-Path $caseDirectory 'settings.json'
+            $second = Join-Path $caseDirectory 'second.json'
+            if ($case -eq 'cycle') { [void](New-Item -ItemType SymbolicLink -Path $second -Target 'settings.json' -ErrorAction Stop) }
+            $targetSpec = if ($case -eq 'cycle') { 'second.json' } else { 'missing.json' }
+            [void](New-Item -ItemType SymbolicLink -Path $casePath -Target $targetSpec -ErrorAction Stop)
+            $env:USERPROFILE = $caseProfile
+            try {
+                $previousErrorPreference = $ErrorActionPreference
+                try {
+                    $ErrorActionPreference = 'Continue'
+                    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setup -Mode Install 2>$null
+                } finally { $ErrorActionPreference = $previousErrorPreference }
+                if ($LASTEXITCODE -eq 0) { throw "The $case symbolic link must not be updated." }
+                if (([IO.File]::GetAttributes($casePath) -band [IO.FileAttributes]::ReparsePoint) -eq 0) { throw "The $case symbolic link was replaced." }
+                if (@(Get-ChildItem -LiteralPath $caseDirectory -Filter '.ai-task-monitor-settings-*.tmp' -Force).Count -ne 0) { throw "A temporary file remained after the $case link failed." }
+            } finally { $env:USERPROFILE = $root }
+        }
+        Write-Output 'Claude integration: absolute, relative and chained settings symbolic links and backups verified.'
+        Write-Output 'Claude integration: dangling and cyclic symbolic links are left unchanged.'
     }
     Write-Output "Claude integration: exact hook ownership, unrelated settings, unsupported structures, backups and safe replacement verified."
 } finally {

@@ -29,6 +29,24 @@ function Is-CurrentHook($hook) {
  return (Is-OurHook $hook) -and [string]::Equals(([string]$hook.command).Trim(),$hookCommand,[StringComparison]::Ordinal)
 }
 
+function Resolve-SettingsDestination([string]$path) {
+ $current=[IO.Path]::GetFullPath($path)
+ $visited=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+ for($depth=0;$depth -lt 32;$depth++){
+  if(-not $visited.Add($current)){throw "Claude Code settings contain a symbolic-link cycle; no changes were made."}
+  $item=Get-Item -LiteralPath $current -Force -ErrorAction Stop
+  if($item.PSIsContainer){throw "Claude Code settings point to a directory; no changes were made."}
+  if(($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0){return $current}
+  if($item.LinkType -ne 'SymbolicLink'){throw "Claude Code settings use an unsupported reparse point; no changes were made."}
+  $targets=@($item.Target)
+  if($targets.Count -ne 1 -or -not [string]$targets[0]){throw "Claude Code settings have an invalid symbolic link; no changes were made."}
+  $target=[string]$targets[0]
+  if(-not [IO.Path]::IsPathRooted($target)){$target=Join-Path (Split-Path -Parent $current) $target}
+  $current=[IO.Path]::GetFullPath($target)
+ }
+ throw "Claude Code settings contain too many symbolic links; no changes were made."
+}
+
 if(-not (Test-Path -LiteralPath $claudeDirectory)){
  if($Mode -eq "Remove"){exit 0}
  [IO.Directory]::CreateDirectory($claudeDirectory)|Out-Null
@@ -37,12 +55,13 @@ if(-not (Test-Path -LiteralPath $claudeDirectory)){
 $hasSettings=Test-Path -LiteralPath $settingsPath -PathType Leaf
 if($Mode -eq "Remove" -and -not $hasSettings){exit 0}
 if($hasSettings){
- $originalBytes=[IO.File]::ReadAllBytes($settingsPath)
+ $settingsWritePath=Resolve-SettingsDestination $settingsPath
+ $originalBytes=[IO.File]::ReadAllBytes($settingsWritePath)
  $hasher=[Security.Cryptography.SHA256]::Create()
  try{$originalHash=[BitConverter]::ToString($hasher.ComputeHash($originalBytes)).Replace("-","")}finally{$hasher.Dispose()}
  $raw=[Text.Encoding]::UTF8.GetString($originalBytes).TrimStart([char]0xFEFF)
  $settings=if($raw.Trim()){$raw|ConvertFrom-Json}else{[PSCustomObject]@{}}
-}else{$settings=[PSCustomObject]@{}}
+}else{$settingsWritePath=$settingsPath;$settings=[PSCustomObject]@{}}
 
 if($settings -isnot [PSCustomObject]){throw "Claude Code settings are not a JSON object; no changes were made."}
 if($null -eq $settings.PSObject.Properties["hooks"]){$settings|Add-Member NoteProperty hooks ([PSCustomObject]@{})}
@@ -114,7 +133,7 @@ if($Mode -eq "Install"){
 }
 
 $json=$settings|ConvertTo-Json -Depth 100
-$temporaryPath=Join-Path $claudeDirectory (".ai-task-monitor-settings-"+[Guid]::NewGuid().ToString("N")+".tmp")
+$temporaryPath=Join-Path (Split-Path -Parent $settingsWritePath) (".ai-task-monitor-settings-"+[Guid]::NewGuid().ToString("N")+".tmp")
 try{
  $stream=[IO.File]::Open($temporaryPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
  try{
@@ -122,7 +141,9 @@ try{
   try{$writer.Write($json+[Environment]::NewLine)}finally{$writer.Dispose()}
  }finally{$stream.Dispose()}
  if($hasSettings){
-  if(-not (Test-Path -LiteralPath $settingsPath -PathType Leaf) -or (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash -cne $originalHash){throw "Claude Code settings changed during the update; no changes were made."}
-  [IO.File]::Replace($temporaryPath,$settingsPath,[System.Management.Automation.Language.NullString]::Value)
+  if(-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)){throw "Claude Code settings changed during the update; no changes were made."}
+  $verifiedWritePath=Resolve-SettingsDestination $settingsPath
+  if(-not [string]::Equals($verifiedWritePath,$settingsWritePath,[StringComparison]::OrdinalIgnoreCase) -or (Get-FileHash -LiteralPath $verifiedWritePath -Algorithm SHA256).Hash -cne $originalHash){throw "Claude Code settings changed during the update; no changes were made."}
+  [IO.File]::Replace($temporaryPath,$settingsWritePath,[System.Management.Automation.Language.NullString]::Value)
  }else{[IO.File]::Move($temporaryPath,$settingsPath)}
 }finally{if([IO.File]::Exists($temporaryPath)){[IO.File]::Delete($temporaryPath)}}

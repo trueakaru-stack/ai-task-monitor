@@ -82,6 +82,7 @@ try{
  if(-not $batch.Gap -or $batch.Events.Count -ne 0){throw 'An oversized frame must clear the pending sequence and report a gap.'}
 
  $wireName='AITM.Test.Wire.'+[guid]::NewGuid().ToString('N')
+ $wireOwner=[Threading.Mutex]::new($false,'Local\'+$wireName+'.owner')
  $wire=[IO.Pipes.NamedPipeServerStream]::new($wireName,[IO.Pipes.PipeDirection]::InOut,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::Asynchronous)
  $process=$null
  try{
@@ -118,6 +119,7 @@ try{
   if(-not $process.WaitForExit(5000) -or $process.ExitCode -ne 0){throw 'The synthetic hook client did not exit cleanly.'}
  }finally{
   $wire.Dispose()
+  $wireOwner.Dispose()
   if($null -ne $process){$process.Dispose()}
  }
  $log=Join-Path $testRoot 'CodexTaskProgress\claude-events-v2.jsonl'
