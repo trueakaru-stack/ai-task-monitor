@@ -16,7 +16,7 @@ struct RootView: View {
             else if store.showsSettings { SettingsView() }
             else { tasksContent }
         }
-        .frame(width: store.isCompact ? 372 : 560, height: store.isCompact ? compactHeight : 700)
+        .frame(width: store.isCompact ? 372 : 560, height: store.isCompact ? compactHeight : 700, alignment: .top)
         .background(MonitorTheme.surface)
         .overlay {
             if let update = store.visibleUpdate { UpdateDialog(update: update) }
