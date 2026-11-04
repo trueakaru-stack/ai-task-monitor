@@ -6,7 +6,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "Unable to parse the application." }
-$definitions = foreach ($name in @("Prop", "Read-TailText", "Lock-State", "Thread-State", "Codex-Uncertain", "Plan-Progress", "Codex-Tasks")) {
+$definitions = foreach ($name in @("Prop", "Read-TailText", "Lock-State", "Thread-State", "Codex-Uncertain", "Plan-Progress", "Codex-IndexCandidates", "Codex-Tasks")) {
     $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if ($null -eq $function) { throw "Missing lifecycle function: $name" }
     $function.Extent.Text

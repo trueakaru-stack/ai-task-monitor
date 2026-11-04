@@ -24,6 +24,7 @@ try {
     $rootLiteral = "'" + $sourceRoot.Replace("'", "''") + "'"
     $connectionDefinition = ($definitions -join "`n").Replace('$PSScriptRoot', $rootLiteral)
     $assertConnected = [scriptblock]::Create($connectionDefinition + "`n" + 'if (-not (Claude-HookConnected)) { throw "The installed hook was not recognized." }')
+    $assertPartial = [scriptblock]::Create($connectionDefinition + "`n" + 'if ((Claude-ConnectionState) -ne "partial") { throw "A partial legacy hook was not recognized as incomplete." }')
     $assertDisconnected = [scriptblock]::Create($connectionDefinition + "`n" + 'if (Claude-HookConnected) { throw "An unrelated hook was recognized as the app hook." }')
     $legacy = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $hook + '"'
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& '" + $hook.Replace("'", "''") + "'"))
@@ -62,7 +63,7 @@ try {
     $withLegacy = $original | ConvertFrom-Json
     $withLegacy.hooks.PreToolUse[0].hooks = @($withLegacy.hooks.PreToolUse[0].hooks) + [PSCustomObject]@{type="command";command=$legacy}
     [IO.File]::WriteAllText($settingsPath, ($withLegacy | ConvertTo-Json -Depth 100), [Text.UTF8Encoding]::new($false))
-    & $assertConnected
+    & $assertPartial
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setup -Mode Install
     if ($LASTEXITCODE -ne 0) { throw "Installing the hook failed." }
     $connected = Get-Content -Raw -Encoding UTF8 -LiteralPath $settingsPath | ConvertFrom-Json

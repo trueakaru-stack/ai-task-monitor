@@ -45,6 +45,7 @@ $arguments = @(
     "/resource:$(Join-Path $source 'ClaudeLoopDetection.ps1'),ClaudeLoopDetection.ps1",
     "/resource:$(Join-Path $source 'ClaudeLoopChannel.cs'),ClaudeLoopChannel.cs",
     "/resource:$(Join-Path $source 'ClaudeReaderCore.ps1'),ClaudeReaderCore.ps1",
+    "/resource:$(Join-Path $source 'ClaudeRetention.cs'),ClaudeRetention.cs",
     "/resource:$(Join-Path $source 'AppShellIdentity.cs'),AppShellIdentity.cs",
     "/resource:$(Join-Path $source 'Configure-ClaudeIntegration.ps1'),Configure-ClaudeIntegration.ps1",
     "/resource:$(Join-Path $source 'DiagnosticPolicy.ps1'),DiagnosticPolicy.ps1",

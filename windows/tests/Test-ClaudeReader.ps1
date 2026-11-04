@@ -24,6 +24,10 @@ $tasks=@([AITaskMonitor.Claude.Reader]::Read($current,$legacy,$now))
 if($tasks.Count -ne 3 -or @($tasks|Where-Object Id -eq "ghost").Count -ne 0){throw "Only observed valid sessions should be returned."}
 $observed=@($tasks|Where-Object Id -eq "observed")[0]
 if($observed.Steps.Count -ne 1 -or $observed.Steps[0].title -ne "Synthetic step" -or $observed.Steps[0].status -ne "active"){throw "Legacy plan data was not preserved for the observed session."}
+if($observed.Steps[0].generated){throw 'A user-provided step title must not be treated as generated.'}
+$unnamed=New-Event 'unnamed' 'TaskCreated' $now $true 'step-id' '' 'pending'
+$unnamedTasks=@([AITaskMonitor.Claude.Reader]::Read($unnamed,'',$now))
+if($unnamedTasks.Count -ne 1 -or -not $unnamedTasks[0].Steps[0].generated -or $unnamedTasks[0].Steps[0].id -ne 'step-id'){throw 'An unnamed step must be identified as generated for localization.'}
 if($observed.Activity.Contains($secret)){throw "Raw event activity leaked into the view."}
 $completed=@($tasks|Where-Object Id -eq "completed")[0]
 if($completed.Steps.Count -ne 1 -or $completed.Steps[0].status -ne "done"){throw "The latest plan step status was not preserved."}

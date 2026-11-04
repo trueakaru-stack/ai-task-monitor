@@ -12,7 +12,7 @@ AI Task Monitor processes task information locally on the user's computer. The a
 
 ## Data stored on Windows
 
-- Theme preference.
+- Theme and language preferences.
 - A bounded local Claude Code event log when the optional integration is enabled.
 - A separate local diagnostic journal and its retention settings.
 
@@ -40,11 +40,13 @@ On macOS the key for pseudonymous identifiers is stored as an owner-only file in
 
 ## Claude Code event data
 
-In the current development sources, new hook events do not include the user's prompt or working-directory path. When no independent task title is available, the interface uses a neutral title. Events can still include a session identifier, tool name, step title, status, timestamp, and generated activity description; step titles and other text may themselves contain sensitive information. Hook input is size-limited and the event log is rotated by size, not by age.
+New hook events do not include the user's prompt or working-directory path. When no independent task title is available, the interface uses a neutral title. Events can still include a session identifier, tool name, step title, status, timestamp, and generated activity description; step titles and other text may themselves contain sensitive information. Hook input is size-limited.
 
-Events written by older versions may still contain prompt text and working-directory paths. The new hook writes to a separate v2 file and does not remove or rewrite the older file. When a session produces new events, the reader may use matching legacy events to recover its plan without persisting them again. Disconnecting Claude Code removes only the exact hook command installed by AI Task Monitor and preserves unrelated hooks.
+Events written by older versions may still contain prompt text and working-directory paths. The hook writes to a separate v2 file. When a session produces new events, the reader may use matching legacy events to recover its plan without persisting them again. Disconnecting Claude Code removes only the exact hook command installed by AI Task Monitor and preserves unrelated hooks.
 
-The new event file is `%LOCALAPPDATA%\CodexTaskProgress\claude-events-v2.jsonl` in the standalone Windows edition, `%USERPROFILE%\.ai-task-monitor\claude-events-v2.jsonl` in the Microsoft Store edition, and `~/Library/Application Support/AI Task Monitor/claude-events-v2.jsonl` on macOS. The older file is `claude-events.jsonl` in the same directory. The diagnostic journal's age and size controls do not apply to either Claude event file.
+The new event file is `%LOCALAPPDATA%\CodexTaskProgress\claude-events-v2.jsonl` in the standalone Windows edition, `%USERPROFILE%\.ai-task-monitor\claude-events-v2.jsonl` in the Microsoft Store edition, and `~/Library/Application Support/AI Task Monitor/claude-events-v2.jsonl` on macOS. The older file is `claude-events.jsonl` in the same directory. Separate controls set their combined retention to 1–30 days and 1–100 MB; defaults are 7 days and 10 MB. The application removes the oldest recognized complete events during operation and at the next launch. The hook also bounds the current file by the chosen size; temporary increases are possible between checks. Busy, invalid, incomplete or linked files are not automatically pruned. No background cleanup service is installed.
+
+The application removes its own Claude settings backups older than 30 days, keeping the newest backup regardless of age. That retained backup can contain sensitive settings. These controls do not change the separate diagnostic journal's limits.
 
 ## Data transmission
 
@@ -52,7 +54,7 @@ AI Task Monitor does not transmit task data to the developer, OpenAI, Anthropic,
 
 In the standalone Windows and macOS editions, at startup and once every 24 hours while open, the application requests the public release list from GitHub without authentication or cookies. GitHub receives the network request and IP address; no task titles, activity, prompts, commands, paths, identifiers, or journal contents are sent. The app checks only for a newer release with a package for the current platform, including alpha releases. Downloads open in the user's browser only after the user chooses «Скачать»; installation remains manual. Choosing «Позже» suppresses that version until the next application launch. The app does not display the notification in compact mode. The Microsoft Store edition does not check GitHub for EXE updates; Microsoft Store manages its updates.
 
-«Отзывы и предложения» opens a preaddressed email draft in the user's mail application. No task or diagnostic information is inserted, and the user decides whether to write and send the message.
+«Отзывы и предложения» displays a selectable email address and offers a preaddressed draft through the system's `mailto:` handler. A browser may open if it is configured as that handler; the address can instead be copied. No task or diagnostic information is inserted, and the user decides whether to write and send the message.
 
 ## Removal
 

@@ -3,6 +3,9 @@
  [string]$SnapshotFile = "",
  [switch]$CompactMode,
  [ValidateSet("","system","dark","light")][string]$ThemeOverride = "",
+ [ValidateSet("","system","ru","en")][string]$LanguageOverride = "",
+ [string]$PreferencesFile = "",
+ [switch]$PreviewLanguageUiTest,
  [string]$SettingsSnapshotFile = "",
  [string]$JournalSnapshotFile = "",
  [switch]$PreviewJournalSettings,
@@ -35,6 +38,8 @@
  [switch]$PreviewMotionUiTest,
  [switch]$PreviewOffscreen,
  [switch]$PreviewUnconfirmed,
+ [switch]$PreviewPlanUnconfirmed,
+ [switch]$PreviewPlanUiTest,
  [ValidateSet("all","codex","claude")][string]$PreviewProvider = "all",
  [string]$ClaudeEventFile = "",
  [string]$DiagnosticDirectory = "",
@@ -69,6 +74,14 @@ if($PreviewActivityUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1
 if($PreviewFocusUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or -not $CompactMode)){throw "Focus UI tests require a compact synthetic snapshot."}
 if(($PreviewMotion -ne "default" -or $PreviewMotionDelayMilliseconds -gt 0) -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw "Motion previews require synthetic tasks and a snapshot."}
 if($PreviewMotionUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1)){throw "Motion UI tests require one synthetic task and a snapshot."}
+if($PreferencesFile){
+ if(-not $SnapshotFile -or $PreviewActiveTasks -lt 0){throw 'Isolated preferences are available only for synthetic snapshots.'}
+ $preferencesPath=[IO.Path]::GetFullPath($PreferencesFile)
+ $temporaryRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
+ if(-not $preferencesPath.StartsWith($temporaryRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Isolated preferences must be inside the temporary folder.'}
+}
+if($PreviewLanguageUiTest -and (-not $PreferencesFile -or -not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw 'Language UI tests require isolated preferences and synthetic tasks.'}
+if(($PreviewPlanUnconfirmed -or $PreviewPlanUiTest) -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or $PreviewScenario -ne 'planned')){throw 'Plan UI tests require one synthetic planned task and a snapshot.'}
 if($PreviewOffscreen -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw "Offscreen previews require synthetic tasks and a snapshot."}
 if(($PreviewAbout -or $PreviewAboutUiTest) -and (-not $PreviewAbout -or -not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw "About previews require synthetic tasks and a snapshot."}
 if(($PreviewUpdate -or $PreviewUpdateUiTest) -and (-not $PreviewUpdate -or -not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw "Update previews require synthetic tasks and a snapshot."}
@@ -91,7 +104,9 @@ $claudeLegacyEventPath = if($ClaudeEventFile){""}else{Join-Path $dataDirectory "
 $script:fingerprint = ""
 $script:sessionFiles = @{}
 $script:sessionDates = @{}
+$script:sessionIndexLookup = @{}
 $script:planCache = @{}
+$script:planConfirmations = @{}
 $script:lifecycleState = @{}
 $script:observedCodex = @{}
 $script:monitorStartedUtc = [DateTime]::UtcNow
@@ -104,7 +119,7 @@ $script:sourceErrors = @()
 $script:compactTaskId = ""
 $script:taskPriority = @{}
 $script:taskPriorityCounter = 0
-$script:settingsPath = Join-Path $dataDirectory "settings.json"
+$script:settingsPath = if($PreferencesFile){$preferencesPath}else{Join-Path $dataDirectory "settings.json"}
 $script:diagnosticDirectory = if($DiagnosticDirectory){$DiagnosticDirectory}else{Join-Path (Split-Path -Parent $script:settingsPath) "diagnostics"}
 $script:diagnosticRuntime = $null
 $script:diagnosticError = ""
@@ -128,6 +143,14 @@ try{
  $script:claudeLoopModulesAvailable=$true
 }catch{$script:claudeLoopModulesAvailable=$false}
 try { . (Join-Path $PSScriptRoot "ClaudeReaderCore.ps1") }catch{if($PreviewStartupReadyFile){$script:previewReaderFailure=$_.Exception.ToString()}}
+$script:claudeRetentionAvailable=$false
+try{
+ if(-not ('AITaskMonitor.Claude.Retention' -as [type])){
+  Add-Type -AssemblyName System.Web.Extensions
+  Add-Type -Path (Join-Path $PSScriptRoot 'ClaudeRetention.cs') -ReferencedAssemblies System.Web.Extensions
+ }
+ $script:claudeRetentionAvailable=$true
+}catch{}
 $script:releaseUpdatesAvailable=$false
 try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAvailable=$true }catch{}
 $script:currentVersion='0.2.4-alpha'
@@ -144,6 +167,146 @@ $accentColor = [Windows.SystemParameters]::WindowGlassColor
 $script:accentHex = "#{0:X2}{1:X2}{2:X2}" -f $accentColor.R, $accentColor.G, $accentColor.B
 $accentLuma = (0.299 * $accentColor.R) + (0.587 * $accentColor.G) + (0.114 * $accentColor.B)
 $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFFF" }
+$script:languageMode='system'
+$script:resolvedLanguage='ru'
+$script:translations=@{
+ 'Окно всегда поверх других окон'='Keep window on top'
+ 'Свернуть в панель задач'='Minimize to taskbar'
+ 'Компактный режим'='Compact view'
+ 'Закрыть'='Close'
+ 'Ход выполнения'='Progress'
+ 'Открыть настройки'='Open settings'
+ 'Настройки'='Settings'
+ 'Развернуть'='Expand'
+ 'Назад к задачам'='Back to tasks'
+ 'Внешний вид'='Appearance'
+ 'Системная'='System'
+ 'Системный'='System'
+ 'Тёмная'='Dark'
+ 'Светлая'='Light'
+ 'Язык'='Language'
+ 'Источники'='Sources'
+ 'Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Code. Затем задачи будут появляться автоматически во время работы.'='The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Code after connecting; tasks will appear automatically.'
+ 'Журнал'='Journal'
+ 'Срок хранения'='Retention period'
+ 'Срок хранения журнала'='Journal retention period'
+ 'Максимальный размер'='Maximum size'
+ 'Максимальный размер журнала'='Maximum journal size'
+ 'Хранение Claude Code'='Claude Code storage'
+ 'Срок хранения событий'='Event retention period'
+ 'Максимальный размер событий'='Maximum event size'
+ 'События очищаются автоматически. Резервные копии настроек хранятся 30 дней; последняя сохраняется.'='Events are cleaned automatically. Settings backups are kept for 30 days; the most recent is retained.'
+ 'Не удалось очистить данные Claude Code'='Could not clean Claude Code data'
+ 'Настройки хранения Claude Code повреждены'='Claude Code storage settings are invalid'
+ 'Не удалось сохранить настройки хранения Claude Code'='Could not save Claude Code storage settings'
+ 'Очистка Claude Code недоступна'='Claude Code cleanup is unavailable'
+ 'Открыть журнал'='Open journal'
+ 'Очистить'='Clear'
+ 'Удалить все события журнала? История Codex и Claude Code не изменится.'='Delete all journal events? Codex and Claude Code history will not change.'
+ 'Удалить'='Delete'
+ 'Отмена'='Cancel'
+ 'Возможный цикл'='Possible loop'
+ 'Количество ошибок'='Error count'
+ 'Количество повторных ошибок для предупреждения'='Repeated error threshold'
+ 'Интервал'='Time window'
+ 'Интервал для повторных ошибок'='Time window for repeated errors'
+ 'Предупреждение не останавливает задачу.'='The warning does not stop the task.'
+ 'О приложении'='About'
+ 'Отзывы и предложения'='Feedback and suggestions'
+ 'Адрес для отзывов и предложений'='Feedback email address'
+ 'Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com.'='Could not open your email app. Write to truea.k.a.ru@gmail.com.'
+ 'Назад к настройкам'='Back to settings'
+ 'AI Task Monitor показывает активные задачи и текущее действие. Сейчас поддерживаются Codex и Claude Code.'='AI Task Monitor shows active tasks and their current action. Codex and Claude Code are currently supported.'
+ 'При нескольких источниках можно переключать задачи по вкладкам. Компактное окно остаётся поверх других и показывает до трёх задач с переключением между ними. Тему можно выбрать вручную или использовать тему Windows. Если источник недоступен, приложение сообщит об этом.'='When multiple sources are available, use tabs to switch between them. The compact window stays on top and lets you switch between up to three tasks. Choose a theme or follow Windows. The app reports unavailable sources.'
+ 'Если задача публикует план, приложение показывает выполненные, текущий и следующие этапы. В карточке одновременно видны до пяти этапов; остальные можно прокрутить. Без плана отображается текущее действие без списка этапов.'='When a task publishes a plan, the app shows completed, current and upcoming steps. Up to five steps are visible at once; scroll to see the rest. Without a plan, only the current action is shown.'
+ 'Точный процент показывается числом, приблизительная оценка — со знаком ≈. Если процент рассчитан по плану, он отражает долю выполненных этапов, а не всей работы. Без надёжной оценки процент скрыт.'='An exact percentage is shown as a number; an estimate is marked ≈. A plan percentage is the share of completed steps, not the entire task. No percentage is shown without a reliable value.'
+ 'Диагностический журнал хранится локально. В настройках можно выбрать срок и размер хранения, просмотреть события или очистить журнал.'='The diagnostic journal stays on this device. In Settings you can choose its retention period and size, view events or clear the journal.'
+ 'Приложение может предупредить о возможном цикле при повторных ошибках одной команды. Это предположение, оно не останавливает задачу.'='The app may warn about a possible loop when one command repeatedly fails. This is a warning only and does not stop the task.'
+ 'Данные задач обрабатываются локально. Для Claude Code после подключения используются локальные hooks. Самому монитору не нужны вход в аккаунт, токены или права администратора.'='Task data is processed locally. Claude Code uses local hooks after connection. The monitor does not require sign-in, tokens or administrator rights.'
+ 'При запуске и раз в сутки приложение проверяет новые версии на GitHub, не отправляя данные задач. Отзыв можно написать через почтовое приложение; сообщение отправляется только по вашему решению.'='The app checks GitHub for updates at startup and daily without sending task data. Feedback opens in your email app and is sent only if you choose to send it.'
+ 'Обновления этой версии устанавливаются через Microsoft Store. Отзыв можно написать через почтовое приложение; сообщение отправляется только по вашему решению.'='Updates for this edition are installed through Microsoft Store. Feedback opens in your email app and is sent only if you choose to send it.'
+ 'Фильтр журнала по задаче'='Filter journal by task'
+ 'События журнала'='Journal events'
+ 'Доступна новая версия'='A new version is available'
+ 'Скачайте приложение, полностью закройте старую версию и переустановите новую.'='Download the app, quit the old version completely, and install the new one.'
+ 'Не удалось открыть страницу загрузки.'='Could not open the download page.'
+ 'Позже'='Later'
+ 'Напомнить при следующем запуске'='Remind me next time'
+ 'Скачать'='Download'
+ 'Скачать новую версию'='Download the new version'
+ 'Нет данных'='No data'
+ 'Нет данных от '='No data from '
+ 'Подключён'='Connected'
+ 'Подключён частично'='Partially connected'
+ 'Не подключён'='Not connected'
+ 'Не найден'='Not found'
+ 'Установка не подтверждена'='Installation unconfirmed'
+ 'Не удалось подтвердить установку Claude Code'='Could not confirm that Claude Code is installed'
+ 'Подключить'='Connect'
+ 'Отключить'='Disconnect'
+ 'Claude Code не найден на этом компьютере'='Claude Code was not found on this computer'
+ 'Подключить Claude Code. Claude Code не найден'='Connect Claude Code. Claude Code was not found'
+ 'Не удалось прочитать настройки Claude Code'='Could not read Claude Code settings'
+ 'Claude Code: не удалось прочитать настройки'='Claude Code: could not read settings'
+ 'Подключение неполное. Нажмите, чтобы восстановить.'='Connection is incomplete. Select to repair it.'
+ 'Статус не подтверждён'='Status unconfirmed'
+ 'Выполняется'='Working'
+ 'Задача Claude Code'='Claude Code task'
+ 'Задача Codex'='Codex task'
+ 'Обрабатывает новый запрос'='Processing a new request'
+ 'Выполняет действие'='Running an action'
+ 'Действие завершено'='Action completed'
+ 'Ошибка действия'='Action failed'
+ 'Добавлен этап'='Step added'
+ 'Завершён этап'='Step completed'
+ 'Этап завершён'='Step completed'
+ 'Запущен дополнительный агент'='Subagent started'
+ 'Дополнительный агент завершён'='Subagent finished'
+ 'Выполняет: '='Running: '
+ 'Завершено: '='Completed: '
+ 'Ошибка: '='Failed: '
+ 'Добавлен этап: '='Step added: '
+ 'Завершён этап: '='Step completed: '
+ 'План задачи'='Task plan'
+ 'План не подтверждён'='Plan unconfirmed'
+ ' этапов'=' steps'
+ 'Приблизительная оценка'='Approximate estimate'
+ 'Скрыть'='Hide'
+ 'План ещё не опубликован этой задачей'='This task has not published a plan yet'
+ 'Без названия'='Untitled'
+ 'Показать задачу: '='Show task: '
+ 'Активных задач сейчас нет'='No active tasks'
+ 'Журнал недоступен'='Journal unavailable'
+ 'Журнал очищен, но недоступен'='Journal was cleared but is unavailable'
+ 'Не удалось обновить журнал'='Could not update the journal'
+ 'Не удалось сохранить настройки журнала'='Could not save journal settings'
+ 'Не удалось применить очистку журнала'='Could not apply journal cleanup'
+ 'Не удалось очистить журнал'='Could not clear the journal'
+ 'Настройка недоступна'='Setting unavailable'
+ 'Не удалось сохранить настройки предупреждения'='Could not save warning settings'
+ 'Предупреждение Claude Code недоступно'='Claude Code loop warning unavailable'
+ 'Все задачи'='All tasks'
+ 'Задача обнаружена'='Task observed'
+ 'Работа началась'='Task started'
+ 'Работа завершена'='Task completed'
+ 'Работа прервана'='Task interrupted'
+ 'Источник недоступен'='Source unavailable'
+ 'Источник восстановлен'='Source restored'
+ 'Действие началось'='Action started'
+ 'Нет событий для этой задачи'='No events for this task'
+ 'Пока нет событий'='No events yet'
+ 'Не удалось открыть журнал'='Could not open the journal'
+ 'Все'='All'
+ 'Не удалось обновить задачи'='Could not refresh tasks'
+ 'Файл настройки не найден'='Configuration file not found'
+ 'Ошибка подключения'='Connection error'
+ 'Выход'='Quit'
+ 'Не удалось сохранить язык'='Could not save language'
+}
+function Tr([string]$text){
+ if($script:resolvedLanguage -eq 'en' -and $script:translations.ContainsKey($text)){return [string]$script:translations[$text]}
+ return $text
+}
 
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -467,7 +630,7 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
     <Grid Grid.Row="1">
      <ScrollViewer x:Name="SettingsScroll" Margin="20,10,28,20" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled">
       <StackPanel>
-      <TextBlock Text="Настройки" FontFamily="Segoe UI Variable Display Semibold" FontSize="22" Foreground="{DynamicResource TextPrimary}"/>
+      <TextBlock x:Name="SettingsHeading" Text="Настройки" FontFamily="Segoe UI Variable Display Semibold" FontSize="22" Foreground="{DynamicResource TextPrimary}"/>
       <TextBlock Text="Внешний вид" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
       <Border Margin="0,12,0,0" Padding="6" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10">
        <StackPanel>
@@ -476,6 +639,16 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
         <Button x:Name="LightThemeButton" Style="{StaticResource SettingsOptionStyle}" Content="Светлая"/>
        </StackPanel>
       </Border>
+
+      <TextBlock x:Name="LanguageHeading" Text="Язык" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
+      <Border Margin="0,12,0,0" Padding="6" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10">
+       <StackPanel>
+        <Button x:Name="SystemLanguageButton" Style="{StaticResource SettingsOptionStyle}" Content="Системный"/>
+        <Button x:Name="RussianLanguageButton" Style="{StaticResource SettingsOptionStyle}" Content="Русский"/>
+        <Button x:Name="EnglishLanguageButton" Style="{StaticResource SettingsOptionStyle}" Content="English"/>
+       </StackPanel>
+      </Border>
+      <TextBlock x:Name="LanguageSettingsError" Visibility="Collapsed" Margin="0,6,0,0" Text="Не удалось сохранить язык" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
 
       <TextBlock Text="Источники" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
       <Border Margin="0,12,0,0" Padding="16,6" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10">
@@ -524,6 +697,24 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
         </StackPanel>
        </StackPanel>
       </Border>
+      <TextBlock Text="Хранение Claude Code" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
+      <Border x:Name="ClaudeRetentionSection" Margin="0,12,0,0" Padding="16,6" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10">
+       <StackPanel>
+        <Grid Height="46">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <TextBlock Text="Срок хранения событий" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimary}"/>
+         <ComboBox x:Name="ClaudeRetentionDaysCombo" Grid.Column="1" VerticalAlignment="Center" Style="{StaticResource JournalComboStyle}" AutomationProperties.Name="Срок хранения событий"/>
+        </Grid>
+        <Border Height="1" Background="{DynamicResource Divider}"/>
+        <Grid Height="46">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <TextBlock Text="Максимальный размер событий" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimary}"/>
+         <ComboBox x:Name="ClaudeRetentionSizeCombo" Grid.Column="1" VerticalAlignment="Center" Style="{StaticResource JournalComboStyle}" AutomationProperties.Name="Максимальный размер событий"/>
+        </Grid>
+        <TextBlock Margin="0,0,0,8" Text="События очищаются автоматически. Резервные копии настроек хранятся 30 дней; последняя сохраняется." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+        <TextBlock x:Name="ClaudeRetentionError" Visibility="Collapsed" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
+       </StackPanel>
+      </Border>
       <TextBlock Text="Возможный цикл" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
       <Border x:Name="LoopSettingsSection" Margin="0,12,0,0" Padding="16,6" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource Border}" BorderThickness="1" CornerRadius="10">
        <StackPanel>
@@ -543,7 +734,12 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
        </StackPanel>
       </Border>
       <Button x:Name="AboutSettingsButton" Content="О приложении" Margin="-10,22,0,0" HorizontalAlignment="Left" Style="{StaticResource FooterNavStyle}" FontSize="13" AutomationProperties.Name="О приложении"/>
-      <Button x:Name="FeedbackSettingsButton" Content="Отзывы и предложения" Margin="-10,0,0,0" HorizontalAlignment="Left" Style="{StaticResource FooterNavStyle}" FontSize="13" AutomationProperties.Name="Отзывы и предложения"/>
+      <TextBlock Text="Отзывы и предложения" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
+      <RichTextBox x:Name="FeedbackEmailBox" Margin="-5,12,0,0" Padding="0" HorizontalAlignment="Left" BorderThickness="0" Background="Transparent" IsReadOnly="True" IsDocumentEnabled="True" ScrollViewer.VerticalScrollBarVisibility="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="Адрес для отзывов и предложений">
+       <FlowDocument PagePadding="0" FontFamily="Segoe UI Variable Text" FontSize="13">
+        <Paragraph Margin="0"><Hyperlink x:Name="FeedbackEmailLink" Foreground="{DynamicResource Accent}">truea.k.a.ru@gmail.com</Hyperlink></Paragraph>
+       </FlowDocument>
+      </RichTextBox>
       <TextBlock x:Name="FeedbackError" Visibility="Collapsed" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextSecondary}" Text="Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com."/>
       </StackPanel>
      </ScrollViewer>
@@ -644,6 +840,28 @@ $script:accentForeground = if ($accentLuma -gt 155) { "#161616" } else { "#FFFFF
 </Window>
 "@
 
+$script:staticResourceKeys=@{}
+$resourceParent=$xaml.SelectSingleNode("//*[local-name()='Window.Resources']")
+$namespaceAttribute=$xaml.CreateAttribute('xmlns','sys','http://www.w3.org/2000/xmlns/')
+$namespaceAttribute.Value='clr-namespace:System;assembly=mscorlib'
+[void]$xaml.DocumentElement.Attributes.Append($namespaceAttribute)
+foreach($node in $xaml.SelectNodes('//*')){
+ foreach($attribute in @($node.Attributes)){
+  if($attribute.LocalName -notin @('Text','Content','ToolTip','AutomationProperties.Name')){continue}
+  $original=[string]$attribute.Value
+  if(-not $script:translations.ContainsKey($original)){continue}
+  if(-not $script:staticResourceKeys.ContainsKey($original)){
+   $key='Localized'+$script:staticResourceKeys.Count
+   $script:staticResourceKeys[$original]=$key
+   $item=$xaml.CreateElement('sys','String','clr-namespace:System;assembly=mscorlib')
+   $keyAttribute=$xaml.CreateAttribute('x','Key','http://schemas.microsoft.com/winfx/2006/xaml')
+   $keyAttribute.Value=$key;[void]$item.Attributes.Append($keyAttribute)
+   $item.InnerText=$original;[void]$resourceParent.AppendChild($item)
+  }
+  $attribute.Value='{DynamicResource '+$script:staticResourceKeys[$original]+'}'
+ }
+}
+
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 $iconPath = Join-Path $PSScriptRoot "assets\app-icon.ico"
@@ -720,7 +938,8 @@ $settingsCloseButton = $window.FindName("SettingsCloseButton")
 $settingsScroll = $window.FindName("SettingsScroll")
 $settingsScrollBar = $window.FindName("SettingsScrollBar")
 $aboutSettingsButton = $window.FindName("AboutSettingsButton")
-$feedbackSettingsButton = $window.FindName("FeedbackSettingsButton")
+$feedbackEmailBox = $window.FindName("FeedbackEmailBox")
+$feedbackEmailLink = $window.FindName("FeedbackEmailLink")
 $feedbackError = $window.FindName("FeedbackError")
 $aboutBackButton = $window.FindName("AboutBackButton")
 $aboutHeading = $window.FindName("AboutHeading")
@@ -733,6 +952,10 @@ $aboutCloseButton = $window.FindName("AboutCloseButton")
 $aboutScroll = $window.FindName("AboutScroll")
 $aboutScrollBar = $window.FindName("AboutScrollBar")
 $journalSettingsSection = $window.FindName("JournalSettingsSection")
+$claudeRetentionSection = $window.FindName('ClaudeRetentionSection')
+$claudeRetentionDaysCombo = $window.FindName('ClaudeRetentionDaysCombo')
+$claudeRetentionSizeCombo = $window.FindName('ClaudeRetentionSizeCombo')
+$claudeRetentionError = $window.FindName('ClaudeRetentionError')
 $loopSettingsSection = $window.FindName("LoopSettingsSection")
 $loopThresholdCombo = $window.FindName("LoopThresholdCombo")
 $loopWindowCombo = $window.FindName("LoopWindowCombo")
@@ -754,6 +977,10 @@ $journalEmptyText = $window.FindName("JournalEmptyText")
 $systemThemeButton = $window.FindName("SystemThemeButton")
 $darkThemeButton = $window.FindName("DarkThemeButton")
 $lightThemeButton = $window.FindName("LightThemeButton")
+$systemLanguageButton = $window.FindName("SystemLanguageButton")
+$russianLanguageButton = $window.FindName("RussianLanguageButton")
+$englishLanguageButton = $window.FindName("EnglishLanguageButton")
+$languageSettingsError = $window.FindName("LanguageSettingsError")
 $codexSourceStatus = $window.FindName("CodexSourceStatus")
 $claudeSourceStatus = $window.FindName("ClaudeSourceStatus")
 $claudeSourceAction = $window.FindName("ClaudeSourceAction")
@@ -762,6 +989,10 @@ $script:showingSettings = $false
 $script:showingAbout = $false
 $script:showingJournal = $false
 $script:updatingJournalControls = $false
+$script:updatingClaudeRetentionControls = $false
+$script:claudeRetentionUiError = ''
+$script:nextClaudeRetention = [DateTime]::MinValue
+$script:retentionPolicyInvalidated = $false
 $script:updatingLoopControls = $false
 $script:loopUiError = ""
 $script:previewLoopDismissed = $false
@@ -837,6 +1068,40 @@ function Windows-Theme {
  return "dark"
 }
 
+function Resolve-Language([string]$mode,[string]$systemName="") {
+ if($mode -in @('ru','en')){return $mode}
+ if(-not $systemName){$systemName=[Globalization.CultureInfo]::CurrentUICulture.Name}
+ if(($systemName -split '[-_]')[0] -ieq 'ru'){return 'ru'}
+ return 'en'
+}
+
+function Save-DisplayPreference([string]$name,$value) {
+ $temporaryPath=''
+ try{
+  $folder=Split-Path -Parent $script:settingsPath
+  [void][IO.Directory]::CreateDirectory($folder)
+  $settings=[PSCustomObject]@{}
+  $hadFile=Test-Path -LiteralPath $script:settingsPath -PathType Leaf
+  $originalHash=''
+  if($hadFile){
+   if(([IO.File]::GetAttributes($script:settingsPath) -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Refusing to overwrite linked preferences.'}
+   $originalHash=(Get-FileHash -LiteralPath $script:settingsPath -Algorithm SHA256 -ErrorAction Stop).Hash
+   $settings=Get-Content -LiteralPath $script:settingsPath -Raw -Encoding UTF8|ConvertFrom-Json -ErrorAction Stop
+   if($null -eq $settings -or $settings -isnot [PSCustomObject]){throw 'Unsupported display preferences.'}
+  }
+  if($null -eq $settings.PSObject.Properties[$name]){$settings|Add-Member -MemberType NoteProperty -Name $name -Value $value}
+  else{$settings.$name=$value}
+  $temporaryPath=Join-Path $folder ('.display-preferences-'+[Guid]::NewGuid().ToString('N')+'.tmp')
+  [IO.File]::WriteAllText($temporaryPath,($settings|ConvertTo-Json -Depth 100),[Text.UTF8Encoding]::new($true))
+  if($hadFile){
+   if(-not (Test-Path -LiteralPath $script:settingsPath -PathType Leaf) -or (Get-FileHash -LiteralPath $script:settingsPath -Algorithm SHA256 -ErrorAction Stop).Hash -cne $originalHash){throw 'Display preferences changed during the update.'}
+   [IO.File]::Replace($temporaryPath,$script:settingsPath,[System.Management.Automation.Language.NullString]::Value)
+  }else{[IO.File]::Move($temporaryPath,$script:settingsPath)}
+  return $true
+ }catch{return $false}
+ finally{if($temporaryPath -and [IO.File]::Exists($temporaryPath)){[IO.File]::Delete($temporaryPath)}}
+}
+
 function Load-ThemeMode {
  try {
   if(Test-Path -LiteralPath $script:settingsPath){
@@ -849,22 +1114,86 @@ function Load-ThemeMode {
 }
 
 function Save-ThemeMode([string]$mode) {
- try {
-  $folder=Split-Path -Parent $script:settingsPath; New-Item -ItemType Directory -Path $folder -Force|Out-Null
-  [PSCustomObject]@{theme=$mode}|ConvertTo-Json|Set-Content -LiteralPath $script:settingsPath -Encoding UTF8
+ if($mode -notin @('system','dark','light')){return $false}
+ return (Save-DisplayPreference 'theme' $mode)
+}
+
+function Load-LanguageMode {
+ try{
+  if(Test-Path -LiteralPath $script:settingsPath -PathType Leaf){
+   $saved=Get-Content -LiteralPath $script:settingsPath -Raw -Encoding UTF8|ConvertFrom-Json
+   $mode=[string](Prop $saved 'language' 'system')
+   if($mode -in @('system','ru','en')){return $mode}
+  }
  }catch{}
+ return 'system'
+}
+
+function Save-LanguageMode([string]$mode) {
+ if($mode -notin @('system','ru','en')){return $false}
+ return (Save-DisplayPreference 'language' $mode)
+}
+
+function Load-ClaudeRetentionSettings {
+ $days=7;$maximum=10
+ try{
+  if(Test-Path -LiteralPath $script:settingsPath -PathType Leaf){
+   $saved=Get-Content -LiteralPath $script:settingsPath -Raw -Encoding UTF8|ConvertFrom-Json -ErrorAction Stop
+   if($null -eq $saved -or $saved -isnot [PSCustomObject]){throw 'Unsupported settings.'}
+   if($null -ne $saved.PSObject.Properties['claudeRetentionDays'] -and (-not [int]::TryParse([string]$saved.claudeRetentionDays,[ref]$days) -or $days -lt 1 -or $days -gt 30)){throw 'Invalid retention days.'}
+   if($null -ne $saved.PSObject.Properties['claudeMaximumMB'] -and (-not [int]::TryParse([string]$saved.claudeMaximumMB,[ref]$maximum) -or $maximum -lt 1 -or $maximum -gt 100)){throw 'Invalid retention size.'}
+  }
+  return [PSCustomObject]@{Valid=$true;Days=$days;MaximumMB=$maximum}
+ }catch{return [PSCustomObject]@{Valid=$false;Days=$days;MaximumMB=$maximum}}
+}
+
+function Save-ClaudeRetentionPreference([string]$name,[int]$value) {
+ if($name -eq 'claudeRetentionDays' -and $value -ge 1 -and $value -le 30){return (Save-DisplayPreference $name $value)}
+ if($name -eq 'claudeMaximumMB' -and $value -ge 1 -and $value -le 100){return (Save-DisplayPreference $name $value)}
+ return $false
 }
 
 function Update-ThemeButtons {
  foreach($entry in @(@($systemThemeButton,"system"),@($darkThemeButton,"dark"),@($lightThemeButton,"light"))){
   $entry[0].Background=if($script:themeMode -eq $entry[1]){Brush $script:palette.Pressed}else{[Windows.Media.Brushes]::Transparent}
  }
+ Update-LanguageButtons
+}
+
+function Update-LanguageButtons {
+ foreach($entry in @(@($systemLanguageButton,'system'),@($russianLanguageButton,'ru'),@($englishLanguageButton,'en'))){
+  $entry[0].Background=if($script:languageMode -eq $entry[1]){Brush $script:palette.Pressed}else{[Windows.Media.Brushes]::Transparent}
+ }
 }
 
 function Update-SettingsButtonName {
  $modeName=switch($script:themeMode){"system"{"Системная"};"light"{"Светлая"};default{"Тёмная"}}
- $name="Открыть настройки. Тема: $modeName"
+ $name=if($script:resolvedLanguage -eq 'en'){"Open settings. Theme: $(Tr $modeName)"}else{"Открыть настройки. Тема: $modeName"}
  [Windows.Automation.AutomationProperties]::SetName($settingsFooterButton,$name)
+}
+
+function Apply-Language([string]$mode,[bool]$persist) {
+ if($mode -notin @('system','ru','en')){$mode='system'}
+ if($persist -and -not (Save-LanguageMode $mode)){$languageSettingsError.Visibility='Visible';return}
+ $languageSettingsError.Visibility='Collapsed'
+ $script:languageMode=$mode
+ $script:resolvedLanguage=Resolve-Language $mode
+ foreach($original in $script:staticResourceKeys.Keys){$window.Resources[$script:staticResourceKeys[$original]]=Tr $original}
+ $window.Language=[Windows.Markup.XmlLanguage]::GetLanguage($(if($script:resolvedLanguage -eq 'ru'){'ru-RU'}else{'en-US'}))
+ $aboutVersionText.Text=$(if($script:resolvedLanguage -eq 'en'){'AI task monitor · version '}else{'AI task monitor · версия '})+$script:currentVersion.Replace('-',' ')
+ if($script:isStoreEdition){$aboutUpdatesText.Text=Tr 'Обновления этой версии устанавливаются через Microsoft Store. Отзыв можно написать через почтовое приложение; сообщение отправляется только по вашему решению.'}
+ if($null -ne (Get-Variable -Scope Script -Name trayShowMenu -ErrorAction SilentlyContinue)){$script:trayShowMenu.Text=Tr 'Развернуть';$script:trayExitMenu.Text=Tr 'Выход'}
+ Update-LanguageButtons
+ Update-SettingsButtonName
+ Update-SourceSettings
+ $script:updatingJournalControls=$true;$script:updatingLoopControls=$true;$script:updatingClaudeRetentionControls=$true
+ try{$journalDaysCombo.Items.Clear();$journalSizeCombo.Items.Clear();$loopThresholdCombo.Items.Clear();$loopWindowCombo.Items.Clear();$claudeRetentionDaysCombo.Items.Clear();$claudeRetentionSizeCombo.Items.Clear()}
+ finally{$script:updatingJournalControls=$false;$script:updatingLoopControls=$false;$script:updatingClaudeRetentionControls=$false}
+ Update-JournalSettings
+ Update-ClaudeRetentionSettings
+ Update-LoopSettings
+ $script:journalFingerprint='';$script:fingerprint=''
+ Update-View
 }
 
 function Claude-ConnectionState {
@@ -890,7 +1219,7 @@ function Claude-ConnectionState {
  if($null -eq $hooksProperty){return "disconnected"}
  if($hooksProperty.Value -isnot [PSCustomObject]){throw "Claude Code hooks are not a JSON object."}
  $knownEvents=@("UserPromptSubmit","PreToolUse","PostToolUse","PostToolUseFailure","TaskCreated","TaskCompleted","SubagentStart","SubagentStop","Stop","SessionEnd")
- $connected=$false
+ $connectedEvents=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
  foreach($eventProperty in $hooksProperty.Value.PSObject.Properties){
   if($eventProperty.Name -notin $knownEvents){continue}
   if($eventProperty.Value -isnot [array]){throw "Claude Code hook groups are not an array."}
@@ -906,11 +1235,12 @@ function Claude-ConnectionState {
     foreach($propertyName in $hook.PSObject.Properties.Name){if($propertyName -notin @("type","command","timeout")){$hasExtraProperties=$true;break}}
     if($hasExtraProperties){continue}
     $command=([string]$hook.command).Trim()
-    if([string]::Equals($command,$expected,[StringComparison]::Ordinal) -or [string]::Equals($command,$legacy,[StringComparison]::OrdinalIgnoreCase)){$connected=$true}
+    if([string]::Equals($command,$expected,[StringComparison]::Ordinal) -or [string]::Equals($command,$legacy,[StringComparison]::OrdinalIgnoreCase)){[void]$connectedEvents.Add($eventProperty.Name)}
    }
   }
  }
- if($connected){return "connected"}
+ if($connectedEvents.Count -eq $knownEvents.Count){return "connected"}
+ if($connectedEvents.Count -gt 0){return "partial"}
  return "disconnected"
 }
 
@@ -918,28 +1248,47 @@ function Claude-HookConnected {
  try{return (Claude-ConnectionState) -eq "connected"}catch{return $false}
 }
 
+function Claude-InstallationState([string]$profile,[string]$appData,[string]$localData,[string]$pathValue) {
+ $directories=New-Object 'Collections.Generic.List[string]'
+ if($profile){$directories.Add((Join-Path $profile '.local\bin'))}
+ if($appData){$directories.Add((Join-Path $appData 'npm'))}
+ if($localData){$directories.Add((Join-Path $localData 'Programs\Claude'))}
+ foreach($part in ($pathValue -split ';')){
+  $directory=$part.Trim().Trim('"')
+  if($directory){$directories.Add($directory)}
+ }
+ foreach($directory in $directories){
+  foreach($name in @('claude.exe','claude.cmd','claude.bat')){
+   try{if(Test-Path -LiteralPath (Join-Path $directory $name) -PathType Leaf -ErrorAction Stop){return 'available'}}catch{}
+  }
+ }
+ if($profile -and (Test-Path -LiteralPath (Join-Path $profile '.claude') -PathType Container)){return 'unconfirmed'}
+ return 'not-found'
+}
+
 function Update-SourceSettings {
- $codexSourceStatus.Text=$(if($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
- $claudeHome=Join-Path $env:USERPROFILE ".claude"
- if(-not (Test-Path -LiteralPath $claudeHome)){
-  $claudeSourceStatus.Text="Не найден"
-  $claudeSourceAction.Visibility="Visible";$claudeSourceAction.IsEnabled=$false;$claudeSourceAction.Content="Подключить";$claudeSourceAction.Tag=""
-  $claudeSourceAction.ToolTip="Claude Code не найден на этом компьютере"
-  [Windows.Automation.AutomationProperties]::SetName($claudeSourceAction,"Подключить Claude Code. Claude Code не найден")
-  return
- }
- try{$connected=(Claude-ConnectionState) -eq "connected"}
+ $codexSourceStatus.Text=Tr $(if($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
+ $installation=Claude-InstallationState $env:USERPROFILE $env:APPDATA $env:LOCALAPPDATA $env:PATH
+ try{$connectionState=Claude-ConnectionState;$connected=$connectionState -eq "connected"}
  catch{
-  $claudeSourceStatus.Text="Нет данных"
-  $claudeSourceAction.Visibility="Visible";$claudeSourceAction.IsEnabled=$false;$claudeSourceAction.Content="Подключить";$claudeSourceAction.Tag=""
-  $claudeSourceAction.ToolTip="Не удалось прочитать настройки Claude Code"
-  [Windows.Automation.AutomationProperties]::SetName($claudeSourceAction,"Claude Code: не удалось прочитать настройки")
+  $claudeSourceStatus.Text=Tr "Нет данных"
+  $claudeSourceAction.Visibility="Visible";$claudeSourceAction.IsEnabled=$false;$claudeSourceAction.Content=Tr "Подключить";$claudeSourceAction.Tag=""
+  $claudeSourceAction.ToolTip=Tr "Не удалось прочитать настройки Claude Code"
+  [Windows.Automation.AutomationProperties]::SetName($claudeSourceAction,(Tr "Claude Code: не удалось прочитать настройки"))
   return
  }
- $claudeSourceStatus.Text=$(if($connected -and $script:sourceErrors -contains "Claude Code"){"Нет данных"}elseif($connected){"Подключён"}else{"Не подключён"})
+ if($installation -ne 'available' -and $connectionState -eq 'disconnected'){
+  $claudeSourceStatus.Text=Tr $(if($installation -eq 'unconfirmed'){'Установка не подтверждена'}else{'Не найден'})
+  $claudeSourceAction.Visibility="Visible";$claudeSourceAction.IsEnabled=$false;$claudeSourceAction.Content=Tr "Подключить";$claudeSourceAction.Tag=""
+  $claudeSourceAction.ToolTip=Tr $(if($installation -eq 'unconfirmed'){'Не удалось подтвердить установку Claude Code'}else{'Claude Code не найден на этом компьютере'})
+  [Windows.Automation.AutomationProperties]::SetName($claudeSourceAction,([string]$claudeSourceAction.ToolTip))
+  return
+ }
+ $claudeSourceStatus.Text=Tr $(if($connectionState -eq "partial"){"Подключён частично"}elseif($connected -and $script:sourceErrors -contains "Claude Code"){"Нет данных"}elseif($connected){"Подключён"}else{"Не подключён"})
  $claudeSourceAction.Visibility="Visible";$claudeSourceAction.IsEnabled=$true;$claudeSourceAction.ToolTip=$null
- $claudeSourceAction.Content=$(if($connected){"Отключить"}else{"Подключить"})
+ $claudeSourceAction.Content=Tr $(if($connected){"Отключить"}else{"Подключить"})
  $claudeSourceAction.Tag=$(if($connected){"Remove"}else{"Install"})
+ if($connectionState -eq "partial"){$claudeSourceAction.ToolTip=Tr "Подключение неполное. Нажмите, чтобы восстановить."}
  [Windows.Automation.AutomationProperties]::SetName($claudeSourceAction,$claudeSourceAction.Content+" Claude Code")
 }
 
@@ -953,7 +1302,7 @@ function Apply-Theme([string]$mode,[bool]$persist) {
  }
  $resources=@{Surface=$script:palette.Surface;SurfaceRaised=$script:palette.Raised;TooltipSurface=$script:palette.TooltipSurface;TooltipBorder=$script:palette.TooltipBorder;Border=$script:palette.Border;TextPrimary=$script:palette.Primary;TextSecondary=$script:palette.Secondary;TextMuted=$script:palette.Muted;SurfaceHover=$script:palette.Hover;SurfacePressed=$script:palette.Pressed;Divider=$script:palette.Divider;Track=$script:palette.Track;ScrollThumbBrush=$script:palette.Scroll;ScrollThumbHoverBrush=$script:palette.ScrollHover}
  foreach($key in $resources.Keys){$window.Resources[$key]=Brush $resources[$key]}
- if($persist){Save-ThemeMode $mode}
+ if($persist){[void](Save-ThemeMode $mode)}
  Update-ThemeButtons
  Update-SettingsButtonName
  $script:fingerprint=""
@@ -1203,48 +1552,94 @@ function Read-TailText([string]$path,[long]$maxBytes) {
 function Codex-Plan([string]$id) {
  $path = Session-File $id
  if (-not $path) { return @() }
- $stamp = (Get-Item -LiteralPath $path).LastWriteTimeUtc.Ticks
- $cacheKey = "$path|$stamp"
- if ($script:planCache.ContainsKey($cacheKey)) { return @($script:planCache[$cacheKey]) }
- $latest = @()
- try {
-  $tail=Read-TailText $path 4194304
-  foreach ($line in ($tail -split "`r?`n")) {
-   if ($line -notmatch 'update_plan') { continue }
-   try { $record = $line | ConvertFrom-Json } catch { continue }
-   $payload = Prop $record "payload"
-   if ($null -eq $payload -or [string](Prop $payload "type" "") -notin @("custom_tool_call","function_call")) { continue }
-   $name = [string](Prop $payload "name" "")
-   $input = [string](Prop $payload "input" (Prop $payload "arguments" ""))
-   if (-not $input) { continue }
-   $isDirectPlan = $name -eq "update_plan"
-   if(-not $isDirectPlan -and $input -notmatch 'update_plan\s*\('){continue}
-   $candidate = New-Object Collections.Generic.List[object]
-   if($isDirectPlan){
-    try{$parsed=$input|ConvertFrom-Json -ErrorAction Stop}catch{$parsed=$null}
-    if($null -ne $parsed -and $null -ne $parsed.PSObject.Properties["plan"] -and $parsed.plan -is [array]){
-     foreach($step in $parsed.plan){
-      $label=[string](Prop $step "step" "");$status=[string](Prop $step "status" "")
-      if(-not $label -or $status -notin @("completed","in_progress","pending")){continue}
-      $state=switch($status){"completed"{"done"} "in_progress"{"active"} default{"pending"}}
-      $candidate.Add([PSCustomObject]@{title=$label;status=$state})
-     }
-     if($parsed.plan.Count -eq 0 -or $candidate.Count -gt 0){$latest=$candidate.ToArray()}
-     continue
-    }
-   }
-   $matches = [regex]::Matches($input, 'step\s*:\s*"(?<step>(?:\\.|[^"\\])*)"\s*,\s*status\s*:\s*"(?<status>completed|in_progress|pending)"')
-   if ($matches.Count -eq 0) { continue }
-   foreach ($match in $matches) {
-    $state = switch ($match.Groups["status"].Value) { "completed" { "done" } "in_progress" { "active" } default { "pending" } }
-    $label = [regex]::Unescape($match.Groups["step"].Value)
-    $candidate.Add([PSCustomObject]@{ title=$label; status=$state })
-   }
-   $latest = $candidate.ToArray()
+ if($null -eq (Get-Variable -Scope Script -Name planConfirmations -ErrorAction SilentlyContinue)){$script:planConfirmations=@{}}
+ $file=Get-Item -LiteralPath $path -ErrorAction Stop
+ $stamp=$file.LastWriteTimeUtc.Ticks
+ $cached=if($script:planCache.ContainsKey($path)){$script:planCache[$path]}else{$null}
+ if($null -ne $cached -and $cached.Stamp -eq $stamp -and $cached.Length -eq $file.Length){
+  $script:planConfirmations[$id]=[bool]$cached.Confirmed
+  return @($cached.Steps)
+ }
+ $latest=@();$confirmed=$false;$currentTurn='';$offset=[long]0
+ $sharing=[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+ $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
+ try{
+  $length=[long]$stream.Length
+  $readAnchor={param([IO.Stream]$inputStream,[long]$position)
+   $count=[int][Math]::Min([long]128,$position)
+   if($count -eq 0){return ''}
+   $data=New-Object byte[] $count
+   [void]$inputStream.Seek($position-$count,[IO.SeekOrigin]::Begin)
+   $read=0
+   while($read -lt $count){$n=$inputStream.Read($data,$read,$count-$read);if($n -le 0){throw 'Unable to verify Codex plan history.'};$read+=$n}
+   return [Convert]::ToBase64String($data)
   }
- } catch {}
+  $safeEnd=[long]0;$position=$length;$buffer=New-Object byte[] 65536
+  while($position -gt 0 -and $safeEnd -eq 0){
+   $count=[int][Math]::Min([long]$buffer.Length,$position);$position-=$count
+   [void]$stream.Seek($position,[IO.SeekOrigin]::Begin)
+   $read=0
+   while($read -lt $count){$n=$stream.Read($buffer,$read,$count-$read);if($n -le 0){throw 'Unable to read Codex plan history.'};$read+=$n}
+   for($i=$read-1;$i -ge 0;$i--){if($buffer[$i] -eq 10){$safeEnd=$position+$i+1;break}}
+  }
+  if($null -ne $cached -and $length -gt [long]$cached.Length -and $safeEnd -ge [long]$cached.Offset){
+   $anchor=& $readAnchor $stream ([long]$cached.Offset)
+   if($anchor -ceq [string]$cached.Anchor){$offset=[long]$cached.Offset;$latest=@($cached.Steps);$confirmed=[bool]$cached.Confirmed;$currentTurn=[string]$cached.CurrentTurn}
+  }
+  if($safeEnd -gt $offset){
+   [void]$stream.Seek($offset,[IO.SeekOrigin]::Begin)
+   $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,($offset -eq 0),4096,$true)
+   try{
+    while($null -ne ($line=$reader.ReadLine())){
+     if($reader.EndOfStream -and $safeEnd -lt $length){break}
+     if($line -notmatch 'update_plan|task_started|turn_started'){continue}
+     try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
+     $payload=Prop $record "payload"
+     if($null -eq $payload){continue}
+     $eventType=[string](Prop $payload "type" "")
+     if([string](Prop $record "type" "") -eq 'event_msg' -and $eventType -in @('task_started','turn_started')){
+      $eventTurn=[string](Prop $payload 'turn_id' '')
+      if(-not $eventTurn -or -not $currentTurn -or $eventTurn -cne $currentTurn){if($latest.Count -gt 0){$confirmed=$false}}
+      $currentTurn=$eventTurn
+      continue
+     }
+     if($eventType -notin @('custom_tool_call','function_call')){continue}
+     $eventTurn=[string](Prop $payload 'turn_id' '')
+     if($currentTurn -and $eventTurn -and $eventTurn -cne $currentTurn){continue}
+     $name=[string](Prop $payload 'name' '')
+     $inputText=[string](Prop $payload 'input' (Prop $payload 'arguments' ''))
+     if(-not $inputText){continue}
+     $isDirectPlan=$name -eq 'update_plan'
+     if(-not $isDirectPlan -and $inputText -notmatch 'update_plan\s*\('){continue}
+     $candidate=New-Object Collections.Generic.List[object]
+     if($isDirectPlan){
+      try{$parsed=$inputText|ConvertFrom-Json -ErrorAction Stop}catch{$parsed=$null}
+      if($null -ne $parsed -and $null -ne $parsed.PSObject.Properties['plan'] -and $parsed.plan -is [array]){
+       foreach($step in $parsed.plan){
+        $label=[string](Prop $step 'step' '');$status=[string](Prop $step 'status' '')
+        if(-not $label -or $status -notin @('completed','in_progress','pending')){continue}
+        $state=switch($status){'completed'{'done'} 'in_progress'{'active'} default{'pending'}}
+        $candidate.Add([PSCustomObject]@{title=$label;status=$state})
+       }
+       if($parsed.plan.Count -eq 0 -or $candidate.Count -gt 0){$latest=$candidate.ToArray();$confirmed=$true}
+       continue
+      }
+     }
+     $matches=[regex]::Matches($inputText, 'step\s*:\s*"(?<step>(?:\\.|[^"\\])*)"\s*,\s*status\s*:\s*"(?<status>completed|in_progress|pending)"')
+     if($matches.Count -eq 0){continue}
+     foreach($match in $matches){
+      $state=switch($match.Groups['status'].Value){'completed'{'done'} 'in_progress'{'active'} default{'pending'}}
+      $candidate.Add([PSCustomObject]@{title=[regex]::Unescape($match.Groups['step'].Value);status=$state})
+     }
+     $latest=$candidate.ToArray();$confirmed=$true
+    }
+   }finally{$reader.Dispose()}
+  }
+  $anchor=& $readAnchor $stream $safeEnd
+ }finally{$stream.Dispose()}
  if($script:planCache.Count -ge 100){$script:planCache.Clear()}
- $script:planCache[$cacheKey] = $latest
+ $script:planCache[$path]=[PSCustomObject]@{Length=$length;Stamp=$stamp;Offset=$safeEnd;Anchor=$anchor;Steps=@($latest);Confirmed=$confirmed;CurrentTurn=$currentTurn}
+ $script:planConfirmations[$id]=[bool]$confirmed
  return @($latest)
 }
 
@@ -1309,26 +1704,76 @@ function Plan-Progress($steps, [int]$fallback) {
  return [int][Math]::Round(($done / $all.Count) * 100)
 }
 
+function Codex-IndexCandidates {
+ $sessionMap=@{}
+ foreach($line in Get-Content -LiteralPath $sessionIndex -Encoding UTF8 -Tail 50){
+  if(-not $line){continue}
+  try{
+   $session=$line|ConvertFrom-Json -ErrorAction Stop
+   $id=[string](Prop $session "id" "")
+   if($id -match '^[A-Za-z0-9_-]{1,128}$'){$sessionMap[$id]=$session}
+  }catch{}
+ }
+ $needed=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+ foreach($id in @($script:observedCodex.Keys)){
+  if([string]$id -match '^[A-Za-z0-9_-]{1,128}$' -and -not $sessionMap.ContainsKey([string]$id)){[void]$needed.Add([string]$id)}
+ }
+ if(Test-Path -LiteralPath $lockDirectory -PathType Container -ErrorAction Stop){
+  foreach($lock in Get-ChildItem -LiteralPath $lockDirectory -File -Filter '*.lock' -ErrorAction Stop){
+   $id=[IO.Path]::GetFileNameWithoutExtension($lock.Name)
+   if($id -notmatch '^[A-Za-z0-9_-]{1,128}$' -or $sessionMap.ContainsKey($id)){continue}
+   if((Lock-State $lock.FullName) -in @('held','unavailable')){[void]$needed.Add($id)}
+  }
+ }
+ if($needed.Count -gt 0){
+  $indexFile=Get-Item -LiteralPath $sessionIndex -ErrorAction Stop
+  $version="{0}|{1}|{2}" -f $indexFile.FullName,$indexFile.Length,$indexFile.LastWriteTimeUtc.Ticks
+  if($null -eq (Get-Variable -Scope Script -Name sessionIndexLookup -ErrorAction SilentlyContinue)){$script:sessionIndexLookup=@{}}
+  if(-not $script:sessionIndexLookup.ContainsKey('Version') -or $script:sessionIndexLookup.Version -cne $version){$script:sessionIndexLookup=@{Version=$version;Items=@{}}}
+  $missing=@($needed|Where-Object {-not $script:sessionIndexLookup.Items.ContainsKey($_)})
+  if($missing.Count -gt 0){
+   foreach($id in $missing){$script:sessionIndexLookup.Items[$id]=$null}
+   $filter='"(?:'+(($missing|ForEach-Object {[regex]::Escape($_)}) -join '|')+')"'
+   $sharing=[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+   $stream=[IO.File]::Open($sessionIndex,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
+   try{
+    $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true,4096,$true)
+    try{
+     while($null -ne ($line=$reader.ReadLine())){
+      if($line.Length -gt 1048576){throw 'Codex session index contains an oversized line.'}
+      if($line -notmatch $filter){continue}
+      try{
+       $session=$line|ConvertFrom-Json -ErrorAction Stop
+       $id=[string](Prop $session "id" "")
+       if($id -and $script:sessionIndexLookup.Items.ContainsKey($id)){$script:sessionIndexLookup.Items[$id]=$session}
+      }catch{}
+     }
+    }finally{$reader.Dispose()}
+   }finally{$stream.Dispose()}
+  }
+  foreach($id in $needed){
+   $session=$script:sessionIndexLookup.Items[$id]
+   if($null -ne $session){$sessionMap[$id]=$session}
+  }
+ }
+ foreach($session in $sessionMap.Values){
+  try{
+   $id=[string](Prop $session "id" "")
+   $updated=[DateTime]$session.updated_at
+   $yearFolder=Join-Path $sessionsDirectory ([string]$updated.Year)
+   $monthFolder=Join-Path $yearFolder $updated.Month.ToString("00")
+   $script:sessionDates[$id]=Join-Path $monthFolder $updated.Day.ToString("00")
+  }catch{}
+ }
+ return @($sessionMap.Values)
+}
+
 function Codex-Tasks {
  if (-not (Test-Path -LiteralPath $sessionIndex -ErrorAction Stop)) {
   if ($script:lastCodexTasks.Count -gt 0 -or (Test-Path -LiteralPath $codexHome -PathType Container -ErrorAction Stop)) { throw "Codex session index is unavailable." }
   return @()
  }
- $sessionMap = @{}
- foreach ($line in Get-Content -LiteralPath $sessionIndex -Encoding UTF8 -Tail 50) {
-  if (-not $line) { continue }
-  try {
-   $session = $line | ConvertFrom-Json
-   $sessionId=[string](Prop $session "id" "")
-   if($sessionId -notmatch '^[A-Za-z0-9_-]{1,128}$'){continue}
-   $sessionMap[$sessionId] = $session
-   $updated = [DateTime]$session.updated_at
-   $yearFolder = Join-Path $sessionsDirectory ([string]$updated.Year)
-   $monthFolder = Join-Path $yearFolder $updated.Month.ToString("00")
-   $script:sessionDates[$sessionId] = Join-Path $monthFolder $updated.Day.ToString("00")
-  } catch {}
- }
- $sessions = @($sessionMap.Values)
+ $sessions = @(Codex-IndexCandidates)
  $manual = Manual-Tasks $sessions
  $items = New-Object Collections.Generic.List[object]
  foreach ($session in $sessions) {
@@ -1339,7 +1784,7 @@ function Codex-Tasks {
   $uncertain = Codex-Uncertain $id $threadState
   if($threadState.State -in @("interrupted","unobserved")){continue}
   $override = if ($manual.ContainsKey($id)) { $manual[$id] } elseif ($manual.ContainsKey("title:$title")) { $manual["title:$title"] } else { $null }
-  $paused = $false; $steps = @(); $source = "Оценка активности"
+  $paused = $false; $steps = @(); $source = "Оценка активности"; $planConfirmed=$true
   if ($null -ne $override) {
    $title = [string](Prop $override "title" $title)
    $paused = [bool](Prop $override "paused" $false)
@@ -1349,31 +1794,36 @@ function Codex-Tasks {
   $uncertain=$uncertain -and -not $paused
   if ($steps.Count -eq 0 -and ($eventActive -or $uncertain)) {
    $steps = @(Codex-Plan $id)
-   if ($steps.Count -gt 0) { $source = "План Codex" }
+   if ($steps.Count -gt 0) {
+    $source = "План Codex"
+    if($null -ne (Get-Variable -Scope Script -Name planConfirmations -ErrorAction SilentlyContinue) -and $script:planConfirmations.ContainsKey($id)){$planConfirmed=[bool]$script:planConfirmations[$id]}
+   }
   }
   $running = $eventActive -and -not $paused
   $status = if ($paused) { "На паузе" } elseif ($running) { "В работе" } elseif ($uncertain) { "Статус не подтверждён" } else { "Ожидает" }
-  $progress=$null; $progressKind="none"
-  if($steps.Count -gt 0){$progress=Plan-Progress $steps 0;$progressKind="exact"}
+  $progress=$null; $progressKind="none"; $progressBasis="task"
+  if($steps.Count -gt 0){$progress=Plan-Progress $steps 0;$progressKind="exact";$progressBasis="steps"}
   if ($null -ne $override) {
    $value = Prop $override "progress"
    if ($null -ne $value) {
     $progress = [Math]::Max(0, [Math]::Min(100, [int]$value))
     $progressKind=[string](Prop $override "progressKind" "approximate")
+    $progressBasis="task"
     if($progressKind -notin @("exact","approximate")){$progressKind="approximate"}
    }
    if(-not $uncertain){$status = [string](Prop $override "status" $status)}
   }
   if ($steps.Count -gt 0) {
    $doneCount = @($steps | Where-Object { [string](Prop $_ "status" "pending") -eq "done" }).Count
-   if ($doneCount -eq $steps.Count) { $progress = 100; $progressKind="exact" }
+   if ($doneCount -eq $steps.Count) { $progress = 100; $progressKind="exact"; $progressBasis="steps" }
    elseif ($null -ne $progress -and $progress -ge 100) { $progress = 99 }
   }
   $updated = if($threadState.UpdatedUtc -ne [DateTime]::MinValue){$threadState.UpdatedUtc.ToLocalTime()}else{[DateTime]::MinValue}
-  $activity = if($uncertain){"Статус не подтверждён"}elseif($running){$currentActivity=Codex-Activity $id;if($currentActivity){$currentActivity}else{"Выполняется"}}else{""}
+  $activityGenerated=$uncertain
+  $activity = if($uncertain){"Статус не подтверждён"}elseif($running){$currentActivity=Codex-Activity $id;if($currentActivity){$currentActivity}else{$activityGenerated=$true;"Выполняется"}}else{""}
   $startKey=[string](Prop $threadState "StartKey" "")
   $started=[DateTime](Prop $threadState "StartedUtc" ([DateTime]::MinValue))
-  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; Activity=$activity; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source })
+  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; Activity=$activity; ActivityGenerated=$activityGenerated; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; ProgressBasis=$progressBasis; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source; PlanConfirmed=$planConfirmed })
  }
  $runningItems = @($items | Where-Object Active | Sort-Object Updated -Descending)
  $trackedItems = @($items | Where-Object { -not $_.Active -and ($_.Status -in @("Статус не подтверждён","Ожидает подтверждения") -or $_.Paused) } | Sort-Object Updated -Descending)
@@ -1405,7 +1855,7 @@ function Claude-Tasks {
   $unconfirmed=[bool]$state.Unconfirmed
   $activity=if($unconfirmed){"Статус не подтверждён"}else{$state.Activity}
   $status=if($unconfirmed){"Статус не подтверждён"}else{"В работе"}
-  $items.Add([PSCustomObject]@{Id="claude:"+$state.Id;Title=$title;Activity=$activity;Active=(-not $unconfirmed);Paused=$false;Progress=$progress;ProgressKind=$kind;Provider="claude";ProviderName="Claude Code";Status=$status;Updated=$state.Updated.ToLocalTime();Started=$state.Started;StartKey=$state.StartKey;Steps=$steps;Source="Claude Code"})
+  $items.Add([PSCustomObject]@{Id="claude:"+$state.Id;Title=$title;Activity=$activity;Active=(-not $unconfirmed);Paused=$false;Progress=$progress;ProgressKind=$kind;ProgressBasis=$(if($steps.Count -gt 0){"steps"}else{"task"});Provider="claude";ProviderName="Claude Code";Status=$status;Updated=$state.Updated.ToLocalTime();Started=$state.Started;StartKey=$state.StartKey;Steps=$steps;Source="Claude Code";PlanConfirmed=$true})
  }
  return @($items|Sort-Object Updated -Descending)
 }
@@ -1414,8 +1864,10 @@ function Source-Snapshot {
  $codex=@(); $claude=@(); $unavailable=New-Object Collections.Generic.List[string]
  try{$codex=@(Codex-Tasks);$script:lastCodexTasks=$codex}catch{[void]$unavailable.Add("Codex");$codex=@(Unconfirmed-Tasks $script:lastCodexTasks)}
  try{
-  $connected=if($ClaudeEventFile){$true}else{(Claude-ConnectionState) -eq "connected"}
-  if($connected){$claude=@(Claude-Tasks);$script:lastClaudeTasks=$claude}else{$script:lastClaudeTasks=@()}
+  $connectionState=if($ClaudeEventFile){"connected"}else{Claude-ConnectionState}
+  if($connectionState -eq "connected"){$claude=@(Claude-Tasks);$script:lastClaudeTasks=$claude}
+  elseif($connectionState -eq "partial"){$claude=@(Unconfirmed-Tasks @(Claude-Tasks));$script:lastClaudeTasks=$claude;[void]$unavailable.Add("Claude Code")}
+  else{$script:lastClaudeTasks=@()}
  }catch{[void]$unavailable.Add("Claude Code");$claude=@(Unconfirmed-Tasks $script:lastClaudeTasks)}
  return [PSCustomObject]@{Tasks=@($codex+$claude);Unavailable=$unavailable.ToArray()}
 }
@@ -1501,6 +1953,7 @@ function Unconfirmed-Tasks($tasks) {
   if(-not $task.Active -and [string](Prop $task "Status" "") -ne "Статус не подтверждён"){continue}
   $copy=$task.PSObject.Copy()
   $copy.Active=$false; $copy.Status="Статус не подтверждён"; $copy.Activity="Статус не подтверждён"
+  if($null -eq $copy.PSObject.Properties['ActivityGenerated']){$copy|Add-Member -MemberType NoteProperty -Name ActivityGenerated -Value $true}else{$copy.ActivityGenerated=$true}
   $copy
  }
 }
@@ -1598,7 +2051,29 @@ function Progress-Label($task) {
  $value=Prop $task "Progress"
  if($kind -eq "none" -or $null -eq $value){return ""}
  $prefix=if($kind -eq "approximate"){"≈ "}else{""}
- return $prefix+([int]$value).ToString()+"%"
+ $basis=[string](Prop $task "ProgressBasis" "")
+ if(-not $basis){$basis=if(@(Prop $task "Steps" @()).Count -gt 0){"steps"}else{"task"}}
+ $suffix=if($basis -eq "steps"){if($script:resolvedLanguage -eq 'en'){' of steps'}else{' этапов'}}else{""}
+ return $prefix+([int]$value).ToString()+"%"+$suffix
+}
+
+function Localized-TaskTitle($task) {
+ $title=[string](Prop $task 'Title' '')
+ if([string](Prop $task 'Provider' '') -eq 'claude' -and $title -ceq 'Задача Claude Code'){return (Tr $title)}
+ return $title
+}
+
+function Localized-TaskActivity($task) {
+ $activity=[string](Prop $task 'Activity' '')
+ if(-not $activity){return ''}
+ if([bool](Prop $task 'ActivityGenerated' $false) -or [string](Prop $task 'Status' '') -eq 'Статус не подтверждён'){return (Tr $activity)}
+ if([string](Prop $task 'Provider' '') -eq 'claude'){
+  foreach($prefix in @('Выполняет: ','Завершено: ','Ошибка: ','Добавлен этап: ','Завершён этап: ')){
+   if($activity.StartsWith($prefix,[StringComparison]::Ordinal)){return (Tr $prefix)+$activity.Substring($prefix.Length)}
+  }
+  return (Tr $activity)
+ }
+ return $activity
 }
 
 function Get-LoopWarning($task) {
@@ -1632,13 +2107,14 @@ function Add-LoopWarning($container,$task,[bool]$compact) {
  $messageColumn=New-Object Windows.Controls.ColumnDefinition; $messageColumn.Width=New-Object Windows.GridLength(1,"Star")
  $actionColumn=New-Object Windows.Controls.ColumnDefinition; $actionColumn.Width=[Windows.GridLength]::Auto
  $row.ColumnDefinitions.Add($messageColumn);$row.ColumnDefinitions.Add($actionColumn)
- $message="Возможный цикл: одна команда завершилась с одинаковым кодом ошибки не менее $($loop.Threshold) раз за $($loop.WindowMinutes) мин."
+ $message=if($script:resolvedLanguage -eq 'en'){"Possible loop: one command failed with the same code at least $($loop.Threshold) times in $($loop.WindowMinutes) min."}else{"Возможный цикл: одна команда завершилась с одинаковым кодом ошибки не менее $($loop.Threshold) раз за $($loop.WindowMinutes) мин."}
  $label=Text $message $(if($compact){11.5}else{12}) $script:palette.Secondary
  $label.TextWrapping="Wrap"; $label.Margin=New-Object Windows.Thickness(0,0,8,0)
  [Windows.Automation.AutomationProperties]::SetName($label,$message)
- $dismiss=New-Object Windows.Controls.Button; $dismiss.Content="Скрыть"; $dismiss.Style=$window.Resources["SourceActionStyle"]; $dismiss.FontSize=11.5
+ $dismiss=New-Object Windows.Controls.Button; $dismiss.Content=Tr "Скрыть"; $dismiss.Style=$window.Resources["SourceActionStyle"]; $dismiss.FontSize=11.5
  $dismiss.VerticalAlignment="Top"; $dismiss.Tag=[PSCustomObject]@{Id=[string]$task.Id;Provider=[string]$task.Provider}; $dismiss.FocusVisualStyle=$window.Resources["KeyboardFocusStyle"]
- [Windows.Automation.AutomationProperties]::SetName($dismiss,"Скрыть предупреждение о возможном цикле для задачи: "+[string]$task.Title)
+ $dismissName=if($script:resolvedLanguage -eq 'en'){'Hide possible loop warning for task: '}else{'Скрыть предупреждение о возможном цикле для задачи: '}
+ [Windows.Automation.AutomationProperties]::SetName($dismiss,$dismissName+(Localized-TaskTitle $task))
  $dismiss.Add_Click({param($sender,$eventArgs)
   $id=[string]$sender.Tag.Id;$provider=[string]$sender.Tag.Provider
   if($PreviewActiveTasks -ge 0 -and $provider -eq 'codex' -and $id -eq "preview-0"){$script:previewLoopDismissed=$true}
@@ -1655,7 +2131,7 @@ function Add-LoopWarning($container,$task,[bool]$compact) {
 function Add-Steps($container, $steps) {
  $all = @($steps)
  if($all.Count -eq 0){
-  $empty = Text "План ещё не опубликован этой задачей" 12.5 $script:palette.Activity
+  $empty = Text (Tr "План ещё не опубликован этой задачей") 12.5 $script:palette.Activity
   $empty.Margin=New-Object Windows.Thickness(0,11,0,0); $container.Children.Add($empty)|Out-Null
   return
  }
@@ -1680,7 +2156,8 @@ function Add-Steps($container, $steps) {
   [Windows.Controls.Grid]::SetColumn($marker,0)
   $labelColor=if($state -eq "active"){$script:palette.Primary}elseif($state -eq "done"){$script:palette.Done}else{$script:palette.Pending}
   $labelWeight=if($state -eq "active"){"SemiBold"}else{"Normal"}
-  $stepTitle=[string](Prop $step "title" "Без названия")
+  $stepTitle=[string](Prop $step "title" (Tr "Без названия"))
+  if($script:resolvedLanguage -eq 'en' -and [bool](Prop $step 'generated' $false)){$stepTitle='Step '+[string](Prop $step 'id' '')}
   $label=Text $stepTitle 13 $labelColor $labelWeight
   $label.Margin=New-Object Windows.Thickness(4,0,0,0); $label.TextWrapping="NoWrap"; $label.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $label $stepTitle "line"; $label.VerticalAlignment="Center"; [Windows.Controls.Grid]::SetColumn($label,1)
   $row.Children.Add($marker)|Out-Null; $row.Children.Add($label)|Out-Null; $rail.Children.Add($row)|Out-Null
@@ -1741,21 +2218,22 @@ function Add-Card($task) {
  $header=New-Object Windows.Controls.Grid
  $c1=New-Object Windows.Controls.ColumnDefinition; $c1.Width=New-Object Windows.GridLength(1,"Star"); $c2=New-Object Windows.Controls.ColumnDefinition; $c2.Width=[Windows.GridLength]::Auto; $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2)
  $titleStack=New-Object Windows.Controls.StackPanel
- $title=Text $task.Title 16 $script:palette.Primary "SemiBold"; $title.Margin=New-Object Windows.Thickness(0,0,14,0); $title.Height=22; $title.MaxWidth=390; $title.HorizontalAlignment="Left"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $title ([string]$task.Title) "line"; $titleStack.Children.Add($title)|Out-Null
- $activityText=[string]$task.Activity; $activity=Text $activityText 12 $script:palette.Activity; $activity.MaxWidth=390; $activity.HorizontalAlignment="Left"; $activity.Height=34; $activity.MaxHeight=34; $activity.TextTrimming="CharacterEllipsis"; if($activityText){Add-ConditionalHint $activity $activityText "wrap"}
+ $displayTitle=Localized-TaskTitle $task
+ $title=Text $displayTitle 16 $script:palette.Primary "SemiBold"; $title.Margin=New-Object Windows.Thickness(0,0,14,0); $title.Height=22; $title.MaxWidth=390; $title.HorizontalAlignment="Left"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $title $displayTitle "line"; $titleStack.Children.Add($title)|Out-Null
+ $activityText=Localized-TaskActivity $task; $activity=Text $activityText 12 $script:palette.Activity; $activity.MaxWidth=390; $activity.HorizontalAlignment="Left"; $activity.Height=34; $activity.MaxHeight=34; $activity.TextTrimming="CharacterEllipsis"; if($activityText){Add-ConditionalHint $activity $activityText "wrap"}
  $activityRow=New-Object Windows.Controls.Grid; $activityRow.Margin=New-Object Windows.Thickness(0,5,14,0)
  $activityMarkColumn=New-Object Windows.Controls.ColumnDefinition; $activityMarkColumn.Width=New-Object Windows.GridLength(22); $activityTextColumn=New-Object Windows.Controls.ColumnDefinition; $activityTextColumn.Width=New-Object Windows.GridLength(1,"Star"); $activityRow.ColumnDefinitions.Add($activityMarkColumn); $activityRow.ColumnDefinitions.Add($activityTextColumn)
  if($activityText){$indicator=New-ActivityIndicator ([bool]$task.Active);$indicator.Margin=New-Object Windows.Thickness(0,7,6,0);$indicator.VerticalAlignment="Top";$indicator.HorizontalAlignment="Left";$activityRow.Children.Add($indicator)|Out-Null}
  [Windows.Controls.Grid]::SetColumn($activity,1);$activityRow.Children.Add($activity)|Out-Null;$titleStack.Children.Add($activityRow)|Out-Null
  if(-not $CompactMode -and $PreviewActiveTasks -ge 0 -and $null -eq $script:previewHintTarget -and $activityText){$script:previewHintTarget=$activity}
  $progressLabel=Progress-Label $task
- $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.Height=22; $percent.VerticalAlignment="Top"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip="Приблизительная оценка"}; [Windows.Controls.Grid]::SetColumn($percent,1)
+ $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.Height=22; $percent.VerticalAlignment="Top"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip=Tr "Приблизительная оценка"}; [Windows.Controls.Grid]::SetColumn($percent,1)
  $header.Children.Add($titleStack)|Out-Null; $header.Children.Add($percent)|Out-Null; $stack.Children.Add($header)|Out-Null
  Add-LoopWarning $stack $task $false
  if($task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Margin=New-Object Windows.Thickness(0,14,0,0); $stack.Children.Add($bar)|Out-Null}
  if($stepCount -gt 0){
   Add-Steps $stack $task.Steps
-  $metaText="План задачи · $stepCount этапов"
+  $metaText=(Tr $(if([bool](Prop $task "PlanConfirmed" $true)){"План задачи"}else{"План не подтверждён"}))+" · $stepCount"+(Tr " этапов")
   if($task.Updated -ne [DateTime]::MinValue){$metaText += " · "+$task.Updated.ToString("HH:mm")}
   $meta=Text $metaText 11.5 $script:palette.Muted; $meta.Margin=New-Object Windows.Thickness(0,11,0,0); $stack.Children.Add($meta)|Out-Null
  }
@@ -1776,14 +2254,15 @@ function Add-CompactTask($task) {
  $c2=New-Object Windows.Controls.ColumnDefinition; $c2.Width=New-Object Windows.GridLength(1,"Star")
  $c3=New-Object Windows.Controls.ColumnDefinition; $c3.Width=[Windows.GridLength]::Auto
  $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2); $header.ColumnDefinitions.Add($c3)
- $title=Text $task.Title 13.5 $script:palette.Primary "SemiBold"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; $title.Margin=New-Object Windows.Thickness(0,0,10,0); Add-ConditionalHint $title ([string]$task.Title) "line"; [Windows.Automation.AutomationProperties]::SetName($title,[string]$task.Title)
+ $displayTitle=Localized-TaskTitle $task
+ $title=Text $displayTitle 13.5 $script:palette.Primary "SemiBold"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; $title.Margin=New-Object Windows.Thickness(0,0,10,0); Add-ConditionalHint $title $displayTitle "line"; [Windows.Automation.AutomationProperties]::SetName($title,$displayTitle)
  $progressLabel=Progress-Label $task
- $percent=Text $progressLabel 13.5 $script:palette.Primary "SemiBold"; $percent.VerticalAlignment="Center"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip="Приблизительная оценка"}
+ $percent=Text $progressLabel 13.5 $script:palette.Primary "SemiBold"; $percent.VerticalAlignment="Center"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip=Tr "Приблизительная оценка"}
  [Windows.Controls.Grid]::SetColumn($title,1); [Windows.Controls.Grid]::SetColumn($percent,2)
  $header.Children.Add($title)|Out-Null; $header.Children.Add($percent)|Out-Null
  [Windows.Controls.Grid]::SetRow($header,0); $container.Children.Add($header)|Out-Null
 
- $activityText=if($task.Activity){[string]$task.Activity}else{"Выполняется"}
+ $activityText=Localized-TaskActivity $task; if(-not $activityText){$activityText=Tr "Выполняется"}
  $activity=Text $activityText 11.5 $script:palette.Activity; $activity.TextWrapping="NoWrap"; $activity.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $activity $activityText "line"; [Windows.Automation.AutomationProperties]::SetName($activity,$activityText)
  $activityRow=New-Object Windows.Controls.Grid; $activityRow.Margin=New-Object Windows.Thickness(12,2,0,0)
  $activityMarkColumn=New-Object Windows.Controls.ColumnDefinition; $activityMarkColumn.Width=New-Object Windows.GridLength(22); $activityTextColumn=New-Object Windows.Controls.ColumnDefinition; $activityTextColumn.Width=New-Object Windows.GridLength(1,"Star"); $activityRow.ColumnDefinitions.Add($activityMarkColumn); $activityRow.ColumnDefinitions.Add($activityTextColumn)
@@ -1791,7 +2270,9 @@ function Add-CompactTask($task) {
  [Windows.Controls.Grid]::SetColumn($activity,1);$activityRow.Children.Add($activity)|Out-Null
  if($CompactMode -and $PreviewActiveTasks -ge 0 -and $null -eq $script:previewHintTarget){$script:previewHintTarget=$activity}
  [Windows.Controls.Grid]::SetRow($activityRow,1); $container.Children.Add($activityRow)|Out-Null
- $warningPanel=New-Object Windows.Controls.StackPanel; Add-LoopWarning $warningPanel $task $true; [Windows.Controls.Grid]::SetRow($warningPanel,2); $container.Children.Add($warningPanel)|Out-Null
+ $warningPanel=New-Object Windows.Controls.StackPanel
+ if(@($task.Steps).Count -gt 0 -and -not [bool](Prop $task "PlanConfirmed" $true)){$planNote=Text (Tr "План не подтверждён") 11.5 $script:palette.Muted;$planNote.Margin=New-Object Windows.Thickness(12,4,0,0);$warningPanel.Children.Add($planNote)|Out-Null}
+ Add-LoopWarning $warningPanel $task $true; [Windows.Controls.Grid]::SetRow($warningPanel,2); $container.Children.Add($warningPanel)|Out-Null
  if($task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Height=2; $bar.Margin=New-Object Windows.Thickness(12,7,0,0); [Windows.Controls.Grid]::SetRow($bar,3); $container.Children.Add($bar)|Out-Null}
  $compactTasksPanel.Children.Add($container)|Out-Null
 }
@@ -1800,7 +2281,7 @@ function Add-CompactDot($task,[bool]$selected) {
  $button=New-Object Windows.Controls.Button
  $button.Style=$window.Resources["CompactDotStyle"]
  $button.Tag=[string]$task.Id
- [Windows.Automation.AutomationProperties]::SetName($button,"Показать задачу: "+[string]$task.Title)
+ [Windows.Automation.AutomationProperties]::SetName($button,(Tr "Показать задачу: ")+(Localized-TaskTitle $task))
  $dot=New-Object Windows.Controls.Border
  $dot.Width=7; $dot.Height=7; $dot.CornerRadius=New-Object Windows.CornerRadius(3.5)
  $dot.Background=Brush $(if($selected){$script:accentHex}else{$script:palette.Scroll})
@@ -1854,10 +2335,10 @@ function Render-CompactTasks($tasks) {
  $compactTasks=@(Compact-VisibleTasks $tasks)
  $visibleTasks=@($compactTasks|Select-Object -First 3)
  $unavailable=@($script:sourceErrors)
- $warningText=if($unavailable.Count -gt 0){"Нет данных от "+($unavailable -join ", ")}else{""}
+ $warningText=if($unavailable.Count -gt 0){(Tr "Нет данных от ")+($unavailable -join ", ")}else{""}
  if($visibleTasks.Count -eq 0){
   $script:compactTaskId=""
-  $compactEmpty=Text $(if($warningText){$warningText}else{"Активных задач сейчас нет"}) 12.5 $script:palette.Activity
+  $compactEmpty=Text $(if($warningText){$warningText}else{Tr "Активных задач сейчас нет"}) 12.5 $script:palette.Activity
   $compactEmpty.Margin=New-Object Windows.Thickness(0,5,0,5)
   $compactTasksPanel.Children.Add($compactEmpty)|Out-Null
   $compactDotsPanel.Visibility="Collapsed"
@@ -1877,19 +2358,21 @@ function Render-CompactTasks($tasks) {
  }
  $hiddenCount=[Math]::Max(0,$compactTasks.Count-3)
  $compactMoreText.Visibility=$(if($hiddenCount -gt 0){"Visible"}else{"Collapsed"})
- $compactMoreText.Text=$(if($hiddenCount -gt 0){"Ещё $hiddenCount задач"}else{""})
+ $compactMoreText.Text=$(if($hiddenCount -gt 0){if($script:resolvedLanguage -eq 'en'){"$hiddenCount more tasks"}else{"Ещё $hiddenCount задач"}}else{""})
  $hasLoopWarning=$visibleTasks.Count -gt 0 -and $null -ne (Get-LoopWarning $selected[0])
- if($script:isCompact){$window.Height=Compact-Height $compactTasks.Count ($unavailable.Count -gt 0) $hasLoopWarning; Move-CompactWindow}
+ $hasUnconfirmedPlan=$visibleTasks.Count -gt 0 -and @($selected[0].Steps).Count -gt 0 -and -not [bool](Prop $selected[0] "PlanConfirmed" $true)
+ if($script:isCompact){$window.Height=Compact-Height $compactTasks.Count ($unavailable.Count -gt 0) $hasLoopWarning $hasUnconfirmedPlan; Move-CompactWindow}
 }
 
-function Compact-Height([int]$activeCount,[bool]$hasSourceErrors=$false,[bool]$hasLoopWarning=$false) {
+function Compact-Height([int]$activeCount,[bool]$hasSourceErrors=$false,[bool]$hasLoopWarning=$false,[bool]$hasUnconfirmedPlan=$false) {
  if($activeCount -le 0){return 132}
  $dots=if($activeCount -gt 1){18}else{0}
  $more=if($activeCount -gt 3){20}else{0}
  $provider=if($script:showProviderLabels){18}else{0}
  $warning=if($hasSourceErrors){20}else{0}
  $loopSpace=if($hasLoopWarning){72}else{0}
- return 162+$dots+$more+$provider+$warning+$loopSpace
+ $planSpace=if($hasUnconfirmedPlan){20}else{0}
+ return 162+$dots+$more+$provider+$warning+$loopSpace+$planSpace
 }
 
 function Move-CompactWindow {
@@ -1909,7 +2392,8 @@ function Set-CompactMode([bool]$compact) {
   $compactCount=@(Compact-VisibleTasks $script:lastAllTasks).Count
   $selectedTask=@($script:lastAllTasks|Where-Object {[string]$_.Id -eq $script:compactTaskId}|Select-Object -First 1)
   $hasLoopWarning=$selectedTask.Count -gt 0 -and $null -ne (Get-LoopWarning $selectedTask[0])
-  $window.Height=Compact-Height $compactCount ($script:sourceErrors.Count -gt 0) $hasLoopWarning
+  $hasUnconfirmedPlan=$selectedTask.Count -gt 0 -and @($selectedTask[0].Steps).Count -gt 0 -and -not [bool](Prop $selectedTask[0] "PlanConfirmed" $true)
+  $window.Height=Compact-Height $compactCount ($script:sourceErrors.Count -gt 0) $hasLoopWarning $hasUnconfirmedPlan
   $windowFrame.Margin=New-Object Windows.Thickness(16)
   $script:isCompact=$true; $window.Topmost=$true; Move-CompactWindow
  }else{
@@ -1924,7 +2408,7 @@ function Set-CompactMode([bool]$compact) {
 
 function Show-PendingUpdate {
  if($script:isCompact -or $null -eq $script:availableUpdate -or $script:availableUpdate.Version -ceq $script:dismissedUpdate){return}
- $updateVersionText.Text='Версия '+$script:availableUpdate.Version+' доступна для скачивания'
+ $updateVersionText.Text=if($script:resolvedLanguage -eq 'en'){'Version '+$script:availableUpdate.Version+' is available to download'}else{'Версия '+$script:availableUpdate.Version+' доступна для скачивания'}
  $updateOpenError.Visibility='Collapsed';$updateOverlay.Visibility='Visible'
  $updateLaterButton.Focus()|Out-Null
 }
@@ -1983,15 +2467,18 @@ function Show-SettingsView([bool]$keyboardNavigation = $false,[bool]$fromJournal
  $script:showingSettings=$true; $script:showingAbout=$false; $script:showingJournal=$false
  Update-SourceSettings
  Update-JournalSettings
+ Update-ClaudeRetentionSettings
  Update-LoopSettings
  if($keyboardNavigation){if($fromJournal){$journalOpenButton.Focus()|Out-Null}elseif($fromAbout){$aboutSettingsButton.Focus()|Out-Null}else{$settingsBackButton.Focus()|Out-Null}}else{[Windows.Input.Keyboard]::ClearFocus()|Out-Null}
 }
 
 function Get-FeedbackUri {
- return 'mailto:truea.k.a.ru@gmail.com?subject='+[Uri]::EscapeDataString('Отзыв или предложение об AI Task Monitor')
+ $subject=if($script:resolvedLanguage -eq 'en'){'AI Task Monitor feedback or suggestion'}else{'Отзыв или предложение об AI Task Monitor'}
+ return 'mailto:truea.k.a.ru@gmail.com?subject='+[Uri]::EscapeDataString($subject)
 }
 
 function Open-FeedbackDraft {
+ if($PreviewAboutUiTest){$script:previewFeedbackClicks++;return}
  try{
   $info=New-Object Diagnostics.ProcessStartInfo
   $info.FileName=Get-FeedbackUri; $info.UseShellExecute=$true
@@ -2045,8 +2532,8 @@ function Update-JournalSettings {
  $script:updatingJournalControls=$true
  try{
   if($journalDaysCombo.Items.Count -eq 0){
-   foreach($day in 1..7){$unit=if($day -eq 1){"день"}elseif($day -le 4){"дня"}else{"дней"};[void]$journalDaysCombo.Items.Add((New-JournalComboItem "$day $unit" $day))}
-   foreach($size in 1..10){[void]$journalSizeCombo.Items.Add((New-JournalComboItem "$size МБ" $size))}
+   foreach($day in 1..7){$unit=if($script:resolvedLanguage -eq 'en'){if($day -eq 1){'day'}else{'days'}}elseif($day -eq 1){"день"}elseif($day -le 4){"дня"}else{"дней"};[void]$journalDaysCombo.Items.Add((New-JournalComboItem "$day $unit" $day))}
+   foreach($size in 1..10){$unit=if($script:resolvedLanguage -eq 'en'){'MB'}else{'МБ'};[void]$journalSizeCombo.Items.Add((New-JournalComboItem "$size $unit" $size))}
   }
   $ready=$null -ne $script:diagnosticRuntime
   $journalDaysCombo.IsEnabled=$ready; $journalSizeCombo.IsEnabled=$ready; $journalOpenButton.IsEnabled=$ready; $journalClearButton.IsEnabled=$script:diagnosticModulesAvailable -and $journalClearConfirmation.Visibility -ne "Visible"
@@ -2055,11 +2542,59 @@ function Update-JournalSettings {
    foreach($item in $journalSizeCombo.Items){if([int]$item.Tag -eq [int]$script:diagnosticRuntime.Settings.MaximumMB){$journalSizeCombo.SelectedItem=$item;break}}
   }
   $error=if($script:journalUiError){$script:journalUiError}elseif($script:diagnosticError){$script:diagnosticError}elseif(-not $ready){"Журнал недоступен"}else{""}
-  $journalSettingsError.Text=$error
+  $journalSettingsError.Text=Tr $error
   $journalSettingsError.Visibility=$(if($error){"Visible"}else{"Collapsed"})
  }finally{$script:updatingJournalControls=$false}
  Update-JournalComboHint $journalDaysCombo
  Update-JournalComboHint $journalSizeCombo
+}
+
+function Update-ClaudeRetentionSettings {
+ $script:updatingClaudeRetentionControls=$true
+ try{
+  if($claudeRetentionDaysCombo.Items.Count -eq 0){
+   foreach($day in 1..30){
+    $last=$day%10;$lastTwo=$day%100
+    $unit=if($script:resolvedLanguage -eq 'en'){if($day -eq 1){'day'}else{'days'}}elseif($lastTwo -ge 11 -and $lastTwo -le 14){'дней'}elseif($last -eq 1){'день'}elseif($last -ge 2 -and $last -le 4){'дня'}else{'дней'}
+    [void]$claudeRetentionDaysCombo.Items.Add((New-JournalComboItem "$day $unit" $day))
+   }
+   foreach($size in 1..100){$unit=if($script:resolvedLanguage -eq 'en'){'MB'}else{'МБ'};[void]$claudeRetentionSizeCombo.Items.Add((New-JournalComboItem "$size $unit" $size))}
+  }
+  $policy=Load-ClaudeRetentionSettings
+  $ready=$script:claudeRetentionAvailable -and $policy.Valid
+  $claudeRetentionDaysCombo.IsEnabled=$ready;$claudeRetentionSizeCombo.IsEnabled=$ready
+  if($ready){
+   foreach($item in $claudeRetentionDaysCombo.Items){if([int]$item.Tag -eq $policy.Days){$claudeRetentionDaysCombo.SelectedItem=$item;break}}
+   foreach($item in $claudeRetentionSizeCombo.Items){if([int]$item.Tag -eq $policy.MaximumMB){$claudeRetentionSizeCombo.SelectedItem=$item;break}}
+  }
+  $error=if($script:claudeRetentionUiError){$script:claudeRetentionUiError}elseif(-not $policy.Valid){'Настройки хранения Claude Code повреждены'}elseif(-not $script:claudeRetentionAvailable){'Очистка Claude Code недоступна'}elseif([AITaskMonitor.Claude.Retention]::Status -eq 'error'){'Не удалось очистить данные Claude Code'}else{''}
+  $claudeRetentionError.Text=Tr $error;$claudeRetentionError.Visibility=$(if($error){'Visible'}else{'Collapsed'})
+ }finally{$script:updatingClaudeRetentionControls=$false}
+ Update-JournalComboHint $claudeRetentionDaysCombo
+ Update-JournalComboHint $claudeRetentionSizeCombo
+}
+
+function Schedule-ClaudeRetention([bool]$force=$false) {
+ if($PreviewActiveTasks -ge 0 -or $SnapshotFile -or -not $script:claudeRetentionAvailable){return}
+ $policy=Load-ClaudeRetentionSettings
+ if(-not $policy.Valid){
+  if(-not $script:retentionPolicyInvalidated){[AITaskMonitor.Claude.Retention]::Invalidate();$script:retentionPolicyInvalidated=$true}
+  return
+ }
+ $script:retentionPolicyInvalidated=$false
+ if(-not $force -and [DateTime]::UtcNow -lt $script:nextClaudeRetention){return}
+ try{
+  [AITaskMonitor.Claude.Retention]::Schedule($dataDirectory,(Join-Path $env:USERPROFILE '.claude'),[int]$policy.Days,([long]$policy.MaximumMB*1000000))
+  $script:nextClaudeRetention=[DateTime]::UtcNow.AddSeconds($(if($force -or [AITaskMonitor.Claude.Retention]::Status -in @('busy','cancelled')){10}else{300}))
+ }catch{$script:claudeRetentionUiError='Не удалось очистить данные Claude Code';$script:nextClaudeRetention=[DateTime]::UtcNow.AddMinutes(1)}
+}
+
+function Save-ClaudeRetentionControls([string]$name,$combo) {
+ if($script:updatingClaudeRetentionControls -or $null -eq $combo.SelectedItem){return}
+ if(Save-ClaudeRetentionPreference $name ([int]$combo.SelectedItem.Tag)){
+  $script:claudeRetentionUiError='';Schedule-ClaudeRetention $true
+ }else{$script:claudeRetentionUiError='Не удалось сохранить настройки хранения Claude Code'}
+ Update-ClaudeRetentionSettings
 }
 
 function Update-LoopSettings {
@@ -2067,7 +2602,7 @@ function Update-LoopSettings {
  try{
   if($loopThresholdCombo.Items.Count -eq 0){
    foreach($count in 3..10){[void]$loopThresholdCombo.Items.Add((New-JournalComboItem ([string]$count) $count))}
-   foreach($minutes in 1..30){[void]$loopWindowCombo.Items.Add((New-JournalComboItem "$minutes мин" $minutes))}
+   foreach($minutes in 1..30){$unit=if($script:resolvedLanguage -eq 'en'){'min'}else{'мин'};[void]$loopWindowCombo.Items.Add((New-JournalComboItem "$minutes $unit" $minutes))}
   }
   $ready=$null -ne $script:diagnosticRuntime
   $loopThresholdCombo.IsEnabled=$ready; $loopWindowCombo.IsEnabled=$ready
@@ -2076,7 +2611,7 @@ function Update-LoopSettings {
    foreach($item in $loopWindowCombo.Items){if([int]$item.Tag -eq [int]$script:diagnosticRuntime.Settings.LoopWindowMinutes){$loopWindowCombo.SelectedItem=$item;break}}
   }
   $error=if($script:loopUiError){$script:loopUiError}elseif(-not $ready){"Настройка недоступна"}elseif($script:claudeLoopError){$script:claudeLoopError}else{""}
-  $loopSettingsError.Text=$error; $loopSettingsError.Visibility=$(if($error){"Visible"}else{"Collapsed"})
+  $loopSettingsError.Text=Tr $error; $loopSettingsError.Visibility=$(if($error){"Visible"}else{"Collapsed"})
  }finally{$script:updatingLoopControls=$false}
  Update-JournalComboHint $loopThresholdCombo
  Update-JournalComboHint $loopWindowCombo
@@ -2146,8 +2681,10 @@ function Get-JournalTaskOptions($references) {
  foreach($reference in $references){
   $key=[string]$reference.Key
   $provider=[string]$reference.Provider
-  $label=if($known.ContainsKey($key) -and $known[$key]){[string]$known[$key]}elseif($provider -eq "claude"){"Задача Claude Code"}else{"Задача Codex"}
-  if($provider -eq "codex" -and $label -ne "Задача Codex"){$label="$label (Codex)"}
+  $hasKnown=$known.ContainsKey($key) -and $known[$key]
+  $label=if($hasKnown){[string]$known[$key]}elseif($provider -eq "claude"){Tr "Задача Claude Code"}else{Tr "Задача Codex"}
+  if($provider -eq "claude" -and $label -ceq "Задача Claude Code"){$label=Tr $label}
+  if($provider -eq "codex" -and $hasKnown){$label="$label (Codex)"}
   if($labels.ContainsKey($label)){$labels[$label]++;$label="$label $($labels[$label])"}else{$labels[$label]=1}
   $options.Add([PSCustomObject]@{Key=$key;Label=$label})
  }
@@ -2156,7 +2693,7 @@ function Get-JournalTaskOptions($references) {
 
 function Render-Journal {
  if(-not $script:showingJournal){return}
- if($null -eq $script:diagnosticRuntime){$journalEventsList.ItemsSource=$null;$journalEmptyText.Text="Журнал недоступен";$journalEmptyText.Visibility="Visible";return}
+ if($null -eq $script:diagnosticRuntime){$journalEventsList.ItemsSource=$null;$journalEmptyText.Text=Tr "Журнал недоступен";$journalEmptyText.Visibility="Visible";return}
  try{
   $filter=if($null -ne $journalTaskFilter.SelectedItem){[string]$journalTaskFilter.SelectedItem.Tag}else{""}
   $path=Join-Path $script:diagnosticDirectory "diagnostic-events-v1.jsonl"
@@ -2173,7 +2710,7 @@ function Render-Journal {
   $script:updatingJournalControls=$true
   try{
    $journalTaskFilter.Items.Clear()
-   [void]$journalTaskFilter.Items.Add((New-JournalComboItem "Все задачи" ""))
+   [void]$journalTaskFilter.Items.Add((New-JournalComboItem (Tr "Все задачи") ""))
    $selected=0
    foreach($option in $options){[void]$journalTaskFilter.Items.Add((New-JournalComboItem $option.Label $option.Key));if($option.Key -eq $filter){$selected=$journalTaskFilter.Items.Count-1}}
    $journalTaskFilter.SelectedIndex=$selected
@@ -2183,13 +2720,14 @@ function Render-Journal {
    task_observed="Задача обнаружена";task_started="Работа началась";task_completed="Работа завершена";task_interrupted="Работа прервана";task_unconfirmed="Статус не подтверждён"
    source_unavailable="Источник недоступен";source_recovered="Источник восстановлен";tool_started="Действие началось";tool_finished="Действие завершено";tool_failed="Ошибка действия"
   }
+  foreach($key in @($labels.Keys)){$labels[$key]=Tr $labels[$key]}
   $rows=@([AITaskMonitor.Diagnostics.Policy]::MakeRows($events,$filter,$labels))
   $journalEventsList.ItemsSource=$rows
-  $journalEmptyText.Text=$(if($filter){"Нет событий для этой задачи"}else{"Пока нет событий"})
+  $journalEmptyText.Text=Tr $(if($filter){"Нет событий для этой задачи"}else{"Пока нет событий"})
   $journalEmptyText.Visibility=$(if($rows.Count -eq 0){"Visible"}else{"Collapsed"})
   $script:journalFingerprint=$fileVersion+"|"+$filter+"|"+$titles
   Update-JournalComboHint $journalTaskFilter
- }catch{$journalEventsList.ItemsSource=$null;$journalEmptyText.Text="Не удалось открыть журнал";$journalEmptyText.Visibility="Visible"}
+ }catch{$journalEventsList.ItemsSource=$null;$journalEmptyText.Text=Tr "Не удалось открыть журнал";$journalEmptyText.Visibility="Visible"}
 }
 
 function Show-JournalView([bool]$keyboardNavigation = $false) {
@@ -2257,7 +2795,7 @@ function Add-ProviderTab([string]$id,[string]$label,[int]$count){
  $button.Add_SizeChanged({param($sender,$args) if($sender.ActualWidth -gt 0 -and $sender.ActualHeight -gt 0){$sender.DataContext.Data=Squircle-Geometry $sender.ActualWidth $sender.ActualHeight ($script:cardRadius-$script:tabPadding) 0}})
  $button.Add_MouseEnter({param($sender,$args) if($script:selectedProvider -ne [string]$sender.Tag){$sender.DataContext.Fill=Brush $script:palette.Hover}})
  $button.Add_MouseLeave({param($sender,$args) if($script:selectedProvider -ne [string]$sender.Tag){$sender.DataContext.Fill=[Windows.Media.Brushes]::Transparent}})
- [Windows.Automation.AutomationProperties]::SetName($button,"Показать задачи: $label, $count")
+ [Windows.Automation.AutomationProperties]::SetName($button,$(if($script:resolvedLanguage -eq 'en'){"Show tasks: $label, $count"}else{"Показать задачи: $label, $count"}))
  $tabShape.Fill=$(if($selected){Brush $script:accentHex}else{[Windows.Media.Brushes]::Transparent})
  $button.Add_Click({param($sender,$args) $script:selectedProvider=[string]$sender.Tag;$script:fingerprint="";Update-View})
  $providerTabsPanel.Children.Add($button)|Out-Null
@@ -2269,7 +2807,7 @@ function Render-ProviderTabs($tasks){
  if($providers.Count -lt 2){$providerTabsHost.Visibility="Collapsed";$script:selectedProvider="all";return}
  if($script:selectedProvider -ne "all" -and $script:selectedProvider -notin $providers){$script:selectedProvider="all"}
  $providerTabsHost.Visibility="Visible";$providerTabsPanel.Children.Clear()
- Add-ProviderTab "all" "Все" @($tasks|Where-Object Active).Count
+ Add-ProviderTab "all" (Tr "Все") @($tasks|Where-Object Active).Count
  Add-ProviderTab "codex" "Codex" @($tasks|Where-Object {$_.Active -and $_.Provider -eq "codex"}).Count
  Add-ProviderTab "claude" "Claude Code" @($tasks|Where-Object {$_.Active -and $_.Provider -eq "claude"}).Count
  if($providerTabsPanel.Children.Count -gt 0){$providerTabsPanel.Children[$providerTabsPanel.Children.Count-1].Margin=New-Object Windows.Thickness(0)}
@@ -2319,7 +2857,7 @@ function Update-View {
      if($PreviewScenario -eq "unplanned"){$previewSteps=@();$previewValue=$null;$previewKind="none"}
     }
     $previewTime=[DateTime]::Now.AddSeconds(-$i)
-    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр"}
+    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр";PlanConfirmed=(-not ($PreviewPlanUnconfirmed -and $i -eq 0))}
    }
   }
   $ordered=Prioritize-Tasks $allTasks $previousAllTasks $script:compactTaskId
@@ -2330,20 +2868,21 @@ function Update-View {
   Render-ProviderTabs $allTasks
   $tasks=@(Filtered-Tasks $allTasks)
   $script:lastTasks=$tasks
-  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Active):$($_.ProgressKind):$($_.Progress):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
+  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
   if($next -ne $script:fingerprint){
    $script:fingerprint=$next; $tasksPanel.Children.Clear()
-   if($script:sourceErrors.Count -gt 0){$warning=Text ("Нет данных от "+($script:sourceErrors -join ", ")) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
+   if($script:sourceErrors.Count -gt 0){$warning=Text ((Tr "Нет данных от ")+($script:sourceErrors -join ", ")) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
    foreach($task in $tasks){Add-Card $task}
-   if($tasks.Count -eq 0 -and $script:sourceErrors.Count -eq 0){$empty=Text "Активных задач сейчас нет" 14 $script:palette.Secondary; $empty.Margin=New-Object Windows.Thickness(4,24,0,0); $tasksPanel.Children.Add($empty)|Out-Null}
+   if($tasks.Count -eq 0 -and $script:sourceErrors.Count -eq 0){$empty=Text (Tr "Активных задач сейчас нет") 14 $script:palette.Secondary; $empty.Margin=New-Object Windows.Thickness(4,24,0,0); $tasksPanel.Children.Add($empty)|Out-Null}
    Render-CompactTasks $allTasks
   }
   if($script:showingJournal){Render-Journal}
   if($script:showingSettings -and -not $journalDaysCombo.IsDropDownOpen -and -not $journalSizeCombo.IsDropDownOpen){Update-JournalSettings}
+  if($script:showingSettings -and -not $claudeRetentionDaysCombo.IsDropDownOpen -and -not $claudeRetentionSizeCombo.IsDropDownOpen){Update-ClaudeRetentionSettings}
   if($script:showingSettings -and -not $loopThresholdCombo.IsDropDownOpen -and -not $loopWindowCombo.IsDropDownOpen){Update-LoopSettings}
  } catch {
   $tasksPanel.Children.Clear()
-  $errorText=Text "Не удалось обновить задачи" 14 $script:palette.Secondary
+  $errorText=Text (Tr "Не удалось обновить задачи") 14 $script:palette.Secondary
   $errorText.Margin=New-Object Windows.Thickness(4,24,0,0)
   $tasksPanel.Children.Add($errorText)|Out-Null
  }
@@ -2371,7 +2910,7 @@ $settingsBackButton.Add_Click({Show-TasksView $script:navigationByKeyboard;$scri
 $aboutSettingsButton.Add_PreviewMouseLeftButtonDown({$script:navigationByKeyboard=$false;[Windows.Input.Keyboard]::ClearFocus()|Out-Null})
 $aboutSettingsButton.Add_PreviewKeyDown({param($sender,$eventArgs) if($eventArgs.Key -in @([Windows.Input.Key]::Enter,[Windows.Input.Key]::Space)){$script:navigationByKeyboard=$true}})
 $aboutSettingsButton.Add_Click({Show-AboutView $script:navigationByKeyboard;$script:navigationByKeyboard=$false})
-$feedbackSettingsButton.Add_Click({Open-FeedbackDraft})
+$feedbackEmailLink.Add_Click({Open-FeedbackDraft})
 $aboutBackButton.Add_PreviewMouseLeftButtonDown({$script:navigationByKeyboard=$false;[Windows.Input.Keyboard]::ClearFocus()|Out-Null})
 $aboutBackButton.Add_PreviewKeyDown({param($sender,$eventArgs) if($eventArgs.Key -in @([Windows.Input.Key]::Enter,[Windows.Input.Key]::Space)){$script:navigationByKeyboard=$true}})
 $aboutBackButton.Add_Click({Show-SettingsView $script:navigationByKeyboard $false $true;$script:navigationByKeyboard=$false})
@@ -2383,10 +2922,12 @@ $journalOpenButton.Add_Click({$journalClearConfirmation.Visibility="Collapsed";S
 $journalBackButton.Add_Click({Show-SettingsView $script:navigationByKeyboard $true;$script:navigationByKeyboard=$false})
 $journalDaysCombo.Add_SelectionChanged({Save-JournalControls})
 $journalSizeCombo.Add_SelectionChanged({Save-JournalControls})
+$claudeRetentionDaysCombo.Add_SelectionChanged({Save-ClaudeRetentionControls 'claudeRetentionDays' $claudeRetentionDaysCombo})
+$claudeRetentionSizeCombo.Add_SelectionChanged({Save-ClaudeRetentionControls 'claudeMaximumMB' $claudeRetentionSizeCombo})
 $loopThresholdCombo.Add_SelectionChanged({Save-LoopControls})
 $loopWindowCombo.Add_SelectionChanged({Save-LoopControls})
 $journalTaskFilter.Add_SelectionChanged({if(-not $script:updatingJournalControls){$script:journalFingerprint="";Render-Journal}})
-foreach($combo in @($journalDaysCombo,$journalSizeCombo,$journalTaskFilter,$loopThresholdCombo,$loopWindowCombo)){$combo.Add_SizeChanged({param($sender,$eventArgs) Update-JournalComboHint $sender})}
+foreach($combo in @($journalDaysCombo,$journalSizeCombo,$journalTaskFilter,$loopThresholdCombo,$loopWindowCombo,$claudeRetentionDaysCombo,$claudeRetentionSizeCombo)){$combo.Add_SizeChanged({param($sender,$eventArgs) Update-JournalComboHint $sender})}
 $journalClearButton.Add_Click({$journalClearConfirmation.Visibility="Visible";Update-JournalSettings;Reveal-JournalSettings})
 $journalCancelClearButton.Add_Click({$journalClearConfirmation.Visibility="Collapsed";Update-JournalSettings})
 $journalConfirmClearButton.Add_Click({
@@ -2405,15 +2946,18 @@ $journalConfirmClearButton.Add_Click({
 $systemThemeButton.Add_Click({Apply-Theme "system" $true;Update-View})
 $darkThemeButton.Add_Click({Apply-Theme "dark" $true;Update-View})
 $lightThemeButton.Add_Click({Apply-Theme "light" $true;Update-View})
+$systemLanguageButton.Add_Click({Apply-Language 'system' $true})
+$russianLanguageButton.Add_Click({Apply-Language 'ru' $true})
+$englishLanguageButton.Add_Click({Apply-Language 'en' $true})
 $claudeSourceAction.Add_Click({
  $mode=[string]$claudeSourceAction.Tag
  $configScript=Join-Path $PSScriptRoot "Configure-ClaudeIntegration.ps1"
- if(-not (Test-Path -LiteralPath $configScript)){$claudeSourceStatus.Text="Файл настройки не найден";return}
+ if(-not (Test-Path -LiteralPath $configScript)){$claudeSourceStatus.Text=Tr "Файл настройки не найден";return}
  try{
   Invoke-HiddenProviderSetup $configScript $mode
   Update-SourceSettings
   Update-View
- }catch{$claudeSourceStatus.Text="Ошибка подключения"}
+ }catch{$claudeSourceStatus.Text=Tr "Ошибка подключения"}
 })
 $closeButton.Add_Click({$window.Close()})
 $compactCloseButton.Add_Click({$window.Close()})
@@ -2422,14 +2966,17 @@ $aboutCloseButton.Add_Click({$window.Close()})
 $journalCloseButton.Add_Click({$window.Close()})
 $windowFrame.Add_SizeChanged({Update-SquircleGeometry})
 $tray=New-Object Windows.Forms.NotifyIcon; $tray.Icon=if($null -ne $script:applicationIcon){$script:applicationIcon}else{[Drawing.SystemIcons]::Application}; $tray.Text="AI task monitor"; $tray.Visible=$true; $tray.Add_DoubleClick({Restore-Window})
-$menu=New-Object Windows.Forms.ContextMenuStrip; $show=$menu.Items.Add("Развернуть"); $exit=$menu.Items.Add("Выход"); $show.Add_Click({Restore-Window;Set-CompactMode $false}); $exit.Add_Click({$window.Close()}); $tray.ContextMenuStrip=$menu
-$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
+$menu=New-Object Windows.Forms.ContextMenuStrip; $script:trayShowMenu=$menu.Items.Add("Развернуть"); $script:trayExitMenu=$menu.Items.Add("Выход"); $script:trayShowMenu.Add_Click({Restore-Window;Set-CompactMode $false}); $script:trayExitMenu.Add_Click({$window.Close()}); $tray.ContextMenuStrip=$menu
+$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
 if($script:diagnosticModulesAvailable -and (($PreviewActiveTasks -lt 0 -and -not $SnapshotFile) -or $DiagnosticDirectory)){
  try{$script:diagnosticRuntime=New-DiagnosticRuntime -Directory $script:diagnosticDirectory -Since ([DateTimeOffset]$script:monitorStartedUtc) -Now ([DateTimeOffset]::UtcNow);$script:diagnosticError=""}
  catch{$script:diagnosticError="Журнал недоступен";if($PreviewStartupReadyFile){$script:previewDiagnosticFailure=$_.Exception.ToString()}}
 }
+$initialLanguage=if($LanguageOverride){$LanguageOverride}elseif($SnapshotFile -or $PreviewActiveTasks -ge 0){'ru'}else{Load-LanguageMode}
+Apply-Language $initialLanguage $false
+Schedule-ClaudeRetention
 if($PreviewStartupReadyFile){
  $probe=[IO.File]::Open($probePath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
  try{$probe.WriteByte(1)}finally{$probe.Dispose()}
@@ -2451,6 +2998,45 @@ if($PreviewUpdate){$script:availableUpdate=[PSCustomObject]@{Version='0.3.0-alph
 if ($SnapshotFile) {
  if($PreviewOffscreen){$window.WindowStartupLocation="Manual";$window.Left=-10000;$window.Top=-10000;$window.ShowActivated=$false;$window.ShowInTaskbar=$false}
  $window.Show(); $window.UpdateLayout()
+ if($PreviewPlanUiTest){
+  function Find-PlanText($parent,[string]$expected){
+   if($parent -is [Windows.Controls.TextBlock] -and $parent.Text -ceq $expected -and $parent.IsVisible){return $true}
+   for($index=0;$index -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$index++){
+    if(Find-PlanText ([Windows.Media.VisualTreeHelper]::GetChild($parent,$index)) $expected){return $true}
+   }
+   return $false
+  }
+  $root=if($script:isCompact){$compactTasksPanel}else{$tasksPanel}
+  $expectedProgress=if($script:resolvedLanguage -eq 'en'){'50% of steps'}else{'50% этапов'}
+  if(-not (Find-PlanText $root $expectedProgress)){throw 'The plan percentage is not identified as a fraction of steps.'}
+  if($PreviewPlanUnconfirmed){
+   $expected=if($script:isCompact){Tr 'План не подтверждён'}else{(Tr 'План не подтверждён')+' · 8'+(Tr ' этапов')+' · '+$script:lastAllTasks[0].Updated.ToString('HH:mm')}
+   if(-not (Find-PlanText $root $expected)){throw 'The previous plan is not visibly marked unconfirmed.'}
+  }
+  Write-Output 'Plan UI: step percentage and confirmation state verified.'
+ }
+ if($PreviewLanguageUiTest){
+  $originalTitle=[string]$script:lastAllTasks[0].Title
+  Show-SettingsView
+  $englishLanguageButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+  if((Load-LanguageMode) -ne 'en' -or $window.FindName('SettingsHeading').Text -cne 'Settings' -or $window.FindName('LanguageHeading').Text -cne 'Language'){throw 'English selection did not update and persist the settings UI.'}
+  if([string]$script:lastAllTasks[0].Title -cne $originalTitle){throw 'Language selection changed source task text.'}
+  Apply-Theme 'light' $true
+  if((Load-LanguageMode) -ne 'en'){throw 'Saving a theme overwrote the language preference.'}
+  $russianLanguageButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+  if((Load-LanguageMode) -ne 'ru' -or $window.FindName('SettingsHeading').Text -cne 'Настройки'){throw 'Russian selection did not update and persist the settings UI.'}
+  $systemLanguageButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+  if((Load-LanguageMode) -ne 'system' -or $script:resolvedLanguage -ne (Resolve-Language 'system')){throw 'System language selection did not persist or resolve correctly.'}
+  $claudeRetentionDaysCombo.SelectedIndex=29
+  $claudeRetentionSizeCombo.SelectedIndex=99
+  $retention=Load-ClaudeRetentionSettings
+  if(-not $retention.Valid -or $retention.Days -ne 30 -or $retention.MaximumMB -ne 100 -or (Load-LanguageMode) -ne 'system'){throw 'Claude retention controls did not save independent values.'}
+  Apply-Theme $initialTheme $false
+  Apply-Language $initialLanguage $false
+  Show-TasksView
+  $window.UpdateLayout()
+  Write-Output 'Language UI: live switching, system mode, persistence and untouched task text verified.'
+ }
  if($PreviewMotionUiTest){
   function Find-MotionElement($parent,[string]$kind,[string]$expected){
    if($kind -eq "indicator" -and $parent -is [Windows.Controls.Canvas] -and $parent.Tag -ceq "ActivityIndicator" -and $parent.IsVisible){return $parent}
@@ -2526,12 +3112,18 @@ if ($SnapshotFile) {
   Write-Output 'Update UI: asynchronous result, copy, link rejection, dismissal and compact deferral verified.'
  }
  if($PreviewAboutUiTest){
-  if($aboutView.Visibility -ne "Visible" -or $aboutHeading.Text -ne "О приложении" -or $aboutVersionText.Text -ne ('AI task monitor · версия '+$script:currentVersion.Replace('-',' ')) -or
+  $expectedVersion=$(if($script:resolvedLanguage -eq 'en'){'AI task monitor · version '}else{'AI task monitor · версия '})+$script:currentVersion.Replace('-',' ')
+  if($aboutView.Visibility -ne "Visible" -or $aboutHeading.Text -ne (Tr 'О приложении') -or $aboutVersionText.Text -ne $expectedVersion -or
      -not $aboutProviders.Text.Contains("Codex") -or -not $aboutProviders.Text.Contains("Claude Code")){
    throw "The About page does not expose the expected content."
   }
   $aboutBackButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
   if($settingsView.Visibility -ne "Visible" -or $aboutView.Visibility -ne "Collapsed"){throw "The About back action did not return to settings."}
+  $feedbackEmailBox.SelectAll()
+  if($feedbackEmailBox.Selection.Text.Trim() -cne 'truea.k.a.ru@gmail.com'){throw 'The feedback address cannot be selected for copying.'}
+  $script:previewFeedbackClicks=0
+  $feedbackEmailLink.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Documents.Hyperlink]::ClickEvent))
+  if($script:previewFeedbackClicks -ne 1){throw 'The feedback address does not open the feedback action.'}
   if((Get-FeedbackUri) -notmatch '^mailto:truea\.k\.a\.ru@gmail\.com\?subject=' -or (Get-FeedbackUri) -match '&body='){throw "The feedback draft is not private or correctly addressed."}
   if($script:isStoreEdition){
    if(-not $aboutUpdatesText.Text.Contains('Microsoft Store') -or $aboutUpdatesText.Text.Contains('GitHub')){throw 'Store edition update description is incorrect.'}

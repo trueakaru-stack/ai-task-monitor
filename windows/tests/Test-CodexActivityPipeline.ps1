@@ -3,7 +3,7 @@ $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Application source could not be parsed.' }
-$names = @('Prop', 'Read-TailText', 'Lock-State', 'Thread-State', 'Codex-Uncertain', 'Codex-Plan', 'Codex-Activity', 'Plan-Progress', 'Codex-Tasks', 'Prioritize-Tasks')
+$names = @('Prop', 'Read-TailText', 'Lock-State', 'Thread-State', 'Codex-Uncertain', 'Codex-Plan', 'Codex-Activity', 'Plan-Progress', 'Codex-IndexCandidates', 'Codex-Tasks', 'Prioritize-Tasks')
 $definitions = foreach ($name in $names) {
     $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if ($null -eq $function) { throw "Missing function: $name" }
@@ -69,6 +69,7 @@ try {
     $resumed = @(Codex-Tasks)
     $third = Prioritize-Tasks $resumed $current 'new-id'
     Require ($third.SelectedId -eq 'old-id' -and $third.Tasks[0].Id -eq 'old-id' -and $third.Tasks[0].Activity -eq 'Resume work') 'The continued task did not take focus with its current action'
+    Require (-not $third.Tasks[0].PlanConfirmed -and @($third.Tasks[0].Steps).Count -eq 2) 'A prior plan must remain visible but unconfirmed after the new turn starts'
     Require (-not (($resumed | ConvertTo-Json -Compress -Depth 8) -match 'PRIVATE_REASONING')) 'Raw reasoning leaked into task display data'
     Write-Output 'Codex activity pipeline: live sessions, plans, no-plan activity, new and resumed selection, and privacy verified.'
 } finally { foreach ($owner in $owners) { $owner.Dispose() } }

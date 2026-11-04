@@ -11,14 +11,17 @@ try{
  $env:LOCALAPPDATA=$root;$env:USERPROFILE=$root;$env:CODEX_HOME=Join-Path $root "codex"
  if($EvidenceDirectory){[void][IO.Directory]::CreateDirectory($EvidenceDirectory)}
  foreach($theme in @("dark","light")){
-  $snapshot=Join-Path $root ($theme+".png")
-  $settingsSnapshot=Join-Path $root ("settings-"+$theme+".png")
-  & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File $app -PreviewActiveTasks 2 -PreviewAbout -PreviewAboutUiTest -PreviewSettingsEnd -ThemeOverride $theme -DiagnosticDirectory (Join-Path $root "diagnostics") -SnapshotFile $snapshot -SettingsSnapshotFile $settingsSnapshot
-  if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $snapshot -PathType Leaf)){throw "About UI failed for $theme."}
-  if(-not (Test-Path -LiteralPath $settingsSnapshot -PathType Leaf)){throw "Settings snapshot failed for $theme."}
-  if($EvidenceDirectory){Copy-Item -LiteralPath $snapshot -Destination (Join-Path $EvidenceDirectory ($theme+".png"));Copy-Item -LiteralPath $settingsSnapshot -Destination (Join-Path $EvidenceDirectory ("settings-"+$theme+".png"))}
+  foreach($language in @('ru','en')){
+   $stem=$theme+'-'+$language
+   $snapshot=Join-Path $root ($stem+".png")
+   $settingsSnapshot=Join-Path $root ("settings-"+$stem+".png")
+   & powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File $app -PreviewActiveTasks 2 -PreviewAbout -PreviewAboutUiTest -PreviewSettingsEnd -ThemeOverride $theme -LanguageOverride $language -DiagnosticDirectory (Join-Path $root "diagnostics") -SnapshotFile $snapshot -SettingsSnapshotFile $settingsSnapshot
+   if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $snapshot -PathType Leaf)){throw "About UI failed for $stem."}
+   if(-not (Test-Path -LiteralPath $settingsSnapshot -PathType Leaf)){throw "Settings snapshot failed for $stem."}
+   if($EvidenceDirectory){Copy-Item -LiteralPath $snapshot -Destination (Join-Path $EvidenceDirectory ($stem+".png"));Copy-Item -LiteralPath $settingsSnapshot -Destination (Join-Path $EvidenceDirectory ("settings-"+$stem+".png"))}
+  }
  }
- Write-Output "About UI: both themes, back navigation and small-window scrolling verified."
+ Write-Output "About UI: both themes and languages, back navigation, email and small-window scrolling verified."
 }finally{
  $env:LOCALAPPDATA=$oldLocal;$env:USERPROFILE=$oldProfile;$env:CODEX_HOME=$oldCodex
  if(Test-Path -LiteralPath $root){

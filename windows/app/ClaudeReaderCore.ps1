@@ -13,6 +13,8 @@ namespace AITaskMonitor.Claude {
  public sealed class Step {
   public string title { get; set; }
   public string status { get; set; }
+  public string id { get; set; }
+  public bool generated { get; set; }
  }
  public sealed class Task {
   public string Id { get; set; }
@@ -110,10 +112,11 @@ namespace AITaskMonitor.Claude {
     if(item.TaskId.Length == 0) continue;
     Step step;
     if(!state.Steps.TryGetValue(item.TaskId, out step)) {
-     step = new Step { title=item.Subject.Length > 0 ? item.Subject : "Этап " + item.TaskId, status="pending" };
+     step = new Step { id=item.TaskId, generated=item.Subject.Length == 0, title=item.Subject.Length > 0 ? item.Subject : "Этап " + item.TaskId, status="pending" };
      state.Steps.Add(item.TaskId, step); state.StepOrder.Add(item.TaskId);
     } else if(item.Name == "TaskCreated") {
      step.title = item.Subject.Length > 0 ? item.Subject : "Этап " + item.TaskId;
+     step.generated = item.Subject.Length == 0;
      step.status = "pending";
     }
     if(item.Name == "TaskCompleted" || item.TaskStatus == "completed") step.status = "done";

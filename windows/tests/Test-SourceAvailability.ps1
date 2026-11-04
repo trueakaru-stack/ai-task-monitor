@@ -56,6 +56,11 @@ $snapshot = Source-Snapshot
 if (@($snapshot.Tasks).Count -ne 1 -or @($snapshot.Tasks | Where-Object { $_.Provider -eq "claude" }).Count -ne 0 -or @($snapshot.Unavailable).Count -ne 0) { throw "A disconnected provider must not keep old tasks visible or report an error." }
 $script:claudeConnection = "connected"
 [void](Source-Snapshot)
+$script:claudeConnection = "partial"
+$snapshot = Source-Snapshot
+if (@($snapshot.Tasks | Where-Object { $_.Provider -eq "claude" -and -not $_.Active -and $_.Status -ne "working" }).Count -ne 1 -or (@($snapshot.Unavailable) -join ",") -ne "Claude Code") { throw "A partial provider must keep observed tasks unconfirmed and report unavailable data." }
+$script:claudeConnection = "connected"
+[void](Source-Snapshot)
 $script:claudeConnection = "unknown"
 $snapshot = Source-Snapshot
 if (@($snapshot.Tasks | Where-Object { $_.Provider -eq "claude" -and -not $_.Active }).Count -ne 1 -or (@($snapshot.Unavailable) -join ",") -ne "Claude Code") { throw "Unreadable provider settings must retain an observed task as unconfirmed." }
