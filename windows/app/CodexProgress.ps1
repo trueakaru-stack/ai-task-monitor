@@ -170,7 +170,7 @@ try{
  $script:externalProviderController=New-ExternalProviderController
  $script:externalProviderModulesAvailable=$true
 }catch{}
-$script:currentVersion='0.2.5-alpha'
+$script:currentVersion='0.2.6-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateClient=$null
