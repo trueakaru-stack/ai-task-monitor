@@ -10,9 +10,9 @@
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>AI Task Monitor</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.3.4</string>
-    <key>CFBundleVersion</key><string>7</string>
-    <key>AITaskMonitorReleaseVersion</key><string>0.3.4-alpha</string>
+    <key>CFBundleShortVersionString</key><string>0.3.5</string>
+    <key>CFBundleVersion</key><string>8</string>
+    <key>AITaskMonitorReleaseVersion</key><string>0.3.5-alpha</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>

@@ -38,7 +38,7 @@ swift test
 
 For the current test changes, also check the truncated-text tooltip in light and dark themes, in expanded and compact windows, near each edge of the screen. The tooltip should appear above the pointer when there is room, move to stay visible at an edge, and remain absent when the text fits. Share test results and screenshots made with synthetic task data only.
 
-The result is a universal Apple silicon and Intel application inside `dist/AITaskMonitor-macOS-0.3.4-alpha.dmg`.
+The result is a universal Apple silicon and Intel application inside `dist/AITaskMonitor-macOS-0.3.5-alpha.dmg`.
 
 ## Alpha installation
 
