@@ -6,11 +6,18 @@ struct RootView: View {
     @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.system.rawValue
     @AppStorage("languageMode") private var languageRaw = AppLanguage.system.rawValue
     @Environment(\.colorScheme) private var colorScheme
+    @State private var measuredCompactContentHeight: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
             titleBar
-            if store.isCompact { compactContent }
+            if store.isCompact {
+                compactContent
+                    .fixedSize(horizontal: false, vertical: true)
+                    .background(GeometryReader { geometry in
+                        Color.clear.preference(key: CompactContentHeightKey.self, value: geometry.size.height)
+                    })
+            }
             else if store.showsJournal { JournalView() }
             else if store.showsAbout { AboutView() }
             else if store.showsSettings { SettingsView() }
@@ -25,6 +32,11 @@ struct RootView: View {
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(MonitorTheme.border, lineWidth: 1))
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.42 : 0.18), radius: 22, y: 8)
         .background(WindowConfigurator(isCompact: store.isCompact, compactHeight: compactHeight))
+        .onPreferenceChange(CompactContentHeightKey.self) { height in
+            if height > 0 && abs(measuredCompactContentHeight - height) > 0.5 {
+                measuredCompactContentHeight = height
+            }
+        }
         .preferredColorScheme(preferredScheme)
         .environment(\.locale, Locale(identifier: AppLanguage.resolve(AppLanguage(rawValue: languageRaw) ?? .system, preferredLanguages: Locale.preferredLanguages).rawValue))
     }
@@ -156,9 +168,9 @@ struct RootView: View {
                             .padding(.bottom, 6)
                     }
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        TruncatingText(text: task.title, font: .systemFont(ofSize: 13, weight: .semibold), color: .labelColor)
+                        TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
                             .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
-                        if let label = task.progressLabel { Text(label).font(.system(size: 13, weight: .semibold)).monospacedDigit() }
+                        if let label = task.progressLabel { Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit() }
                     }
                     if !task.activity.isEmpty {
                         ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 11.5)
@@ -203,6 +215,7 @@ struct RootView: View {
 
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     private var compactHeight: CGFloat {
+        if measuredCompactContentHeight > 0 { return ceil(58 + measuredCompactContentHeight) }
         let base: CGFloat = store.tasks.count > 1 ? 182 : 156
         let sourceExtra: CGFloat = !store.tasks.isEmpty && !store.unavailableMessage.isEmpty ? 24 : 0
         let selected = store.tasks.isEmpty ? nil : store.tasks[min(store.compactIndex, store.tasks.count - 1)]
@@ -210,6 +223,11 @@ struct RootView: View {
         let planExtra: CGFloat = selected.map { !$0.steps.isEmpty && !$0.planConfirmed } == true ? 22 : 0
         return base + sourceExtra + loopExtra + planExtra
     }
+}
+
+private struct CompactContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 private struct TitleAction: View {
@@ -256,7 +274,16 @@ private struct WindowConfigurator: NSViewRepresentable {
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
         let size = isCompact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)
-        if window.frame.size != size { window.setContentSize(size) }
+        let preserveCompactPosition = isCompact && abs(window.frame.width - 372) < 0.5
+        let oldFrame = window.frame
+        if window.frame.size != size {
+            window.minSize = .zero
+            window.maxSize = NSSize(width: 10_000, height: 10_000)
+            window.setContentSize(size)
+            if preserveCompactPosition {
+                window.setFrameOrigin(NSPoint(x: oldFrame.maxX - window.frame.width, y: oldFrame.minY))
+            }
+        }
         window.minSize = isCompact ? size : NSSize(width: 500, height: 500)
         window.maxSize = isCompact ? size : NSSize(width: 900, height: 1_000)
     }

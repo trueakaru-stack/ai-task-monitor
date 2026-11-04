@@ -100,12 +100,11 @@ enum SnapshotRenderer {
             .environment(\.colorScheme, scheme)
             .environment(\.settingsPreviewEnd, settingsEnd)
             .environment(\.settingsPreviewSources, settingsSources)
-            .frame(width: size.width, height: size.height)
         let hosting = NSHostingView(rootView: view)
         hosting.appearance = NSAppearance(named: mode == .dark ? .darkAqua : .aqua)
         hosting.frame = NSRect(origin: .zero, size: size)
         var previewWindow: NSWindow?
-        if settingsEnd || settingsSources || manyProviders {
+        if compact || settingsEnd || settingsSources || manyProviders {
             let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.contentView = hosting
