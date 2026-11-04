@@ -68,10 +68,9 @@ final class OverlayScrollerTests: XCTestCase {
         let scroll = try XCTUnwrap(probe.enclosingScrollView)
         XCTAssertGreaterThan(scroll.documentView?.bounds.height ?? 0, scroll.contentView.bounds.height)
         XCTAssertEqual(scroll.scrollerStyle, .overlay, "Settings must stay in overlay mode after layout")
-        print("Settings scroller: style=\(scroll.scrollerStyle.rawValue) class=\(String(describing: scroll.verticalScroller.map { type(of: $0) })) frame=\(String(describing: scroll.verticalScroller?.frame))")
         scroll.scrollerStyle = .legacy
-        probe.configure()
-        XCTAssertEqual(scroll.scrollerStyle, .overlay)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(scroll.scrollerStyle, .overlay, "The probe must recover if AppKit changes the style")
         XCTAssertTrue(scroll.hasVerticalScroller)
     }
 }
