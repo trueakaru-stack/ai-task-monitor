@@ -59,9 +59,11 @@ struct JournalView: View {
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 12)
+                    .background(OverlayScrollerProbe().frame(width: 0, height: 0))
                 }
             }
         }
+        .controlSize(.large)
         .onChange(of: store.journalEvents) { _ in
             if !selectedTask.isEmpty && !taskOptions.contains(where: { $0.id == selectedTask }) { selectedTask = "" }
         }

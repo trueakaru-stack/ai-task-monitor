@@ -77,6 +77,7 @@ struct RootView: View {
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 16)
+                    .background(OverlayScrollerProbe().frame(width: 0, height: 0))
                 }
             }
             Button {

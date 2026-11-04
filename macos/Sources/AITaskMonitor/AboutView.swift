@@ -54,6 +54,7 @@ struct AboutView: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 18)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .background(OverlayScrollerProbe().frame(width: 0, height: 0))
             }
         }
     }

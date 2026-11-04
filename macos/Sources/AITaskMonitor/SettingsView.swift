@@ -144,18 +144,19 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 14) {
                         Button(tr("О приложении", "About")) { store.showsAbout = true }
                         section(tr("Отзывы и предложения", "Feedback and suggestions")) {
-                            HStack(spacing: 8) {
+                            HStack(spacing: 16) {
                                 Text(FeedbackDraft.address)
                                     .textSelection(.enabled)
                                     .tint(.accentColor)
+                                    .fixedSize(horizontal: true, vertical: false)
                                     .accessibilityLabel(tr("Адрес для отзывов и предложений: \(FeedbackDraft.email)", "Feedback email address: \(FeedbackDraft.email)"))
-                                Spacer(minLength: 8)
                                 Button { feedbackCopyError = !FeedbackDraft.copyAddress() } label: {
                                     Image(systemName: "doc.on.doc")
-                                        .frame(width: 28, height: 28)
+                                        .frame(width: 28, height: 28, alignment: .leading)
                                         .foregroundStyle(MonitorTheme.secondary)
                                 }
                                 .accessibilityLabel(tr("Скопировать адрес", "Copy email address"))
+                                Spacer(minLength: 0)
                             }
                             if feedbackCopyError {
                                 Text(tr("Не удалось скопировать адрес. Выделите его и скопируйте вручную.", "Could not copy the address. Select and copy it manually."))
@@ -169,6 +170,7 @@ struct SettingsView: View {
                 }
                 .padding(.horizontal, 20)
                 .padding(.vertical, 18)
+                .background(OverlayScrollerProbe().frame(width: 0, height: 0))
                 .id("feedback-end")
              }
              .onAppear {
@@ -180,6 +182,7 @@ struct SettingsView: View {
              }
             }
         }
+        .controlSize(.large)
         .onChange(of: languageRaw) { _ in store.refresh() }
     }
 

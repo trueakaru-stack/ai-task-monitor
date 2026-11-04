@@ -50,6 +50,7 @@ struct TaskCardView: View {
                             }
                         }
                     }
+                    .background(OverlayScrollerProbe().frame(width: 0, height: 0))
                 }
                 .frame(height: 116)
                 .padding(.top, 16)
@@ -81,7 +82,7 @@ struct LoopWarningView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
                 Button(tr("Скрыть", "Hide")) { store.dismissLoop(for: task.id) }
-                    .controlSize(.small)
+                    .controlSize(.large)
                     .accessibilityLabel(tr("Скрыть предупреждение о возможном цикле для задачи: \(task.title)", "Hide possible loop warning for task: \(task.title)"))
             }
         }
