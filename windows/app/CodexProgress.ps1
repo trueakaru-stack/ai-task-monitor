@@ -163,7 +163,7 @@ try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAva
 $script:externalProviderController=$null
 $script:externalProviderModulesAvailable=$false
 $script:lastExternalTasks=@()
-$script:lastOpenCodeConnected=$false
+$script:seenExternalConnections=@{}
 try{
  . (Join-Path $PSScriptRoot 'integrations\ProviderEventView.ps1')
  . (Join-Path $PSScriptRoot 'integrations\ProviderRuntime.ps1')
@@ -1948,22 +1948,13 @@ function Source-Snapshot {
   else{$script:lastClaudeTasks=@()}
  }catch{[void]$unavailable.Add("Claude Code");$claude=@(Unconfirmed-Tasks $script:lastClaudeTasks)}
  if($script:externalProviderModulesAvailable){
+  $connection=try{Get-OpenCodeConnectionState -AppRoot $PSScriptRoot}catch{'error'}
   try{
-   $connection=Get-OpenCodeConnectionState -AppRoot $PSScriptRoot
-   if($connection -eq 'connected'){
-    $script:lastOpenCodeConnected=$true
-    $external=@(Read-ManagedExternalProviderSnapshot -Controller $script:externalProviderController -AllowedProviders @('opencode') -Language $script:resolvedLanguage)
-    $script:lastExternalTasks=$external
-   }elseif($connection -eq 'partial'){
-    [void]$unavailable.Add('OpenCode')
-    $external=@(Unconfirmed-ExternalTasks $script:lastExternalTasks)
-    Stop-ExternalProviderController $script:externalProviderController
-   }else{
-    Stop-ExternalProviderController $script:externalProviderController
-    $script:lastOpenCodeConnected=$false;$script:lastExternalTasks=@()
-   }
+   $group=Read-ExternalProviderGroupSnapshot -Controller $script:externalProviderController -Connections @{opencode=$connection} -Seen $script:seenExternalConnections -PreviousTasks $script:lastExternalTasks -Language $script:resolvedLanguage
+   $external=@($group.Tasks);$script:lastExternalTasks=$external
+   foreach($name in $group.Unavailable){[void]$unavailable.Add($name)}
   }catch{
-   if($script:lastOpenCodeConnected){[void]$unavailable.Add('OpenCode');$external=@(Unconfirmed-ExternalTasks $script:lastExternalTasks)}
+   if($script:seenExternalConnections.ContainsKey('opencode')){[void]$unavailable.Add('OpenCode');$external=@(Unconfirmed-ExternalTasks $script:lastExternalTasks);$script:lastExternalTasks=$external}
    try{Stop-ExternalProviderController $script:externalProviderController}catch{}
   }
  }
@@ -2374,9 +2365,9 @@ function Add-CompactTask($task) {
  $c3=New-Object Windows.Controls.ColumnDefinition; $c3.Width=[Windows.GridLength]::Auto
  $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2); $header.ColumnDefinitions.Add($c3)
  $displayTitle=Localized-TaskTitle $task
- $title=Text $displayTitle 13.5 $script:palette.Primary "SemiBold"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; $title.Margin=New-Object Windows.Thickness(0,0,10,0); Add-ConditionalHint $title $displayTitle "line"; [Windows.Automation.AutomationProperties]::SetName($title,$displayTitle)
+ $title=Text $displayTitle 16 $script:palette.Primary "SemiBold"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; $title.Margin=New-Object Windows.Thickness(0,0,10,0); Add-ConditionalHint $title $displayTitle "line"; [Windows.Automation.AutomationProperties]::SetName($title,$displayTitle)
  $progressLabel=Progress-Label $task
- $percent=Text $progressLabel 13.5 $script:palette.Primary "SemiBold"; $percent.VerticalAlignment="Center"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip=Tr "Приблизительная оценка"}
+ $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.VerticalAlignment="Center"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip=Tr "Приблизительная оценка"}
  [Windows.Controls.Grid]::SetColumn($title,1); [Windows.Controls.Grid]::SetColumn($percent,2)
  $header.Children.Add($title)|Out-Null; $header.Children.Add($percent)|Out-Null
  [Windows.Controls.Grid]::SetRow($header,0); $container.Children.Add($header)|Out-Null
@@ -3239,6 +3230,11 @@ if ($SnapshotFile) {
   $activity=Find-MotionElement $previewRoot "text" ([string]$script:lastAllTasks[0].Activity)
   $title=Find-MotionElement $previewRoot "text" ([string]$script:lastAllTasks[0].Title)
   if($null -eq $indicator -or $null -eq $activity -or $null -eq $title){throw "The task activity indicator, action or title is missing."}
+  if($script:isCompact){
+   if($title.FontSize -ne 16){throw "The compact task title must use a 16 DIP font."}
+   $expectedLabel=Progress-Label $script:lastAllTasks[0]
+   if($expectedLabel){$label=Find-MotionElement $previewRoot "text" $expectedLabel;if($null -eq $label -or $label.FontSize -ne 16){throw "The compact progress label must match the title font size."}}
+  }
   if($script:isCompact -and $compactTasksPanel.Children[0].Children[0].Children.Count -ne 2){throw "The previous title indicator was not removed."}
   $mark=$indicator.Children[0];$geometry=$mark.Data
   $expectAnimation=[bool]$script:lastAllTasks[0].Active -and $script:motionEnabled

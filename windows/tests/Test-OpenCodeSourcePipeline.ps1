@@ -53,7 +53,7 @@ function Send([string]$name,[string]$json){
 $name='AITaskMonitor.Test.'+[Guid]::NewGuid().ToString('N')
 $ClaudeEventFile='';$script:lastCodexTasks=@();$script:lastClaudeTasks=@();$script:lastExternalTasks=@()
 $script:externalProviderModulesAvailable=$true;$script:externalProviderController=New-ExternalProviderController -PipeName $name
-$script:lastOpenCodeConnected=$false;$script:resolvedLanguage='en'
+$script:seenExternalConnections=@{};$script:resolvedLanguage='en'
 try{
  Set-FixtureConnection 'Install'
  $initial=Source-Snapshot

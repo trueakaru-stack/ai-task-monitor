@@ -58,6 +58,46 @@ function Read-ManagedExternalProviderSnapshot {
  return @(Read-ExternalProviderSnapshot -Channel $Controller.Channel -Store $Controller.Store -AllowedProviders $allowed -Language $Language -Now $Now)
 }
 
+# Connection failures are isolated per provider; only a shared channel failure
+# marks every currently connected external source as unavailable.
+function Read-ExternalProviderGroupSnapshot {
+ param(
+  [Parameter(Mandatory=$true)]$Controller,
+  [Parameter(Mandatory=$true)][hashtable]$Connections,
+  [Parameter(Mandatory=$true)][hashtable]$Seen,
+  [object[]]$PreviousTasks = @(),
+  [ValidateSet('ru','en')][string]$Language = 'ru'
+ )
+ $names=[ordered]@{kimi='Kimi Code';deepseek='DeepSeek Harness';hermes='Hermes Agent';opencode='OpenCode'}
+ $allowed=New-Object 'Collections.Generic.List[string]'
+ $uncertain=New-Object 'Collections.Generic.List[string]'
+ $unavailable=New-Object 'Collections.Generic.List[string]'
+ foreach($provider in $names.Keys){
+  if(-not $Connections.ContainsKey($provider)){continue}
+  switch([string]$Connections[$provider]){
+   'connected' {$Seen[$provider]=$true;$allowed.Add($provider)}
+   'partial' {$uncertain.Add($provider);$unavailable.Add($names[$provider])}
+   'error' {if($Seen.ContainsKey($provider)){$uncertain.Add($provider);$unavailable.Add($names[$provider])}}
+   'disconnected' {[void]$Seen.Remove($provider)}
+   default {throw 'Invalid external provider connection state.'}
+  }
+ }
+ $retained=@(Unconfirmed-ExternalTasks @($PreviousTasks|Where-Object {$_.Provider -in $uncertain}))
+ if($allowed.Count -eq 0){
+  Stop-ExternalProviderController $Controller
+  return [PSCustomObject]@{Tasks=$retained;Unavailable=$unavailable.ToArray()}
+ }
+ try{
+  $current=@(Read-ManagedExternalProviderSnapshot -Controller $Controller -AllowedProviders $allowed.ToArray() -Language $Language)
+  return [PSCustomObject]@{Tasks=@($current+$retained);Unavailable=$unavailable.ToArray()}
+ }catch{
+  foreach($provider in $allowed){$uncertain.Add($provider);$unavailable.Add($names[$provider])}
+  $retained=@(Unconfirmed-ExternalTasks @($PreviousTasks|Where-Object {$_.Provider -in $uncertain}))
+  Stop-ExternalProviderController $Controller
+  return [PSCustomObject]@{Tasks=$retained;Unavailable=$unavailable.ToArray()}
+ }
+}
+
 function Get-OpenCodeConnectionState {
  param([Parameter(Mandatory=$true)][string]$AppRoot)
  $setup=Join-Path $AppRoot 'Configure-OpenCodeIntegration.ps1'
