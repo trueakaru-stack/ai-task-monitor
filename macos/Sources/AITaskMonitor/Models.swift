@@ -14,6 +14,11 @@ enum ProgressKind: String, Codable {
     case none
 }
 
+enum ProgressBasis: String, Codable {
+    case task
+    case steps
+}
+
 enum StepStatus: String, Codable {
     case done
     case active
@@ -47,11 +52,24 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
     var startedAt: Date = .distantPast
     var startKey: String = ""
     var planConfirmed: Bool = true
+    var progressBasis: ProgressBasis? = nil
 
     var progressLabel: String? {
-        guard let progress else { return nil }
+        var basis = progressBasis ?? (steps.isEmpty ? .task : .steps)
+        if (progress == nil || progressKind == .none) && !steps.isEmpty { basis = .steps }
+        if basis == .steps {
+            guard !steps.isEmpty, planConfirmed, !isUnconfirmed else { return nil }
+            let active = steps.indices.filter { steps[$0].status == .active }
+            if active.count == 1 {
+                let current = active[0] + 1
+                return tr("Этап \(current) из \(steps.count)", "Step \(current) of \(steps.count)")
+            }
+            let done = steps.filter { $0.status == .done }.count
+            return tr("Готово \(done) из \(steps.count)", "Done \(done) of \(steps.count)")
+        }
+        guard let progress, progressKind != .none else { return nil }
         let value = progressKind == .approximate ? "≈\(progress)%" : "\(progress)%"
-        return steps.isEmpty ? value : value + tr(" этапов", " of steps")
+        return value
     }
 
     static func progress(for steps: [TaskStep]) -> Int? {

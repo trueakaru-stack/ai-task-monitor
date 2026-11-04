@@ -94,18 +94,30 @@ private struct StepMark: View {
 
     var body: some View {
         ZStack {
-            Circle()
-                .stroke(status == .done ? Color.accentColor : MonitorTheme.muted, lineWidth: 1)
-                .frame(width: 11, height: 11)
             if status == .done {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 7, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
+                StepCheckmark()
+                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                    .frame(width: 11, height: 9)
             } else if status == .active {
-                Circle().fill(Color.accentColor).frame(width: 5, height: 5)
+                Circle().fill(Color.accentColor).frame(width: 14, height: 14)
+            } else {
+                Circle().stroke(MonitorTheme.muted, lineWidth: 1).frame(width: 14, height: 14)
             }
         }
-        .frame(width: 12, height: 16)
+        .frame(width: 14, height: 16)
         .accessibilityHidden(true)
+    }
+}
+
+private struct StepCheckmark: Shape {
+    func path(in rect: CGRect) -> Path {
+        let scale = min(rect.width / 9.5, rect.height / 6.5)
+        let x = rect.minX + (rect.width - 9.5 * scale) / 2
+        let y = rect.minY + (rect.height - 6.5 * scale) / 2
+        var path = Path()
+        path.move(to: CGPoint(x: x, y: y + 3.5 * scale))
+        path.addLine(to: CGPoint(x: x + 3.2 * scale, y: y + 6.5 * scale))
+        path.addLine(to: CGPoint(x: x + 9.5 * scale, y: y))
+        return path
     }
 }

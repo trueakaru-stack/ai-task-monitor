@@ -287,11 +287,33 @@ final class ParserTests: XCTestCase {
     }
 
     func testProgressLabelsPreserveCertainty() {
+        let oldLanguage = AppLanguage.previewOverride
+        defer { AppLanguage.previewOverride = oldLanguage }
+        AppLanguage.previewOverride = .ru
         let base = MonitoredTask(id: "1", provider: .codex, title: "Task", activity: "", isActive: true, progress: 40, progressKind: .exact, steps: [], updatedAt: Date())
         XCTAssertEqual(base.progressLabel, "40%")
         var planned = base
-        planned.steps = [TaskStep(title: "Synthetic", status: .active)]
-        XCTAssertEqual(planned.progressLabel, "40%" + tr(" этапов", " of steps"))
+        planned.steps = [TaskStep(title: "Done", status: .done), TaskStep(title: "Current", status: .active), TaskStep(title: "Next", status: .pending)]
+        XCTAssertEqual(planned.progressLabel, "Этап 2 из 3")
+        AppLanguage.previewOverride = .en
+        XCTAssertEqual(planned.progressLabel, "Step 2 of 3")
+        var overallWithPlan = planned
+        overallWithPlan.progressBasis = .task
+        XCTAssertEqual(overallWithPlan.progressLabel, "40%")
+        var ambiguous = planned
+        ambiguous.steps[2].status = .active
+        XCTAssertEqual(ambiguous.progressLabel, "Done 1 of 3")
+        ambiguous.steps[1].status = .pending
+        ambiguous.steps[2].status = .pending
+        XCTAssertEqual(ambiguous.progressLabel, "Done 1 of 3")
+        ambiguous.steps = ambiguous.steps.map { TaskStep(title: $0.title, status: .done) }
+        XCTAssertEqual(ambiguous.progressLabel, "Done 3 of 3")
+        var stale = planned
+        stale.planConfirmed = false
+        XCTAssertNil(stale.progressLabel)
+        stale.planConfirmed = true
+        stale.isUnconfirmed = true
+        XCTAssertNil(stale.progressLabel)
         var approximate = base
         approximate.progressKind = .approximate
         XCTAssertEqual(approximate.progressLabel, "≈40%")
