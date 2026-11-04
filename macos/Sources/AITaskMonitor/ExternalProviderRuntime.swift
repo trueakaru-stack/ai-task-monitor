@@ -1,5 +1,7 @@
 import Foundation
 
+enum ExternalProviderConnectionState { case disconnected, partial, connected }
+
 // This runtime is enabled only for explicitly connected providers by its caller.
 final class ExternalProviderRuntime {
     private let channel: ExternalProviderChannel

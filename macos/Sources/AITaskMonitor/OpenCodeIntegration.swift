@@ -5,7 +5,7 @@ import Foundation
 enum OpenCodeIntegrationError: Error { case invalidPath, conflict, modified, missingResources, unverifiedVersion }
 
 enum OpenCodeIntegration {
-    enum State { case disconnected, partial, connected }
+    typealias State = ExternalProviderConnectionState
     private static let owner = "AI Task Monitor OpenCode v1"
     private static let files = ["provider-events.mjs", "provider-observers.mjs", "provider-transport.mjs"]
 

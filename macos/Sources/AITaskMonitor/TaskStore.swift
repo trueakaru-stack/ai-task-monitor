@@ -31,7 +31,7 @@ final class TaskStore: ObservableObject {
     private let claudeLoopProfile: URL?
     private let claudeRetentionWorker: ClaudeRetentionWorker?
     private let externalProvidersEnabled: Bool
-    private let openCodeConnection: () throws -> OpenCodeIntegration.State
+    private let externalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState]
     private let makeExternalRuntime: () throws -> ExternalProviderRuntime
     private var nextClaudeRetention = Date.distantPast
     private let updateChecksEnabled: Bool
@@ -40,7 +40,7 @@ final class TaskStore: ObservableObject {
     private var previousClaude: [MonitoredTask] = []
     private var previousExternal: [MonitoredTask] = []
     private var externalRuntime: ExternalProviderRuntime?
-    private var sawOpenCodeConnection = false
+    private var seenExternalConnections: Set<TaskProvider> = []
     private var taskFocus = TaskFocusTracker()
     private var sawCodexHome = false
     private var sawClaudeEvents = false
@@ -71,12 +71,14 @@ final class TaskStore: ObservableObject {
         }
     }
 
-    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }) {
+    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, additionalExternalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState] = [:], makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }) {
         self.codexReader = codexReader
         self.claudeReader = claudeReader
         self.claudeLoopProfile = claudeLoopProfile
         self.externalProvidersEnabled = enableExternalProviders && previewTasks == nil
-        self.openCodeConnection = openCodeConnection
+        var connections = additionalExternalConnections.filter { [.kimi, .deepseek, .hermes].contains($0.key) }
+        connections[.opencode] = openCodeConnection
+        self.externalConnections = connections
         self.makeExternalRuntime = makeExternalRuntime
         self.claudeRetentionWorker = enableClaudeRetention && previewTasks == nil ? ClaudeRetentionWorker() : nil
         self.updateChecksEnabled = enableUpdateChecks && previewTasks == nil
@@ -320,33 +322,7 @@ final class TaskStore: ObservableObject {
             if !unavailable.contains(.claude) { unavailable.append(.claude) }
             previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         }
-        if externalProvidersEnabled {
-            do {
-                switch try openCodeConnection() {
-                case .connected:
-                    sawOpenCodeConnection = true
-                    if externalRuntime == nil { externalRuntime = try makeExternalRuntime() }
-                    previousExternal = externalRuntime?.snapshot(allowed: [.opencode]) ?? []
-                case .partial:
-                    unavailable.append(.opencode)
-                    markExternalTasksUnconfirmed()
-                    externalRuntime?.stop()
-                    externalRuntime = nil
-                case .disconnected:
-                    externalRuntime?.stop()
-                    externalRuntime = nil
-                    previousExternal = []
-                    sawOpenCodeConnection = false
-                }
-            } catch {
-                if sawOpenCodeConnection {
-                    unavailable.append(.opencode)
-                    markExternalTasksUnconfirmed()
-                }
-                externalRuntime?.stop()
-                externalRuntime = nil
-            }
-        }
+        if externalProvidersEnabled { refreshExternalProviders(unavailable: &unavailable) }
         unavailableSources = unavailable
         var combined = (previousCodex + previousClaude + previousExternal)
             .filter { $0.isActive || $0.isUnconfirmed || $0.isWaiting }
@@ -401,8 +377,51 @@ final class TaskStore: ObservableObject {
                       terminalIDs: terminalIDs, interruptedIDs: interruptedIDs, toolInputs: toolInputs)
     }
 
-    private func markExternalTasksUnconfirmed() {
-        previousExternal = previousExternal.map { task in
+    private func refreshExternalProviders(unavailable: inout [TaskProvider]) {
+        var allowed: Set<TaskProvider> = []
+        var uncertain: Set<TaskProvider> = []
+        for provider in TaskProvider.allCases {
+            guard let connection = externalConnections[provider] else { continue }
+            do {
+                switch try connection() {
+                case .connected:
+                    seenExternalConnections.insert(provider)
+                    allowed.insert(provider)
+                case .partial:
+                    unavailable.append(provider)
+                    uncertain.insert(provider)
+                case .disconnected:
+                    seenExternalConnections.remove(provider)
+                }
+            } catch {
+                if seenExternalConnections.contains(provider) {
+                    unavailable.append(provider)
+                    uncertain.insert(provider)
+                }
+            }
+        }
+        let retained = unconfirmedExternalTasks(for: uncertain)
+        guard !allowed.isEmpty else {
+            externalRuntime?.stop()
+            externalRuntime = nil
+            previousExternal = retained
+            return
+        }
+        do {
+            if externalRuntime == nil { externalRuntime = try makeExternalRuntime() }
+            previousExternal = (externalRuntime?.snapshot(allowed: allowed) ?? []) + retained
+        } catch {
+            for provider in TaskProvider.allCases where allowed.contains(provider) && !unavailable.contains(provider) {
+                unavailable.append(provider)
+            }
+            previousExternal = unconfirmedExternalTasks(for: uncertain.union(allowed))
+            externalRuntime?.stop()
+            externalRuntime = nil
+        }
+    }
+
+    private func unconfirmedExternalTasks(for providers: Set<TaskProvider>) -> [MonitoredTask] {
+        previousExternal.filter { providers.contains($0.provider) }.map { task in
             var copy = task
             copy.isActive = false
             copy.isWaiting = false
