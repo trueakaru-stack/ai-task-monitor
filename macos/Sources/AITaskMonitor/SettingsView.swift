@@ -156,7 +156,11 @@ struct SettingsView: View {
                 .padding(.vertical, 18)
              }
              .onAppear {
-                 if settingsPreviewEnd { DispatchQueue.main.async { scrollProxy.scrollTo("feedback-end", anchor: .bottom) } }
+                 if settingsPreviewEnd {
+                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                         scrollProxy.scrollTo("feedback-end", anchor: .bottom)
+                     }
+                 }
              }
             }
         }

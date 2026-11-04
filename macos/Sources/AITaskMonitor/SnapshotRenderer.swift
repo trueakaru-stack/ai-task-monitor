@@ -103,7 +103,9 @@ enum SnapshotRenderer {
             window.contentView = hosting
             window.orderFrontRegardless()
             previewWindow = window
-            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+            hosting.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(1.2))
         }
         defer { previewWindow?.close() }
         hosting.layoutSubtreeIfNeeded()
