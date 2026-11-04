@@ -137,7 +137,7 @@ struct RootView: View {
                     ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 11.5)
                 }
                 if !task.steps.isEmpty && !task.planConfirmed {
-                    Text(tr("План не подтверждён", "Plan unconfirmed")).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.muted)
+                    Text(tr("План не подтверждён", "Plan unconfirmed")).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
                 }
                 if task.loopWarning != nil { LoopWarningView(task: task, compact: true) }
                 if !store.unavailableMessage.isEmpty {

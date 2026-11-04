@@ -55,6 +55,7 @@ enum SnapshotRenderer {
                         }
                     }
                     try render(name: "settings-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory)
+                    try render(name: "settings-end-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsEnd: true)
                 }
             }
             return 0
@@ -76,7 +77,7 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
         let store = journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources, planUnconfirmed: planUnconfirmed))
         store.isCompact = compact
@@ -95,11 +96,25 @@ enum SnapshotRenderer {
         hosting.appearance = NSAppearance(named: mode == .dark ? .darkAqua : .aqua)
         hosting.frame = NSRect(origin: .zero, size: size)
         hosting.layoutSubtreeIfNeeded()
+        if settingsEnd {
+            guard scrollToEnd(hosting) else { throw SnapshotError.scroll }
+            hosting.layoutSubtreeIfNeeded()
+        }
         guard let bitmap = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { throw SnapshotError.bitmap }
         hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
         guard let png = bitmap.representation(using: .png, properties: [:]) else { throw SnapshotError.png }
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private enum SnapshotError: Error { case bitmap, png }
+    private static func scrollToEnd(_ view: NSView) -> Bool {
+        if let scroll = view as? NSScrollView, let document = scroll.documentView, document.bounds.height > scroll.contentView.bounds.height {
+            let bottom = document.isFlipped ? document.bounds.height - scroll.contentView.bounds.height : 0
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: bottom))
+            scroll.reflectScrolledClipView(scroll.contentView)
+            return true
+        }
+        return view.subviews.contains { scrollToEnd($0) }
+    }
+
+    private enum SnapshotError: Error { case bitmap, png, scroll }
 }

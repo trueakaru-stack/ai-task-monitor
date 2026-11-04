@@ -55,7 +55,7 @@ struct TaskCardView: View {
                 .padding(.top, 16)
                 Text("\(task.planConfirmed ? tr("План задачи", "Task plan") : tr("План не подтверждён", "Plan unconfirmed")) · \(task.steps.count) \(tr("этапов", "steps"))")
                     .font(.system(size: 11))
-                    .foregroundStyle(MonitorTheme.muted)
+                    .foregroundStyle(task.planConfirmed ? MonitorTheme.muted : MonitorTheme.secondary)
                     .padding(.top, 14)
             }
         }
