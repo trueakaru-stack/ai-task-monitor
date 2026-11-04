@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum FeedbackDraft {
@@ -15,6 +16,12 @@ enum FeedbackDraft {
         var text = AttributedString(email)
         text.link = url
         return text
+    }
+
+    @discardableResult
+    static func copyAddress(to pasteboard: NSPasteboard = .general) -> Bool {
+        pasteboard.clearContents()
+        return pasteboard.setString(email, forType: .string)
     }
 }
 

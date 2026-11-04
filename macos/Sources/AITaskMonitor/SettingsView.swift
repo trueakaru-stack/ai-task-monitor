@@ -14,6 +14,7 @@ struct SettingsView: View {
     @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.system.rawValue
     @AppStorage("languageMode") private var languageRaw = AppLanguage.system.rawValue
     @State private var confirmsJournalClear = false
+    @State private var feedbackCopyError = false
     @Environment(\.settingsPreviewEnd) private var settingsPreviewEnd
 
     var body: some View {
@@ -143,10 +144,25 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 14) {
                         Button(tr("О приложении", "About")) { store.showsAbout = true }
                         section(tr("Отзывы и предложения", "Feedback and suggestions")) {
-                            Text(FeedbackDraft.address)
-                                .textSelection(.enabled)
-                                .tint(.accentColor)
-                                .accessibilityLabel(tr("Адрес для отзывов и предложений: \(FeedbackDraft.email)", "Feedback email address: \(FeedbackDraft.email)"))
+                            HStack(spacing: 8) {
+                                Text(FeedbackDraft.address)
+                                    .textSelection(.enabled)
+                                    .tint(.accentColor)
+                                    .accessibilityLabel(tr("Адрес для отзывов и предложений: \(FeedbackDraft.email)", "Feedback email address: \(FeedbackDraft.email)"))
+                                Spacer(minLength: 8)
+                                Button { feedbackCopyError = !FeedbackDraft.copyAddress() } label: {
+                                    Image(systemName: "doc.on.doc")
+                                        .frame(width: 28, height: 28)
+                                        .foregroundStyle(MonitorTheme.secondary)
+                                }
+                                .accessibilityLabel(tr("Скопировать адрес", "Copy email address"))
+                            }
+                            if feedbackCopyError {
+                                Text(tr("Не удалось скопировать адрес. Выделите его и скопируйте вручную.", "Could not copy the address. Select and copy it manually."))
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(MonitorTheme.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
                     .font(.system(size: 13)).buttonStyle(.plain)
