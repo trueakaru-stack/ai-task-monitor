@@ -39,5 +39,15 @@ final class CompactWindowLayoutTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(nextTitle.font).pointSize, 16, accuracy: 0.01)
         let titleRect = host.convert(nextTitle.bounds, from: nextTitle)
         XCTAssertTrue(host.bounds.insetBy(dx: 0, dy: -1).contains(titleRect), "The task title must remain visible after resizing")
+
+        window.setFrameOrigin(NSPoint(x: 120, y: 200))
+        let movedBottom = window.frame.minY
+        let movedRight = window.frame.maxX
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        store.compactIndex = 0
+        RunLoop.current.run(until: Date().addingTimeInterval(0.75))
+        XCTAssertGreaterThan(window.frame.height, 182, "Restoring a warning must restore its required height")
+        XCTAssertEqual(window.frame.minY, movedBottom, accuracy: 1, "Resizing must respect a manually moved window")
+        XCTAssertEqual(window.frame.maxX, movedRight, accuracy: 1)
     }
 }

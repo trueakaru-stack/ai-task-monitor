@@ -250,18 +250,25 @@ private struct WindowConfigurator: NSViewRepresentable {
     let isCompact: Bool
     let compactHeight: CGFloat
 
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
-        DispatchQueue.main.async { configure(view.window) }
+        let coordinator = context.coordinator
+        DispatchQueue.main.async { configure(view.window, coordinator: coordinator) }
         return view
     }
 
     func updateNSView(_ view: NSView, context: Context) {
-        DispatchQueue.main.async { configure(view.window) }
+        let coordinator = context.coordinator
+        DispatchQueue.main.async { configure(view.window, coordinator: coordinator) }
     }
 
-    private func configure(_ window: NSWindow?) {
+    private func configure(_ window: NSWindow?, coordinator: Coordinator) {
         guard let window else { return }
+        coordinator.observe(window)
+        coordinator.isApplying = true
+        defer { coordinator.isApplying = false }
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.styleMask.formUnion([.fullSizeContentView, .resizable])
@@ -274,17 +281,47 @@ private struct WindowConfigurator: NSViewRepresentable {
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
         let size = isCompact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)
-        let preserveCompactPosition = isCompact && abs(window.frame.width - 372) < 0.5
-        let oldFrame = window.frame
+        let anchor = isCompact && coordinator.wasCompact && coordinator.expectedSize != size ? coordinator.anchor : nil
         if window.frame.size != size {
             window.minSize = .zero
             window.maxSize = NSSize(width: 10_000, height: 10_000)
             window.setContentSize(size)
-            if preserveCompactPosition {
-                window.setFrameOrigin(NSPoint(x: oldFrame.maxX - window.frame.width, y: oldFrame.minY))
-            }
+        }
+        if let anchor {
+            window.setFrameOrigin(NSPoint(x: anchor.x - window.frame.width, y: anchor.y))
         }
         window.minSize = isCompact ? size : NSSize(width: 500, height: 500)
         window.maxSize = isCompact ? size : NSSize(width: 900, height: 1_000)
+        coordinator.wasCompact = isCompact
+        coordinator.expectedSize = isCompact ? size : nil
+        coordinator.anchor = isCompact ? NSPoint(x: window.frame.maxX, y: window.frame.minY) : nil
+    }
+
+    final class Coordinator {
+        var wasCompact = false
+        var expectedSize: NSSize?
+        var anchor: NSPoint?
+        var isApplying = false
+        private weak var window: NSWindow?
+        private var moveObserver: NSObjectProtocol?
+
+        func observe(_ window: NSWindow) {
+            guard self.window !== window else { return }
+            if let moveObserver { NotificationCenter.default.removeObserver(moveObserver) }
+            self.window = window
+            wasCompact = false
+            expectedSize = nil
+            anchor = nil
+            moveObserver = NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: window, queue: .main) { [weak self, weak window] _ in
+                guard let self, let window, !self.isApplying, self.wasCompact,
+                      let size = self.expectedSize, abs(window.frame.width - size.width) < 0.5,
+                      abs(window.frame.height - size.height) < 0.5 else { return }
+                self.anchor = NSPoint(x: window.frame.maxX, y: window.frame.minY)
+            }
+        }
+
+        deinit {
+            if let moveObserver { NotificationCenter.default.removeObserver(moveObserver) }
+        }
     }
 }
