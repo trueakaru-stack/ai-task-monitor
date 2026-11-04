@@ -10,6 +10,8 @@ final class TaskStore: ObservableObject {
     @Published var isCompact = false
     @Published var compactIndex = 0
     @Published var sourceMessage = ""
+    @Published private(set) var openCodeMessage = ""
+    @Published private(set) var openCodeSetupInProgress = false
     @Published private(set) var unavailableSources: [TaskProvider] = []
     @Published var showsJournal = false
     @Published private(set) var diagnosticSettings = DiagnosticSettings()
@@ -28,11 +30,17 @@ final class TaskStore: ObservableObject {
     private let diagnosticWorker: DiagnosticWorker?
     private let claudeLoopProfile: URL?
     private let claudeRetentionWorker: ClaudeRetentionWorker?
+    private let externalProvidersEnabled: Bool
+    private let openCodeConnection: () throws -> OpenCodeIntegration.State
+    private let makeExternalRuntime: () throws -> ExternalProviderRuntime
     private var nextClaudeRetention = Date.distantPast
     private let updateChecksEnabled: Bool
     private let monitoringStartedAt = Date()
     private var previousCodex: [MonitoredTask] = []
     private var previousClaude: [MonitoredTask] = []
+    private var previousExternal: [MonitoredTask] = []
+    private var externalRuntime: ExternalProviderRuntime?
+    private var sawOpenCodeConnection = false
     private var taskFocus = TaskFocusTracker()
     private var sawCodexHome = false
     private var sawClaudeEvents = false
@@ -44,10 +52,32 @@ final class TaskStore: ObservableObject {
     private var lastUpdateCheck = Date.distantPast
     private var releaseRequest: ReleaseRequest?
 
-    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false) {
+    func setOpenCodeConnected(_ connect: Bool) {
+        guard !openCodeSetupInProgress else { return }
+        openCodeSetupInProgress = true
+        openCodeMessage = ""
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try OpenCodeIntegration.setConnected(connect) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.openCodeSetupInProgress = false
+                switch result {
+                case .success:
+                    self.refresh()
+                case .failure:
+                    self.openCodeMessage = tr("Не удалось изменить подключение OpenCode. Проверьте установку и совместимость версии.", "Could not change the OpenCode connection. Check its installation and version compatibility.")
+                }
+            }
+        }
+    }
+
+    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }) {
         self.codexReader = codexReader
         self.claudeReader = claudeReader
         self.claudeLoopProfile = claudeLoopProfile
+        self.externalProvidersEnabled = enableExternalProviders && previewTasks == nil
+        self.openCodeConnection = openCodeConnection
+        self.makeExternalRuntime = makeExternalRuntime
         self.claudeRetentionWorker = enableClaudeRetention && previewTasks == nil ? ClaudeRetentionWorker() : nil
         self.updateChecksEnabled = enableUpdateChecks && previewTasks == nil
         self.diagnosticWorker = previewTasks == nil ? DiagnosticWorker(journal: journal ?? DiagnosticJournal()) : nil
@@ -81,6 +111,7 @@ final class TaskStore: ObservableObject {
         timer?.invalidate()
         releaseRequest?.cancel()
         claudeLoopChannel?.stop()
+        externalRuntime?.stop()
     }
 
     func setClaudeRetention(days: Int? = nil, maximumMB: Int? = nil) {
@@ -184,6 +215,17 @@ final class TaskStore: ObservableObject {
         return store
     }
 
+    static func manySourcesPreview() -> TaskStore {
+        let now = Date()
+        let examples = TaskProvider.allCases.enumerated().map { index, provider in
+            MonitoredTask(id: "preview-\(provider.rawValue)", provider: provider,
+                title: "\(provider.displayName) · \(tr("задача", "task"))",
+                activity: tr("Выполняет действие", "Performing an action"), isActive: true,
+                progress: nil, progressKind: .none, steps: [], updatedAt: now.addingTimeInterval(-Double(index)))
+        }
+        return TaskStore(previewTasks: examples)
+    }
+
     static func journalPreview() -> TaskStore {
         let store = preview()
         let key = String(repeating: "a", count: 64)
@@ -211,24 +253,21 @@ final class TaskStore: ObservableObject {
     }
 
     var providers: Set<TaskProvider> { Set(tasks.map(\.provider)) }
+    var visibleProviderFilters: [ProviderFilter] {
+        ProviderFilter.allCases.filter { filter in filter == .all || filter.provider.map { providers.contains($0) } == true }
+    }
     var unavailableMessage: String {
         guard !unavailableSources.isEmpty else { return "" }
         return tr("Нет данных от ", "No data from ") + unavailableSources.map(\.displayName).joined(separator: ", ")
     }
     var filteredTasks: [MonitoredTask] {
-        switch selectedProvider {
-        case .all: return tasks
-        case .codex: return tasks.filter { $0.provider == .codex }
-        case .claude: return tasks.filter { $0.provider == .claude }
-        }
+        guard let provider = selectedProvider.provider else { return tasks }
+        return tasks.filter { $0.provider == provider }
     }
 
     func count(for filter: ProviderFilter) -> Int {
-        switch filter {
-        case .all: return tasks.filter(\.isActive).count
-        case .codex: return tasks.filter { $0.isActive && $0.provider == .codex }.count
-        case .claude: return tasks.filter { $0.isActive && $0.provider == .claude }.count
-        }
+        guard let provider = filter.provider else { return tasks.filter(\.isActive).count }
+        return tasks.filter { $0.isActive && $0.provider == provider }.count
     }
 
     func refresh() {
@@ -281,9 +320,36 @@ final class TaskStore: ObservableObject {
             if !unavailable.contains(.claude) { unavailable.append(.claude) }
             previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         }
+        if externalProvidersEnabled {
+            do {
+                switch try openCodeConnection() {
+                case .connected:
+                    sawOpenCodeConnection = true
+                    if externalRuntime == nil { externalRuntime = try makeExternalRuntime() }
+                    previousExternal = externalRuntime?.snapshot(allowed: [.opencode]) ?? []
+                case .partial:
+                    unavailable.append(.opencode)
+                    markExternalTasksUnconfirmed()
+                    externalRuntime?.stop()
+                    externalRuntime = nil
+                case .disconnected:
+                    externalRuntime?.stop()
+                    externalRuntime = nil
+                    previousExternal = []
+                    sawOpenCodeConnection = false
+                }
+            } catch {
+                if sawOpenCodeConnection {
+                    unavailable.append(.opencode)
+                    markExternalTasksUnconfirmed()
+                }
+                externalRuntime?.stop()
+                externalRuntime = nil
+            }
+        }
         unavailableSources = unavailable
-        var combined = (previousCodex + previousClaude)
-            .filter { $0.isActive || $0.isUnconfirmed }
+        var combined = (previousCodex + previousClaude + previousExternal)
+            .filter { $0.isActive || $0.isUnconfirmed || $0.isWaiting }
             .sorted { $0.updatedAt > $1.updatedAt }
         let now = Date()
         syncClaudeLoop(connected: claudeConnected, now: now)
@@ -330,10 +396,21 @@ final class TaskStore: ObservableObject {
         combined = focus.tasks
         tasks = combined
         compactIndex = focus.selectedID.flatMap { id in combined.firstIndex { $0.id == id } } ?? 0
-        if selectedProvider == .codex, !providers.contains(.codex) { selectedProvider = .all }
-        if selectedProvider == .claude, !providers.contains(.claude) { selectedProvider = .all }
+        if let provider = selectedProvider.provider, !providers.contains(provider) { selectedProvider = .all }
         recordChanges(previousTasks: previousTasks, previousUnavailable: previousUnavailable,
                       terminalIDs: terminalIDs, interruptedIDs: interruptedIDs, toolInputs: toolInputs)
+    }
+
+    private func markExternalTasksUnconfirmed() {
+        previousExternal = previousExternal.map { task in
+            var copy = task
+            copy.isActive = false
+            copy.isWaiting = false
+            copy.isUnconfirmed = true
+            copy.activity = tr("Статус не подтверждён", "Status unconfirmed")
+            copy.planConfirmed = false
+            return copy
+        }
     }
 
     private func syncClaudeLoop(connected: Bool, now: Date) {

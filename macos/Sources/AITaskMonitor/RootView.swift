@@ -95,25 +95,46 @@ struct RootView: View {
     }
 
     private var providerTabs: some View {
-        HStack(spacing: 4) {
-            ForEach(ProviderFilter.allCases) { filter in
-                Button {
-                    store.selectedProvider = filter
-                } label: {
-                    HStack(alignment: .firstTextBaseline, spacing: 3) {
-                        Text(filter.title).font(.system(size: 13, weight: .semibold))
-                        Text("\(store.count(for: filter))").font(.system(size: 11.5, weight: .semibold)).baselineOffset(4)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 34)
-                    .background(store.selectedProvider == filter ? Squircle(radius: 10).fill(MonitorTheme.raised) : nil)
+        Group {
+            if store.providers.count <= 2 {
+                HStack(spacing: 4) {
+                    ForEach(store.visibleProviderFilters) { filter in providerTab(filter, fillsWidth: true) }
                 }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(store.selectedProvider == filter ? .isSelected : [])
+                .padding(4)
+                .background(Squircle(radius: 14).fill(MonitorTheme.track.opacity(0.5)))
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 4) {
+                            ForEach(store.visibleProviderFilters) { filter in
+                                providerTab(filter, fillsWidth: false).id(filter)
+                            }
+                        }
+                        .padding(4)
+                    }
+                    .background(Squircle(radius: 14).fill(MonitorTheme.track.opacity(0.5)))
+                    .clipShape(Squircle(radius: 14))
+                    .onChange(of: store.selectedProvider) { selection in proxy.scrollTo(selection) }
+                }
             }
         }
-        .padding(4)
-        .background(Squircle(radius: 14).fill(MonitorTheme.track.opacity(0.5)))
         .padding(.horizontal, 20)
+    }
+
+    private func providerTab(_ filter: ProviderFilter, fillsWidth: Bool) -> some View {
+        Button {
+            store.selectedProvider = filter
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(filter.title).font(.system(size: 13, weight: .semibold))
+                Text("\(store.count(for: filter))").font(.system(size: 11.5, weight: .semibold)).baselineOffset(4)
+            }
+            .padding(.horizontal, fillsWidth ? 0 : 13)
+            .frame(maxWidth: fillsWidth ? .infinity : nil, minHeight: 34)
+            .background(store.selectedProvider == filter ? Squircle(radius: 10).fill(MonitorTheme.raised) : nil)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(store.selectedProvider == filter ? .isSelected : [])
     }
 
     private var compactContent: some View {

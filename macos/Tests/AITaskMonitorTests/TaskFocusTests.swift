@@ -66,4 +66,20 @@ final class TaskFocusTests: XCTestCase {
         XCTAssertEqual(restarted.selectedID, "unknown")
         XCTAssertEqual(restarted.tasks.first?.id, "unknown")
     }
+
+    func testNewWaitingTaskTakesFocusWithoutBeingCountedAsActive() {
+        var tracker = TaskFocusTracker()
+        let monitorStart = Date(timeIntervalSince1970: 5)
+        let active = task("active", active: true, key: "one", start: 1)
+        _ = tracker.reconcile(current: [active], previous: [], selectedID: nil, monitoringStartedAt: monitorStart)
+        var waiting = task("waiting", active: false, key: "two", start: 6)
+        waiting.isWaiting = true
+        let added = tracker.reconcile(current: [active, waiting], previous: [active], selectedID: "active", monitoringStartedAt: monitorStart)
+        XCTAssertEqual(added.selectedID, "waiting")
+        XCTAssertTrue(added.tasks[0].isWaiting)
+        XCTAssertFalse(added.tasks[0].isActive)
+        XCTAssertFalse(added.tasks[0].isUnconfirmed)
+        let stable = tracker.reconcile(current: [active, waiting], previous: [active, waiting], selectedID: "active", monitoringStartedAt: monitorStart)
+        XCTAssertEqual(stable.selectedID, "active")
+    }
 }

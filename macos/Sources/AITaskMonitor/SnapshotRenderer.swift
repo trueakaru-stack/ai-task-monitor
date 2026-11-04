@@ -18,6 +18,8 @@ enum SnapshotRenderer {
             NSApplication.shared.setActivationPolicy(.prohibited)
             try render(name: "expanded-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory)
             try render(name: "expanded-light", mode: .light, compact: false, settings: false, outputDirectory: outputDirectory)
+            try render(name: "many-providers-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory, manyProviders: true)
+            try render(name: "many-providers-light", mode: .light, compact: false, settings: false, outputDirectory: outputDirectory, manyProviders: true)
             try render(name: "compact-dark", mode: .dark, compact: true, settings: false, outputDirectory: outputDirectory)
             try render(name: "compact-light", mode: .light, compact: true, settings: false, outputDirectory: outputDirectory)
             try render(name: "settings-dark", mode: .dark, compact: false, settings: true, outputDirectory: outputDirectory)
@@ -56,6 +58,9 @@ enum SnapshotRenderer {
                     }
                     try render(name: "settings-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory)
                     try render(name: "settings-end-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsEnd: true)
+                    try render(name: "settings-sources-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true)
+                    try render(name: "many-providers-\(language.rawValue)-\(mode.rawValue)-expanded", mode: mode, compact: false, settings: false, outputDirectory: outputDirectory, manyProviders: true)
+                    try render(name: "many-providers-\(language.rawValue)-\(mode.rawValue)-compact", mode: mode, compact: true, settings: false, outputDirectory: outputDirectory, manyProviders: true)
                 }
             }
             return 0
@@ -77,9 +82,9 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, manyProviders: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
-        let store = journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources, planUnconfirmed: planUnconfirmed))
+        let store = manyProviders ? TaskStore.manySourcesPreview() : (journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources, planUnconfirmed: planUnconfirmed)))
         store.isCompact = compact
         store.showsSettings = settings || journal
         store.showsJournal = journal
@@ -92,12 +97,13 @@ enum SnapshotRenderer {
             .environmentObject(store)
             .environment(\.colorScheme, scheme)
             .environment(\.settingsPreviewEnd, settingsEnd)
+            .environment(\.settingsPreviewSources, settingsSources)
             .frame(width: size.width, height: size.height)
         let hosting = NSHostingView(rootView: view)
         hosting.appearance = NSAppearance(named: mode == .dark ? .darkAqua : .aqua)
         hosting.frame = NSRect(origin: .zero, size: size)
         var previewWindow: NSWindow?
-        if settingsEnd {
+        if settingsEnd || settingsSources {
             let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.contentView = hosting

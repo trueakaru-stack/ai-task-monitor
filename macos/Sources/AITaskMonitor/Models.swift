@@ -3,9 +3,22 @@ import Foundation
 enum TaskProvider: String, Codable, CaseIterable, Identifiable {
     case codex
     case claude
+    case kimi
+    case deepseek
+    case hermes
+    case opencode
 
     var id: String { rawValue }
-    var displayName: String { self == .codex ? "Codex" : "Claude Code" }
+    var displayName: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude Code"
+        case .kimi: return "Kimi Code"
+        case .deepseek: return "DeepSeek Harness"
+        case .hermes: return "Hermes Agent"
+        case .opencode: return "OpenCode"
+        }
+    }
 }
 
 enum ProgressKind: String, Codable {
@@ -48,6 +61,7 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
     var steps: [TaskStep]
     var updatedAt: Date
     var isUnconfirmed: Bool = false
+    var isWaiting: Bool = false
     var loopWarning: LoopWarning? = nil
     var startedAt: Date = .distantPast
     var startKey: String = ""
@@ -90,8 +104,8 @@ struct TaskFocusTracker {
         let present = Set(current.map(\.id))
         priorities = priorities.filter { present.contains($0.key) }
         let activated = current.filter { task in
-            let recentUnconfirmed = task.isUnconfirmed && !task.startKey.isEmpty && task.startedAt >= monitoringStartedAt
-            guard task.isActive || recentUnconfirmed else { return false }
+            let recentlyObserved = (task.isUnconfirmed || task.isWaiting) && !task.startKey.isEmpty && task.startedAt >= monitoringStartedAt
+            guard task.isActive || recentlyObserved else { return false }
             guard let old = previousByID[task.id] else { return true }
             let newTurn = !task.startKey.isEmpty && task.startKey != old.startKey
             let becameActive = task.isActive && !old.isActive && (task.startKey.isEmpty || old.startKey.isEmpty)
@@ -128,6 +142,7 @@ enum TaskSnapshotMerger {
             var uncertain = task
             uncertain.isActive = false
             uncertain.isUnconfirmed = true
+            uncertain.isWaiting = false
             uncertain.activity = tr("Статус не подтверждён", "Status unconfirmed")
             result.append(uncertain)
         }
@@ -139,15 +154,16 @@ enum ProviderFilter: String, CaseIterable, Identifiable {
     case all
     case codex
     case claude
+    case kimi
+    case deepseek
+    case hermes
+    case opencode
 
     var id: String { rawValue }
     var title: String {
-        switch self {
-        case .all: return tr("Все", "All")
-        case .codex: return "Codex"
-        case .claude: return "Claude Code"
-        }
+        provider?.displayName ?? tr("Все", "All")
     }
+    var provider: TaskProvider? { TaskProvider(rawValue: rawValue) }
 }
 
 enum AppearanceMode: String, CaseIterable, Identifiable {

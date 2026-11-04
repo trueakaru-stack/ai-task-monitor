@@ -10,6 +10,10 @@ swift build -c release --arch arm64 --arch x86_64
 cp ".build/apple/Products/Release/AITaskMonitor" "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
 cp "Info.plist" "dist/AI Task Monitor.app/Contents/Info.plist"
 chmod 755 "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
+mkdir -p "dist/AI Task Monitor.app/Contents/Resources/integrations"
+for file in opencode-entry.js provider-events.mjs provider-observers.mjs provider-transport.mjs; do
+    cp "integrations/$file" "dist/AI Task Monitor.app/Contents/Resources/integrations/$file"
+done
 
 # Each image comes from the corresponding size-specific Figma frame.
 ICON_TEMP="$(mktemp -d)"

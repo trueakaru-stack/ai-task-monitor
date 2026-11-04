@@ -2,10 +2,15 @@ import AppKit
 import SwiftUI
 
 private struct SettingsPreviewEndKey: EnvironmentKey { static let defaultValue = false }
+private struct SettingsPreviewSourcesKey: EnvironmentKey { static let defaultValue = false }
 extension EnvironmentValues {
     var settingsPreviewEnd: Bool {
         get { self[SettingsPreviewEndKey.self] }
         set { self[SettingsPreviewEndKey.self] = newValue }
+    }
+    var settingsPreviewSources: Bool {
+        get { self[SettingsPreviewSourcesKey.self] }
+        set { self[SettingsPreviewSourcesKey.self] = newValue }
     }
 }
 
@@ -16,6 +21,7 @@ struct SettingsView: View {
     @State private var confirmsJournalClear = false
     @State private var feedbackCopyError = false
     @Environment(\.settingsPreviewEnd) private var settingsPreviewEnd
+    @Environment(\.settingsPreviewSources) private var settingsPreviewSources
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -58,7 +64,30 @@ struct SettingsView: View {
                         if !store.sourceMessage.isEmpty {
                             Text(store.sourceMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
                         }
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("OpenCode").font(.system(size: 13, weight: .medium))
+                                Text(tr("Приложение добавит локальный плагин OpenCode. Поддерживаются совместимые версии 1 начиная с 1.18.29 и версия 2. После подключения перезапустите OpenCode.", "The app adds a local OpenCode plugin. Compatible versions 1.18.29 and later within version 1, and version 2, are supported. Restart OpenCode after connecting."))
+                                    .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                if openCodeState == nil {
+                                    Text(tr("Не удалось прочитать подключение OpenCode", "Could not read the OpenCode connection"))
+                                        .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                                } else if !openCodePresent && openCodeState == .disconnected {
+                                    Text(tr("Установка не подтверждена", "Installation unconfirmed"))
+                                        .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                                }
+                            }
+                            Spacer(minLength: 20)
+                            Button(openCodeState == .connected || openCodeState == .partial ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
+                                store.setOpenCodeConnected(openCodeState == .disconnected)
+                            }
+                            .disabled(openCodeState == nil || store.openCodeSetupInProgress || (!openCodePresent && openCodeState == .disconnected))
+                        }
+                        if !store.openCodeMessage.isEmpty {
+                            Text(store.openCodeMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
+                    .id("settings-sources")
                     section(tr("Журнал", "Journal")) {
                         HStack {
                             Text(tr("Срок хранения", "Retention period")).font(.system(size: 13))
@@ -174,9 +203,10 @@ struct SettingsView: View {
                 .id("feedback-end")
              }
              .onAppear {
-                 if settingsPreviewEnd {
+                 if settingsPreviewEnd || settingsPreviewSources {
                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                         scrollProxy.scrollTo("feedback-end", anchor: .bottom)
+                         if settingsPreviewEnd { scrollProxy.scrollTo("feedback-end", anchor: .bottom) }
+                         else { scrollProxy.scrollTo("settings-sources", anchor: .top) }
                      }
                  }
              }
@@ -199,6 +229,9 @@ struct SettingsView: View {
     private var claudePartiallyConnected: Bool {
         (try? ClaudeIntegration.connectionState()) == .partial
     }
+
+    private var openCodeState: OpenCodeIntegration.State? { try? OpenCodeIntegration.state() }
+    private var openCodePresent: Bool { OpenCodeIntegration.hasPotentialInstallation() }
 
     private var retentionDays: Binding<Int> {
         Binding(get: { store.diagnosticSettings.retentionDays }, set: { value in
