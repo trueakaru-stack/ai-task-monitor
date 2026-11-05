@@ -119,7 +119,7 @@ enum SnapshotRenderer {
             guard let event = ExternalProviderEventParser.parse(Data(json.utf8)), state.apply(event, now: Date()) else { throw SnapshotError.bitmap }
             store = TaskStore(previewTasks: ExternalProviderTaskMapper.tasks(state.snapshot(now: Date())))
         } else if cloudTask {
-            let item = CodexCloudReader.Task(id: "codex-cloud:synthetic", title: "Synthetic cloud task", status: .pending, updatedAt: Date())
+            let item = CodexCloudReader.Task(id: "codex-cloud:synthetic", title: tr("Тестовая облачная задача", "Synthetic cloud task"), status: .pending, updatedAt: Date())
             store = TaskStore(previewTasks: [TaskStore.codexCloudMonitoredTask(item)])
         } else {
             store = manyProviders ? TaskStore.manySourcesPreview() : (journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources, planUnconfirmed: planUnconfirmed)))
@@ -146,18 +146,14 @@ enum SnapshotRenderer {
         let hosting = NSHostingView(rootView: view)
         hosting.appearance = NSAppearance(named: mode == .dark ? .darkAqua : .aqua)
         hosting.frame = NSRect(origin: .zero, size: size)
-        var previewWindow: NSWindow?
-        if compact || settingsEnd || settingsSources || manyProviders {
-            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
-            window.isReleasedWhenClosed = false
-            window.contentView = hosting
-            window.orderFrontRegardless()
-            previewWindow = window
-            hosting.layoutSubtreeIfNeeded()
-            window.displayIfNeeded()
-            RunLoop.current.run(until: Date().addingTimeInterval(1.2))
-        }
-        defer { previewWindow?.close() }
+        let previewWindow = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+        previewWindow.isReleasedWhenClosed = false
+        previewWindow.contentView = hosting
+        previewWindow.orderFrontRegardless()
+        hosting.layoutSubtreeIfNeeded()
+        previewWindow.displayIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(1.2))
+        defer { previewWindow.close() }
         hosting.layoutSubtreeIfNeeded()
         if tasksEnd || tabsEnd {
             func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
@@ -176,7 +172,7 @@ enum SnapshotRenderer {
                 scroll.contentView.scroll(to: NSPoint(x: x, y: y))
                 scroll.reflectScrolledClipView(scroll.contentView)
                 hosting.layoutSubtreeIfNeeded()
-                previewWindow?.displayIfNeeded()
+                previewWindow.displayIfNeeded()
             } else {
                 throw SnapshotError.bitmap
             }

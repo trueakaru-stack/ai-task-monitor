@@ -559,22 +559,22 @@ final class TaskStore: ObservableObject {
         let store = TaskStore(previewTasks: [
             MonitoredTask(
                 id: "codex-preview", provider: .codex,
-                title: "Создать индикатор прогресса задач",
-                activity: "Проверяю нативную сборку и формирую установочный образ",
+                title: tr("Создать индикатор прогресса задач", "Create a task progress indicator"),
+                activity: tr("Проверяю нативную сборку и формирую установочный образ", "Checking the native build and preparing the installer"),
                 isActive: true, progress: 50, progressKind: .exact,
                 steps: [
-                    TaskStep(title: "Собрать модель активных задач", status: .done),
-                    TaskStep(title: "Подключить локальные источники", status: .done),
-                    TaskStep(title: "Проверить интерфейс macOS", status: .done),
-                    TaskStep(title: "Собрать универсальное приложение", status: .active),
-                    TaskStep(title: "Опубликовать установочный образ", status: .pending),
-                    TaskStep(title: "Проверить установку на чистом Mac", status: .pending)
+                    TaskStep(title: tr("Собрать модель активных задач", "Build the active task model"), status: .done),
+                    TaskStep(title: tr("Подключить локальные источники", "Connect local sources"), status: .done),
+                    TaskStep(title: tr("Проверить интерфейс macOS", "Check the macOS interface"), status: .done),
+                    TaskStep(title: tr("Собрать универсальное приложение", "Build the universal app"), status: .active),
+                    TaskStep(title: tr("Опубликовать установочный образ", "Publish the installer image"), status: .pending),
+                    TaskStep(title: tr("Проверить установку на чистом Mac", "Test installation on a clean Mac"), status: .pending)
                 ], updatedAt: Date()
             ),
             MonitoredTask(
                 id: "claude-preview", provider: .claude,
-                title: "Задача Claude Code",
-                activity: "Выполняет проверку локальных lifecycle hooks и сохранения событий",
+                title: tr("Задача Claude Code", "Claude Code task"),
+                activity: tr("Выполняет проверку локальных lifecycle hooks и сохранения событий", "Checking local lifecycle hooks and event storage"),
                 isActive: true, progress: nil, progressKind: .none,
                 steps: [], updatedAt: Date().addingTimeInterval(-15)
             )
@@ -613,7 +613,7 @@ final class TaskStore: ObservableObject {
             DiagnosticEvent(version: 1, time: now.addingTimeInterval(-10), source: .codex, task: key, type: .toolStarted, id: UUID()),
             DiagnosticEvent(version: 1, time: now, source: .claude, task: nil, type: .sourceUnavailable, id: UUID())
         ]
-        store.journalTaskNames = [key: "Создать индикатор прогресса задач"]
+        store.journalTaskNames = [key: tr("Создать индикатор прогресса задач", "Create a task progress indicator")]
         store.showsSettings = true
         store.showsJournal = true
         return store

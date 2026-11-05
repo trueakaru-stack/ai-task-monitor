@@ -19,14 +19,20 @@ struct UpdateDialog: View {
                         .foregroundStyle(MonitorTheme.secondary).padding(.top, 10)
                 }
                 HStack(spacing: 12) {
-                    Button(tr("Позже", "Later")) { store.dismissUpdate() }
-                        .keyboardShortcut(.cancelAction)
-                        .frame(maxWidth: .infinity, minHeight: 34)
-                        .background(Squircle(radius: 7).fill(MonitorTheme.track))
-                    Button(tr("Скачать", "Download")) { openDownload() }
-                        .frame(maxWidth: .infinity, minHeight: 34)
-                        .foregroundStyle(accentForeground)
-                        .background(Squircle(radius: 7).fill(Color.accentColor))
+                    Button { store.dismissUpdate() } label: {
+                        Text(tr("Позже", "Later"))
+                            .frame(maxWidth: .infinity, minHeight: 34)
+                            .background(Squircle(radius: 7).fill(MonitorTheme.track))
+                            .contentShape(Rectangle())
+                    }
+                    .keyboardShortcut(.cancelAction)
+                    Button { openDownload() } label: {
+                        Text(tr("Скачать", "Download"))
+                            .frame(maxWidth: .infinity, minHeight: 34)
+                            .foregroundStyle(accentForeground)
+                            .background(Squircle(radius: 7).fill(Color.accentColor))
+                            .contentShape(Rectangle())
+                    }
                 }
                 .font(.system(size: 13))
                 .buttonStyle(.plain)
@@ -36,6 +42,7 @@ struct UpdateDialog: View {
             .frame(width: 368, alignment: .leading)
             .background(Squircle(radius: 16).fill(MonitorTheme.raised))
             .overlay(Squircle(radius: 16).stroke(MonitorTheme.border, lineWidth: 1))
+            .compositingGroup()
             .shadow(color: .black.opacity(0.48), radius: 13, y: 8)
             .accessibilityElement(children: .contain)
         }

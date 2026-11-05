@@ -7,6 +7,8 @@ on:
       - ".github/workflows/macos-layout-audit.yml"
       - "macos/Tests/AITaskMonitorTests/WindowLayoutAuditTests.swift"
       - "macos/Tests/AITaskMonitorTests/PickerSizingAuditTests.swift"
+      - "macos/Tests/AITaskMonitorTests/PreviewLocalizationSnapshotsTests.swift"
+      - "macos/Tests/AITaskMonitorTests/PreviewLocalizationTests.swift"
       - "macos/Sources/AITaskMonitor/RootView.swift"
       - "macos/Sources/AITaskMonitor/UpdateDialog.swift"
       - "macos/Sources/AITaskMonitor/TaskStore.swift"
@@ -24,7 +26,7 @@ jobs:
       matrix:
         runner: [macos-26, macos-15]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout candidate at the triggering commit
         uses: actions/checkout@v4
@@ -47,8 +49,9 @@ jobs:
           baseline = pathlib.Path('baseline-layout/macos/Sources/AITaskMonitor/UpdateDialog.swift').read_text(encoding='utf-8')
           pattern = r'(?ms)^    private func openDownload\(\) \{.*?^    \}'
           current, reference = re.search(pattern, candidate), re.search(pattern, baseline)
-          action = 'Button(tr("Скачать", "Download")) { openDownload() }'
-          if not current or not reference or current.group() != reference.group() or candidate.count(action) != 1 or baseline.count(action) != 1:
+          baseline_action = 'Button(tr("Скачать", "Download")) { openDownload() }'
+          candidate_action = 'Button { openDownload() } label: {'
+          if not current or not reference or current.group() != reference.group() or candidate.count(candidate_action) != 1 or baseline.count(baseline_action) != 1:
               raise SystemExit('Download action or guard changed; synthetic clicks were not run.')
           PY
       - name: Test pinned baseline window layout
@@ -62,6 +65,7 @@ jobs:
           export AITM_LAYOUT_SYNTHETIC_ROOT="$RUNNER_TEMP/aitm-layout-baseline"
           mkdir -p "$AITM_LAYOUT_SYNTHETIC_ROOT"
           export AITM_LAYOUT_SYNTHETIC_CI=1
+          export AITM_LAYOUT_BASELINE=1
           swift test --filter WindowLayoutAuditTests
       - name: Test candidate window layout
         if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
@@ -74,6 +78,7 @@ jobs:
           export AITM_LAYOUT_SYNTHETIC_ROOT="$RUNNER_TEMP/aitm-layout-candidate"
           mkdir -p "$AITM_LAYOUT_SYNTHETIC_ROOT"
           export AITM_LAYOUT_SYNTHETIC_CI=1
+          unset AITM_LAYOUT_BASELINE
           swift test --filter WindowLayoutAuditTests
       - name: Render native Picker sizing variants
         if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
@@ -87,6 +92,42 @@ jobs:
           mkdir -p "$AITM_LAYOUT_SYNTHETIC_ROOT"
           export AITM_LAYOUT_SYNTHETIC_CI=1
           swift test --filter PickerSizingAuditTests
+      - name: Capture baseline compact previews
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' && contains(github.event.head_commit.message, '[preview-localization]') }}
+        working-directory: baseline-layout/macos
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          cp "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/PreviewLocalizationSnapshotsTests.swift" Tests/AITaskMonitorTests/
+          export AITM_LAYOUT_SYNTHETIC_ROOT="$RUNNER_TEMP/aitm-layout-baseline"
+          mkdir -p "$AITM_LAYOUT_SYNTHETIC_ROOT"
+          export AITM_LAYOUT_SYNTHETIC_CI=1
+          swift test --filter PreviewLocalizationSnapshotsTests
+      - name: Test localized preview content
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' && contains(github.event.head_commit.message, '[preview-localization]') }}
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          test -f Tests/AITaskMonitorTests/PreviewLocalizationTests.swift
+          swift test --filter PreviewLocalizationTests
+      - name: Capture candidate compact previews
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' && contains(github.event.head_commit.message, '[preview-localization]') }}
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          export AITM_LAYOUT_SYNTHETIC_ROOT="$RUNNER_TEMP/aitm-layout-candidate"
+          mkdir -p "$AITM_LAYOUT_SYNTHETIC_ROOT"
+          export AITM_LAYOUT_SYNTHETIC_CI=1
+          swift test --filter PreviewLocalizationSnapshotsTests
+      - name: Render candidate preview collection
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' && contains(github.event.head_commit.message, '[preview-localization]') }}
+        working-directory: macos
+        run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-layout-candidate/previews"
       - name: Upload baseline diagnostics
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
