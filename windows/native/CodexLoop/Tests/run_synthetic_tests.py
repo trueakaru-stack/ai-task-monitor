@@ -11,6 +11,14 @@ import subprocess
 import sys
 import uuid
 
+
+def reject_device_path(path):
+    value = str(path).replace('/', '\\')
+    if value.startswith(('\\\\?\\', '\\\\.\\')):
+        raise SystemExit('Extended and device paths are not supported for synthetic tests.')
+
+
+reject_device_path(__file__)
 ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser()
 parser.add_argument('--sdk-root', type=Path, required=True)
@@ -19,14 +27,21 @@ parser.add_argument('--work-directory', type=Path, required=True)
 args = parser.parse_args()
 
 
+reject_device_path(ROOT)
+for path in (args.sdk_root, args.reference_directory, args.work_directory):
+    reject_device_path(path)
+
+
 def protected_directory(variable, optional=False):
     value = os.environ.get(variable)
     if value is None and optional:
         return None
     if not value or not value.strip() or not Path(value).is_absolute():
         raise SystemExit('Cannot verify the protected directory: ' + variable)
+    reject_device_path(value)
     try:
         directory = Path(value).resolve(strict=True)
+        reject_device_path(directory)
         if not directory.is_dir():
             raise OSError('Not a directory')
         return directory
@@ -44,6 +59,8 @@ try:
     SDK = args.sdk_root.resolve(strict=True)
     REFERENCE = args.reference_directory.resolve(strict=True)
     work = args.work_directory.resolve()
+    for path in (SDK, REFERENCE, work):
+        reject_device_path(path)
 except (OSError, RuntimeError, ValueError):
     raise SystemExit('Cannot resolve a supplied path.')
 if not SDK.is_dir() or not REFERENCE.is_dir():
@@ -52,7 +69,7 @@ if not SDK.is_dir() or not REFERENCE.is_dir():
 # Discover the real checkout without reading a user's Git configuration or
 # trusting inherited GIT_DIR/GIT_WORK_TREE overrides. This is a local query.
 git_env = {name: os.environ[name] for name in ('SystemRoot', 'windir', 'PATH', 'ComSpec') if name in os.environ}
-git_env.update({'HOME': str(ROOT), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+git_env.update({'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
                 'GIT_OPTIONAL_LOCKS': '0', 'GIT_TERMINAL_PROMPT': '0'})
 try:
     git = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--show-toplevel'], env=git_env,
@@ -61,6 +78,7 @@ try:
     if not repository_path.is_absolute():
         raise ValueError('Repository root is not absolute')
     repository = repository_path.resolve(strict=True)
+    reject_device_path(repository)
     if not repository.is_dir() or not ROOT.is_relative_to(repository):
         raise ValueError('Source is not inside the discovered repository')
 except (OSError, RuntimeError, UnicodeError, ValueError, subprocess.SubprocessError):

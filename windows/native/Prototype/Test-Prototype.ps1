@@ -6,31 +6,48 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$sdk = [IO.Path]::GetFullPath($SdkRoot)
-$work = [IO.Path]::GetFullPath($WorkDirectory)
-$dotnet = Join-Path $sdk 'dotnet.exe'
-if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf)) { throw 'The isolated .NET SDK is missing.' }
-foreach ($profile in @($env:USERPROFILE,$env:APPDATA,$env:LOCALAPPDATA)) {
-    if (-not [string]::IsNullOrWhiteSpace($profile)) {
-        $profilePath = [IO.Path]::GetFullPath($profile).TrimEnd('\','/')
-        $workPath = $work.TrimEnd('\','/')
-        if ($workPath.Equals($profilePath, [StringComparison]::OrdinalIgnoreCase) -or
-            $workPath.StartsWith($profilePath + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'The work directory must be outside the user profile and application data.'
+function Absolute-TestPath([string]$value, [string]$label) {
+    if ([string]::IsNullOrWhiteSpace($value) -or -not [IO.Path]::IsPathRooted($value) -or
+        $value -match '^[A-Za-z]:(?:$|[^\\/])' -or $value -match '^[\\/](?![\\/])' -or
+        $value -match '^[\\/]{2}[?.][\\/]') {
+        throw "$label must be an absolute path."
+    }
+    return [IO.Path]::GetFullPath($value)
+}
+function Assert-NoReparseAncestors([string]$path) {
+    $ancestor = [IO.DirectoryInfo]::new($path)
+    while ($null -ne $ancestor) {
+        if ($ancestor.Exists -and (($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw 'Test and protected directories must not have a reparse-point ancestor.'
         }
+        $ancestor = $ancestor.Parent
     }
 }
-$repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..')).TrimEnd('\','/')
-$workPath = $work.TrimEnd('\','/')
+$sdk = Absolute-TestPath $SdkRoot 'SDK directory'
+$workBase = Absolute-TestPath $WorkDirectory 'Work directory'
+$dotnet = Join-Path $sdk 'dotnet.exe'
+if (-not (Test-Path -LiteralPath $dotnet -PathType Leaf)) { throw 'The isolated .NET SDK is missing.' }
+foreach ($name in @('USERPROFILE','APPDATA','LOCALAPPDATA','HOME')) {
+    $profile = [Environment]::GetEnvironmentVariable($name, 'Process')
+    if ($name -eq 'HOME' -and $null -eq $profile) { continue }
+    $profilePath = (Absolute-TestPath $profile $name).TrimEnd('\','/')
+    if (-not (Test-Path -LiteralPath $profilePath -PathType Container)) { throw "Cannot verify protected directory: $name." }
+    Assert-NoReparseAncestors $profilePath
+    $workPath = $workBase.TrimEnd('\','/')
+    if ($workPath.Equals($profilePath, [StringComparison]::OrdinalIgnoreCase) -or
+        $workPath.StartsWith($profilePath + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'The work directory must be outside the current user profile and application data.'
+    }
+}
+$sourceRoot = Absolute-TestPath $PSScriptRoot 'Source directory'
+$repository = (Absolute-TestPath (Join-Path $sourceRoot '../../..') 'Repository directory').TrimEnd('\','/')
+$workPath = $workBase.TrimEnd('\','/')
 if ($workPath.Equals($repository, [StringComparison]::OrdinalIgnoreCase) -or
     $workPath.StartsWith($repository + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'The work directory must be outside the repository.'
 }
-$ancestor = [IO.DirectoryInfo]::new($work)
-while ($null -ne $ancestor) {
-    if ($ancestor.Exists -and (($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { throw 'The work directory must not have a reparse-point ancestor.' }
-    $ancestor = $ancestor.Parent
-}
+Assert-NoReparseAncestors $repository
+Assert-NoReparseAncestors $workBase
 $systemRoot = $env:SystemRoot
 $systemValues = @{}
 foreach ($name in @('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','SystemDrive','ComSpec')) {
@@ -43,6 +60,9 @@ $env:SystemRoot = $systemRoot
 $env:windir = $systemRoot
 $env:PATH = (Join-Path $systemRoot 'System32') + ';' + $systemRoot
 $env:PSModulePath = (Join-Path $PSHOME 'Modules') + ';' + (Join-Path $systemRoot 'System32\WindowsPowerShell\v1.0\Modules')
+[IO.Directory]::CreateDirectory($workBase) | Out-Null
+$work = Join-Path $workBase ('prototype-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $work -ErrorAction Stop | Out-Null
 @('home','appdata','localappdata','temp','nuget','obj','bin','runs') | ForEach-Object {
     New-Item -ItemType Directory -Force -Path (Join-Path $work $_) | Out-Null
 }
@@ -65,7 +85,11 @@ $env:TEMP = Join-Path $work 'temp'
 $env:TMP = $env:TEMP
 $env:PSModuleAnalysisCachePath = Join-Path $work 'temp/ModuleAnalysisCache'
 $config = Join-Path $work 'NuGet.Config'
-[IO.File]::WriteAllText($config, '<?xml version="1.0" encoding="utf-8"?><configuration><packageSources><clear /></packageSources></configuration>')
+$configStream = [IO.File]::Open($config, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+try {
+    $configBytes = [Text.Encoding]::UTF8.GetBytes('<?xml version="1.0" encoding="utf-8"?><configuration><packageSources><clear /></packageSources></configuration>')
+    $configStream.Write($configBytes, 0, $configBytes.Length)
+} finally { $configStream.Dispose() }
 
 $artifacts = Join-Path $work 'artifacts'
 & $dotnet build (Join-Path $PSScriptRoot 'Prototype.csproj') --configuration Release --configfile $config `

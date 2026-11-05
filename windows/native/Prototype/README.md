@@ -36,8 +36,19 @@ its process descendants and checks for the PowerShell engine. The build is
 framework-dependent and requires the isolated .NET 10 runtime through
 `DOTNET_ROOT`; it is not a self-contained installer or release build.
 
-The tests save synthetic frames under a new `runs/<id>` directory outside the
-user profile. In addition to the 12 original frames, they check fixed provider
+Each invocation creates its own `prototype-<id>` directory within the supplied
+work directory; existing files alongside it are not overwritten. The runner
+requires absolute paths and verifies the current `USERPROFILE`, `APPDATA` and
+`LOCALAPPDATA` directories, as well as `HOME` when set, before creating output.
+It rejects work paths inside those locations or the checkout and rejects
+extended/device paths and reparse-point ancestors of protected, checkout and work directories. These
+checks rely on the caller's environment, do not identify other users' profiles,
+and cannot guarantee detection of alternate path aliases (such as short names
+or mapped drives) or concurrent path replacement. Use a trusted local
+directory outside all profiles and repositories.
+
+The tests save synthetic frames under that invocation's `runs/<id>` directory.
+In addition to the 12 original frames, they check fixed provider
 scenarios, WPF-visible status text, stable selection, and compact layouts in
 both themes and languages. Passing `-ReferenceDirectory` compares the original
 frames and the Kimi and retained-plan scenarios with the published captures.

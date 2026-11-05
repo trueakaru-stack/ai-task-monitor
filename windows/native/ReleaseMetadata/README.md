@@ -45,12 +45,15 @@ through a local Git query and rejects paths inside it. `USERPROFILE`, `APPDATA`
 and `LOCALAPPDATA` must each name an existing absolute directory; `HOME`, if
 present, must meet the same requirement. The runner resolves these directories
 and rejects work paths inside them. If the repository or a required directory
-cannot be verified, it stops without creating the work directory.
+cannot be verified, it stops without creating the work directory. Extended and
+device path forms are rejected before creating output.
 
 The profile guard relies on these environment variables. It does not identify
 other users' profiles, prove that the variables were not deliberately changed,
-or protect against a junction being swapped concurrently after validation. Use
-a trusted local work directory outside all profiles and repositories.
+guarantee detection of alternate path aliases (such as short names or mapped
+drives), or protect against a junction being swapped concurrently after
+validation. Use a trusted local work directory outside all profiles and
+repositories.
 
 The runner checks the SHA-256 of the normalized `ReleaseUpdates.ps1` from
 Windows commit `ade7894`, copies it into an isolated work directory, disables
