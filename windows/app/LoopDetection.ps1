@@ -35,7 +35,11 @@ function Get-CodexLoopDigest([byte[]]$Key,[string]$Context,[string]$Value) {
 }
 
 function Get-CodexCommandDigest($Tracker,$Item) {
- $command=Get-DiagnosticProperty $Item "command"
+ # Access the property directly: the shared helper unwraps a one-item array
+ # into a scalar, which otherwise prevents single-argument commands matching.
+ $commandProperty=if($null -ne $Item){$Item.PSObject.Properties["command"]}else{$null}
+ if($null -eq $commandProperty){return ""}
+ $command=$commandProperty.Value
  $cwd=Get-DiagnosticProperty $Item "cwd"
  if($command -isnot [array] -or $command.Count -eq 0 -or $command.Count -gt 256 -or $cwd -isnot [string] -or $cwd.Length -gt 32768){return ""}
  $builder=New-Object Text.StringBuilder

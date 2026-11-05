@@ -57,4 +57,15 @@ $custom=New-CodexLoopTracker -Key $key -Since $now -Threshold 3 -WindowMinutes 1
 if(-not $custom.Warning){throw "The configured threshold must be applied."}
 Refresh-CodexLoopTracker $custom $now.AddSeconds(64)
 if($custom.Warning){throw "A warning must expire when the configured window elapses."}
+$single=New-CodexLoopTracker -Key $key -Since $now -Threshold 3 -WindowMinutes 1
+1..3|ForEach-Object {
+ $record=CommandEvent "single-$_" $_ "failed" 2
+ $record.payload.item.command=@('synthetic-tool')
+ Update-CodexLoopTracker $single $record $now.AddSeconds(5)
+}
+if(-not $single.Warning -or $single.Times.Count -ne 3){throw "Repeated one-argument commands must trigger a warning."}
+$scalar=CommandEvent 'scalar-command' 4 'failed' 2
+$scalar.payload.item.command='synthetic-tool'
+Update-CodexLoopTracker $single $scalar $now.AddSeconds(5)
+if($single.Warning -or $single.Times.Count -ne 0){throw "A scalar command must not be treated as a valid command array."}
 Write-Output "Loop detector: thresholds, task isolation, reset, deduplication, dismissal and privacy verified."

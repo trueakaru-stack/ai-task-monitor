@@ -49,6 +49,12 @@ try{
     if(@($events|Where-Object type -eq "tool_failed").Count -ne 10){throw "Structured errors must reach the journal without duplication."}
     $raw=[IO.File]::ReadAllText($journal)
     if($raw.Contains($secret) -or $raw.Contains("/private/synthetic") -or $raw -match 'command|aggregated_output|exit_code'){throw "The journal contains private command metadata."}
+    foreach($index in 1..5){
+        $record=@{timestamp=$now.AddSeconds(11+$index).ToString("o");type="event_msg";payload=@{type="item_completed";item=@{type="CommandExecution";id="single-$index";status="failed";exit_code=1;command=@("synthetic-tool");cwd="/private/synthetic"}}}
+        [IO.File]::AppendAllText($pathA,(($record|ConvertTo-Json -Compress -Depth 6)+"`n"),[Text.UTF8Encoding]::new($false))
+    }
+    Update-DiagnosticRuntime -Runtime $runtime -Tasks $tasks -Unavailable @() -Now $now.AddSeconds(17) -SessionResolver $resolver -StateResolver $stateResolver
+    if(-not $runtime.LoopStates["codex:task-a"].Warning -or $runtime.LoopStates["codex:task-b"].Warning){throw "Single-argument command failures must warn only on the affected task."}
     Write-Output "Loop runtime: concurrent tasks, transactional retry, dismissal, reset and metadata-only journal verified."
 }finally{
     if(Test-Path -LiteralPath $root){
