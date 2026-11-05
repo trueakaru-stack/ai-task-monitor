@@ -55,6 +55,10 @@ jobs:
               --output "$RUNNER_TEMP/aitm-hermes-upstream/hermes_cli/$file"
           done
           python3 -B integration-tests/Test-HermesUpstreamDispatch.py "$RUNNER_TEMP/aitm-hermes-upstream"
+          npm pack @moonshot-ai/kimi-code@2.5.0 --ignore-scripts --pack-destination "$RUNNER_TEMP" --json > "$RUNNER_TEMP/aitm-kimi-package.json"
+          tar -xOf "$RUNNER_TEMP/moonshot-ai-kimi-code-2.5.0.tgz" package/dist/main.mjs > "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
+          node integration-tests/Test-KimiObserver.mjs
+          node integration-tests/Test-KimiUpstreamHook.mjs "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
       - name: Render native source-status previews
         working-directory: macos
         run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/ai-task-monitor-previews"
