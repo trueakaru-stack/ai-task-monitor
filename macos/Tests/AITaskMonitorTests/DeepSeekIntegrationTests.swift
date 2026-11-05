@@ -1,0 +1,71 @@
+import Foundation
+import XCTest
+@testable import AITaskMonitor
+
+final class DeepSeekIntegrationTests: XCTestCase {
+    func testScopeValidation() {
+        XCTAssertTrue(DeepSeekIntegration.validScope(String(repeating: "a", count: 32)))
+        XCTAssertFalse(DeepSeekIntegration.validScope(String(repeating: "A", count: 32)))
+        XCTAssertFalse(DeepSeekIntegration.validScope("a"))
+    }
+
+    func testIsolatedUpstreamConnectionBridge() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let anchorPath = environment["AITM_DSH_ANCHOR"], let pnpmPath = environment["AITM_PNPM_SCRIPT"],
+              let nodePath = environment["AITM_NODE"] else { throw XCTSkip("Isolated upstream DeepSeek fixture is unavailable.") }
+        let manager = FileManager.default
+        let temp = manager.temporaryDirectory.resolvingSymlinksInPath().standardizedFileURL
+        let root = temp.appendingPathComponent("aitm-swift-dsh-" + UUID().uuidString, isDirectory: true)
+        try manager.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? manager.removeItem(at: root) }
+        let foreign = root.appendingPathComponent("foreign", isDirectory: true)
+        let tools = root.appendingPathComponent("bin", isDirectory: true)
+        let dshHome = root.appendingPathComponent("dsh-home", isDirectory: true)
+        try manager.createDirectory(at: foreign, withIntermediateDirectories: false)
+        try manager.createDirectory(at: tools, withIntermediateDirectories: false)
+        try manager.createSymbolicLink(at: tools.appendingPathComponent("pnpm"), withDestinationURL: URL(fileURLWithPath: pnpmPath))
+        try Data("".utf8).write(to: root.appendingPathComponent("npmrc"))
+        let manifest = #"{"name":"aitm-foreign-fixture","version":"1.0.0","type":"module","main":"index.js","dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#
+        try Data(manifest.utf8).write(to: foreign.appendingPathComponent("package.json"))
+        try Data("export function apply() {}".utf8).write(to: foreign.appendingPathComponent("index.js"))
+        try Data("- insert:\n    - id: foreign-fixture\n      name: aitm-foreign-fixture\n".utf8).write(to: foreign.appendingPathComponent("cordis.patch.yml"))
+        let fixtureEnvironment = [
+            "HOME": root.path, "USERPROFILE": root.path, "DSH_HOME": dshHome.path,
+            "PATH": tools.path + ":" + URL(fileURLWithPath: nodePath).deletingLastPathComponent().path + ":/usr/bin:/bin",
+            "XDG_CONFIG_HOME": root.appendingPathComponent("config").path,
+            "XDG_CACHE_HOME": root.appendingPathComponent("cache").path,
+            "PNPM_CONFIG_STORE_DIR": root.appendingPathComponent("store").path,
+            "PNPM_CONFIG_OFFLINE": "true", "PNPM_CONFIG_IGNORE_SCRIPTS": "true", "PNPM_CONFIG_IGNORE_PNPMFILE": "true",
+            "NPM_CONFIG_USERCONFIG": root.appendingPathComponent("npmrc").path,
+        ]
+        let anchor = URL(fileURLWithPath: anchorPath)
+        let node = URL(fileURLWithPath: nodePath)
+        let initializer = Process()
+        initializer.executableURL = node
+        initializer.arguments = [anchor.deletingLastPathComponent().appendingPathComponent("lib/bin.js").path,
+                                 "plugin", "--profile", "тестовый-профиль", "add", "--offline", "--ignore-scripts", foreign.path]
+        initializer.environment = fixtureEnvironment
+        initializer.standardOutput = FileHandle.nullDevice
+        initializer.standardError = FileHandle.nullDevice
+        try initializer.run()
+        initializer.waitUntilExit()
+        XCTAssertEqual(initializer.terminationStatus, 0)
+        let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let context = DeepSeekIntegration.Context(node: node, home: dshHome, assets: project.appendingPathComponent("integrations"),
+            installAnchor: anchor, pnpmScript: URL(fileURLWithPath: pnpmPath), environment: fixtureEnvironment)
+        let first = try DeepSeekIntegration.profiles(context)
+        XCTAssertEqual(first.map(\.name), ["тестовый-профиль"])
+        XCTAssertEqual(first.first?.state, "disconnected")
+        try DeepSeekIntegration.setConnected(true, profile: "тестовый-профиль", context: context)
+        let connected = try XCTUnwrap(DeepSeekIntegration.profiles(context).first)
+        XCTAssertEqual(connected.state, "connected")
+        XCTAssertTrue(DeepSeekIntegration.validScope(connected.scope))
+        try DeepSeekIntegration.setConnected(false, profile: "тестовый-профиль", context: context)
+        XCTAssertEqual(try DeepSeekIntegration.profiles(context).first?.state, "disconnected")
+        let profileManifest = try Data(contentsOf: dshHome.appendingPathComponent("profiles/тестовый-профиль/package.json"))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: profileManifest) as? [String: Any])
+        let dependencies = try XCTUnwrap(json["dependencies"] as? [String: String])
+        XCTAssertNotNil(dependencies["aitm-foreign-fixture"])
+        XCTAssertNil(dependencies["ai-task-monitor-dsh-observer"])
+    }
+}

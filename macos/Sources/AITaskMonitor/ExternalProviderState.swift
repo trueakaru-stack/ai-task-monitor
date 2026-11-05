@@ -174,6 +174,30 @@ final class ExternalProviderStateStore {
         states = states.filter { allowed.contains($0.value.provider) }
     }
 
+    func retainSessionScopes(provider: String, scopes: Set<String>) {
+        states = states.filter { $0.value.provider != provider || scopes.contains(Self.sessionScope($0.value.session)) }
+    }
+
+    func markSessionScopesGap(provider: String, scopes: Set<String>) {
+        for key in Array(states.keys) {
+            guard let state = states[key], state.provider == provider,
+                  scopes.contains(Self.sessionScope(state.session)) else { continue }
+            if !state.steps.isEmpty { states[key]?.planConfirmed = false }
+            if state.status == "active" || state.status == "waiting" {
+                states[key]?.status = "unknown"
+                states[key]?.calls.removeAll()
+            }
+            states[key]?.lastHeartbeat = nil
+        }
+    }
+
+    static func sessionScope(_ session: String) -> String {
+        guard session.utf8.count > 32 else { return "" }
+        let bytes = Array(session.utf8)
+        guard bytes[32] == 95 else { return "" }
+        return String(decoding: bytes.prefix(32), as: UTF8.self)
+    }
+
     func snapshot(now: Date) -> [ExternalProviderTask] {
         states.values.compactMap { state in
             guard ["active", "waiting", "unknown"].contains(state.status) else { return nil }

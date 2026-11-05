@@ -12,6 +12,12 @@ final class TaskStore: ObservableObject {
     @Published var sourceMessage = ""
     @Published private(set) var openCodeMessage = ""
     @Published private(set) var openCodeSetupInProgress = false
+    @Published private(set) var deepSeekProfiles: [DeepSeekProfile] = []
+    @Published var selectedDeepSeekProfile = ""
+    @Published private(set) var deepSeekMessage = ""
+    @Published private(set) var deepSeekSetupInProgress = false
+    @Published private(set) var deepSeekScanInProgress = false
+    @Published private(set) var deepSeekInstallationAvailable = false
     @Published private(set) var unavailableSources: [TaskProvider] = []
     @Published var showsJournal = false
     @Published private(set) var diagnosticSettings = DiagnosticSettings()
@@ -41,6 +47,10 @@ final class TaskStore: ObservableObject {
     private var previousExternal: [MonitoredTask] = []
     private var externalRuntime: ExternalProviderRuntime?
     private var seenExternalConnections: Set<TaskProvider> = []
+    private var deepSeekContext: DeepSeekIntegration.Context?
+    private var deepSeekSeenScopes: [String: String] = [:]
+    private var deepSeekScanError: String?
+    private var nextDeepSeekScan = Date.distantPast
     private var taskFocus = TaskFocusTracker()
     private var sawCodexHome = false
     private var sawClaudeEvents = false
@@ -69,6 +79,110 @@ final class TaskStore: ObservableObject {
                 }
             }
         }
+    }
+
+    func setDeepSeekConnected(_ connect: Bool) {
+        guard !deepSeekSetupInProgress, !deepSeekScanInProgress, let context = deepSeekContext,
+              deepSeekProfiles.contains(where: { $0.name == selectedDeepSeekProfile }) else { return }
+        let profile = selectedDeepSeekProfile
+        deepSeekSetupInProgress = true
+        deepSeekMessage = ""
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try DeepSeekIntegration.setConnected(connect, profile: profile, context: context) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.deepSeekSetupInProgress = false
+                switch result {
+                case .success:
+                    if !connect { self.deepSeekSeenScopes.removeValue(forKey: profile) }
+                case .failure(let error):
+                    self.deepSeekMessage = self.deepSeekErrorMessage((error as? DeepSeekIntegrationError)?.code ?? "operation-failed")
+                }
+                self.nextDeepSeekScan = .distantPast
+                self.refresh()
+            }
+        }
+    }
+
+    private func scheduleDeepSeekScan() {
+        guard externalProvidersEnabled, !deepSeekSetupInProgress, !deepSeekScanInProgress,
+              Date() >= nextDeepSeekScan else { return }
+        deepSeekScanInProgress = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let context = DeepSeekIntegration.discover()
+            let result: Result<[DeepSeekProfile], Error>
+            if let context { result = Result { try DeepSeekIntegration.profiles(context) } }
+            else { result = .failure(DeepSeekIntegrationError(code: "installation-unconfirmed")) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.deepSeekScanInProgress = false
+                self.nextDeepSeekScan = Date().addingTimeInterval(15)
+                self.deepSeekContext = context
+                self.deepSeekInstallationAvailable = context != nil
+                switch result {
+                case .success(let profiles):
+                    self.deepSeekScanError = nil
+                    self.deepSeekProfiles = profiles
+                    for item in profiles {
+                        if item.state == "connected", let scope = item.scope { self.deepSeekSeenScopes[item.name] = scope }
+                        else if item.state == "disconnected" { self.deepSeekSeenScopes.removeValue(forKey: item.name) }
+                    }
+                    if !profiles.contains(where: { $0.name == self.selectedDeepSeekProfile }) { self.selectedDeepSeekProfile = "" }
+                case .failure(let error):
+                    self.deepSeekScanError = (error as? DeepSeekIntegrationError)?.code ?? "operation-failed"
+                }
+                self.refresh()
+            }
+        }
+    }
+
+    private func deepSeekErrorMessage(_ code: String) -> String {
+        switch code {
+        case "unverified-dsh", "unverified-pnpm":
+            return tr("Версия DeepSeek Harness или pnpm не подтверждена.", "The DeepSeek Harness or pnpm version could not be verified.")
+        case "linked-path", "bundle-conflict", "modified-bundle", "partial-connection":
+            return tr("Подключение DeepSeek Harness неполное или его файлы изменены.", "The DeepSeek Harness connection is incomplete or its files were changed.")
+        default:
+            return tr("Не удалось изменить подключение DeepSeek Harness.", "Could not change the DeepSeek Harness connection.")
+        }
+    }
+
+    var deepSeekSelectedProfile: DeepSeekProfile? { deepSeekProfiles.first { $0.name == selectedDeepSeekProfile } }
+    var deepSeekCanChange: Bool {
+        deepSeekScanError == nil && deepSeekContext != nil && !deepSeekSetupInProgress && !deepSeekScanInProgress &&
+            deepSeekSelectedProfile != nil && deepSeekSelectedProfile?.state != "error"
+    }
+    var deepSeekStatusMessage: String {
+        if let code = deepSeekScanError, code != "installation-unconfirmed" { return deepSeekErrorMessage(code) }
+        if !deepSeekInstallationAvailable { return tr("Установка не подтверждена", "Installation unconfirmed") }
+        guard let profile = deepSeekSelectedProfile else { return tr("Выберите профиль", "Select a profile") }
+        switch profile.state {
+        case "connected": return tr("Подключён", "Connected")
+        case "partial": return tr("Подключён частично", "Partially connected")
+        case "error": return tr("Не удалось прочитать профиль", "Could not read the profile")
+        default: return tr("Не подключён", "Not connected")
+        }
+    }
+
+    private var deepSeekAllowedScopes: Set<String> {
+        guard deepSeekScanError == nil else { return [] }
+        return Set(deepSeekProfiles.compactMap { $0.state == "connected" ? $0.scope : nil })
+    }
+
+    private var deepSeekUncertainScopes: Set<String> {
+        Set(deepSeekSeenScopes.compactMap { name, scope in
+            let profile = deepSeekProfiles.first { $0.name == name }
+            return deepSeekScanError != nil || profile == nil || profile?.state == "partial" || profile?.state == "error" ? scope : nil
+        })
+    }
+
+    private func deepSeekConnectionState() throws -> ExternalProviderConnectionState {
+        if deepSeekScanError != nil {
+            if deepSeekSeenScopes.isEmpty { return .disconnected }
+            throw DeepSeekIntegrationError(code: "operation-failed")
+        }
+        if !deepSeekAllowedScopes.isEmpty { return deepSeekUncertainScopes.isEmpty ? .connected : .connectedDegraded }
+        return deepSeekUncertainScopes.isEmpty ? .disconnected : .partial
     }
 
     init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, additionalExternalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState] = [:], makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }) {
@@ -177,6 +291,13 @@ final class TaskStore: ObservableObject {
 
     func setPreviewUpdate() {
         availableUpdate = AvailableUpdate(version: "0.4.0-alpha", url: URL(string: "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.4.0-alpha/app.dmg")!)
+    }
+
+    func setPreviewDeepSeekProfiles() {
+        deepSeekInstallationAvailable = true
+        deepSeekProfiles = [DeepSeekProfile(name: "Profile One", state: "disconnected", scope: nil),
+                            DeepSeekProfile(name: "Profile Two", state: "connected", scope: String(repeating: "b", count: 32))]
+        selectedDeepSeekProfile = "Profile Two"
     }
 
     static func preview(unavailableSources: [TaskProvider] = [], planUnconfirmed: Bool = false) -> TaskStore {
@@ -322,7 +443,7 @@ final class TaskStore: ObservableObject {
             if !unavailable.contains(.claude) { unavailable.append(.claude) }
             previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         }
-        if externalProvidersEnabled { refreshExternalProviders(unavailable: &unavailable) }
+        if externalProvidersEnabled { scheduleDeepSeekScan(); refreshExternalProviders(unavailable: &unavailable) }
         unavailableSources = unavailable
         var combined = (previousCodex + previousClaude + previousExternal)
             .filter { $0.isActive || $0.isUnconfirmed || $0.isWaiting }
@@ -381,12 +502,19 @@ final class TaskStore: ObservableObject {
         var allowed: Set<TaskProvider> = []
         var uncertain: Set<TaskProvider> = []
         for provider in TaskProvider.allCases {
-            guard let connection = externalConnections[provider] else { continue }
             do {
-                switch try connection() {
+                let state: ExternalProviderConnectionState
+                if let connection = externalConnections[provider] { state = try connection() }
+                else if provider == .deepseek { state = try deepSeekConnectionState() }
+                else { continue }
+                switch state {
                 case .connected:
                     seenExternalConnections.insert(provider)
                     allowed.insert(provider)
+                case .connectedDegraded:
+                    seenExternalConnections.insert(provider)
+                    allowed.insert(provider)
+                    unavailable.append(provider)
                 case .partial:
                     unavailable.append(provider)
                     uncertain.insert(provider)
@@ -409,7 +537,13 @@ final class TaskStore: ObservableObject {
         }
         do {
             if externalRuntime == nil { externalRuntime = try makeExternalRuntime() }
-            previousExternal = (externalRuntime?.snapshot(allowed: allowed) ?? []) + retained
+            var scopes: [TaskProvider: Set<String>] = [:]
+            var uncertainScopes: [TaskProvider: Set<String>] = [:]
+            if allowed.contains(.deepseek), externalConnections[.deepseek] == nil {
+                scopes[.deepseek] = deepSeekAllowedScopes
+                uncertainScopes[.deepseek] = deepSeekUncertainScopes
+            }
+            previousExternal = (externalRuntime?.snapshot(allowed: allowed, profileScopes: scopes, uncertainScopes: uncertainScopes) ?? []) + retained
         } catch {
             for provider in TaskProvider.allCases where allowed.contains(provider) && !unavailable.contains(provider) {
                 unavailable.append(provider)

@@ -7,9 +7,10 @@ export function createOrderedSender(send = publish, retryMs = 1000) {
   let busy = false;
   let gapOrigin = null;
   let retry = null;
+  let closed = false;
 
   function schedule() {
-    if (retry) return;
+    if (closed || retry) return;
     retry = setTimeout(() => { retry = null; void pump(); }, retryMs);
     if (typeof retry.unref === 'function') retry.unref();
   }
@@ -20,14 +21,16 @@ export function createOrderedSender(send = publish, retryMs = 1000) {
     if (busy) return;
     busy = true;
     try {
-      while (gapOrigin || queue.length) {
+      while (!closed && (gapOrigin || queue.length)) {
         if (gapOrigin) {
           const gap = { version: 1, provider: gapOrigin.provider, session: gapOrigin.session, kind: 'gap' };
           if (!await transmit(gap)) { schedule(); return; }
+          if (closed) return;
           gapOrigin = null;
         }
         const value = queue.shift();
         if (value && !await transmit(value)) {
+          if (closed) return;
           gapOrigin = value;
           queue.length = 0;
           schedule();
@@ -36,8 +39,8 @@ export function createOrderedSender(send = publish, retryMs = 1000) {
       }
     } finally { busy = false; }
   }
-  return value => {
-    if (!value) return;
+  const enqueue = value => {
+    if (closed || !value) return;
     if (gapOrigin) return;
     if (queue.length >= 128) {
       queue.length = 0;
@@ -45,6 +48,14 @@ export function createOrderedSender(send = publish, retryMs = 1000) {
     } else queue.push(value);
     void pump();
   };
+  enqueue.close = () => {
+    closed = true;
+    if (retry) clearTimeout(retry);
+    retry = null;
+    gapOrigin = null;
+    queue.length = 0;
+  };
+  return enqueue;
 }
 
 export function createOpenCodeObserver(enqueue = createOrderedSender()) {
@@ -92,23 +103,41 @@ export function observeOpenCodeV2(ctx, enqueue = createOrderedSender()) {
 }
 
 // DeepSeek Harness exposes committed session events and live agent status separately.
-export function registerDeepSeekObserver(ctx, enqueue = createOrderedSender(), timers = {}) {
+export function registerDeepSeekObserver(ctx, enqueue, timers = {}, mapIdentifier = value => value) {
+  // In-process delivery must be owned by Cordis, including failed-send retries.
+  // Older hosts without effects cannot safely own the sender or subscriptions.
+  if (typeof ctx?.effect !== 'function') return;
+  const ownsSender = enqueue === undefined;
+  enqueue ??= createOrderedSender();
   const agents = new Map();
+  let closed = false;
+  const forward = value => { if (!closed) enqueue(value); };
+  try {
+    ctx.effect(() => () => {
+      closed = true;
+      agents.clear();
+      if (ownsSender) enqueue.close();
+    });
+  } catch {
+    if (ownsSender) enqueue.close();
+    return;
+  }
   ctx.on('session/event', (session, event) => {
-    try { enqueue(fromDeepSeekSession(session, event)); } catch { /* Ignore observer failures. */ }
+    try { forward(fromDeepSeekSession(session, event, mapIdentifier)); } catch { /* Ignore observer failures. */ }
   });
   ctx.on('agent/status', payload => {
     try {
-      const event = fromDeepSeekStatus(payload);
+      if (closed) return;
+      const event = fromDeepSeekStatus(payload, mapIdentifier);
       if (event) {
         if (payload.status === 'running' && (agents.has(event.session) || agents.size < 256)) agents.set(event.session, payload.agent);
         else if (payload.status !== 'running') agents.delete(event.session);
-        enqueue(event);
+        forward(event);
       }
     } catch { /* Ignore observer failures. */ }
   });
   try {
-    ctx.on('agent/disposed', ({ agent } = {}) => { try { agents.delete(agent?.id); } catch { /* Best effort. */ } });
+    ctx.on('agent/disposed', ({ agent } = {}) => { try { agents.delete(mapIdentifier(agent?.id)); } catch { /* Best effort. */ } });
   } catch { /* Older versions may not expose this lifecycle event. */ }
 
   // Cordis disposes effects on unload. Without that lifecycle capability there
@@ -119,10 +148,11 @@ export function registerDeepSeekObserver(ctx, enqueue = createOrderedSender(), t
         const start = timers.setInterval || setInterval;
         const stop = timers.clearInterval || clearInterval;
         const timer = start(() => {
+          if (closed) return;
           for (const [session, agent] of agents) {
             try {
-              if (agent.id !== session || agent.status !== 'running') { agents.delete(session); continue; }
-              enqueue({ version: 1, provider: 'deepseek', session, kind: 'heartbeat' });
+              if (mapIdentifier(agent.id) !== session || agent.status !== 'running') { agents.delete(session); continue; }
+              forward({ version: 1, provider: 'deepseek', session, kind: 'heartbeat' });
             } catch { agents.delete(session); }
           }
         }, 60000);

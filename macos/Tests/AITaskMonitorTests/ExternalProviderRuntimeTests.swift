@@ -66,4 +66,32 @@ final class ExternalProviderRuntimeTests: XCTestCase {
         XCTAssertTrue(try waitFor("opencode:fresh", runtime: runtime).contains { $0.id == "opencode:fresh" })
         XCTAssertTrue(runtime.stop())
     }
+
+    func testProfileScopesIsolateFailureDisconnectAndLateEvents() throws {
+        let directory = "/private/tmp/aitm-provider-scopes-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let runtime = ExternalProviderRuntime(channel: try ExternalProviderChannel(directory: directory))
+        defer { runtime.stop() }
+        let first = String(repeating: "a", count: 32)
+        let second = String(repeating: "b", count: 32)
+        let both: [TaskProvider: Set<String>] = [.deepseek: [first, second]]
+        _ = runtime.snapshot(allowed: [.deepseek, .opencode], profileScopes: both)
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(first)_one\",\"kind\":\"started\"}", directory: directory)
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(second)_two\",\"kind\":\"started\"}", directory: directory)
+        try send(#"{"version":1,"provider":"opencode","session":"other","kind":"started"}"#, directory: directory)
+        var tasks = runtime.snapshot(allowed: [.deepseek, .opencode], profileScopes: both)
+        XCTAssertEqual(tasks.filter(\.isActive).count, 3)
+        let healthy: [TaskProvider: Set<String>] = [.deepseek: [first]]
+        let uncertain: [TaskProvider: Set<String>] = [.deepseek: [second]]
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(second)_two\",\"kind\":\"active\"}", directory: directory)
+        tasks = runtime.snapshot(allowed: [.deepseek, .opencode], profileScopes: healthy, uncertainScopes: uncertain)
+        XCTAssertTrue(try XCTUnwrap(tasks.first { $0.id == "deepseek:\(first)_one" }).isActive)
+        XCTAssertTrue(try XCTUnwrap(tasks.first { $0.id == "deepseek:\(second)_two" }).isUnconfirmed)
+        XCTAssertTrue(try XCTUnwrap(tasks.first { $0.provider == .opencode }).isActive)
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(second)_two\",\"kind\":\"active\"}", directory: directory)
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(second)_two\",\"kind\":\"gap\"}", directory: directory)
+        tasks = runtime.snapshot(allowed: [.deepseek, .opencode], profileScopes: healthy)
+        XCTAssertFalse(tasks.contains { $0.id == "deepseek:\(second)_two" })
+        XCTAssertTrue(try XCTUnwrap(tasks.first { $0.id == "deepseek:\(first)_one" }).isActive)
+    }
 }

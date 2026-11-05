@@ -11,7 +11,7 @@ cp ".build/apple/Products/Release/AITaskMonitor" "dist/AI Task Monitor.app/Conte
 cp "Info.plist" "dist/AI Task Monitor.app/Contents/Info.plist"
 chmod 755 "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
 mkdir -p "dist/AI Task Monitor.app/Contents/Resources/integrations"
-for file in opencode-entry.js provider-events.mjs provider-observers.mjs provider-transport.mjs; do
+for file in opencode-entry.js provider-events.mjs provider-observers.mjs provider-transport.mjs deepseek-integration.mjs deepseek-setup.mjs deepseek-plugin.js package.json cordis.patch.yml; do
     cp "integrations/$file" "dist/AI Task Monitor.app/Contents/Resources/integrations/$file"
 done
 

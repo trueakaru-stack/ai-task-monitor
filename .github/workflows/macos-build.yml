@@ -26,9 +26,25 @@ jobs:
       - name: Select Xcode
         if: ${{ !contains(github.event.head_commit.message, '[macos26]') }}
         run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Prepare isolated DeepSeek test tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/aitm-dsh-upstream" --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.5 pnpm@11.25.0
+          echo "AITM_DSH_ANCHOR=$RUNNER_TEMP/aitm-dsh-upstream/node_modules/@deepseek-ai/dsh/package.json" >> "$GITHUB_ENV"
+          echo "AITM_PNPM_SCRIPT=$RUNNER_TEMP/aitm-dsh-upstream/node_modules/pnpm/bin/pnpm.mjs" >> "$GITHUB_ENV"
+          echo "AITM_NODE=$(command -v node)" >> "$GITHUB_ENV"
       - name: Test
         working-directory: macos
         run: swift test
+      - name: Test isolated DeepSeek integration
+        working-directory: macos
+        run: |
+          node integration-tests/Test-ExternalProviderEvents.mjs
+          node integration-tests/Test-ExternalProviderObservers.mjs
+          node integration-tests/Test-DeepSeekCordisRuntime.mjs "$RUNNER_TEMP/aitm-dsh-upstream/node_modules"
+          node integration-tests/Test-DeepSeekIntegration.mjs "$AITM_DSH_ANCHOR" "$AITM_PNPM_SCRIPT"
       - name: Render native source-status previews
         working-directory: macos
         run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/ai-task-monitor-previews"

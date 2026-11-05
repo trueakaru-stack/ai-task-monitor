@@ -86,6 +86,28 @@ struct SettingsView: View {
                         if !store.openCodeMessage.isEmpty {
                             Text(store.openCodeMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
                         }
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("DeepSeek Harness").font(.system(size: 13, weight: .medium))
+                                Text(tr("Приложение добавит локальный плагин в выбранный профиль DeepSeek Harness. После подключения перезапустите DeepSeek Harness.", "The app adds a local plugin to the selected DeepSeek Harness profile. Restart DeepSeek Harness after connecting."))
+                                    .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                Text(store.deepSeekStatusMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                                Picker(tr("Профиль", "Profile"), selection: $store.selectedDeepSeekProfile) {
+                                    Text(tr("Выберите профиль", "Select a profile")).tag("")
+                                    ForEach(store.deepSeekProfiles) { profile in Text(profile.name).tag(profile.name) }
+                                }
+                                .disabled(store.deepSeekProfiles.isEmpty || store.deepSeekSetupInProgress)
+                                .accessibilityLabel(tr("Профиль DeepSeek Harness", "DeepSeek Harness profile"))
+                            }
+                            Spacer(minLength: 20)
+                            Button(["connected", "partial"].contains(store.deepSeekSelectedProfile?.state ?? "") ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
+                                store.setDeepSeekConnected(store.deepSeekSelectedProfile?.state == "disconnected")
+                            }
+                            .disabled(!store.deepSeekCanChange && !settingsPreviewSources)
+                        }
+                        if !store.deepSeekMessage.isEmpty {
+                            Text(store.deepSeekMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     .id("settings-sources")
                     section(tr("Журнал", "Journal")) {

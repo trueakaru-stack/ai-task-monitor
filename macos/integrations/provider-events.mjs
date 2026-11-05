@@ -79,7 +79,8 @@ export function fromOpenCodeV2(input) {
         const turn = typeof input.id === 'string' && safeID.test(input.id) ? { turn: input.id } : {};
         return event('opencode', session, 'started', turn);
       }
-      case 'session.execution.succeeded': return event('opencode', session, 'completed');
+      // The execution ended, but a single turn does not prove the user's whole task is complete.
+      case 'session.execution.succeeded': return event('opencode', session, 'idle');
       case 'session.execution.failed': return event('opencode', session, 'failed');
       case 'session.execution.interrupted': return event('opencode', session, 'interrupted');
       case 'session.step.started': return event('opencode', session, 'active');
@@ -97,10 +98,10 @@ export function fromOpenCodeV2(input) {
 }
 
 /** DeepSeek Harness session/event callback, not a direct todo/write listener. */
-export function fromDeepSeekSession(session, input) {
+export function fromDeepSeekSession(session, input, mapIdentifier = value => value) {
   try {
     if (!input || typeof input !== 'object' || !input.data || typeof input.data !== 'object') return null;
-    const id = session && session.id;
+    const id = mapIdentifier(session && session.id);
     switch (input.type) {
       case 'turn/start': {
         const turn = input.data.turn;
@@ -109,15 +110,15 @@ export function fromDeepSeekSession(session, input) {
       }
       case 'turn/end': {
         const reason = input.data.reason?.kind;
-        const result = { completed: 'completed', error: 'failed', aborted: 'interrupted',
+        const result = { completed: 'idle', error: 'failed', aborted: 'interrupted',
           interrupted: 'interrupted', blocked: 'unknown', 'max-tokens': 'unknown', forked: 'unknown' };
         return Object.hasOwn(result, reason) ? event('deepseek', id, result[reason]) : event('deepseek', id, 'unknown');
       }
       case 'step/start': return event('deepseek', id, 'active');
       case 'approval/asked': return event('deepseek', id, 'waiting');
       case 'approval/decided': return event('deepseek', id, 'unknown');
-      case 'tool/call': return action('deepseek', id, input.data.callId, input.data.name, true);
-      case 'tool/result': return action('deepseek', id, input.data.message?.source?.callId, '', false);
+      case 'tool/call': return action('deepseek', id, mapIdentifier(input.data.callId), input.data.name, true);
+      case 'tool/result': return action('deepseek', id, mapIdentifier(input.data.message?.source?.callId), '', false);
       case 'todo/write': {
         const steps = plan(input.data.todos);
         return steps === null ? null : event('deepseek', id, 'plan', { steps });
@@ -128,11 +129,11 @@ export function fromDeepSeekSession(session, input) {
 }
 
 /** DeepSeek Harness agent/status callback. */
-export function fromDeepSeekStatus(input) {
+export function fromDeepSeekStatus(input, mapIdentifier = value => value) {
   try {
     if (!input || typeof input !== 'object') return null;
-    if (input.status === 'running') return event('deepseek', input.agent?.id, 'active');
-    if (input.status === 'idle') return event('deepseek', input.agent?.id, 'idle');
+    if (input.status === 'running') return event('deepseek', mapIdentifier(input.agent?.id), 'active');
+    if (input.status === 'idle') return event('deepseek', mapIdentifier(input.agent?.id), 'idle');
     return null;
   } catch { return null; }
 }
