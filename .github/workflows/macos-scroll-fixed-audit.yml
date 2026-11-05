@@ -1,0 +1,95 @@
+name: macOS synthetic fixed-size scroll
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-scroll-fixed-audit.yml"
+      - ".github/audits/ScrollFixedAuditTests.swift"
+      - ".github/audits/generate-scroll-fixed.py"
+      - ".github/audits/compare-scroll-fixed.py"
+
+permissions:
+  contents: read
+
+jobs:
+  fixed-scroll:
+    if: ${{ github.event_name == 'workflow_dispatch' || (contains(github.event.head_commit.message, '[tests-only]') && contains(github.event.head_commit.message, '[scroll-fixed-audit]')) }}
+    name: synthetic fixed-size scroll (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout the audit tools
+        uses: actions/checkout@v4
+        with:
+          path: audit-control
+          persist-credentials: false
+      - name: Checkout the pinned application source
+        uses: actions/checkout@v4
+        with:
+          ref: 835ad09e98efb59546a8b850b8b8c2777323b581
+          path: pinned-source
+          persist-credentials: false
+      - name: Select Xcode for macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Check isolated variants
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          status=0
+          for variant in baseline fixed-before fixed-after; do
+            project="$RUNNER_TEMP/aitm-scroll-fixed-code-$variant"
+            output="$RUNNER_TEMP/aitm-layout-fixed-$variant"
+            test ! -e "$project"
+            mkdir -p "$project" "$output"
+            cp -R "$GITHUB_WORKSPACE/pinned-source/macos/." "$project/"
+            cp "$GITHUB_WORKSPACE/audit-control/.github/audits/ScrollWideProbes.swift" "$project/Sources/AITaskMonitor/"
+            cp "$GITHUB_WORKSPACE/audit-control/.github/audits/ScrollFixedAuditTests.swift" "$project/Tests/AITaskMonitorTests/"
+            if ! python3 "$GITHUB_WORKSPACE/audit-control/.github/audits/generate-scroll-wide.py" "$project" baseline "$output"; then
+              status=1
+              continue
+            fi
+            if [[ "$variant" != baseline ]]; then
+              if ! python3 "$GITHUB_WORKSPACE/audit-control/.github/audits/generate-scroll-fixed.py" "$project" "$variant" "$output"; then
+                status=1
+                continue
+              fi
+            fi
+            for file in RootView.swift TaskCardView.swift; do
+              if diff -u "$GITHUB_WORKSPACE/pinned-source/macos/Sources/AITaskMonitor/$file" "$project/Sources/AITaskMonitor/$file" > "$output/$file.patch"; then
+                :
+              else
+                test "$?" -eq 1 || status=1
+              fi
+            done
+            export AITM_LAYOUT_SYNTHETIC_CI=1
+            export AITM_LAYOUT_SYNTHETIC_ROOT="$output"
+            export AITM_SCROLL_VARIANT="$variant"
+            if ! (cd "$project" && swift test --filter ScrollFixedAuditTests); then status=1; fi
+            test -s "$output/fixed-geometry.json" || status=1
+            test -s "$output/fixed-hit-tests.json" || status=1
+          done
+          if ! python3 "$GITHUB_WORKSPACE/audit-control/.github/audits/compare-scroll-fixed.py" "$RUNNER_TEMP"; then status=1; fi
+          exit "$status"
+      - name: Document audit scope
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          printf '%s\n' 'Synthetic layout and in-process input only; no source change was integrated, no installer was built, and the full reconnect regression was not run.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload synthetic geometry and screenshots
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-scroll-fixed-${{ matrix.runner }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/aitm-layout-fixed-*/
+          if-no-files-found: warn
+          retention-days: 7
