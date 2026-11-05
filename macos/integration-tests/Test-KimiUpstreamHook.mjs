@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +27,7 @@ const env = Object.fromEntries(['SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'T
 env.PATH = [dirname(process.execPath), process.env.PATH || ''].join(delimiter);
 env.USERPROFILE = fixture;
 env.KIMI_CODE_HOME = join(fixture, 'kimi-home');
+await mkdir(env.KIMI_CODE_HOME);
 let usedWindowsHide = false;
 const host = {
   async spawn(command, args, options) {
@@ -45,7 +46,7 @@ const host = {
 };
 try {
   const input = { hook_event_name: 'TurnStarted', session_id: 'synthetic-session',
-    turn_id: 'synthetic-turn', prompt: 'SECRET_PROMPT', cwd: 'SECRET_PATH' };
+    turn_id: 1, prompt: 'SECRET_PROMPT', cwd: 'SECRET_PATH' };
   const result = await runHook(host, manifest.hooks[0].command, input, { cwd: assets, timeout: manifest.hooks[0].timeout });
   assert.equal(result.action, 'allow');
   assert.equal(result.exitCode, 0);

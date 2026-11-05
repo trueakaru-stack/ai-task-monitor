@@ -11,8 +11,7 @@ import { userPipeName } from '../integrations/provider-transport.mjs';
 const assets = join(dirname(dirname(fileURLToPath(import.meta.url))), 'integrations', 'kimi-plugin');
 assert.deepEqual(await readFile(join(assets, 'provider-transport.mjs')), await readFile(join(assets, '..', 'provider-transport.mjs')));
 const manifest = JSON.parse(await readFile(join(assets, 'kimi.plugin.json'), 'utf8'));
-const names = ['TurnStarted', 'SessionStart', 'SessionEnd', 'PostToolUse', 'PostToolUseFailure',
-  'PermissionRequest', 'PermissionResult', 'StopFailure', 'Interrupt'];
+const names = ['TurnStarted', 'PermissionRequest', 'PermissionResult', 'Interrupt'];
 assert.deepEqual(manifest.hooks.map(item => item.event), names);
 assert.ok(manifest.hooks.every(item => item.command === 'node ./kimi-hook.mjs' && item.timeout === 2));
 assert.ok(!manifest.hooks.some(item => ['PreToolUse', 'Stop', 'SessionHeartbeat'].includes(item.event)));
@@ -20,12 +19,17 @@ assert.ok(!manifest.hooks.some(item => ['PreToolUse', 'Stop', 'SessionHeartbeat'
 const temp = await realpath(tmpdir());
 const fixture = await mkdtemp(join(temp, 'aitm-kimi-observer-'));
 const kimiHome = join(fixture, 'kimi-home');
-const input = { hook_event_name: 'TurnStarted', session_id: 'same:session/private', turn_id: 'turn:1',
+await mkdir(kimiHome);
+await mkdir(join(fixture, 'other-home'));
+const input = { hook_event_name: 'TurnStarted', session_id: 'same:session/private', turn_id: 1,
   prompt: 'SECRET_PROMPT', tool_input: { command: 'SECRET_COMMAND' }, cwd: 'SECRET_PATH' };
 const event = fromKimi(input, kimiHome);
 assert.equal(event.kind, 'started');
-assert.match(event.session, /^k_[a-f0-9]{64}$/);
+assert.match(event.session, /^[a-f0-9]{32}_[a-f0-9]{64}$/);
 assert.match(event.turn, /^t_[a-f0-9]{64}$/);
+for (const turn_id of [undefined, '1', -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+  assert.equal(fromKimi({ ...input, turn_id }, kimiHome), null);
+}
 assert.notEqual(event.session, fromKimi(input, join(fixture, 'other-home')).session);
 assert.ok(!JSON.stringify(event).includes('SECRET') && !JSON.stringify(event).includes('same:session'));
 assert.equal(fromKimi({ ...input, hook_event_name: 'PreToolUse' }, kimiHome), null);
@@ -33,7 +37,7 @@ assert.equal(fromKimi(input, 'relative'), null);
 assert.equal(fromKimi({ ...input, session_id: 'bad\nvalue' }, kimiHome), null);
 assert.equal(fromKimi({ ...input, hook_event_name: 'PermissionRequest' }, kimiHome).kind, 'waiting');
 assert.equal(fromKimi({ ...input, hook_event_name: 'PermissionResult' }, kimiHome).kind, 'unknown');
-assert.equal(fromKimi({ ...input, hook_event_name: 'SessionEnd' }, kimiHome).kind, 'idle');
+assert.equal(fromKimi({ ...input, hook_event_name: 'SessionEnd' }, kimiHome), null);
 
 function runHook(body) {
   const env = Object.fromEntries(['PATH', 'SystemRoot', 'WINDIR', 'PATHEXT', 'TMP', 'TEMP']

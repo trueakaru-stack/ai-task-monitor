@@ -4,13 +4,8 @@
   "description": "Local, observation-only activity updates for AI Task Monitor",
   "hooks": [
     { "event": "TurnStarted", "command": "node ./kimi-hook.mjs", "timeout": 2 },
-    { "event": "SessionStart", "command": "node ./kimi-hook.mjs", "timeout": 2 },
-    { "event": "SessionEnd", "command": "node ./kimi-hook.mjs", "timeout": 2 },
-    { "event": "PostToolUse", "command": "node ./kimi-hook.mjs", "timeout": 2 },
-    { "event": "PostToolUseFailure", "command": "node ./kimi-hook.mjs", "timeout": 2 },
     { "event": "PermissionRequest", "command": "node ./kimi-hook.mjs", "timeout": 2 },
     { "event": "PermissionResult", "command": "node ./kimi-hook.mjs", "timeout": 2 },
-    { "event": "StopFailure", "command": "node ./kimi-hook.mjs", "timeout": 2 },
     { "event": "Interrupt", "command": "node ./kimi-hook.mjs", "timeout": 2 }
   ]
 }

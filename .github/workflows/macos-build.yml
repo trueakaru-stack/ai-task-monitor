@@ -60,6 +60,8 @@ jobs:
           node integration-tests/Test-KimiIntegration.mjs
           node integration-tests/Test-KimiObserver.mjs
           node integration-tests/Test-KimiUpstreamHook.mjs "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
+          node integration-tests/Test-KimiUpstreamContract.mjs "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
+          node integration-tests/Test-KimiUpstreamInstall.mjs "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
       - name: Render native source-status previews
         working-directory: macos
         run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/ai-task-monitor-previews"

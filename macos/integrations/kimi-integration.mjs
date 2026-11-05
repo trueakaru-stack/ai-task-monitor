@@ -2,6 +2,7 @@
 import { constants } from 'node:fs';
 import { lstat, open, readdir, realpath } from 'node:fs/promises';
 import { isAbsolute, join, parse, resolve } from 'node:path';
+import { kimiHomeScope } from './kimi-plugin/kimi-observer.mjs';
 
 const expectedKimi = '2.5.0';
 const pluginId = 'ai-task-monitor';
@@ -58,12 +59,12 @@ export async function inspectKimiConnection({ home, assets, installAnchor }) {
   const source = await plainPath(assets);
   if ((await readdir(source)).sort().join('\0') !== [...files].sort().join('\0')) fail('invalid-bundle');
   const registry = await plainPath(join(home, 'plugins', 'installed.json'), true);
-  if (!registry) return 'disconnected';
+  if (!registry) return { state: 'disconnected' };
   const document = await json(registry, 1048576);
   if (!document || typeof document !== 'object' || document.version !== 1 ||
       !Array.isArray(document.plugins) || document.plugins.length > 2048) fail('invalid-registry');
   const matches = document.plugins.filter(item => item && typeof item === 'object' && item.id === pluginId);
-  if (!matches.length) return 'disconnected';
+  if (!matches.length) return { state: 'disconnected' };
   if (matches.length !== 1 || typeof matches[0].enabled !== 'boolean' ||
       !fullyQualified(matches[0].root)) fail('invalid-registry');
   const expectedRoot = join(home, 'plugins', 'managed', pluginId);
@@ -74,5 +75,8 @@ export async function inspectKimiConnection({ home, assets, installAnchor }) {
   for (const name of files) {
     if (!(await readPlain(join(expectedRoot, name))).equals(await readPlain(join(source, name)))) fail('modified-bundle');
   }
-  return matches[0].enabled ? 'connected' : 'disabled';
+  if (!matches[0].enabled) return { state: 'disabled' };
+  const scope = kimiHomeScope(home);
+  if (!scope) fail('invalid-path');
+  return { state: 'connected', scope };
 }
