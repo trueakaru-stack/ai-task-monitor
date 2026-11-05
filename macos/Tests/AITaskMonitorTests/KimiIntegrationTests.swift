@@ -3,6 +3,59 @@ import XCTest
 @testable import AITaskMonitor
 
 final class KimiIntegrationTests: XCTestCase {
+    func testNvmDiscoveryWithoutCurrentSymlinkUsesOnlyUnambiguousInstallation() throws {
+        let manager = FileManager.default
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("aitm-kimi-nvm-" + UUID().uuidString, isDirectory: true)
+        defer { try? manager.removeItem(at: root) }
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let resources = root.appendingPathComponent("resources", isDirectory: true)
+        let integrations = resources.appendingPathComponent("integrations", isDirectory: true)
+        try manager.createDirectory(at: home, withIntermediateDirectories: true)
+        try manager.createDirectory(at: integrations.appendingPathComponent("kimi-plugin"), withIntermediateDirectories: true)
+        try Data().write(to: integrations.appendingPathComponent("kimi-setup.mjs"))
+
+        func makeInstallation(root: URL, version: String) throws -> (bin: URL, anchor: URL) {
+            let versionRoot = root.appendingPathComponent("versions/node/\(version)", isDirectory: true)
+            let bin = versionRoot.appendingPathComponent("bin", isDirectory: true)
+            let package = versionRoot.appendingPathComponent("lib/node_modules/@moonshot-ai/kimi-code", isDirectory: true)
+            let dist = package.appendingPathComponent("dist", isDirectory: true)
+            try manager.createDirectory(at: bin, withIntermediateDirectories: true)
+            try manager.createDirectory(at: dist, withIntermediateDirectories: true)
+            let anchor = package.appendingPathComponent("package.json")
+            try Data(#"{"name":"@moonshot-ai/kimi-code","version":"2.5.0"}"#.utf8).write(to: anchor)
+            let main = dist.appendingPathComponent("main.mjs"), node = bin.appendingPathComponent("node")
+            try Data("#!/usr/bin/env node\n".utf8).write(to: main)
+            try Data("fixture".utf8).write(to: node)
+            try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: main.path)
+            try manager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: node.path)
+            try manager.createSymbolicLink(at: bin.appendingPathComponent("kimi"), withDestinationURL: main)
+            return (bin, anchor)
+        }
+
+        let nvm = home.appendingPathComponent(".nvm", isDirectory: true)
+        let first = try makeInstallation(root: nvm, version: "v22.19.0")
+        let discovered = try XCTUnwrap(KimiIntegration.discover(home: home, environment: ["PATH": ""],
+                                                                 resources: resources, systemPaths: []))
+        XCTAssertEqual(discovered.node.path, first.bin.appendingPathComponent("node").path)
+        XCTAssertEqual(discovered.installAnchor.path, first.anchor.path)
+        XCTAssertFalse(manager.fileExists(atPath: nvm.appendingPathComponent("current").path))
+
+        let second = try makeInstallation(root: nvm, version: "v24.0.0")
+        XCTAssertNil(KimiIntegration.discover(home: home, environment: ["PATH": ""], resources: resources, systemPaths: []))
+        let fromPath = try XCTUnwrap(KimiIntegration.discover(home: home, environment: ["PATH": second.bin.path],
+                                                              resources: resources, systemPaths: []))
+        XCTAssertEqual(fromPath.installAnchor.path, second.anchor.path)
+
+        let custom = root.appendingPathComponent("custom-nvm", isDirectory: true)
+        let customInstall = try makeInstallation(root: custom, version: "v22.20.0")
+        let fromCustom = try XCTUnwrap(KimiIntegration.discover(home: home,
+            environment: ["PATH": "", "NVM_DIR": custom.path], resources: resources, systemPaths: []))
+        XCTAssertEqual(fromCustom.installAnchor.path, customInstall.anchor.path)
+        XCTAssertNil(KimiIntegration.discover(home: home, environment: ["PATH": "", "NVM_DIR": "relative"],
+                                              resources: resources, systemPaths: []))
+    }
+
     func testReadOnlyConnectionDetectionAndBoundedBridge() throws {
         guard let node = ProcessInfo.processInfo.environment["AITM_NODE"], !node.isEmpty else { throw XCTSkip("Isolated Node fixture is unavailable") }
         let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)

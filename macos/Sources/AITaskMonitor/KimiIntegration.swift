@@ -40,14 +40,14 @@ enum KimiIntegration {
 
     static func discover(home: URL = FileManager.default.homeDirectoryForCurrentUser,
                          environment: [String: String] = ProcessInfo.processInfo.environment,
-                         resources: URL? = Bundle.main.resourceURL) -> Context? {
+                         resources: URL? = Bundle.main.resourceURL,
+                         systemPaths: [String] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]) -> Context? {
         let manager = FileManager.default
         guard let assets = pluginDirectory(resources: resources),
               manager.fileExists(atPath: assets.deletingLastPathComponent().appendingPathComponent("kimi-setup.mjs").path) else { return nil }
         let paths = (environment["PATH"] ?? "").split(separator: ":").map(String.init) + [
-            home.appendingPathComponent(".nvm/current/bin").path, home.appendingPathComponent(".volta/bin").path,
-            "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"
-        ]
+            home.appendingPathComponent(".nvm/current/bin").path, home.appendingPathComponent(".volta/bin").path
+        ] + systemPaths
         func executable(_ name: String) -> URL? {
             for path in paths {
                 let candidate = URL(fileURLWithPath: path, isDirectory: true).appendingPathComponent(name)
@@ -55,7 +55,35 @@ enum KimiIntegration {
             }
             return nil
         }
-        guard let node = executable("node"), let kimi = executable("kimi") else { return nil }
+        var node = executable("node"), kimi = executable("kimi")
+        if kimi == nil {
+            // nvm is per-shell and normally has no "current" symlink. A GUI
+            // process may therefore have no nvm directory on its PATH. Only
+            // fall back when exactly one installed version contains both tools.
+            let configuredNvm = environment["NVM_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let nvmRoot: URL
+            if let configuredNvm, !configuredNvm.isEmpty {
+                guard configuredNvm.hasPrefix("/") else { return nil }
+                nvmRoot = URL(fileURLWithPath: configuredNvm, isDirectory: true)
+            } else { nvmRoot = home.appendingPathComponent(".nvm", isDirectory: true) }
+            let versions = nvmRoot.appendingPathComponent("versions/node", isDirectory: true)
+            guard let entries = try? manager.contentsOfDirectory(at: versions, includingPropertiesForKeys: nil,
+                                                                  options: [.skipsHiddenFiles]), entries.count <= 256 else { return nil }
+            var candidates: [(node: URL, kimi: URL)] = []
+            for entry in entries {
+                guard entry.lastPathComponent.range(of: #"^v[0-9]+\.[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil else { continue }
+                let bin = entry.appendingPathComponent("bin", isDirectory: true)
+                let candidateNode = bin.appendingPathComponent("node"), candidateKimi = bin.appendingPathComponent("kimi")
+                if manager.isExecutableFile(atPath: candidateNode.path), manager.isExecutableFile(atPath: candidateKimi.path) {
+                    candidates.append((node: candidateNode, kimi: candidateKimi))
+                    if candidates.count > 1 { return nil }
+                }
+            }
+            guard let candidate = candidates.first else { return nil }
+            node = candidate.node
+            kimi = candidate.kimi
+        }
+        guard let node, let kimi else { return nil }
         guard let binary = physicalURL(kimi) else { return nil }
         guard binary.lastPathComponent == "main.mjs", binary.deletingLastPathComponent().lastPathComponent == "dist" else { return nil }
         let anchorPath = binary.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("package.json")
