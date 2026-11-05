@@ -30,7 +30,9 @@ enum DeepSeekIntegration {
                          environment: [String: String] = ProcessInfo.processInfo.environment,
                          assets: URL? = Bundle.main.resourceURL?.appendingPathComponent("integrations", isDirectory: true)) -> Context? {
         let manager = FileManager.default
-        guard let assets, manager.fileExists(atPath: assets.appendingPathComponent("deepseek-setup.mjs").path) else { return nil }
+        guard let assets else { return nil }
+        let assetDirectory = assets.resolvingSymlinksInPath().standardizedFileURL
+        guard manager.fileExists(atPath: assetDirectory.appendingPathComponent("deepseek-setup.mjs").path) else { return nil }
         let path = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
             + [home.appendingPathComponent(".nvm/current/bin").path, home.appendingPathComponent(".volta/bin").path,
                "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
@@ -54,7 +56,7 @@ enum DeepSeekIntegration {
             dshHome = URL(fileURLWithPath: custom, isDirectory: true).standardizedFileURL
         } else { dshHome = home.appendingPathComponent(".dsh", isDirectory: true) }
         guard manager.fileExists(atPath: anchor.path) else { return nil }
-        return Context(node: node, home: dshHome, assets: assets, installAnchor: anchor, pnpmScript: pnpmBin)
+        return Context(node: node, home: dshHome, assets: assetDirectory, installAnchor: anchor.resolvingSymlinksInPath().standardizedFileURL, pnpmScript: pnpmBin)
     }
 
     static func profiles(_ context: Context) throws -> [DeepSeekProfile] {

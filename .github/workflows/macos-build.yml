@@ -32,8 +32,8 @@ jobs:
       - name: Prepare isolated DeepSeek test tools
         run: |
           npm install --prefix "$RUNNER_TEMP/aitm-dsh-upstream" --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.5 pnpm@11.25.0
-          echo "AITM_DSH_ANCHOR=$RUNNER_TEMP/aitm-dsh-upstream/node_modules/@deepseek-ai/dsh/package.json" >> "$GITHUB_ENV"
-          echo "AITM_PNPM_SCRIPT=$RUNNER_TEMP/aitm-dsh-upstream/node_modules/pnpm/bin/pnpm.mjs" >> "$GITHUB_ENV"
+          echo "AITM_DSH_ANCHOR=$(node -p 'require("node:fs").realpathSync(process.argv[1])' "$RUNNER_TEMP/aitm-dsh-upstream/node_modules/@deepseek-ai/dsh/package.json")" >> "$GITHUB_ENV"
+          echo "AITM_PNPM_SCRIPT=$(node -p 'require("node:fs").realpathSync(process.argv[1])' "$RUNNER_TEMP/aitm-dsh-upstream/node_modules/pnpm/bin/pnpm.mjs")" >> "$GITHUB_ENV"
           echo "AITM_NODE=$(command -v node)" >> "$GITHUB_ENV"
       - name: Test
         working-directory: macos

@@ -8,8 +8,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { deepSeekProfileState, listDeepSeekProfiles, setDeepSeekConnected } from '../integrations/deepseek-integration.mjs';
 
-const [anchor, pnpmScript] = process.argv.slice(2);
-assert.ok(anchor && pnpmScript, 'Pass isolated DeepSeek package.json and pnpm script paths.');
+const [anchorArgument, pnpmArgument] = process.argv.slice(2);
+assert.ok(anchorArgument && pnpmArgument, 'Pass isolated DeepSeek package.json and pnpm script paths.');
+const anchor = await realpath(anchorArgument);
+const pnpmScript = await realpath(pnpmArgument);
 const execute = promisify(execFile);
 const temp = await realpath(tmpdir());
 const fixture = await mkdtemp(join(temp, 'aitm-dsh-controller-'));
@@ -18,7 +20,7 @@ const foreign = join(fixture, 'foreign');
 const profile = 'synthetic-profile';
 const profileDir = join(home, 'profiles', profile);
 const manifestPath = join(profileDir, 'package.json');
-const assets = join(dirname(dirname(fileURLToPath(import.meta.url))), 'integrations');
+const assets = await realpath(join(dirname(dirname(fileURLToPath(import.meta.url))), 'integrations'));
 const marker = join(fixture, 'foreign-script-ran');
 const setup = join(assets, 'deepseek-setup.mjs');
 const env = { ...process.env, USERPROFILE: fixture, HOME: fixture, APPDATA: fixture, LOCALAPPDATA: fixture,
