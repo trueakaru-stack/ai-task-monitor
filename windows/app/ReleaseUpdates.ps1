@@ -1,4 +1,229 @@
 # Public release metadata contains no task data. These helpers do not access the network.
+function Initialize-UpdateTransport {
+ if('AITaskMonitor.Updates.Transport' -as [type]){return}
+ Add-Type -AssemblyName System.Net.Http
+ Add-Type -ReferencedAssemblies System.Net.Http -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace AITaskMonitor.Updates {
+ public sealed class TransportResult {
+  public bool Success;
+  public string Json;
+  public int StatusCode;
+  public string[] RetryAfter = new string[0];
+  public string[] RateLimitReset = new string[0];
+  public string[] ServerDate = new string[0];
+ }
+ public static class Transport {
+  public const int MaximumBytes = 1048576;
+  private const string Url = "https://api.github.com/repos/trueakaru-stack/ai-task-monitor/releases?per_page=100";
+  public static HttpClientHandler NewHandler() {
+   return new HttpClientHandler { UseCookies = false, AllowAutoRedirect = false, UseDefaultCredentials = false, Credentials = null };
+  }
+  // The optional handler is a test seam; production passes null and always
+  // constructs the restricted handler above. All work and disposal are off UI.
+  // Synchronously blocking handlers or disposal can delay completion; a
+  // completion observed after the monotonic deadline cannot be successful.
+  public static Task<TransportResult> Start(CancellationToken cancellation, int timeoutMilliseconds, HttpMessageHandler handler) {
+   if (timeoutMilliseconds < 1 || timeoutMilliseconds > 120000) throw new ArgumentOutOfRangeException("timeoutMilliseconds");
+   var elapsed = Stopwatch.StartNew();
+   return Task.Run(async delegate {
+    TransportResult result = await Fetch(cancellation, timeoutMilliseconds, handler, elapsed).ConfigureAwait(false);
+    if (cancellation.IsCancellationRequested || elapsed.Elapsed >= TimeSpan.FromMilliseconds(timeoutMilliseconds)) {
+     result.Success = false; result.Json = null;
+    }
+    return result;
+   });
+  }
+  private static async Task<TransportResult> Fetch(CancellationToken cancellation, int timeoutMilliseconds, HttpMessageHandler handler, Stopwatch elapsed) {
+   var result = new TransportResult();
+   HttpResponseMessage response = null;
+   Task<HttpResponseMessage> request = null;
+   using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation)) {
+    int remaining = (int)Math.Max(1L, timeoutMilliseconds - elapsed.ElapsedMilliseconds);
+    deadline.CancelAfter(remaining);
+    using (var client = new HttpClient(handler ?? NewHandler(), true)) {
+     client.Timeout = Timeout.InfiniteTimeSpan;
+     client.MaxResponseContentBufferSize = MaximumBytes;
+     client.DefaultRequestHeaders.UserAgent.ParseAdd("AI-Task-Monitor/0.2");
+     client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+     try {
+      ThrowIfExpired(deadline.Token, elapsed, timeoutMilliseconds);
+      request = client.GetAsync(Url, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+      response = await Wait(request, deadline.Token, elapsed, timeoutMilliseconds).ConfigureAwait(false);
+      result.StatusCode = (int)response.StatusCode;
+      result.RetryAfter = Values(response.Headers, "Retry-After");
+      result.RateLimitReset = Values(response.Headers, "X-RateLimit-Reset");
+      result.ServerDate = Values(response.Headers, "Date");
+      if (!response.IsSuccessStatusCode || response.Content == null) return result;
+      await Wait(response.Content.LoadIntoBufferAsync(MaximumBytes), deadline.Token, elapsed, timeoutMilliseconds).ConfigureAwait(false);
+      result.Json = await Wait(response.Content.ReadAsStringAsync(), deadline.Token, elapsed, timeoutMilliseconds).ConfigureAwait(false);
+      ThrowIfExpired(deadline.Token, elapsed, timeoutMilliseconds);
+      result.Success = true;
+     } catch (Exception) {
+      // Failure is returned without response content or exception text.
+      result.Success = false; result.Json = null;
+     } finally {
+      if (response != null) response.Dispose();
+      else if (request != null) DisposeLateResponse(request);
+     }
+    }
+    if (deadline.IsCancellationRequested || elapsed.Elapsed >= TimeSpan.FromMilliseconds(timeoutMilliseconds)) {
+     result.Success = false; result.Json = null;
+    }
+   }
+   return result;
+  }
+  private static string[] Values(HttpResponseHeaders headers, string name) {
+   IEnumerable<string> values;
+   return headers.TryGetValues(name, out values) ? values.ToArray() : new string[0];
+  }
+  private static void ThrowIfExpired(CancellationToken token, Stopwatch elapsed, int timeoutMilliseconds) {
+   if (token.IsCancellationRequested || elapsed.Elapsed >= TimeSpan.FromMilliseconds(timeoutMilliseconds))
+    throw new OperationCanceledException(token);
+  }
+  private static async Task<T> Wait<T>(Task<T> task, CancellationToken token, Stopwatch elapsed, int timeoutMilliseconds) {
+   var cancelled = new TaskCompletionSource<bool>();
+   using (token.Register(delegate { cancelled.TrySetResult(true); })) {
+    if (token.IsCancellationRequested || elapsed.Elapsed >= TimeSpan.FromMilliseconds(timeoutMilliseconds) ||
+        task != await Task.WhenAny(task, cancelled.Task).ConfigureAwait(false)) {
+     Observe(task); throw new OperationCanceledException(token);
+    }
+    T value = await task.ConfigureAwait(false);
+    ThrowIfExpired(token, elapsed, timeoutMilliseconds);
+    return value;
+   }
+  }
+  private static async Task Wait(Task task, CancellationToken token, Stopwatch elapsed, int timeoutMilliseconds) {
+   var cancelled = new TaskCompletionSource<bool>();
+   using (token.Register(delegate { cancelled.TrySetResult(true); })) {
+    if (token.IsCancellationRequested || elapsed.Elapsed >= TimeSpan.FromMilliseconds(timeoutMilliseconds) ||
+        task != await Task.WhenAny(task, cancelled.Task).ConfigureAwait(false)) {
+     Observe(task); throw new OperationCanceledException(token);
+    }
+    await task.ConfigureAwait(false);
+    ThrowIfExpired(token, elapsed, timeoutMilliseconds);
+   }
+  }
+  private static void Observe(Task task) {
+   task.ContinueWith(delegate(Task done) { var ignored = done.Exception; }, CancellationToken.None,
+    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+  }
+  private static void DisposeLateResponse(Task<HttpResponseMessage> task) {
+   task.ContinueWith(delegate(Task<HttpResponseMessage> done) {
+    try {
+     if (done.Status == TaskStatus.RanToCompletion && done.Result != null) done.Result.Dispose();
+     else if (done.IsFaulted) { var ignored = done.Exception; }
+    } catch (Exception) { }
+   }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+  }
+ }
+}
+'@
+}
+
+function Start-UpdateTransport([Threading.CancellationToken]$cancellation) {
+ return [AITaskMonitor.Updates.Transport]::Start($cancellation,12000,$null)
+}
+
+# Delays are kept in memory and measured with Stopwatch, not the wall clock.
+# Restarting the application clears the schedule. An absolute server hint with
+# no valid Date uses the local clock and a 24-hour floor; a fast local clock can
+# still cause an early retry. Invalid or unrepresentable hints are ignored.
+function New-UpdateRetryState {
+ return [PSCustomObject]@{Failures=0;HasSchedule=$false;ScheduledAt=[long]0;Frequency=[long][Diagnostics.Stopwatch]::Frequency;DelayTicks=[long]0}
+}
+function Test-UpdateRetryDue($state,[long]$now) {
+ if(-not $state.HasSchedule){return $true}
+ if($state.Frequency -le 0){$state.Frequency=[long][Diagnostics.Stopwatch]::Frequency;$state.ScheduledAt=$now;return $false}
+ if($now -lt $state.ScheduledAt){$state.ScheduledAt=$now;return $false}
+ [long]$fraction=0;[long]$neededFraction=0
+ [long]$seconds=[Math]::DivRem(([long]($now-$state.ScheduledAt)),([long]$state.Frequency),[ref]$fraction)
+ [long]$needed=[Math]::DivRem(([long]$state.DelayTicks),([long][TimeSpan]::TicksPerSecond),[ref]$neededFraction)
+ if($seconds -ne $needed){return ($seconds -gt $needed)}
+ return (([decimal]$fraction*[TimeSpan]::TicksPerSecond) -ge ([decimal]$neededFraction*[long]$state.Frequency))
+}
+function ConvertFrom-UpdateHttpDate([string]$value) {
+ if(-not $value -or $value.Length -gt 256){return $null}
+ $parsed=$null
+ if([Net.Http.Headers.RetryConditionHeaderValue]::TryParse($value.Trim(),[ref]$parsed) -and $null -ne $parsed.Date){return [DateTimeOffset]$parsed.Date}
+ return $null
+}
+function Get-UpdateRetryDelay([int]$failures,[string[]]$retryAfter,[string[]]$rateReset,[string[]]$serverDates,[DateTimeOffset]$utcNow) {
+ $step=[Math]::Max(0,[Math]::Min(5,$failures-1))
+ $delay=[TimeSpan]::FromHours([Math]::Min(24,[Math]::Pow(2,$step)))
+ $serverDate=[DateTimeOffset]::MinValue;$validServer=$false
+ if($null -ne $serverDates -and $serverDates.Count -eq 1){
+  $parsedDate=ConvertFrom-UpdateHttpDate $serverDates[0]
+  if($null -ne $parsedDate){$serverDate=$parsedDate;$validServer=$true}
+ }
+ $reference=if($validServer){$serverDate}else{$utcNow}
+ foreach($raw in @($retryAfter)){
+  if($null -eq $raw -or $raw.Length -gt 256){continue};$value=$raw.Trim();if(-not $value){continue}
+  [TimeSpan]$hint=[TimeSpan]::Zero
+  if($value -cmatch '^\d+$'){
+   [uint64]$seconds=0
+   if(-not [uint64]::TryParse($value,[Globalization.NumberStyles]::None,[Globalization.CultureInfo]::InvariantCulture,[ref]$seconds) -or $seconds -gt 922337203685){continue}
+   $hint=[TimeSpan]::FromTicks([long]([decimal]$seconds*[TimeSpan]::TicksPerSecond))
+  }else{
+   $date=ConvertFrom-UpdateHttpDate $value
+   if($null -eq $date){continue}
+   if(-not $validServer -and $delay -lt [TimeSpan]::FromHours(24)){$delay=[TimeSpan]::FromHours(24)}
+   if($date -gt $reference){$hint=$date-$reference}
+  }
+  if($hint -gt $delay){$delay=$hint}
+ }
+ foreach($raw in @($rateReset)){
+  if($null -eq $raw -or $raw.Length -gt 256){continue};$value=$raw.Trim()
+  if($value -cnotmatch '^\d+$'){continue};[long]$seconds=0
+  if(-not [long]::TryParse($value,[Globalization.NumberStyles]::None,[Globalization.CultureInfo]::InvariantCulture,[ref]$seconds)){continue}
+  try{$date=[DateTimeOffset]::FromUnixTimeSeconds($seconds)}catch{continue}
+  if(-not $validServer -and $delay -lt [TimeSpan]::FromHours(24)){$delay=[TimeSpan]::FromHours(24)}
+  if($date -gt $reference -and ($date-$reference) -gt $delay){$delay=$date-$reference}
+ }
+ return $delay
+}
+function Set-UpdateRetryResult($state,[bool]$success,$result,[long]$now,[DateTimeOffset]$utcNow) {
+ if($success){$state.Failures=0;$delay=[TimeSpan]::FromHours(24)}
+ else{
+  $state.Failures=[Math]::Min(6,[int]$state.Failures+1)
+  $after=@();$reset=@();$date=@()
+  if($null -ne $result){$after=@($result.RetryAfter);$reset=@($result.RateLimitReset);$date=@($result.ServerDate)}
+  $delay=Get-UpdateRetryDelay $state.Failures $after $reset $date $utcNow
+ }
+ $state.HasSchedule=$true;$state.ScheduledAt=$now;$state.Frequency=[long][Diagnostics.Stopwatch]::Frequency;$state.DelayTicks=$delay.Ticks
+}
+
+function Test-ReleasePayload([string]$json) {
+ if($null -eq $json -or $json.Length -gt 1048576){return $false}
+ $trimmed=$json.Trim();if(-not $trimmed.StartsWith('[') -or -not $trimmed.EndsWith(']')){return $false}
+ try{
+  # Wrapping preserves empty, single-element and nested arrays in PowerShell 5.1.
+  $wrapped=ConvertFrom-Json -InputObject ('{"releases":'+$trimmed+'}') -ErrorAction Stop
+  $releases=$wrapped.PSObject.Properties['releases'].Value
+  if($releases -isnot [array]){return $false}
+  foreach($release in $releases){
+   if($release -isnot [PSCustomObject]){return $false}
+   $tag=$release.PSObject.Properties['tag_name'];$draft=$release.PSObject.Properties['draft'];$assets=$release.PSObject.Properties['assets']
+   if($null -eq $tag -or $tag.Value -isnot [string] -or [string]::IsNullOrWhiteSpace($tag.Value) -or
+      $null -eq $draft -or $draft.Value -isnot [bool] -or $null -eq $assets -or $assets.Value -isnot [array]){return $false}
+   foreach($asset in $assets.Value){
+    if($asset -isnot [PSCustomObject]){return $false}
+    $name=$asset.PSObject.Properties['name'];$url=$asset.PSObject.Properties['browser_download_url']
+    if($null -eq $name -or $name.Value -isnot [string] -or $null -eq $url -or $url.Value -isnot [string]){return $false}
+   }
+  }
+  return $true
+ }catch{return $false}
+}
+
 function ConvertTo-ReleaseVersion([string]$value) {
  if($value.Length -gt 80 -or $value -cnotmatch '^v?(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'){return $null}
  $pre=[string]$Matches[4]

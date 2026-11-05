@@ -195,7 +195,8 @@ try{
  $script:claudeRetentionAvailable=$true
 }catch{}
 $script:releaseUpdatesAvailable=$false
-try { . (Join-Path $PSScriptRoot "ReleaseUpdates.ps1");$script:releaseUpdatesAvailable=$true }catch{}
+$script:releaseUpdatesPath=Join-Path $PSScriptRoot "ReleaseUpdates.ps1"
+try { . $script:releaseUpdatesPath;if(-not $script:isStoreEdition){Initialize-UpdateTransport};$script:releaseUpdatesAvailable=$true }catch{}
 $script:externalProviderController=$null
 $script:externalProviderModulesAvailable=$false
 $script:lastExternalTasks=@()
@@ -242,9 +243,12 @@ try{
 $script:currentVersion='0.2.6-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
-$script:updateClient=$null
 $script:updateRequest=$null
-$script:lastUpdateCheck=[DateTime]::MinValue
+$script:updateCancellation=$null
+$script:updateParser=$null
+$script:updateParserRequest=$null
+$script:updateTransportResult=$null
+$script:updateRetry=if($script:releaseUpdatesAvailable){New-UpdateRetryState}else{$null}
 $script:themeMode = "system"
 $script:resolvedTheme = "dark"
 $script:palette = @{}
@@ -600,7 +604,7 @@ function Tr([string]$text){
   </Style>
   <Style x:Key="ProviderTabStyle" TargetType="Button">
    <Setter Property="Height" Value="34"/><Setter Property="Padding" Value="13,0"/><Setter Property="Margin" Value="0,0,4,0"/>
-   <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/><Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="BorderThickness" Value="0"/><Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusStyle}"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
     <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
    </ControlTemplate></Setter.Value></Setter>
@@ -688,9 +692,9 @@ function Tr([string]$text){
      <Grid Margin="20,18,20,17">
       <StackPanel x:Name="TaskHeaderStack">
        <TextBlock Text="Ход выполнения" FontFamily="Segoe UI Variable Display Semibold" FontSize="22" Foreground="{DynamicResource TextPrimary}"/>
-       <Grid x:Name="ProviderTabsHost" Visibility="Collapsed" Margin="0,13,0,0" HorizontalAlignment="Left" MaxWidth="{Binding ActualWidth, ElementName=TaskHeaderStack}">
-        <Path x:Name="ProviderTabsShape" Fill="{DynamicResource SurfaceRaised}"/>
-        <Border Padding="3"><ScrollViewer x:Name="ProviderTabsScroll" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled" CanContentScroll="False" PanningMode="HorizontalOnly" Focusable="False"><StackPanel x:Name="ProviderTabsPanel" Orientation="Horizontal"/></ScrollViewer></Border>
+       <Grid x:Name="ProviderTabsHost" Visibility="Collapsed" Margin="0,16,0,0" HorizontalAlignment="Stretch" MaxWidth="{Binding ActualWidth, ElementName=TaskHeaderStack}">
+        <Path x:Name="ProviderTabsShape" Fill="{DynamicResource Track}" Opacity="0.36"/>
+        <Border Padding="4"><ScrollViewer x:Name="ProviderTabsScroll" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled" CanContentScroll="False" PanningMode="HorizontalOnly" Focusable="False"><StackPanel x:Name="ProviderTabsPanel" Orientation="Horizontal"/></ScrollViewer></Border>
        </Grid>
       </StackPanel>
      </Grid>
@@ -1248,7 +1252,10 @@ $script:selectedProvider = $PreviewProvider
 $script:providerTabsFingerprint = ""
 $script:providerLastSelected = ""
 $script:cardRadius = 12.0
-$script:tabPadding = 3.0
+$script:tabPadding = 4.0
+$script:providerTabsRadius = 14.0
+$script:providerTabRadius = 10.0
+$script:providerTabsEqualWidth = $false
 $script:previewHintTarget = $null
 $providerTabsScroll.Add_PreviewMouseWheel({param($sender,$event) if($sender.ScrollableWidth -gt 0){$sender.ScrollToHorizontalOffset($sender.HorizontalOffset - $event.Delta);$event.Handled=$true}})
 $tasksScroll.Add_ScrollChanged({
@@ -1280,10 +1287,10 @@ function Prop($object, [string]$name, $fallback = $null) {
 
 function Brush([string]$color) { return [Windows.Media.BrushConverter]::new().ConvertFromString($color) }
 
-function Squircle-Geometry([double]$width,[double]$height,[double]$radius,[double]$inset = 0) {
+function Squircle-Geometry([double]$width,[double]$height,[double]$radius,[double]$inset = 0,[double]$curve = 0.72) {
  $left=$inset; $top=$inset; $right=[Math]::Max($left,$width-$inset); $bottom=[Math]::Max($top,$height-$inset)
  $r=[Math]::Min($radius,[Math]::Min(($right-$left)/2,($bottom-$top)/2))
- $k=$r*0.72
+ $k=$r*$curve
  $figure=New-Object Windows.Media.PathFigure
  $figure.StartPoint=[Windows.Point]::new($left+$r,$top)
  $figure.IsClosed=$true
@@ -1306,8 +1313,8 @@ function Update-SquircleGeometry {
   $windowOutline.Data=Squircle-Geometry $windowFrame.ActualWidth $windowFrame.ActualHeight 16 0.5
  }
  if($providerTabsHost.ActualWidth -gt 0 -and $providerTabsHost.ActualHeight -gt 0){
-  $providerTabsShape.Data=Squircle-Geometry $providerTabsHost.ActualWidth $providerTabsHost.ActualHeight $script:cardRadius 0
-  $providerTabsHost.Clip=Squircle-Geometry $providerTabsHost.ActualWidth $providerTabsHost.ActualHeight $script:cardRadius 0
+  $providerTabsShape.Data=Squircle-Geometry $providerTabsHost.ActualWidth $providerTabsHost.ActualHeight $script:providerTabsRadius 0 0.56
+  $providerTabsHost.Clip=Squircle-Geometry $providerTabsHost.ActualWidth $providerTabsHost.ActualHeight $script:providerTabsRadius 0 0.56
  }
 }
 
@@ -3106,28 +3113,71 @@ function Invoke-UpdateDownload {
 
 function Invoke-UpdateCheckTick {
  if($script:isStoreEdition -or -not $script:releaseUpdatesAvailable){return}
+ if($null -ne $script:updateParserRequest){
+  if(-not $script:updateParserRequest.IsCompleted){return}
+  $parsed=$null;$valid=$false
+  try{
+   $output=@($script:updateParser.EndInvoke($script:updateParserRequest))
+   if($script:updateParser.Streams.Error.Count -ne 0 -or $output.Count -ne 1){throw 'Invalid update result.'}
+   $parsed=$output[0]
+   if($null -eq $parsed -or $null -eq $parsed.PSObject.Properties['Update']){throw 'Invalid update result.'}
+   $valid=$true
+  }catch{}finally{
+   try{$script:updateParser.Dispose()}catch{};$script:updateParser=$null;$script:updateParserRequest=$null
+  }
+  Set-UpdateRetryResult $script:updateRetry $valid $script:updateTransportResult ([Diagnostics.Stopwatch]::GetTimestamp()) ([DateTimeOffset]::UtcNow)
+  $script:updateTransportResult=$null
+  if($valid -and $null -ne $parsed.Update){try{$script:availableUpdate=$parsed.Update;Show-PendingUpdate}catch{}}
+  return
+ }
  if($null -ne $script:updateRequest){
   if(-not $script:updateRequest.IsCompleted){return}
+  $result=$null
   try{
-   $json=$script:updateRequest.GetAwaiter().GetResult()
-   $found=Find-PlatformUpdate $json $script:currentVersion 'windows'
-   if($null -ne $found){$script:availableUpdate=$found;Show-PendingUpdate}
-  }catch{}finally{$script:updateRequest=$null}
- }
- if(([DateTime]::UtcNow-$script:lastUpdateCheck).TotalHours -lt 24){return}
- $script:lastUpdateCheck=[DateTime]::UtcNow
- try{
-  if($null -eq $script:updateClient){
-   Add-Type -AssemblyName System.Net.Http
-   $handler=New-Object Net.Http.HttpClientHandler;$handler.UseCookies=$false;$handler.AllowAutoRedirect=$false;$handler.UseDefaultCredentials=$false
-   $script:updateClient=New-Object Net.Http.HttpClient($handler)
-   $script:updateClient.Timeout=[TimeSpan]::FromSeconds(12)
-   $script:updateClient.MaxResponseContentBufferSize=1048576
-   $script:updateClient.DefaultRequestHeaders.UserAgent.ParseAdd('AI-Task-Monitor/0.2')
-   $script:updateClient.DefaultRequestHeaders.Accept.ParseAdd('application/vnd.github+json')
+   $result=$script:updateRequest.GetAwaiter().GetResult()
+  }catch{}finally{
+   $script:updateRequest=$null
+   if($null -ne $script:updateCancellation){$script:updateCancellation.Dispose();$script:updateCancellation=$null}
   }
-  $script:updateRequest=$script:updateClient.GetStringAsync('https://api.github.com/repos/trueakaru-stack/ai-task-monitor/releases?per_page=100')
- }catch{$script:updateRequest=$null}
+  if($null -eq $result -or -not $result.Success){
+   Set-UpdateRetryResult $script:updateRetry $false $result ([Diagnostics.Stopwatch]::GetTimestamp()) ([DateTimeOffset]::UtcNow)
+   return
+  }
+  try{
+   $parser=[PowerShell]::Create();$script:updateParser=$parser
+   $body={param([string]$module,[string]$json,[string]$version)
+    $ErrorActionPreference='Stop'
+    . $module
+    if(-not (Test-ReleasePayload $json)){throw 'Invalid release metadata.'}
+    [PSCustomObject]@{Update=(Find-PlatformUpdate $json $version 'windows')}
+   }
+   [void]$parser.AddScript($body.ToString()).AddArgument($script:releaseUpdatesPath).AddArgument($result.Json).AddArgument($script:currentVersion)
+   $script:updateTransportResult=$result;$script:updateParserRequest=$parser.BeginInvoke()
+  }catch{
+   if($null -ne $script:updateParser){try{$script:updateParser.Dispose()}catch{};$script:updateParser=$null}
+   $script:updateParserRequest=$null;$script:updateTransportResult=$null
+   Set-UpdateRetryResult $script:updateRetry $false $result ([Diagnostics.Stopwatch]::GetTimestamp()) ([DateTimeOffset]::UtcNow)
+  }
+  return
+ }
+ if(-not (Test-UpdateRetryDue $script:updateRetry ([Diagnostics.Stopwatch]::GetTimestamp()))){return}
+ try{
+  $script:updateCancellation=[Threading.CancellationTokenSource]::new()
+  $script:updateRequest=Start-UpdateTransport $script:updateCancellation.Token
+ }catch{
+  $script:updateRequest=$null
+  if($null -ne $script:updateCancellation){$script:updateCancellation.Dispose();$script:updateCancellation=$null}
+  Set-UpdateRetryResult $script:updateRetry $false $null ([Diagnostics.Stopwatch]::GetTimestamp()) ([DateTimeOffset]::UtcNow)
+ }
+}
+function Stop-UpdateCheck {
+ if($null -ne $script:updateCancellation){try{$script:updateCancellation.CancelAfter(1)}catch{}}
+ if($null -ne $script:updateParser){
+  try{
+   if($null -ne $script:updateParserRequest -and $script:updateParserRequest.IsCompleted){$script:updateParser.Dispose()}
+   else{[void]$script:updateParser.BeginStop($null,$null)}
+  }catch{}
+ }
 }
 
 function Show-SettingsView([bool]$keyboardNavigation = $false,[bool]$fromJournal = $false,[bool]$fromAbout = $false) {
@@ -3467,11 +3517,12 @@ function Add-ProviderTab([string]$id,[string]$label,[int]$count){
  $contentBorder=New-Object Windows.Controls.Border
  $contentBorder.Padding=New-Object Windows.Thickness(13,0,13,0)
  $content=New-Object Windows.Controls.Grid
+ $content.HorizontalAlignment="Center"
  $labelColumn=New-Object Windows.Controls.ColumnDefinition;$labelColumn.Width=[Windows.GridLength]::Auto
  $countColumn=New-Object Windows.Controls.ColumnDefinition;$countColumn.Width=[Windows.GridLength]::Auto
  $content.ColumnDefinitions.Add($labelColumn);$content.ColumnDefinitions.Add($countColumn)
  $selected=$script:selectedProvider -eq $id
- $tabForeground=Brush $(if($selected){$script:accentForeground}else{$script:palette.Secondary})
+ $tabForeground=Brush $script:palette.Primary
  $button.Foreground=$tabForeground
  $labelText=Text $label 13 $script:palette.Secondary "SemiBold"
  $labelText.Foreground=$tabForeground;$labelText.VerticalAlignment="Center";$labelText.TextWrapping="NoWrap"
@@ -3482,24 +3533,33 @@ function Add-ProviderTab([string]$id,[string]$label,[int]$count){
  $surfaceGrid.Children.Add($contentBorder)|Out-Null
  $button.Content=$surfaceGrid
  $button.DataContext=$tabShape
- $button.Add_SizeChanged({param($sender,$args) if($sender.ActualWidth -gt 0 -and $sender.ActualHeight -gt 0){$sender.DataContext.Data=Squircle-Geometry $sender.ActualWidth $sender.ActualHeight ($script:cardRadius-$script:tabPadding) 0}})
+ $button.Add_SizeChanged({param($sender,$args) if($sender.ActualWidth -gt 0 -and $sender.ActualHeight -gt 0){$sender.DataContext.Data=Squircle-Geometry $sender.ActualWidth $sender.ActualHeight $script:providerTabRadius 0 0.60}})
  $button.Add_GotKeyboardFocus({param($sender,$args) $sender.BringIntoView()})
  $button.Add_MouseEnter({param($sender,$args) if($script:selectedProvider -ne [string]$sender.Tag){$sender.DataContext.Fill=Brush $script:palette.Hover}})
  $button.Add_MouseLeave({param($sender,$args) if($script:selectedProvider -ne [string]$sender.Tag){$sender.DataContext.Fill=[Windows.Media.Brushes]::Transparent}})
  [Windows.Automation.AutomationProperties]::SetName($button,$(if($script:resolvedLanguage -eq 'en'){"Show tasks: $label, $count"}else{"Показать задачи: $label, $count"}))
- $tabShape.Fill=$(if($selected){Brush $script:accentHex}else{[Windows.Media.Brushes]::Transparent})
+ $tabShape.Fill=$(if($selected){Brush $script:palette.Surface}else{[Windows.Media.Brushes]::Transparent})
  $button.Add_Click({param($sender,$args) $script:selectedProvider=[string]$sender.Tag;$script:fingerprint="";Update-View})
  $providerTabsPanel.Children.Add($button)|Out-Null
+}
+
+function Update-ProviderTabSizing {
+ if(-not $script:providerTabsEqualWidth -or $providerTabsPanel.Children.Count -ne 3 -or $providerTabsHost.ActualWidth -le 0){return}
+ $spacing=4.0
+ $usable=[Math]::Max(0,$providerTabsHost.ActualWidth-(2*$script:tabPadding)-($spacing*2))
+ $width=$usable/3
+ foreach($button in $providerTabsPanel.Children){$button.Width=$width}
 }
 
 function Render-ProviderTabs($tasks){
  $providers=@($tasks|ForEach-Object{[string]$_.Provider}|Where-Object{$_}|Sort-Object -Unique)
  $script:showProviderLabels=$providers.Count -ge 2
+ $script:providerTabsEqualWidth=$providers.Count -eq 2
  if($providers.Count -lt 2){$providerTabsHost.Visibility="Collapsed";$script:selectedProvider="all";$script:providerTabsFingerprint="";return}
  if($script:selectedProvider -ne "all" -and $script:selectedProvider -notin $providers){$script:selectedProvider="all"}
  $definitions=@(@("codex","Codex"),@("claude","Claude Code"),@("kimi","Kimi Code"),@("deepseek","DeepSeek Harness"),@("hermes","Hermes Agent"),@("opencode","OpenCode"))
  $tabState=($definitions|ForEach-Object{if($_[0] -in $providers){$id=$_[0];"${id}:$(@($tasks|Where-Object {$_.Active -and $_.Provider -eq $id}).Count)"}})-join '|'
- $tabFingerprint="$script:selectedProvider|$script:resolvedLanguage|$script:accentHex|$($script:palette.Secondary)|$($script:palette.Hover)|$tabState"
+ $tabFingerprint="$script:selectedProvider|$script:resolvedLanguage|$($script:palette.Surface)|$($script:palette.Primary)|$($script:palette.Hover)|$tabState"
  $providerTabsHost.Visibility="Visible"
  $oldOffset=$providerTabsScroll.HorizontalOffset
  if($script:providerTabsFingerprint -eq $tabFingerprint -and $providerTabsPanel.Children.Count -gt 0){return}
@@ -3512,11 +3572,19 @@ function Render-ProviderTabs($tasks){
  Add-ProviderTab "all" (Tr "Все") @($tasks|Where-Object Active).Count
  foreach($definition in $definitions){$id=$definition[0];if($id -in $providers){Add-ProviderTab $id $definition[1] @($tasks|Where-Object {$_.Active -and $_.Provider -eq $id}).Count}}
  if($providerTabsPanel.Children.Count -gt 0){$providerTabsPanel.Children[$providerTabsPanel.Children.Count-1].Margin=New-Object Windows.Thickness(0)}
+ Update-ProviderTabSizing
  $providerTabsHost.UpdateLayout()
  $providerTabsScroll.ScrollToHorizontalOffset($oldOffset)
  if($selectionChanged){$selectedTab=@($providerTabsPanel.Children|Where-Object {[string]$_.Tag -eq $script:selectedProvider}|Select-Object -First 1);if($selectedTab.Count){$selectedTab[0].BringIntoView()}}
  if($focusedId){$replacement=@($providerTabsPanel.Children|Where-Object {[string]$_.Tag -eq $focusedId}|Select-Object -First 1);if($replacement.Count){$replacement[0].Focus()|Out-Null}}
  Update-SquircleGeometry
+}
+
+$providerTabsHost.Add_SizeChanged({Update-ProviderTabSizing;Update-SquircleGeometry})
+
+function Preview-Text([string]$russian,[string]$english) {
+ if($script:resolvedLanguage -eq 'en'){return $english}
+ return $russian
 }
 
 function Update-View {
@@ -3526,37 +3594,37 @@ function Update-View {
   $allTasks=@($sourceSnapshot.Tasks)
   $script:sourceErrors=@($sourceSnapshot.Unavailable)
   if($PreviewActiveTasks -ge 0){
-   $previewTitles=@("Создать индикатор прогресса задач","Задача Claude Code","Задача Claude Code","Задача DeepSeek Harness","Задача Hermes Agent","Задача OpenCode")
-   $previewActivities=@("Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний","Запускаю визуальную проверку","Собираю данные для переноса","Проверяю план","Проверяю данные","Выполняю действие")
+   $previewTitles=@((Preview-Text 'Создать индикатор прогресса задач' 'Create a task progress indicator'),(Preview-Text 'Задача Claude Code' 'Claude Code task'),(Preview-Text 'Задача Claude Code' 'Claude Code task'),(Preview-Text 'Задача DeepSeek Harness' 'DeepSeek Harness task'),(Preview-Text 'Задача Hermes Agent' 'Hermes Agent task'),(Preview-Text 'Задача OpenCode' 'OpenCode task'))
+   $previewActivities=@((Preview-Text 'Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний' 'Checking plan cards, source filters, scrolling, the light theme and long descriptions before release'),(Preview-Text 'Запускаю визуальную проверку' 'Running visual checks'),(Preview-Text 'Собираю данные для переноса' 'Preparing migration data'),(Preview-Text 'Проверяю план' 'Checking the plan'),(Preview-Text 'Проверяю данные' 'Checking data'),(Preview-Text 'Выполняю действие' 'Performing an action'))
    $previewProgress=@(50,33,$null,$null,$null,$null);$previewKinds=@("exact","exact","none","none","none","none");$previewProviders=@("codex","claude","claude","deepseek","hermes","opencode");$previewProviderNames=@("Codex","Claude Code","Claude Code","DeepSeek Harness","Hermes Agent","OpenCode")
    if($PreviewManyProviders){
     $previewProviders[2]='kimi';$previewProviderNames[2]='Kimi Code'
     foreach($previewIndex in 2..5){
      $previewTitles[$previewIndex]=if($script:resolvedLanguage -eq 'en'){$previewProviderNames[$previewIndex]+' task'}else{'Задача '+$previewProviderNames[$previewIndex]}
-     $previewActivities[$previewIndex]='Выполняет действие'
+     $previewActivities[$previewIndex]=Preview-Text 'Выполняет действие' 'Running an action'
     }
    }
    $allTasks=@()
    for($i=0;$i -lt $PreviewActiveTasks;$i++){
     $previewSteps=$(if($i -eq 0){
      @(
-      [PSCustomObject]@{title="Синхронизировать список задач";status="done"},
-      [PSCustomObject]@{title="Восстановить карточки планов";status="done"},
-      [PSCustomObject]@{title="Исправить прокрутку этапов";status="done"},
-      [PSCustomObject]@{title="Применить системный акцент";status="done"},
-      [PSCustomObject]@{title="Проверить скругления и фокус";status="active"},
-      [PSCustomObject]@{title="Снять тёмный и светлый экран";status="pending"},
-      [PSCustomObject]@{title="Провести финальную проверку";status="pending"},
-      [PSCustomObject]@{title="Опубликовать исходники";status="pending"}
+      [PSCustomObject]@{title=(Preview-Text 'Синхронизировать список задач' 'Synchronize the task list');status="done"},
+      [PSCustomObject]@{title=(Preview-Text 'Восстановить карточки планов' 'Restore plan cards');status="done"},
+      [PSCustomObject]@{title=(Preview-Text 'Исправить прокрутку этапов' 'Fix step scrolling');status="done"},
+      [PSCustomObject]@{title=(Preview-Text 'Применить системный акцент' 'Apply the system accent');status="done"},
+      [PSCustomObject]@{title=(Preview-Text 'Проверить скругления и фокус' 'Check corners and focus');status="active"},
+      [PSCustomObject]@{title=(Preview-Text 'Снять тёмный и светлый экран' 'Capture dark and light screens');status="pending"},
+      [PSCustomObject]@{title=(Preview-Text 'Провести финальную проверку' 'Run final checks');status="pending"},
+      [PSCustomObject]@{title=(Preview-Text 'Опубликовать исходники' 'Publish the source');status="pending"}
      )
     }elseif($i -eq 1){
      @(
-      [PSCustomObject]@{title="Проверить локальное окружение";status="done"},
-      [PSCustomObject]@{title="Подготовить тестовые данные";status="done"},
-      [PSCustomObject]@{title="Запустить визуальную проверку";status="active"},
-      [PSCustomObject]@{title="Проверить светлую тему";status="pending"},
-      [PSCustomObject]@{title="Зафиксировать результат";status="pending"},
-      [PSCustomObject]@{title="Очистить временные данные";status="pending"}
+      [PSCustomObject]@{title=(Preview-Text 'Проверить локальное окружение' 'Check the local environment');status="done"},
+      [PSCustomObject]@{title=(Preview-Text 'Подготовить тестовые данные' 'Prepare test data');status="done"},
+      [PSCustomObject]@{title=(Preview-Text 'Запустить визуальную проверку' 'Run visual checks');status="active"},
+      [PSCustomObject]@{title=(Preview-Text 'Проверить светлую тему' 'Check the light theme');status="pending"},
+      [PSCustomObject]@{title=(Preview-Text 'Зафиксировать результат' 'Record the result');status="pending"},
+      [PSCustomObject]@{title=(Preview-Text 'Очистить временные данные' 'Clear temporary data');status="pending"}
      )
     }else{@()})
     $previewIsUnconfirmed=$PreviewUnconfirmed -and $i -eq 0
@@ -3564,14 +3632,14 @@ function Update-View {
     $previewStatus=if($previewIsUnconfirmed){"Статус не подтверждён"}else{"В работе"}
     $previewValue=$previewProgress[$i];$previewKind=$previewKinds[$i]
     if($i -eq 0 -and $PreviewScenario -ne "default"){
-     $previewActivity="Checking screenshot stability"
+     $previewActivity=Preview-Text 'Проверяю стабильность снимков' 'Checking screenshot stability'
      if($PreviewScenario -eq "unplanned"){$previewSteps=@();$previewValue=$null;$previewKind="none"}
     }
     $previewTime=[DateTime]::Now.AddSeconds(-$i)
     $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;ActivityGenerated=($PreviewManyProviders -and $i -ge 2);Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр";PlanConfirmed=(-not ($PreviewPlanUnconfirmed -and $i -eq 0))}
    }
    if($PreviewCloudTask -and $script:codexCloudModulesAvailable){
-    $fixture=[PSCustomObject]@{Id='codex-cloud:synthetic';Title='Synthetic cloud task';State='pending';Updated=[DateTimeOffset]::UtcNow}
+    $fixture=[PSCustomObject]@{Id='codex-cloud:synthetic';Title=(Preview-Text 'Тестовая облачная задача' 'Synthetic cloud task');State='pending';Updated=[DateTimeOffset]::UtcNow}
     $allTasks+=@(ConvertTo-CodexCloudMonitorTasks @($fixture) (Tr 'Облако: ') (Tr 'Задача Codex') 'Статус не подтверждён')
    }
    if($PreviewKimiTask -and $script:externalProviderModulesAvailable){
@@ -3785,7 +3853,7 @@ $journalCloseButton.Add_Click({$window.Close()})
 $windowFrame.Add_SizeChanged({Update-SquircleGeometry})
 $tray=New-Object Windows.Forms.NotifyIcon; $tray.Icon=if($null -ne $script:applicationIcon){$script:applicationIcon}else{[Drawing.SystemIcons]::Application}; $tray.Text="AI task monitor"; $tray.Visible=$true; $tray.Add_DoubleClick({Restore-Window})
 $menu=New-Object Windows.Forms.ContextMenuStrip; $script:trayShowMenu=$menu.Items.Add("Развернуть"); $script:trayExitMenu=$menu.Items.Add("Выход"); $script:trayShowMenu.Add_Click({Restore-Window;Set-CompactMode $false}); $script:trayExitMenu.Add_Click({$window.Close()}); $tray.ContextMenuStrip=$menu
-$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:kimiModulesAvailable){Stop-KimiMonitorController $script:kimiController};if($script:hermesModulesAvailable -and -not $PreviewSources){try{Stop-HermesMonitorController $script:hermesController}catch{}};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
+$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};Stop-UpdateCheck;if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:kimiModulesAvailable){Stop-KimiMonitorController $script:kimiController};if($script:hermesModulesAvailable -and -not $PreviewSources){try{Stop-HermesMonitorController $script:hermesController}catch{}};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
 if($script:codexCloudModulesAvailable -and -not $SnapshotFile -and $PreviewActiveTasks -lt 0 -and (Load-CodexCloudEnabled)){Set-CodexCloudControllerEnabled $script:codexCloudController $true}
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
@@ -3852,11 +3920,13 @@ if ($SnapshotFile) {
   Write-Output 'Plan UI: current step and confirmation state verified.'
  }
  if($PreviewLanguageUiTest){
-  $originalTitle=[string]$script:lastAllTasks[0].Title
+  $sourceTask=[PSCustomObject]@{Provider='codex';Title='Моя исходная задача';Activity='Моё исходное описание';ActivityGenerated=$false;Status='В работе'}
   Show-SettingsView
   $englishLanguageButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
   if((Load-LanguageMode) -ne 'en' -or $window.FindName('SettingsHeading').Text -cne 'Settings' -or $window.FindName('LanguageHeading').Text -cne 'Language'){throw 'English selection did not update and persist the settings UI.'}
-  if([string]$script:lastAllTasks[0].Title -cne $originalTitle){throw 'Language selection changed source task text.'}
+  $englishPreview=@($script:lastAllTasks | Where-Object Id -eq 'preview-0')
+  if($englishPreview.Count -ne 1 -or $englishPreview[0].Title -cne 'Create a task progress indicator'){throw 'The synthetic task did not follow the selected language.'}
+  if((Localized-TaskTitle $sourceTask) -cne $sourceTask.Title -or (Localized-TaskActivity $sourceTask) -cne $sourceTask.Activity){throw 'Language selection changed source task text.'}
   Apply-Theme 'light' $true
   if((Load-LanguageMode) -ne 'en'){throw 'Saving a theme overwrote the language preference.'}
   $russianLanguageButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
@@ -3905,12 +3975,12 @@ if ($SnapshotFile) {
   Write-Output "Activity motion UI: placement, task state and motion preference verified."
  }
  if($PreviewActivityUiTest){
-  if($script:lastAllTasks.Count -ne 1 -or $script:lastAllTasks[0].Activity -ne "Checking screenshot stability"){throw "The preview task did not expose its current activity."}
+  if($script:lastAllTasks.Count -ne 1 -or $script:lastAllTasks[0].Activity -ne (Preview-Text 'Проверяю стабильность снимков' 'Checking screenshot stability')){throw "The preview task did not expose its current activity."}
   $stepCount=@($script:lastAllTasks[0].Steps | Where-Object {$null -ne $_}).Count
   if($PreviewScenario -eq "planned" -and $stepCount -eq 0){throw "The planned preview has no steps."}
   if($PreviewScenario -eq "unplanned" -and ($stepCount -ne 0 -or $script:lastAllTasks[0].ProgressKind -ne "none")){throw "The unplanned preview invented a plan or percentage."}
   function Find-PreviewActivity($parent){
-   if($parent -is [Windows.Controls.TextBlock] -and $parent.Text -eq "Checking screenshot stability" -and $parent.IsVisible){return $true}
+   if($parent -is [Windows.Controls.TextBlock] -and $parent.Text -eq (Preview-Text 'Проверяю стабильность снимков' 'Checking screenshot stability') -and $parent.IsVisible){return $true}
    for($index=0;$index -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$index++){
     if(Find-PreviewActivity ([Windows.Media.VisualTreeHelper]::GetChild($parent,$index))){return $true}
    }
@@ -3944,10 +4014,13 @@ if ($SnapshotFile) {
   $script:availableUpdate=$bad;Invoke-UpdateDownload
   if($updateOpenError.Visibility -ne 'Visible'){throw 'Untrusted download URL was not rejected.'}
   $script:availableUpdate=$null;$script:dismissedUpdate='';$updateOverlay.Visibility='Collapsed'
-  $script:lastUpdateCheck=[DateTime]::UtcNow
-  $completed=New-Object 'System.Threading.Tasks.TaskCompletionSource[string]'
-  $completed.SetResult('[{"tag_name":"v0.3.0-alpha","draft":false,"assets":[{"name":"app.exe","browser_download_url":"https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.0-alpha/app.exe"}]}]')
-  $script:updateRequest=$completed.Task;Invoke-UpdateCheckTick
+  $previewJson='[{"tag_name":"v0.3.0-alpha","draft":false,"assets":[{"name":"app.exe","browser_download_url":"https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.0-alpha/app.exe"}]}]'
+  $previewFoundRelease=Find-PlatformUpdate $previewJson $script:currentVersion 'windows'
+  $script:updateParser=[PowerShell]::Create()
+  [void]$script:updateParser.AddScript('param($update) [PSCustomObject]@{Update=$update}').AddArgument($previewFoundRelease)
+  $script:updateParserRequest=$script:updateParser.BeginInvoke()
+  if(-not $script:updateParserRequest.AsyncWaitHandle.WaitOne(3000)){throw 'Synthetic update parser timed out.'}
+  Invoke-UpdateCheckTick
   if($updateOverlay.Visibility -ne 'Visible' -or $script:availableUpdate.Version -ne '0.3.0-alpha'){throw 'Asynchronous release result did not reach the dialog.'}
   $window.UpdateLayout()
   Write-Output 'Update UI: asynchronous result, copy, link rejection, dismissal and compact deferral verified.'
@@ -3995,8 +4068,8 @@ if ($SnapshotFile) {
   if((Get-FeedbackUri) -notmatch '^mailto:truea\.k\.a\.ru@gmail\.com\?subject=' -or (Get-FeedbackUri) -match '&body='){throw "The feedback draft is not private or correctly addressed."}
   if($script:isStoreEdition){
    if(-not $aboutUpdatesText.Text.Contains('Microsoft Store') -or $aboutUpdatesText.Text.Contains('GitHub')){throw 'Store edition update description is incorrect.'}
-   $script:lastUpdateCheck=[DateTime]::MinValue;Invoke-UpdateCheckTick
-   if($null -ne $script:updateClient -or $null -ne $script:updateRequest){throw 'Store edition must not request GitHub updates.'}
+   Invoke-UpdateCheckTick
+   if($null -ne $script:updateCancellation -or $null -ne $script:updateRequest){throw 'Store edition must not request GitHub updates.'}
   }elseif(-not $aboutUpdatesText.Text.Contains('GitHub')){throw 'Standalone update description is incorrect.'}
   if($settingsView.Visibility -ne "Visible" -or $aboutView.Visibility -ne "Collapsed"){throw "Settings and About cannot be visible together."}
   $aboutSettingsButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
