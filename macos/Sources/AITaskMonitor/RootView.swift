@@ -95,6 +95,7 @@ struct RootView: View {
                         .frame(width: max(0, geometry.size.width - scrollerWidth), alignment: .leading)
                         .background(OverlayScrollerProbe(alwaysVisible: true).frame(width: 0, height: 0))
                     }
+                    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
                 }
             }
             Button {
