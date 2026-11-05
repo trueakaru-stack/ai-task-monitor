@@ -65,7 +65,7 @@ struct OverlayScrollerProbe: NSViewRepresentable {
                     scrollView.verticalScroller = TracklessScroller(frame: .zero)
                 }
                 scrollView.hasVerticalScroller = true
-                scrollView.autohidesScrollers = false
+                scrollView.autohidesScrollers = true
             } else if scrollView.scrollerStyle != .overlay {
                 scrollView.scrollerStyle = .overlay
             }

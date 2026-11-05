@@ -7,9 +7,11 @@ on:
       - ".github/workflows/macos-layout-audit.yml"
       - "macos/Tests/AITaskMonitorTests/WindowLayoutAuditTests.swift"
       - "macos/Tests/AITaskMonitorTests/PickerSizingAuditTests.swift"
+      - "macos/Tests/AITaskMonitorTests/OverlayScrollerTests.swift"
       - "macos/Tests/AITaskMonitorTests/PreviewLocalizationSnapshotsTests.swift"
       - "macos/Tests/AITaskMonitorTests/PreviewLocalizationTests.swift"
       - "macos/Sources/AITaskMonitor/RootView.swift"
+      - "macos/Sources/AITaskMonitor/OverlayScrollerProbe.swift"
       - "macos/Sources/AITaskMonitor/SettingsView.swift"
       - "macos/Sources/AITaskMonitor/UpdateDialog.swift"
       - "macos/Sources/AITaskMonitor/TaskStore.swift"
@@ -93,6 +95,10 @@ jobs:
           mkdir -p "$AITM_LAYOUT_SYNTHETIC_ROOT"
           export AITM_LAYOUT_SYNTHETIC_CI=1
           swift test --filter PickerSizingAuditTests
+      - name: Test trackless scroller behavior
+        if: ${{ !cancelled() && steps.guard.outcome == 'success' }}
+        working-directory: macos
+        run: swift test --filter OverlayScrollerTests
       - name: Capture baseline compact previews
         if: ${{ !cancelled() && steps.guard.outcome == 'success' && contains(github.event.head_commit.message, '[preview-localization]') }}
         working-directory: baseline-layout/macos
