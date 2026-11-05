@@ -56,6 +56,16 @@ jobs:
           done
           python3 -B integration-tests/Test-HermesUpstreamDispatch.py "$RUNNER_TEMP/aitm-hermes-upstream"
           python3 -B integration-tests/Test-HermesLiveness.py "$RUNNER_TEMP/aitm-hermes-upstream/hermes_cli/active_sessions.py"
+          python3 -c 'import ast,pathlib; t=ast.parse(pathlib.Path("integration-tests/Test-HermesPublication.py").read_text()); d=next(ast.literal_eval(n.value) for n in t.body if isinstance(n,ast.Assign) and any(isinstance(x,ast.Name) and x.id=="EXPECTED" for x in n.targets)); print("\n".join(d))' > "$RUNNER_TEMP/aitm-hermes-pm-files"
+          while IFS= read -r file; do
+            mkdir -p "$(dirname "$RUNNER_TEMP/aitm-hermes-upstream/$file")"
+            curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+              "https://raw.githubusercontent.com/NousResearch/hermes-agent/b200f5bc60e31588ba2cb60e288029c4a54ba5fa/$file" \
+              --output "$RUNNER_TEMP/aitm-hermes-upstream/$file"
+          done < "$RUNNER_TEMP/aitm-hermes-pm-files"
+          python3 -m venv "$RUNNER_TEMP/aitm-hermes-pm-python"
+          "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: 'ruamel.yaml==0.18.16' 'packaging==26.0'
+          "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -B integration-tests/Test-HermesPublication.py "$RUNNER_TEMP/aitm-hermes-upstream"
           npm pack @moonshot-ai/kimi-code@2.5.0 --ignore-scripts --pack-destination "$RUNNER_TEMP" --json > "$RUNNER_TEMP/aitm-kimi-package.json"
           tar -xOf "$RUNNER_TEMP/moonshot-ai-kimi-code-2.5.0.tgz" package/dist/main.mjs > "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
           node integration-tests/Test-KimiIntegration.mjs
