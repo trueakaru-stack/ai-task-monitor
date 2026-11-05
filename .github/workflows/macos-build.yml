@@ -17,6 +17,33 @@ permissions:
   contents: read
 
 jobs:
+  feedback-visual:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[tests-only]') && contains(github.event.head_commit.message, '[feedback-visual]') }}
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test feedback copy button on disposable runner
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          export AITM_FEEDBACK_SYNTHETIC_ROOT="$(mktemp -d "$RUNNER_TEMP/aitm-feedback-XXXXXXXX")"
+          export AITM_FEEDBACK_SYNTHETIC_CI=1
+          swift test --filter FeedbackAlignmentTests
+      - name: Render synthetic settings previews
+        working-directory: macos
+        run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-feedback-previews"
+      - name: Upload feedback previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-feedback-previews
+          path: ${{ runner.temp }}/aitm-feedback-previews/settings-end-*.png
+          if-no-files-found: error
+          retention-days: 7
+
   tests-only:
     if: ${{ contains(github.event.head_commit.message, '[tests-only]') }}
     runs-on: ${{ contains(github.event.head_commit.message, '[macos26]') && 'macos-26' || 'macos-15' }}

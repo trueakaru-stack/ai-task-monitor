@@ -305,12 +305,19 @@ struct SettingsView: View {
                                     .tint(.accentColor)
                                     .fixedSize(horizontal: true, vertical: false)
                                     .accessibilityLabel(tr("Адрес для отзывов и предложений: \(FeedbackDraft.email)", "Feedback email address: \(FeedbackDraft.email)"))
-                                Button { feedbackCopyError = !FeedbackDraft.copyAddress() } label: {
-                                    Image(systemName: "doc.on.doc")
-                                        .frame(width: 28, height: 28, alignment: .leading)
-                                        .foregroundStyle(MonitorTheme.secondary)
-                                }
-                                .accessibilityLabel(tr("Скопировать адрес", "Copy email address"))
+                                // Keep the symbol in its original layout position while centering its button.
+                                Image(systemName: "doc.on.doc")
+                                    .hidden()
+                                    .frame(height: 28)
+                                    .overlay {
+                                        Button { feedbackCopyError = !FeedbackDraft.copyAddress() } label: {
+                                            Image(systemName: "doc.on.doc")
+                                                .frame(width: 28, height: 28)
+                                                .contentShape(Rectangle())
+                                                .foregroundStyle(MonitorTheme.secondary)
+                                        }
+                                        .accessibilityLabel(tr("Скопировать адрес", "Copy email address"))
+                                    }
                                 Spacer(minLength: 0)
                             }
                             if feedbackCopyError {
