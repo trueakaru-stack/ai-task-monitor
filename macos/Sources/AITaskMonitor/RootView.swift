@@ -83,14 +83,18 @@ struct RootView: View {
                 }
                 Spacer()
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(store.filteredTasks) { task in TaskCardView(task: task, showProvider: store.providers.count > 1) }
+                GeometryReader { geometry in
+                    let scrollerWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+                    ScrollView {
+                        LazyVStack(spacing: 12) {
+                            ForEach(store.filteredTasks) { task in TaskCardView(task: task, showProvider: store.providers.count > 1) }
+                        }
+                        .padding(.leading, 20)
+                        .padding(.trailing, max(0, 20 - scrollerWidth))
+                        .padding(.top, 16)
+                        .frame(width: max(0, geometry.size.width - scrollerWidth), alignment: .leading)
+                        .background(OverlayScrollerProbe(alwaysVisible: true).frame(width: 0, height: 0))
                     }
-                    .padding(.leading, 20)
-                    .padding(.trailing, max(0, 20 - NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)))
-                    .padding(.top, 16)
-                    .background(OverlayScrollerProbe(alwaysVisible: true).frame(width: 0, height: 0))
                 }
             }
             Button {

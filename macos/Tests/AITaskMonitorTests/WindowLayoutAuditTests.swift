@@ -57,6 +57,7 @@ final class WindowLayoutAuditTests: XCTestCase {
         _ = NSApplication.shared
         AppLanguage.previewOverride = .ru
         defer { AppLanguage.previewOverride = nil }
+        let baseline = ProcessInfo.processInfo.environment["AITM_LAYOUT_BASELINE"] == "1"
         var records: [[String: Any]] = []
         for theme in ["light", "dark"] {
             for scenario in ["short", "long"] {
@@ -88,6 +89,14 @@ final class WindowLayoutAuditTests: XCTestCase {
                         record["clipBounds"] = rect(scroll.contentView.convert(scroll.contentView.bounds, to: host))
                         if let document = scroll.documentView {
                             record["documentBounds"] = rect(document.convert(document.bounds, to: host))
+                            if attached && !baseline {
+                                let clipWidth = scroll.contentView.bounds.width
+                                XCTAssertGreaterThan(clipWidth, 0, "The attached task clip must have a measurable width.")
+                                XCTAssertEqual(document.bounds.width, clipWidth, accuracy: 0.5,
+                                               "The \(scenario) task document must match the visible clip width in \(theme) mode.")
+                            }
+                        } else if attached && !baseline {
+                            XCTFail("The attached \(scenario) task list must expose its document view.")
                         }
                         if let scroller = scroll.verticalScroller {
                             record["scrollerBounds"] = rect(scroller.convert(scroller.bounds, to: host))
