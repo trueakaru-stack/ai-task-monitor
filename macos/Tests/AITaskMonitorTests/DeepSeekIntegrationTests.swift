@@ -9,6 +9,32 @@ final class DeepSeekIntegrationTests: XCTestCase {
         XCTAssertFalse(DeepSeekIntegration.validScope("a"))
     }
 
+    func testDiscoversOnlyAnExistingLocalPackageAndAbsoluteHome() throws {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory.appendingPathComponent("aitm-discovery-" + UUID().uuidString, isDirectory: true)
+        try manager.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? manager.removeItem(at: root) }
+        let bin = root.appendingPathComponent("bin", isDirectory: true)
+        let assets = root.appendingPathComponent("assets", isDirectory: true)
+        let dsh = root.appendingPathComponent("node_modules/@deepseek-ai/dsh/lib", isDirectory: true)
+        let pnpm = root.appendingPathComponent("node_modules/pnpm/bin", isDirectory: true)
+        for directory in [bin, assets, dsh, pnpm] { try manager.createDirectory(at: directory, withIntermediateDirectories: true) }
+        for file in [bin.appendingPathComponent("node"), dsh.appendingPathComponent("bin.js"), pnpm.appendingPathComponent("pnpm.mjs")] {
+            try Data("fixture".utf8).write(to: file)
+            try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: file.path)
+        }
+        try Data("{}".utf8).write(to: dsh.deletingLastPathComponent().appendingPathComponent("package.json"))
+        try Data("".utf8).write(to: assets.appendingPathComponent("deepseek-setup.mjs"))
+        try manager.createSymbolicLink(at: bin.appendingPathComponent("dsh"), withDestinationURL: dsh.appendingPathComponent("bin.js"))
+        try manager.createSymbolicLink(at: bin.appendingPathComponent("pnpm"), withDestinationURL: pnpm.appendingPathComponent("pnpm.mjs"))
+        let customHome = root.appendingPathComponent("chosen-home", isDirectory: true).path
+        let context = try XCTUnwrap(DeepSeekIntegration.discover(home: root, environment: ["PATH": bin.path, "DSH_HOME": customHome], assets: assets))
+        XCTAssertEqual(context.home.standardizedFileURL, URL(fileURLWithPath: customHome).standardizedFileURL)
+        XCTAssertEqual(context.installAnchor.lastPathComponent, "package.json")
+        XCTAssertEqual(context.pnpmScript.lastPathComponent, "pnpm.mjs")
+        XCTAssertNil(DeepSeekIntegration.discover(home: root, environment: ["PATH": bin.path, "DSH_HOME": "relative"], assets: assets))
+    }
+
     func testIsolatedUpstreamConnectionBridge() throws {
         let environment = ProcessInfo.processInfo.environment
         guard let anchorPath = environment["AITM_DSH_ANCHOR"], let pnpmPath = environment["AITM_PNPM_SCRIPT"],
