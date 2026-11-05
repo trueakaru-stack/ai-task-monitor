@@ -9,5 +9,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Prototype.csproj" />
+    <None Update="Fixtures\macos-tab-paths.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

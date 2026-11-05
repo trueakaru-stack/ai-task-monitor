@@ -1307,14 +1307,58 @@ function Squircle-Geometry([double]$width,[double]$height,[double]$radius,[doubl
  return $geometry
 }
 
+# The exported SwiftUI continuous corners are available for the current tab
+# heights only. Other sizes retain the previous Windows contour.
+function Add-ProviderTabCubic($figure,[double]$x1,[double]$y1,[double]$x2,[double]$y2,[double]$x3,[double]$y3) {
+ $figure.Segments.Add([Windows.Media.BezierSegment]::new([Windows.Point]::new($x1,$y1),[Windows.Point]::new($x2,$y2),[Windows.Point]::new($x3,$y3),$true))
+}
+function Provider-TabGeometry([double]$width,[double]$height,[double]$radius) {
+ if($height -eq 42 -and $radius -eq 14){
+  $xl=21.401309251785278;$yl=21.0;$xc1=15.238860130310059;$xc2=12.157698154449463
+  $yc1=15.14132285118103;$yc2=12.120952486991882;$n=1.0487596094608307;$f=8.84091579914093
+  $dn=2.3668400943279266;$df=5.2195361852645874;$fallback=0.56
+ }elseif($height -eq 34 -and $radius -eq 10){
+  $xl=15.286649465560913;$yl=15.286649465560913;$xc1=10.884900093078613;$xc2=8.684070110321045
+  $yc1=10.884900093078613;$yc2=8.684070110321045;$n=0.7491140067577362;$f=6.314939856529236
+  $dn=1.6906000673770905;$df=3.728240132331848;$fallback=0.60
+ }else{
+  $fallback=if($radius -eq 14){0.56}else{0.60}
+  return Squircle-Geometry $width $height $radius 0 $fallback
+ }
+ if([double]::IsNaN($width) -or [double]::IsInfinity($width) -or $width -lt (2*$xl)){
+  return Squircle-Geometry $width $height $radius 0 $fallback
+ }
+ $figure=New-Object Windows.Media.PathFigure
+ $figure.StartPoint=[Windows.Point]::new($width,$height/2);$figure.IsClosed=$true
+ $figure.Segments.Add([Windows.Media.LineSegment]::new([Windows.Point]::new($width,($height-$yl)),$true))
+ Add-ProviderTabCubic $figure $width ($height-$yc1) $width ($height-$yc2) ($width-$n) ($height-$f)
+ Add-ProviderTabCubic $figure ($width-$dn) ($height-$df) ($width-$df) ($height-$dn) ($width-$f) ($height-$n)
+ Add-ProviderTabCubic $figure ($width-$xc2) $height ($width-$xc1) $height ($width-$xl) $height
+ $figure.Segments.Add([Windows.Media.LineSegment]::new([Windows.Point]::new($xl,$height),$true))
+ Add-ProviderTabCubic $figure $xc1 $height $xc2 $height $f ($height-$n)
+ Add-ProviderTabCubic $figure $df ($height-$dn) $dn ($height-$df) $n ($height-$f)
+ Add-ProviderTabCubic $figure 0 ($height-$yc2) 0 ($height-$yc1) 0 ($height-$yl)
+ $figure.Segments.Add([Windows.Media.LineSegment]::new([Windows.Point]::new(0,$yl),$true))
+ Add-ProviderTabCubic $figure 0 $yc1 0 $yc2 $n $f
+ Add-ProviderTabCubic $figure $dn $df $df $dn $f $n
+ Add-ProviderTabCubic $figure $xc2 0 $xc1 0 $xl 0
+ $figure.Segments.Add([Windows.Media.LineSegment]::new([Windows.Point]::new(($width-$xl),0),$true))
+ Add-ProviderTabCubic $figure ($width-$xc1) 0 ($width-$xc2) 0 ($width-$f) $n
+ Add-ProviderTabCubic $figure ($width-$df) $dn ($width-$dn) $df ($width-$n) $f
+ Add-ProviderTabCubic $figure $width $yc2 $width $yc1 $width $yl
+ $geometry=New-Object Windows.Media.PathGeometry
+ $geometry.Figures.Add($figure)
+ return $geometry
+}
+
 function Update-SquircleGeometry {
  if($windowFrame.ActualWidth -gt 0 -and $windowFrame.ActualHeight -gt 0){
   $windowFrame.Clip=Squircle-Geometry $windowFrame.ActualWidth $windowFrame.ActualHeight 16 0
   $windowOutline.Data=Squircle-Geometry $windowFrame.ActualWidth $windowFrame.ActualHeight 16 0.5
  }
  if($providerTabsHost.ActualWidth -gt 0 -and $providerTabsHost.ActualHeight -gt 0){
-  $providerTabsShape.Data=Squircle-Geometry $providerTabsHost.ActualWidth $providerTabsHost.ActualHeight $script:providerTabsRadius 0 0.56
-  $providerTabsHost.Clip=Squircle-Geometry $providerTabsHost.ActualWidth $providerTabsHost.ActualHeight $script:providerTabsRadius 0 0.56
+  $providerTabsShape.Data=Provider-TabGeometry $providerTabsHost.ActualWidth $providerTabsHost.ActualHeight $script:providerTabsRadius
+  $providerTabsHost.Clip=Provider-TabGeometry $providerTabsHost.ActualWidth $providerTabsHost.ActualHeight $script:providerTabsRadius
  }
 }
 
@@ -3533,7 +3577,7 @@ function Add-ProviderTab([string]$id,[string]$label,[int]$count){
  $surfaceGrid.Children.Add($contentBorder)|Out-Null
  $button.Content=$surfaceGrid
  $button.DataContext=$tabShape
- $button.Add_SizeChanged({param($sender,$args) if($sender.ActualWidth -gt 0 -and $sender.ActualHeight -gt 0){$sender.DataContext.Data=Squircle-Geometry $sender.ActualWidth $sender.ActualHeight $script:providerTabRadius 0 0.60}})
+ $button.Add_SizeChanged({param($sender,$args) if($sender.ActualWidth -gt 0 -and $sender.ActualHeight -gt 0){$sender.DataContext.Data=Provider-TabGeometry $sender.ActualWidth $sender.ActualHeight $script:providerTabRadius}})
  $button.Add_GotKeyboardFocus({param($sender,$args) $sender.BringIntoView()})
  $button.Add_MouseEnter({param($sender,$args) if($script:selectedProvider -ne [string]$sender.Tag){$sender.DataContext.Fill=Brush $script:palette.Hover}})
  $button.Add_MouseLeave({param($sender,$args) if($script:selectedProvider -ne [string]$sender.Tag){$sender.DataContext.Fill=[Windows.Media.Brushes]::Transparent}})

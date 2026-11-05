@@ -6,12 +6,12 @@ namespace AITaskMonitor.Prototype;
 // Port of Squircle-Geometry in the published Windows interface, revision 1c44076.
 internal static class Squircle
 {
-    public static Geometry Create(double width, double height, double radius, double inset = 0)
+    public static Geometry Create(double width, double height, double radius, double inset = 0, double curve = 0.72)
     {
         double left = inset, top = inset;
         double right = Math.Max(left, width - inset), bottom = Math.Max(top, height - inset);
         double r = Math.Min(radius, Math.Min((right - left) / 2, (bottom - top) / 2));
-        double k = r * 0.72;
+        double k = r * curve;
         var figure = new PathFigure { StartPoint = new Point(left + r, top), IsClosed = true };
         figure.Segments.Add(new LineSegment(new Point(right - r, top), true));
         figure.Segments.Add(new BezierSegment(new Point(right - r + k, top), new Point(right, top + r - k), new Point(right, top + r), true));

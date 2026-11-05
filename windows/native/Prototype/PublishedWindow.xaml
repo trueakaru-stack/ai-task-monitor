@@ -155,7 +155,7 @@
   </Style>
   <Style x:Key="ProviderTabStyle" TargetType="Button">
    <Setter Property="Height" Value="34"/><Setter Property="Padding" Value="13,0"/><Setter Property="Margin" Value="0,0,4,0"/>
-   <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/><Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="BorderThickness" Value="0"/><Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocusStyle}"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
     <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
    </ControlTemplate></Setter.Value></Setter>
@@ -243,9 +243,9 @@
      <Grid Margin="20,18,20,17">
       <StackPanel x:Name="TaskHeaderStack">
        <TextBlock Text="Ход выполнения" FontFamily="Segoe UI Variable Display Semibold" FontSize="22" Foreground="{DynamicResource TextPrimary}"/>
-       <Grid x:Name="ProviderTabsHost" Visibility="Collapsed" Margin="0,13,0,0" HorizontalAlignment="Left" MaxWidth="{Binding ActualWidth, ElementName=TaskHeaderStack}">
-        <Path x:Name="ProviderTabsShape" Fill="{DynamicResource SurfaceRaised}"/>
-        <Border Padding="3"><ScrollViewer x:Name="ProviderTabsScroll" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled" CanContentScroll="False" PanningMode="HorizontalOnly" Focusable="False"><StackPanel x:Name="ProviderTabsPanel" Orientation="Horizontal"/></ScrollViewer></Border>
+       <Grid x:Name="ProviderTabsHost" Visibility="Collapsed" Margin="0,16,0,0" HorizontalAlignment="Stretch" MaxWidth="{Binding ActualWidth, ElementName=TaskHeaderStack}">
+        <Path x:Name="ProviderTabsShape" Fill="{DynamicResource Track}" Opacity="0.36"/>
+        <Border Padding="4"><ScrollViewer x:Name="ProviderTabsScroll" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled" CanContentScroll="False" PanningMode="HorizontalOnly" Focusable="False"><StackPanel x:Name="ProviderTabsPanel" Orientation="Horizontal"/></ScrollViewer></Border>
        </Grid>
       </StackPanel>
      </Grid>

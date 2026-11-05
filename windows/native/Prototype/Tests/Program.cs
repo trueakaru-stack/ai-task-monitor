@@ -21,6 +21,15 @@ internal static class Program
                     foreach (string scene in SyntheticProviderScenarios.Names)
                         CheckScenario(scene, language, theme);
             CheckSelection();
+            CheckLegacyDemoLanguage();
+            CheckExternalTaskText();
+            string? configuredContourReference = Environment.GetEnvironmentVariable("AITM_MAC_CONTOUR_REFERENCE");
+            string contourReference = string.IsNullOrEmpty(configuredContourReference)
+                ? Path.Combine(AppContext.BaseDirectory, "Fixtures", "macos-tab-paths.json")
+                : configuredContourReference;
+            ContourChecks.Run(contourReference);
+            string? captureDirectory = Environment.GetEnvironmentVariable("AITM_TAB_CAPTURE_DIRECTORY");
+            if (!string.IsNullOrEmpty(captureDirectory)) CaptureTabStates(captureDirectory);
             application.Shutdown();
             Console.WriteLine($"Synthetic event-to-state-to-WPF checks passed: {checks} assertions.");
             return 0;
@@ -119,6 +128,132 @@ internal static class Program
             Check(Visible<TextBlock>(window).Any(text => text.Text == "OpenCode task"), "The newly selected task is not rendered.");
         }
         finally { window.Close(); }
+    }
+
+    private static void CheckLegacyDemoLanguage()
+    {
+        SampleTask[]? russian = null;
+        foreach (string language in new[] { "ru", "en" })
+        {
+            var (window, controller) = Open("active", language, "light");
+            try
+            {
+                var tasks = controller.CurrentTasks.ToArray();
+                Check(tasks.Length == 2, "The demo must contain two tasks.");
+                SampleTask codex = tasks.Single(task => task.Provider == "codex");
+                SampleTask claude = tasks.Single(task => task.Provider == "claude");
+                if (language == "ru")
+                {
+                    Check(codex.Title == "Создать индикатор прогресса задач" && claude.Title == "Задача Claude Code", "The Russian demo changed.");
+                    russian = tasks;
+                }
+                else
+                {
+                    Check(codex.Title == "Create a task progress indicator" && claude.Title == "Claude Code task", "English demo titles were not translated.");
+                    Check(codex.Activity.StartsWith("Checking plan cards", StringComparison.Ordinal) && claude.Activity == "Running visual checks", "English demo activity was not translated.");
+                    Check(codex.Steps[0].Title == "Synchronize the task list" && claude.Steps[0].Title == "Check the local environment", "English demo steps were not translated.");
+                    var texts = tasks.SelectMany(task => new[] { task.Title, task.Activity }.Concat(task.Steps.Select(step => step.Title)));
+                    Check(!texts.Any(text => text.Any(ch => ch >= '\u0400' && ch <= '\u052f')), "English demo contains untranslated task text.");
+                    Check(russian is not null && russian.Zip(tasks).All(pair => pair.First.Progress == pair.Second.Progress &&
+                        pair.First.Status == pair.Second.Status && pair.First.Steps.Select(step => step.Status).SequenceEqual(pair.Second.Steps.Select(step => step.Status))),
+                        "Translating demo text changed its state or progress.");
+                    var rendered = Visible<TextBlock>(window).Select(text => text.Text).ToArray();
+                    Check(rendered.Contains(codex.Title) && rendered.Contains(claude.Title), "English demo titles were not rendered.");
+                }
+            }
+            finally { window.Close(); }
+        }
+    }
+
+    private static void CheckExternalTaskText()
+    {
+        var (window, controller) = Open("active", "en", "dark");
+        try
+        {
+            const string title = "Мой настоящий заголовок";
+            const string activity = "Моё собственное описание";
+            var tasks = controller.CurrentTasks.Select(task => task.Provider == "claude"
+                ? task with { Title = title, Activity = activity, Steps = [new SampleStep("Мой этап", "active")] }
+                : task).ToList();
+            Type type = typeof(PrototypeWindow);
+            type.GetField("samples", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(controller, tasks);
+            type.GetMethod("Render", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(controller, null);
+            window.UpdateLayout();
+            var rendered = Visible<TextBlock>(window).Select(text => text.Text).ToArray();
+            Check(rendered.Contains(title) && rendered.Contains(activity) && rendered.Contains("Мой этап"), "Source task text was changed in the English expanded view.");
+            Click((Button)window.FindName("MinimizeButton"));
+            var dots = (StackPanel)window.FindName("CompactDotsPanel");
+            Button claudeDot = (Button)dots.Children[1];
+            Check(System.Windows.Automation.AutomationProperties.GetName(claudeDot) == "Show task: " + title, "Accessible task name was changed.");
+            Click(claudeDot);
+            window.UpdateLayout();
+            rendered = Visible<TextBlock>(window).Select(text => text.Text).ToArray();
+            Check(rendered.Contains(title) && rendered.Contains(activity), "Source task text was changed in the English compact view.");
+        }
+        finally { window.Close(); }
+    }
+
+    private static void CaptureTabStates(string directory)
+    {
+        foreach (string language in new[] { "ru", "en" })
+        foreach (string theme in new[] { "light", "dark" })
+        {
+            var (window, controller) = Open("active", language, theme);
+            try
+            {
+                window.Width = 616; window.Height = 756;
+                window.UpdateLayout();
+                var host = (Grid)window.FindName("ProviderTabsHost");
+                var tabs = (StackPanel)window.FindName("ProviderTabsPanel");
+                Check(tabs.Children.Count == 3, "Expected three tabs for the two-provider case.");
+                Check(tabs.Children.OfType<Button>().Select(button => button.Width).Distinct().Count() == 1,
+                    "The two-provider tabs are not equally wide.");
+                Check(Math.Abs(host.ActualHeight - 42) < 1e-8, "Unexpected tab track height.");
+                SaveCapture(window, Path.Combine(directory, $"{theme}-{language}-all.png"));
+                Click(tabs.Children.OfType<Button>().Single(button => (string)button.Tag == "claude"));
+                window.UpdateLayout();
+                Check(controller.SelectedProvider == "claude", "Claude filter was not selected.");
+                SaveCapture(window, Path.Combine(directory, $"{theme}-{language}-claude.png"));
+                var definitions = new (string Id, string Name)[] { ("codex", "Codex"), ("claude", "Claude Code"),
+                    ("kimi", "Kimi Code"), ("deepseek", "DeepSeek Harness"), ("hermes", "Hermes Agent"), ("opencode", "OpenCode") };
+                SampleTask template = controller.CurrentTasks[0];
+                var synthetic = definitions.Select(provider => template with
+                {
+                    Id = "test-" + provider.Id, Provider = provider.Id, ProviderName = provider.Name,
+                    Title = provider.Name + " task"
+                }).ToList();
+                Type controllerType = typeof(PrototypeWindow);
+                controllerType.GetField("samples", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(controller, synthetic);
+                controllerType.GetField("selectedProvider", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(controller, "all");
+                controllerType.GetMethod("Render", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(controller, null);
+                window.UpdateLayout();
+                var scroll = (ScrollViewer)window.FindName("ProviderTabsScroll");
+                Check(tabs.Children.Count == 7 && scroll.ScrollableWidth > 0, "Six providers did not produce scrollable tabs.");
+                SaveCapture(window, Path.Combine(directory, $"{theme}-{language}-six-start.png"));
+                scroll.ScrollToEnd();
+                window.UpdateLayout();
+                Click(tabs.Children.OfType<Button>().Single(button => (string)button.Tag == "opencode"));
+                window.Dispatcher.Invoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, new Action(() => { }));
+                window.UpdateLayout();
+                Check(controller.SelectedProvider == "opencode", "Scrolling changed the selected provider.");
+                Check(scroll.HorizontalOffset > 0, "Scrolling to the final provider did not persist.");
+                SaveCapture(window, Path.Combine(directory, $"{theme}-{language}-six-end.png"));
+            }
+            finally { window.Close(); }
+        }
+    }
+
+    private static void SaveCapture(Window window, string path)
+    {
+        window.Dispatcher.Invoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, new Action(() => { }));
+        window.UpdateLayout();
+        var image = new System.Windows.Media.Imaging.RenderTargetBitmap((int)Math.Ceiling(window.ActualWidth),
+            (int)Math.Ceiling(window.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+        image.Render(window);
+        var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+        encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(image));
+        using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        encoder.Save(output);
     }
 
     private static (Window Window, PrototypeWindow Controller) Open(string scene, string language, string theme)

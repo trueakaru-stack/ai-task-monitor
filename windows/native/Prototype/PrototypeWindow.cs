@@ -21,6 +21,7 @@ internal sealed class PrototypeWindow
     private readonly Grid tabsHost;
     private readonly ShapePath tabsShape;
     private readonly StackPanel tabs;
+    private readonly ScrollViewer tabsScroll;
     private readonly StackPanel tasks;
     private readonly StackPanel compactTasks;
     private readonly StackPanel dots;
@@ -37,6 +38,8 @@ internal sealed class PrototypeWindow
     private readonly Dictionary<string, long> taskPriority = new(StringComparer.Ordinal);
     private long taskPriorityCounter;
     private bool showProviderLabels;
+    private bool equalProviderWidths;
+    private string lastRenderedProvider = "";
 
     public PrototypeWindow(Window window, Options options)
     {
@@ -49,6 +52,7 @@ internal sealed class PrototypeWindow
         tabsHost = Find<Grid>("ProviderTabsHost");
         tabsShape = Find<ShapePath>("ProviderTabsShape");
         tabs = Find<StackPanel>("ProviderTabsPanel");
+        tabsScroll = Find<ScrollViewer>("ProviderTabsScroll");
         tasks = Find<StackPanel>("TasksPanel");
         compactTasks = Find<StackPanel>("CompactTasksPanel");
         dots = Find<StackPanel>("CompactDotsPanel");
@@ -62,6 +66,13 @@ internal sealed class PrototypeWindow
         if (options.Language == "en") TranslateVisibleStaticText(window);
 
         frame.SizeChanged += (_, _) => UpdateShapes();
+        tabsHost.SizeChanged += (_, _) => { SizeTabs(); UpdateShapes(); };
+        tabsScroll.PreviewMouseWheel += (_, e) =>
+        {
+            if (tabsScroll.ScrollableWidth <= 0) return;
+            tabsScroll.ScrollToHorizontalOffset(tabsScroll.HorizontalOffset - e.Delta);
+            e.Handled = true;
+        };
         tasksScroll.ScrollChanged += (_, _) =>
         {
             tasksScrollBar.Maximum = tasksScroll.ScrollableHeight;
@@ -85,7 +96,7 @@ internal sealed class PrototypeWindow
         Find<Button>("SettingsFooterButton").Focusable = false;
         if (options.Scene == "active")
         {
-            samples = LegacySamples();
+            samples = LegacySamples(options.Language);
             compactSelection = samples[0].Id;
         }
         else if (options.Scene != "empty")
@@ -100,8 +111,9 @@ internal sealed class PrototypeWindow
     private T Find<T>(string name) where T : class => window.FindName(name) as T
         ?? throw new InvalidOperationException($"Published layout is missing {name}.");
 
-    private static List<SampleTask> LegacySamples()
+    private static List<SampleTask> LegacySamples(string language)
     {
+        string DemoText(string ru, string en) => language == "en" ? en : ru;
         static SampleTask Task(string id, string name, string title, string activity, int progress, int active, string[] steps)
         {
             var result = steps.Select((text, index) => new SampleStep(text,
@@ -111,12 +123,12 @@ internal sealed class PrototypeWindow
         }
         return
         [
-            Task("codex", "Codex", "Создать индикатор прогресса задач",
-                "Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний",
+            Task("codex", "Codex", DemoText("Создать индикатор прогресса задач", "Create a task progress indicator"),
+                DemoText("Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний", "Checking plan cards, source filters, scrolling, the light theme and long descriptions before release"),
                 50, 5,
-                ["Синхронизировать список задач", "Восстановить карточки планов", "Исправить прокрутку этапов", "Применить системный акцент", "Проверить скругления и фокус", "Снять тёмный и светлый экран", "Провести финальную проверку", "Опубликовать исходники"]),
-            Task("claude", "Claude Code", "Задача Claude Code", "Запускаю визуальную проверку", 33, 3,
-                ["Проверить локальное окружение", "Подготовить тестовые данные", "Запустить визуальную проверку", "Проверить светлую тему", "Зафиксировать результат", "Очистить временные данные"])
+                [DemoText("Синхронизировать список задач", "Synchronize the task list"), DemoText("Восстановить карточки планов", "Restore plan cards"), DemoText("Исправить прокрутку этапов", "Fix step scrolling"), DemoText("Применить системный акцент", "Apply the system accent"), DemoText("Проверить скругления и фокус", "Check corners and focus"), DemoText("Снять тёмный и светлый экран", "Capture dark and light screens"), DemoText("Провести финальную проверку", "Run final checks"), DemoText("Опубликовать исходники", "Publish the source")]),
+            Task("claude", "Claude Code", DemoText("Задача Claude Code", "Claude Code task"), DemoText("Запускаю визуальную проверку", "Running visual checks"), 33, 3,
+                [DemoText("Проверить локальное окружение", "Check the local environment"), DemoText("Подготовить тестовые данные", "Prepare test data"), DemoText("Запустить визуальную проверку", "Run visual checks"), DemoText("Проверить светлую тему", "Check the light theme"), DemoText("Зафиксировать результат", "Record the result"), DemoText("Очистить временные данные", "Clear temporary data")])
         ];
     }
 
@@ -236,8 +248,8 @@ internal sealed class PrototypeWindow
         }
         if (tabsHost.ActualWidth > 0 && tabsHost.ActualHeight > 0)
         {
-            tabsShape.Data = Squircle.Create(tabsHost.ActualWidth, tabsHost.ActualHeight, 12);
-            tabsHost.Clip = Squircle.Create(tabsHost.ActualWidth, tabsHost.ActualHeight, 12);
+            tabsShape.Data = TabContour.Create(tabsHost.ActualWidth, tabsHost.ActualHeight, 14);
+            tabsHost.Clip = TabContour.Create(tabsHost.ActualWidth, tabsHost.ActualHeight, 14);
         }
     }
 
@@ -273,7 +285,6 @@ internal sealed class PrototypeWindow
         TextWrapping = TextWrapping.Wrap, LineHeight = size * 1.35
     };
 
-    private string Title(SampleTask task) => options.Language == "en" && task.Provider == "claude" ? "Claude Code task" : task.Title;
     private string Progress(SampleTask task)
     {
         if (task.Steps.Length == 0 || !task.PlanConfirmed || task.Status == "unknown") return "";
@@ -289,10 +300,14 @@ internal sealed class PrototypeWindow
 
     private void Render()
     {
+        double oldTabOffset = tabsScroll.HorizontalOffset;
+        string? focusedTab = tabs.Children.OfType<Button>().FirstOrDefault(button => button.IsKeyboardFocusWithin)?.Tag as string;
         tasks.Children.Clear(); tabs.Children.Clear(); compactTasks.Children.Clear(); dots.Children.Clear();
         var providers = samples.Select(task => task.Provider).Distinct(StringComparer.Ordinal).ToHashSet(StringComparer.Ordinal);
         showProviderLabels = providers.Count >= 2;
+        equalProviderWidths = providers.Count == 2;
         tabsHost.Visibility = showProviderLabels ? Visibility.Visible : Visibility.Collapsed;
+        if (!showProviderLabels) selectedProvider = "all";
         if (selectedProvider != "all" && !providers.Contains(selectedProvider)) selectedProvider = "all";
         if (samples.Count == 0)
         {
@@ -310,6 +325,15 @@ internal sealed class PrototypeWindow
             foreach (var provider in ProviderOrder.Where(provider => providers.Contains(provider.Id)))
                 AddTab(provider.Id, provider.Name, samples.Count(task => task.Active && task.Provider == provider.Id));
             tabs.Children[^1].SetValue(FrameworkElement.MarginProperty, new Thickness(0));
+            SizeTabs();
+            tabsHost.UpdateLayout();
+            tabsScroll.ScrollToHorizontalOffset(oldTabOffset);
+            if (lastRenderedProvider != selectedProvider)
+                tabs.Children.OfType<Button>().FirstOrDefault(button => (string)button.Tag == selectedProvider)?.BringIntoView();
+            if (focusedTab is not null)
+                tabs.Children.OfType<Button>().FirstOrDefault(button => (string)button.Tag == focusedTab)?.Focus();
+            lastRenderedProvider = selectedProvider;
+            UpdateShapes();
         }
         foreach (SampleTask task in samples.Where(t => selectedProvider == "all" || t.Provider == selectedProvider)) AddCard(task);
         SampleTask[] visible = samples.Take(3).ToArray();
@@ -321,6 +345,13 @@ internal sealed class PrototypeWindow
         compactMore.Visibility = remaining > 0 ? Visibility.Visible : Visibility.Collapsed;
         compactMore.Text = remaining > 0 ? (options.Language == "en" ? $"{remaining} more tasks" : $"Ещё {remaining} задач") : "";
         if (compact) window.Height = CompactHeight();
+    }
+
+    private void SizeTabs()
+    {
+        if (!equalProviderWidths || tabs.Children.Count != 3 || tabsHost.ActualWidth <= 0) return;
+        double width = Math.Max(0, tabsHost.ActualWidth - 8 - 8) / 3;
+        foreach (Button button in tabs.Children) button.Width = width;
     }
 
     private double CompactHeight()
@@ -336,11 +367,11 @@ internal sealed class PrototypeWindow
     {
         var button = new Button { Style = (Style)window.Resources["ProviderTabStyle"], Tag = id };
         bool selected = selectedProvider == id;
-        Brush foreground = selected ? AccentText : ColorFor("Secondary");
+        Brush foreground = ColorFor("Primary");
         var surface = new Grid();
-        var shape = new ShapePath { Fill = selected ? AccentBrush : Brushes.Transparent, IsHitTestVisible = false };
+        var shape = new ShapePath { Fill = selected ? ColorFor("Surface") : Brushes.Transparent, IsHitTestVisible = false };
         surface.Children.Add(shape);
-        var content = new Grid();
+        var content = new Grid { HorizontalAlignment = HorizontalAlignment.Center };
         content.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         content.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var title = Text(label, 13, "Secondary", true); title.Foreground = foreground; title.VerticalAlignment = VerticalAlignment.Center; title.TextWrapping = TextWrapping.NoWrap;
@@ -348,7 +379,7 @@ internal sealed class PrototypeWindow
         Grid.SetColumn(number, 1); content.Children.Add(title); content.Children.Add(number);
         surface.Children.Add(new Border { Padding = new Thickness(13, 0, 13, 0), Child = content });
         button.Content = surface;
-        button.SizeChanged += (_, _) => shape.Data = Squircle.Create(button.ActualWidth, button.ActualHeight, 9);
+        button.SizeChanged += (_, _) => shape.Data = TabContour.Create(button.ActualWidth, button.ActualHeight, 10);
         button.GotKeyboardFocus += (_, _) => button.BringIntoView();
         button.MouseEnter += (_, _) => { if (selectedProvider != id) shape.Fill = ColorFor("Hover"); };
         button.MouseLeave += (_, _) => { if (selectedProvider != id) shape.Fill = Brushes.Transparent; };
@@ -397,7 +428,7 @@ internal sealed class PrototypeWindow
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         var titleStack = new StackPanel();
-        var title = Text(Title(task), 16, "Primary", true); title.Margin = new Thickness(0, 0, 14, 0); title.Height = 22; title.MaxWidth = 390; title.HorizontalAlignment = HorizontalAlignment.Left; title.TextWrapping = TextWrapping.NoWrap; title.TextTrimming = TextTrimming.CharacterEllipsis;
+        var title = Text(task.Title, 16, "Primary", true); title.Margin = new Thickness(0, 0, 14, 0); title.Height = 22; title.MaxWidth = 390; title.HorizontalAlignment = HorizontalAlignment.Left; title.TextWrapping = TextWrapping.NoWrap; title.TextTrimming = TextTrimming.CharacterEllipsis;
         titleStack.Children.Add(title); titleStack.Children.Add(ActivityRow(task, false));
         var progress = Text(Progress(task), 16, "Primary", true); progress.Height = 22; progress.VerticalAlignment = VerticalAlignment.Top; Grid.SetColumn(progress, 1);
         header.Children.Add(titleStack); header.Children.Add(progress); stack.Children.Add(header);
@@ -453,7 +484,7 @@ internal sealed class PrototypeWindow
         var container = new Grid { Margin = new Thickness(0, 0, 0, 10) };
         for (int i = 0; i < 4; i++) container.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var header = new Grid(); header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(12) }); header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var title = Text(Title(task), 16, "Primary", true); title.TextWrapping = TextWrapping.NoWrap; title.TextTrimming = TextTrimming.CharacterEllipsis; title.Margin = new Thickness(0, 0, 10, 0); Grid.SetColumn(title, 1);
+        var title = Text(task.Title, 16, "Primary", true); title.TextWrapping = TextWrapping.NoWrap; title.TextTrimming = TextTrimming.CharacterEllipsis; title.Margin = new Thickness(0, 0, 10, 0); Grid.SetColumn(title, 1);
         var progress = Text(Progress(task), 16, "Primary", true); progress.VerticalAlignment = VerticalAlignment.Center; Grid.SetColumn(progress, 2);
         header.Children.Add(title); header.Children.Add(progress); container.Children.Add(header);
         var row = ActivityRow(task, true); Grid.SetRow(row, 1); container.Children.Add(row);
@@ -474,7 +505,7 @@ internal sealed class PrototypeWindow
         var dot = new Border { Width = 7, Height = 7, CornerRadius = new CornerRadius(3.5), Background = task.Id == compactSelection ? AccentBrush : ColorFor("Scroll") };
         var button = new Button { Style = (Style)window.Resources["CompactDotStyle"], Content = dot };
         AutomationProperties.SetAutomationId(button, "SampleTask-" + index);
-        AutomationProperties.SetName(button, (options.Language == "en" ? "Show task: " : "Показать задачу: ") + Title(task));
+        AutomationProperties.SetName(button, (options.Language == "en" ? "Show task: " : "Показать задачу: ") + task.Title);
         button.Click += (_, _) => { compactSelection = task.Id; Render(); };
         dots.Children.Add(button);
     }
