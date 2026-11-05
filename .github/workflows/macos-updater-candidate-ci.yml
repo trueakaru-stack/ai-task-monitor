@@ -107,10 +107,31 @@ jobs:
               "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-update-support" \
               /usr/bin/sandbox-exec -p "$PROFILE" "$@"
           }
+          cat > "$RUNNER_TEMP/aitm-network-deny.py" <<'PY'
+          import errno
+          import socket
+          import sys
+
+          try:
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          except OSError as error:
+              if error.errno not in (errno.EPERM, errno.EACCES):
+                  raise
+              print("Synthetic network-deny probe passed: socket creation denied")
+              sys.exit(0)
+          try:
+              result = sock.connect_ex(("127.0.0.1", 0))
+          finally:
+              sock.close()
+          if result not in (errno.EPERM, errno.EACCES):
+              sys.exit("Synthetic network-deny probe failed: loopback was not denied")
+          print("Synthetic network-deny probe passed: loopback connection denied")
+          PY
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-network-deny.py"
           cd "$TREE/macos"
           run_isolated /usr/bin/xcrun swift --version
           for suite in ReleaseUpdatesTests ReleaseRetryScheduleTests ReleaseUpdateCoordinatorTests ReleaseRequestSyntheticTests; do
-            run_isolated /usr/bin/xcrun swift test --filter "$suite"
+            run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite"
           done
           run_isolated /usr/bin/xcrun swiftc Sources/AITaskMonitor/ReleaseScheduleFileStore.swift \
             integration-tests/release-lease-fixture/main.swift -o "$RUNNER_TEMP/aitm-release-lease-fixture"
