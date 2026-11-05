@@ -12,7 +12,7 @@ final class ExternalProviderTaskMapperTests: XCTestCase {
         }
         try apply(#"{"version":1,"provider":"deepseek","session":"one","kind":"tool_started","call":"call_1","action":"command"}"#)
         try apply(#"{"version":1,"provider":"deepseek","session":"one","kind":"plan","steps":[{"title":"One","status":"done"},{"title":"Two","status":"active"}]}"#)
-        try apply(#"{"version":1,"provider":"kimi","session":"two","kind":"waiting"}"#)
+        try apply(#"{"version":1,"provider":"hermes","session":"two","kind":"waiting"}"#)
         let tasks = ExternalProviderTaskMapper.tasks(store.snapshot(now: now))
         let deep = try XCTUnwrap(tasks.first { $0.provider == .deepseek })
         XCTAssertTrue(deep.isActive)
@@ -21,7 +21,7 @@ final class ExternalProviderTaskMapperTests: XCTestCase {
         XCTAssertEqual(deep.progressKind, .exact)
         XCTAssertEqual(deep.steps.map(\.status), [.done, .active])
         XCTAssertTrue(["Выполняет команду", "Running a command"].contains(deep.activity))
-        let waiting = try XCTUnwrap(tasks.first { $0.provider == .kimi })
+        let waiting = try XCTUnwrap(tasks.first { $0.provider == .hermes })
         XCTAssertTrue(waiting.isWaiting)
         XCTAssertFalse(waiting.isActive)
         XCTAssertFalse(waiting.isUnconfirmed)
