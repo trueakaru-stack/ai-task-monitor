@@ -103,7 +103,7 @@ struct SettingsView: View {
                             Button(["connected", "partial"].contains(store.deepSeekSelectedProfile?.state ?? "") ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
                                 store.setDeepSeekConnected(store.deepSeekSelectedProfile?.state == "disconnected")
                             }
-                            .disabled(!store.deepSeekCanChange && !settingsPreviewSources)
+                            .disabled(!store.deepSeekCanChange && !(settingsPreviewSources && store.deepSeekSelectedProfile?.state != "error"))
                         }
                         if !store.deepSeekMessage.isEmpty {
                             Text(store.deepSeekMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)

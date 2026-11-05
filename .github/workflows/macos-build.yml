@@ -38,7 +38,7 @@ jobs:
       - name: Test
         working-directory: macos
         run: swift test
-      - name: Test isolated DeepSeek integration
+      - name: Test isolated agent integrations
         working-directory: macos
         run: |
           node integration-tests/Test-ExternalProviderEvents.mjs
@@ -48,6 +48,13 @@ jobs:
           node integration-tests/Test-DeepSeekIntegration.mjs "$AITM_DSH_ANCHOR" "$AITM_PNPM_SCRIPT"
           python3 -B integration-tests/test_external_provider_hooks.py
           python3 -B integration-tests/test_provider_bundle.py
+          mkdir -p "$RUNNER_TEMP/aitm-hermes-upstream/hermes_cli"
+          for file in middleware.py plugins_dispatch.py; do
+            curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+              "https://raw.githubusercontent.com/NousResearch/hermes-agent/b200f5bc60e31588ba2cb60e288029c4a54ba5fa/hermes_cli/$file" \
+              --output "$RUNNER_TEMP/aitm-hermes-upstream/hermes_cli/$file"
+          done
+          python3 -B integration-tests/Test-HermesUpstreamDispatch.py "$RUNNER_TEMP/aitm-hermes-upstream"
       - name: Render native source-status previews
         working-directory: macos
         run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/ai-task-monitor-previews"
