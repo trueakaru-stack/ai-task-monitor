@@ -24,10 +24,15 @@ enum KimiIntegration {
         let error: String?
     }
 
+    private static func physicalURL(_ url: URL, directory: Bool = false) -> URL? {
+        guard let resolved = url.path.withCString({ Darwin.realpath($0, nil) }) else { return nil }
+        defer { free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved), isDirectory: directory)
+    }
+
     static func pluginDirectory(resources: URL? = Bundle.main.resourceURL) -> URL? {
         guard let resources else { return nil }
-        let directory = resources.appendingPathComponent("integrations/kimi-plugin", isDirectory: true)
-            .resolvingSymlinksInPath().standardizedFileURL
+        guard let directory = physicalURL(resources.appendingPathComponent("integrations/kimi-plugin", isDirectory: true), directory: true) else { return nil }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
         return directory
@@ -51,16 +56,16 @@ enum KimiIntegration {
             return nil
         }
         guard let node = executable("node"), let kimi = executable("kimi") else { return nil }
-        let binary = kimi.resolvingSymlinksInPath().standardizedFileURL
+        guard let binary = physicalURL(kimi) else { return nil }
         guard binary.lastPathComponent == "main.mjs", binary.deletingLastPathComponent().lastPathComponent == "dist" else { return nil }
-        let anchor = binary.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("package.json")
-        guard manager.fileExists(atPath: anchor.path) else { return nil }
+        let anchorPath = binary.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("package.json")
+        guard let anchor = physicalURL(anchorPath) else { return nil }
         let kimiHome: URL
         if let custom = environment["KIMI_CODE_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines), !custom.isEmpty {
             guard custom.hasPrefix("/") else { return nil }
             kimiHome = URL(fileURLWithPath: custom, isDirectory: true).standardizedFileURL
         } else { kimiHome = home.appendingPathComponent(".kimi-code", isDirectory: true) }
-        return Context(node: node, home: kimiHome, assets: assets, installAnchor: anchor)
+        return Context(node: node, home: physicalURL(kimiHome, directory: true) ?? kimiHome, assets: assets, installAnchor: anchor)
     }
 
     static func inspect(_ context: Context, timeout: TimeInterval = 15) throws -> KimiConnection {
