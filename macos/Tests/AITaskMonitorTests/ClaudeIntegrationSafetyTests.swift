@@ -9,15 +9,16 @@ final class ClaudeIntegrationSafetyTests: XCTestCase {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-install-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
-        XCTAssertEqual(ClaudeIntegration.installationState(home: home, searchPath: "", includeStandardPaths: false), .notFound)
+        XCTAssertEqual(ClaudeIntegration.installationState(home: home, searchPath: "", includeStandardPaths: false, desktopAppDetected: false), .notFound)
+        XCTAssertEqual(ClaudeIntegration.installationState(home: home, searchPath: "", includeStandardPaths: false, desktopAppDetected: true), .unconfirmed)
         try FileManager.default.createDirectory(at: home.appendingPathComponent(".claude"), withIntermediateDirectories: true)
-        XCTAssertEqual(ClaudeIntegration.installationState(home: home, searchPath: "", includeStandardPaths: false), .unconfirmed)
+        XCTAssertEqual(ClaudeIntegration.installationState(home: home, searchPath: "", includeStandardPaths: false, desktopAppDetected: false), .unconfirmed)
         let bin = home.appendingPathComponent("custom-bin")
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
         let command = bin.appendingPathComponent("claude")
         try Data("synthetic".utf8).write(to: command)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: command.path)
-        XCTAssertEqual(ClaudeIntegration.installationState(home: home, searchPath: bin.path, includeStandardPaths: false), .available)
+        XCTAssertEqual(ClaudeIntegration.installationState(home: home, searchPath: bin.path, includeStandardPaths: false, desktopAppDetected: false), .available)
     }
 
     func testConnectionControlsAllowUnconfirmedProfileWithoutClaimingInstallation() {

@@ -50,21 +50,12 @@ jobs:
           node integration-tests/Test-DeepSeekIntegration.mjs "$AITM_DSH_ANCHOR" "$AITM_PNPM_SCRIPT"
           python3 -B integration-tests/test_external_provider_hooks.py
           python3 -B integration-tests/test_provider_bundle.py
-          mkdir -p "$RUNNER_TEMP/aitm-hermes-upstream/hermes_cli"
-          for file in middleware.py plugins_dispatch.py active_sessions.py; do
-            curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-              "https://raw.githubusercontent.com/NousResearch/hermes-agent/b200f5bc60e31588ba2cb60e288029c4a54ba5fa/hermes_cli/$file" \
-              --output "$RUNNER_TEMP/aitm-hermes-upstream/hermes_cli/$file"
-          done
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
+            "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/b200f5bc60e31588ba2cb60e288029c4a54ba5fa" \
+            --output "$RUNNER_TEMP/aitm-hermes-upstream.tar.gz"
+          python3 -B integration-tests/Extract-HermesFixture.py "$RUNNER_TEMP/aitm-hermes-upstream.tar.gz" "$RUNNER_TEMP/aitm-hermes-upstream"
           python3 -B integration-tests/Test-HermesUpstreamDispatch.py "$RUNNER_TEMP/aitm-hermes-upstream"
           python3 -B integration-tests/Test-HermesLiveness.py "$RUNNER_TEMP/aitm-hermes-upstream/hermes_cli/active_sessions.py"
-          python3 -c 'import ast,pathlib; t=ast.parse(pathlib.Path("integration-tests/Test-HermesPublication.py").read_text()); d=next(ast.literal_eval(n.value) for n in t.body if isinstance(n,ast.Assign) and any(isinstance(x,ast.Name) and x.id=="EXPECTED" for x in n.targets)); print("\n".join(d))' > "$RUNNER_TEMP/aitm-hermes-pm-files"
-          while IFS= read -r file; do
-            mkdir -p "$(dirname "$RUNNER_TEMP/aitm-hermes-upstream/$file")"
-            curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-              "https://raw.githubusercontent.com/NousResearch/hermes-agent/b200f5bc60e31588ba2cb60e288029c4a54ba5fa/$file" \
-              --output "$RUNNER_TEMP/aitm-hermes-upstream/$file"
-          done < "$RUNNER_TEMP/aitm-hermes-pm-files"
           python3 -m venv "$RUNNER_TEMP/aitm-hermes-pm-python"
           "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: 'ruamel.yaml==0.18.16' 'packaging==26.0'
           "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -B integration-tests/Test-HermesPublication.py "$RUNNER_TEMP/aitm-hermes-upstream"

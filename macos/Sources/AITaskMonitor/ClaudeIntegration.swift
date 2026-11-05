@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 
@@ -20,7 +21,8 @@ enum ClaudeIntegration {
 
     static func installationState(home: URL = FileManager.default.homeDirectoryForCurrentUser,
                                   searchPath: String = ProcessInfo.processInfo.environment["PATH"] ?? "",
-                                  includeStandardPaths: Bool = true) -> InstallationState {
+                                  includeStandardPaths: Bool = true,
+                                  desktopAppDetected: Bool? = nil) -> InstallationState {
         let manager = FileManager.default
         var directories = [home.appendingPathComponent(".local/bin", isDirectory: true),
                            home.appendingPathComponent(".npm-global/bin", isDirectory: true)]
@@ -32,7 +34,9 @@ enum ClaudeIntegration {
         if directories.contains(where: { manager.isExecutableFile(atPath: $0.appendingPathComponent("claude").path) }) {
             return .available
         }
-        return manager.fileExists(atPath: home.appendingPathComponent(".claude", isDirectory: true).path) ? .unconfirmed : .notFound
+        let desktopPresent = desktopAppDetected ?? (NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.anthropic.claudefordesktop") != nil)
+        let profilePresent = manager.fileExists(atPath: home.appendingPathComponent(".claude", isDirectory: true).path)
+        return profilePresent || desktopPresent ? .unconfirmed : .notFound
     }
 
     static var isConnected: Bool {
