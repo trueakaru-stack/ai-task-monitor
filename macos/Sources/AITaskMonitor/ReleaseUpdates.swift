@@ -51,7 +51,7 @@ struct ReleaseVersion: Comparable {
     }
 }
 
-struct AvailableUpdate: Equatable {
+struct AvailableUpdate: Equatable, Sendable {
     let version: String
     let url: URL
 }
@@ -79,9 +79,9 @@ enum ReleaseSelector {
         return url
     }
 
-    static func select(data: Data, currentVersion: String, platform: String = "macos") -> AvailableUpdate? {
+    static func inspect(data: Data, currentVersion: String, platform: String = "macos") -> (valid: Bool, update: AvailableUpdate?) {
         guard data.count <= maximumBytes, let current = ReleaseVersion(currentVersion),
-              let releases = try? JSONDecoder().decode([Release].self, from: data) else { return nil }
+              let releases = try? JSONDecoder().decode([Release].self, from: data) else { return (false, nil) }
         var best = current
         var update: AvailableUpdate?
         for release in releases where !release.draft {
@@ -94,56 +94,159 @@ enum ReleaseSelector {
                 }
             }
         }
-        return update
+        return (true, update)
+    }
+
+    static func select(data: Data, currentVersion: String, platform: String = "macos") -> AvailableUpdate? {
+        inspect(data: data, currentVersion: currentVersion, platform: platform).update
     }
 }
 
-// A single unauthenticated, bounded GitHub request. Delegate callbacks run on a serial queue.
-final class ReleaseRequest: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+enum ReleaseRequestOutcome {
+    case success(Data)
+    case httpFailure(ReleaseHTTPResponse)
+    case transportFailure
+    case oversized
+    case cancelled
+}
+
+protocol ReleaseRequesting: AnyObject {
+    func start() throws
+    func cancel()
+}
+
+typealias ReleaseRequestFactory = (@escaping (ReleaseRequestOutcome) -> Void) throws -> any ReleaseRequesting
+
+enum ReleaseRequestStartError: Error {
+    case alreadyStartedOrCancelled
+}
+
+// One unauthenticated, bounded request. All mutable state is protected by lock.
+final class ReleaseRequest: NSObject, URLSessionDataDelegate, ReleaseRequesting, @unchecked Sendable {
+    private let lock = NSLock()
     private var data = Data()
+    private var started = false
     private var finished = false
+    private var cancelled = false
+    private var sawSuccess = false
+    private var exceededLimit = false
+    private var httpFailure: ReleaseHTTPResponse?
     private var session: URLSession?
-    private let completion: (Data?) -> Void
+    private let endpoint: URL
+    private let makeConfiguration: () -> URLSessionConfiguration
+    private let completion: (ReleaseRequestOutcome) -> Void
 
-    init(completion: @escaping (Data?) -> Void) { self.completion = completion }
+    init(completion: @escaping (ReleaseRequestOutcome) -> Void) {
+        endpoint = URL(string: "https://api.github.com/repos/trueakaru-stack/ai-task-monitor/releases?per_page=100")!
+        makeConfiguration = { .ephemeral }
+        self.completion = completion
+    }
 
-    func start() {
-        let config = URLSessionConfiguration.ephemeral
+    #if DEBUG
+    init(testURL: URL, configuration: URLSessionConfiguration, completion: @escaping (ReleaseRequestOutcome) -> Void) {
+        endpoint = testURL
+        makeConfiguration = { configuration }
+        self.completion = completion
+    }
+    #endif
+
+    static func isolatedConfiguration(_ config: URLSessionConfiguration) -> URLSessionConfiguration {
         config.httpShouldSetCookies = false
+        config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
         config.urlCache = nil
         config.timeoutIntervalForRequest = 12
         config.timeoutIntervalForResource = 15
+        return config
+    }
+
+    func start() throws {
+        lock.lock()
+        guard !started && !cancelled && !finished else {
+            lock.unlock()
+            throw ReleaseRequestStartError.alreadyStartedOrCancelled
+        }
+        started = true
+        let config = Self.isolatedConfiguration(makeConfiguration())
         let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1
         let session = URLSession(configuration: config, delegate: self, delegateQueue: queue)
         self.session = session
-        var request = URLRequest(url: URL(string: "https://api.github.com/repos/trueakaru-stack/ai-task-monitor/releases?per_page=100")!)
+        var request = URLRequest(url: endpoint)
+        request.httpShouldHandleCookies = false
         request.setValue("AI-Task-Monitor/0.3", forHTTPHeaderField: "User-Agent")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        session.dataTask(with: request).resume()
+        let task = session.dataTask(with: request)
+        lock.unlock()
+        task.resume()
+    }
+
+    static func challengeDisposition(_ method: String, isProxy: Bool) -> URLSession.AuthChallengeDisposition {
+        method == NSURLAuthenticationMethodServerTrust || isProxy ? .performDefaultHandling : .cancelAuthenticationChallenge
+    }
+
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        completionHandler(Self.challengeDisposition(challenge.protectionSpace.authenticationMethod,
+                                                    isProxy: challenge.protectionSpace.isProxy()), nil)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        completionHandler(Self.challengeDisposition(challenge.protectionSpace.authenticationMethod,
+                                                    isProxy: challenge.protectionSpace.isProxy()), nil)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        lock.lock(); httpFailure = ReleaseHTTPResponse(response); lock.unlock()
+        completionHandler(nil)
+    }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        guard let response = response as? HTTPURLResponse, response.statusCode == 200,
-              response.expectedContentLength <= Int64(ReleaseSelector.maximumBytes) else { completionHandler(.cancel); return }
+        guard let response = response as? HTTPURLResponse else { completionHandler(.cancel); return }
+        if response.statusCode != 200 {
+            lock.lock(); httpFailure = ReleaseHTTPResponse(response); lock.unlock()
+            completionHandler(.cancel)
+            return
+        }
+        guard response.expectedContentLength <= Int64(ReleaseSelector.maximumBytes) else {
+            lock.lock(); exceededLimit = true; lock.unlock()
+            completionHandler(.cancel)
+            return
+        }
+        lock.lock(); sawSuccess = true; lock.unlock()
         completionHandler(.allow)
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive chunk: Data) {
-        guard data.count + chunk.count <= ReleaseSelector.maximumBytes else { dataTask.cancel(); return }
-        data.append(chunk)
+        lock.lock()
+        let tooLarge = chunk.count > ReleaseSelector.maximumBytes - data.count
+        if tooLarge { exceededLimit = true } else { data.append(chunk) }
+        lock.unlock()
+        if tooLarge { dataTask.cancel() }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard !finished else { return }; finished = true
-        completion(error == nil ? data : nil)
-        self.session?.finishTasksAndInvalidate(); self.session = nil
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        finished = true
+        let result: ReleaseRequestOutcome
+        if cancelled { result = .cancelled }
+        else if let httpFailure { result = .httpFailure(httpFailure) }
+        else if exceededLimit { result = .oversized }
+        else if error != nil || !sawSuccess { result = .transportFailure }
+        else { result = .success(data) }
+        let oldSession = self.session
+        self.session = nil
         data.removeAll()
+        lock.unlock()
+        completion(result)
+        oldSession?.finishTasksAndInvalidate()
     }
 
-    func cancel() { session?.invalidateAndCancel() }
+    func cancel() {
+        lock.lock(); cancelled = true; let active = session; lock.unlock()
+        active?.invalidateAndCancel()
+    }
 }

@@ -68,7 +68,7 @@ final class TaskStore: ObservableObject {
     private var nextCodexCloudScan = Date.distantPast
     private var previousCodexCloud: [CodexCloudReader.Task] = []
     private var nextClaudeRetention = Date.distantPast
-    private let updateChecksEnabled: Bool
+    private var updateCoordinator: ReleaseUpdateCoordinator?
     private let monitoringStartedAt = Date()
     private var previousCodex: [MonitoredTask] = []
     private var previousClaude: [MonitoredTask] = []
@@ -95,8 +95,6 @@ final class TaskStore: ObservableObject {
     private var claudeLoopChannel: ClaudeLoopChannel?
     private var claudeLoopDetectors: [String: ClaudeLoopTracker] = [:]
     private var timer: Timer?
-    private var lastUpdateCheck = Date.distantPast
-    private var releaseRequest: ReleaseRequest?
 
     func setOpenCodeConnected(_ connect: Bool) {
         guard !openCodeSetupInProgress else { return }
@@ -408,7 +406,10 @@ final class TaskStore: ObservableObject {
        inspectHermesProfiles: @escaping (HermesIntegration.Context) throws -> [HermesProfile] = { try HermesIntegration.profiles($0) },
        prepareHermesProfile: @escaping (HermesProfile, HermesIntegration.Context) throws -> Void = { try HermesIntegration.prepare($0, context: $1) },
        hermesScanInterval: TimeInterval = 15,
-       enableCodexCloud: Bool = false, codexCloudDefaults: UserDefaults = .standard, codexCloudInterval: TimeInterval = 30, makeCodexCloudClient: @escaping () -> CodexCloudClient? = { CodexCloudClient.discover().map { CodexCloudClient(executable: $0) } }) {
+       enableCodexCloud: Bool = false, codexCloudDefaults: UserDefaults = .standard, codexCloudInterval: TimeInterval = 30, makeCodexCloudClient: @escaping () -> CodexCloudClient? = { CodexCloudClient.discover().map { CodexCloudClient(executable: $0) } },
+       updateDefaults: UserDefaults = .standard, updateClock: ReleaseRetryClock? = nil,
+       updateFileStore: ReleaseScheduleFileStore? = nil,
+       makeReleaseRequest: @escaping ReleaseRequestFactory = { ReleaseRequest(completion: $0) }) {
         self.codexReader = codexReader
         self.claudeReader = claudeReader
         self.claudeLoopProfile = claudeLoopProfile
@@ -429,8 +430,15 @@ final class TaskStore: ObservableObject {
         self.codexCloudInterval = codexCloudInterval
         self.codexCloudEnabled = enableCodexCloud && previewTasks == nil && codexCloudDefaults.bool(forKey: "codexCloudEnabled")
         self.claudeRetentionWorker = enableClaudeRetention && previewTasks == nil ? ClaudeRetentionWorker() : nil
-        self.updateChecksEnabled = enableUpdateChecks && previewTasks == nil
+        let checksEnabled = enableUpdateChecks && previewTasks == nil
         self.diagnosticWorker = previewTasks == nil ? DiagnosticWorker(journal: journal ?? DiagnosticJournal()) : nil
+        if checksEnabled {
+            let schedule = ReleaseRetrySchedule(defaults: updateDefaults, clock: updateClock ?? .system(),
+                                                fileStore: updateFileStore ?? ReleaseScheduleFileStore(directory: AppPaths.supportDirectory))
+            self.updateCoordinator = ReleaseUpdateCoordinator(schedule: schedule, makeRequest: makeReleaseRequest) { [weak self] update in
+                self?.acceptReleaseUpdate(update)
+            }
+        }
         if let previewTasks {
             tasks = previewTasks
             return
@@ -459,7 +467,6 @@ final class TaskStore: ObservableObject {
     deinit {
         claudeRetentionWorker?.invalidate()
         timer?.invalidate()
-        releaseRequest?.cancel()
         claudeLoopChannel?.stop()
         externalRuntime?.stop()
     }
@@ -505,22 +512,19 @@ final class TaskStore: ObservableObject {
         updateOpenError = false
     }
 
-    func acceptReleaseData(_ data: Data) {
-        if let update = ReleaseSelector.select(data: data, currentVersion: AppVersion.current) { availableUpdate = update }
+    @discardableResult
+    func acceptReleaseData(_ data: Data) -> Bool {
+        let result = ReleaseSelector.inspect(data: data, currentVersion: AppVersion.current)
+        acceptReleaseUpdate(result.update)
+        return result.valid
     }
 
-    func checkForUpdates(now: Date = Date()) {
-        guard updateChecksEnabled, releaseRequest == nil, now.timeIntervalSince(lastUpdateCheck) >= 24 * 60 * 60 else { return }
-        lastUpdateCheck = now
-        let request = ReleaseRequest { [weak self] data in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.releaseRequest = nil
-                if let data { self.acceptReleaseData(data) }
-            }
-        }
-        releaseRequest = request
-        request.start()
+    func acceptReleaseUpdate(_ update: AvailableUpdate?) {
+        if let update { availableUpdate = update }
+    }
+
+    func checkForUpdates() {
+        updateCoordinator?.check()
     }
 
     func setPreviewUpdate() {

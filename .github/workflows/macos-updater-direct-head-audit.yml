@@ -1,0 +1,136 @@
+name: macOS updater direct HEAD synthetic audit
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-updater-direct-head-audit.yml"
+      - "macos/Sources/AITaskMonitor/ReleaseUpdates.swift"
+      - "macos/Sources/AITaskMonitor/ReleaseRetrySchedule.swift"
+      - "macos/Sources/AITaskMonitor/ReleaseScheduleFileStore.swift"
+      - "macos/Sources/AITaskMonitor/ReleaseUpdateCoordinator.swift"
+      - "macos/Sources/AITaskMonitor/TaskStore.swift"
+      - "macos/Tests/AITaskMonitorTests/ReleaseUpdatesTests.swift"
+      - "macos/Tests/AITaskMonitorTests/ReleaseRetryScheduleTests.swift"
+      - "macos/Tests/AITaskMonitorTests/ReleaseUpdateCoordinatorTests.swift"
+      - "macos/Tests/AITaskMonitorTests/ReleaseRequestSyntheticTests.swift"
+      - "macos/Tests/AITaskMonitorTests/ReleaseRedirectDiagnosticTests.swift"
+      - "macos/integration-tests/release-lease-fixture/main.swift"
+
+permissions:
+  contents: read
+
+jobs:
+  updater-direct-head:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[tests-only]') && contains(github.event.head_commit.message, '[updater-direct-head-audit]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Verify disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+
+      - name: Checkout the exact triggering commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: updater-direct-head
+          persist-credentials: false
+          clean: true
+
+      - name: Verify exact checkout and tested updater files
+        shell: bash
+        working-directory: updater-direct-head
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          printf '%s  %s\n' \
+            '1d7698d0f8ad5eefa9df66b3b022dd90aa3ad5de9a4d28be7f8e0495d6875f04' macos/Sources/AITaskMonitor/ReleaseUpdates.swift \
+            '86e973c78d7a1552a0a2fe822c0719be00802584ff394038fcd863d2f9231ec9' macos/Sources/AITaskMonitor/ReleaseRetrySchedule.swift \
+            '391596013fcd0cd8b5766df4fb41e90202fb42ba67b8e0b6d3703278c557d297' macos/Sources/AITaskMonitor/ReleaseScheduleFileStore.swift \
+            'ff34a7e2bc38e85c122806d866ca683869c6bbc73788310c1b127be9969c5af8' macos/Sources/AITaskMonitor/ReleaseUpdateCoordinator.swift \
+            'aeaa65e539f77fd599fc65ef1d29eccf5cb77cf80fe1cef44202620c934127be' macos/Sources/AITaskMonitor/TaskStore.swift \
+            '82fb078246d5164d61443ebc6ec7a5b744f745c07f8fb51d662f0ad33f1d0496' macos/Tests/AITaskMonitorTests/ReleaseUpdatesTests.swift \
+            'a06ad66325d9f23ea5fbca1242a50a8833e78a874c084d8eb1cc665f92913eee' macos/Tests/AITaskMonitorTests/ReleaseRetryScheduleTests.swift \
+            '16b36f9d19df4c6b8a246a532b5ded339e938b980981a6a678680b003280a887' macos/Tests/AITaskMonitorTests/ReleaseUpdateCoordinatorTests.swift \
+            'de75ff9bf942f8923d46f57b3d0aa5387b89c3e379361cea35f34c9340a75af9' macos/Tests/AITaskMonitorTests/ReleaseRequestSyntheticTests.swift \
+            '5f1d4c865e72bc9e490ca17770a614e5fa1fc38da8e7c5589ce27fc546d600a5' macos/Tests/AITaskMonitorTests/ReleaseRedirectDiagnosticTests.swift \
+            '5a6ad25a3f4105e2285cf7caef22a930f2c5ff8038c9cab8066cc2919809e675' macos/integration-tests/release-lease-fixture/main.swift \
+            | shasum -a 256 -c -
+
+      - name: Run offline synthetic suites and two-process fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          TREE="$GITHUB_WORKSPACE/updater-direct-head"
+          mkdir -p "$RUNNER_TEMP/aitm-direct-tmp" "$RUNNER_TEMP/aitm-direct-support" "$RUNNER_TEMP/aitm-direct-home"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*)'
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-direct-home" \
+              "TMPDIR=$RUNNER_TEMP/aitm-direct-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-direct-support" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          cat > "$RUNNER_TEMP/aitm-direct-network-probe.py" <<'PY'
+          import errno
+          import socket
+          import sys
+
+          try:
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          except OSError as error:
+              if error.errno not in (errno.EPERM, errno.EACCES):
+                  raise
+              print("Synthetic network-deny probe passed: socket creation denied")
+              sys.exit(0)
+          try:
+              result = sock.connect_ex(("127.0.0.1", 0))
+          finally:
+              sock.close()
+          if result not in (errno.EPERM, errno.EACCES):
+              sys.exit("Synthetic network-deny probe failed: loopback was not denied")
+          print("Synthetic network-deny probe passed: loopback connection denied")
+          PY
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-direct-network-probe.py"
+          run_isolated /usr/bin/which codesign
+          cd "$TREE/macos"
+          run_isolated /usr/bin/xcrun swift --version
+          audit_status=0
+          for entry in ReleaseUpdatesTests:5 ReleaseRetryScheduleTests:10 ReleaseUpdateCoordinatorTests:17 ReleaseRequestSyntheticTests:6 ReleaseRedirectDiagnosticTests:3; do
+            suite="${entry%:*}"
+            count="${entry#*:}"
+            log="$RUNNER_TEMP/aitm-direct-$suite.log"
+            printf '%s\n' "Running synthetic suite: $suite (expected $count tests)"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | /usr/bin/tee "$log"; then
+              audit_status=1
+            fi
+            if ! /usr/bin/grep -Eq "Executed $count tests?, with 0 failures" "$log"; then
+              printf '%s\n' "Missing successful expected test count: $suite"
+              audit_status=1
+            fi
+          done
+          printf '%s\n' 'Running synthetic two-process lease fixture'
+          if run_isolated /usr/bin/xcrun swiftc Sources/AITaskMonitor/ReleaseScheduleFileStore.swift \
+            integration-tests/release-lease-fixture/main.swift -o "$RUNNER_TEMP/aitm-direct-lease-fixture"; then
+            if ! run_isolated "$RUNNER_TEMP/aitm-direct-lease-fixture"; then audit_status=1; fi
+          else
+            audit_status=1
+          fi
+          exit "$audit_status"
+
+      - name: Record scope
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          printf '%s\n' 'Synthetic updater checks against the exact triggering commit only. No live updater endpoint, real profiles, installer or publication.' >> "$GITHUB_STEP_SUMMARY"

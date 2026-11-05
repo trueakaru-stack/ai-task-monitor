@@ -27,6 +27,16 @@ final class ReleaseUpdatesTests: XCTestCase {
         store.isCompact = false
         XCTAssertNil(store.visibleUpdate)
     }
+
+    @MainActor func testExistingUpdateSurvivesEmptyAndMalformedResponses() {
+        let store = TaskStore.preview()
+        store.setPreviewUpdate()
+        let existing = store.availableUpdate
+        XCTAssertTrue(store.acceptReleaseData(Data("[]".utf8)))
+        XCTAssertEqual(store.availableUpdate, existing)
+        XCTAssertFalse(store.acceptReleaseData(Data("[{}]".utf8)))
+        XCTAssertEqual(store.availableUpdate, existing)
+    }
     func testSemanticOrderingAndRejections() throws {
         XCTAssertLessThan(try XCTUnwrap(ReleaseVersion("v0.3.0-alpha.2")), try XCTUnwrap(ReleaseVersion("0.3.0-alpha.10")))
         XCTAssertLessThan(try XCTUnwrap(ReleaseVersion("0.3.0-alpha")), try XCTUnwrap(ReleaseVersion("0.3.0")))
