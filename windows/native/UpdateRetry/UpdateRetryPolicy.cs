@@ -1,0 +1,99 @@
+using System.Globalization;
+using System.Net.Http.Headers;
+
+namespace AITaskMonitor.NativeUpdateRetry;
+
+// Pure scheduling policy. The caller supplies server headers and clocks.
+public static class UpdateRetryPolicy
+{
+    private const long MaxHintSeconds = 922337203685;
+
+    public static TimeSpan FailureDelay(int failures, IReadOnlyList<string?>? retryAfter,
+        IReadOnlyList<string?>? rateLimitReset, IReadOnlyList<string?>? serverDates, DateTimeOffset now)
+    {
+        int step = (int)Math.Clamp((long)failures - 1, 0, 5);
+        TimeSpan result = TimeSpan.FromHours(Math.Min(24, 1 << step));
+        bool hasServerDate = serverDates is { Count: 1 } && TryDate(serverDates[0], out _);
+        DateTimeOffset reference = hasServerDate && TryDate(serverDates![0], out var serverDate) ? serverDate : now;
+
+        foreach (string? raw in retryAfter ?? Array.Empty<string?>())
+        {
+            if (raw is null || raw.Length > 256) continue;
+            string value = raw.Trim();
+            if (value.Length == 0) continue;
+            TimeSpan hint = TimeSpan.Zero;
+            if (AsciiDigits(value))
+            {
+                if (!ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out ulong seconds) || seconds > MaxHintSeconds) continue;
+                hint = TimeSpan.FromTicks(checked((long)seconds * TimeSpan.TicksPerSecond));
+            }
+            else
+            {
+                if (!TryDate(value, out var date)) continue;
+                if (!hasServerDate && result < TimeSpan.FromHours(24)) result = TimeSpan.FromHours(24);
+                if (date > reference) hint = date - reference;
+            }
+            if (hint > result) result = hint;
+        }
+
+        foreach (string? raw in rateLimitReset ?? Array.Empty<string?>())
+        {
+            if (raw is null || raw.Length > 256) continue;
+            string value = raw.Trim();
+            if (!AsciiDigits(value) || !long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long seconds)) continue;
+            DateTimeOffset date;
+            try { date = DateTimeOffset.FromUnixTimeSeconds(seconds); }
+            catch (ArgumentOutOfRangeException) { continue; }
+            if (!hasServerDate && result < TimeSpan.FromHours(24)) result = TimeSpan.FromHours(24);
+            if (date > reference && date - reference > result) result = date - reference;
+        }
+        return result;
+    }
+
+    private static bool AsciiDigits(string value) => value.Length > 0 && value.All(c => c is >= '0' and <= '9');
+
+    private static bool TryDate(string? value, out DateTimeOffset date)
+    {
+        date = default;
+        if (string.IsNullOrEmpty(value) || value.Length > 256 ||
+            !RetryConditionHeaderValue.TryParse(value.Trim(), out var parsed) || parsed.Date is null) return false;
+        date = parsed.Date.Value;
+        return true;
+    }
+}
+
+// State is deliberately not thread-safe; its owning controller serializes calls.
+public sealed class UpdateRetrySchedule
+{
+    public int Failures { get; private set; }
+    public bool HasSchedule { get; private set; }
+    public long ScheduledAt { get; private set; }
+    public long Frequency { get; private set; }
+    public TimeSpan Delay { get; private set; }
+
+    public bool Record(bool success, long now, long frequency, DateTimeOffset wallNow,
+        IReadOnlyList<string?>? retryAfter = null, IReadOnlyList<string?>? reset = null, IReadOnlyList<string?>? dates = null)
+    {
+        if (frequency <= 0) throw new ArgumentOutOfRangeException(nameof(frequency));
+        if (HasSchedule && !Due(now)) return false;
+        Failures = success ? 0 : Math.Min(6, Failures + 1);
+        Delay = success ? TimeSpan.FromHours(24) : UpdateRetryPolicy.FailureDelay(Failures, retryAfter, reset, dates, wallNow);
+        ScheduledAt = now;
+        Frequency = frequency;
+        HasSchedule = true;
+        return true;
+    }
+
+    public bool Due(long now)
+    {
+        if (!HasSchedule) return true;
+        if (now < ScheduledAt) { ScheduledAt = now; return false; }
+        decimal elapsed = (decimal)now - ScheduledAt;
+        decimal seconds = decimal.Truncate(elapsed / Frequency);
+        long requiredSeconds = Delay.Ticks / TimeSpan.TicksPerSecond;
+        if (seconds != requiredSeconds) return seconds > requiredSeconds;
+        decimal remainder = elapsed - seconds * Frequency;
+        long requiredFraction = Delay.Ticks % TimeSpan.TicksPerSecond;
+        return remainder * TimeSpan.TicksPerSecond >= (decimal)requiredFraction * Frequency;
+    }
+}
