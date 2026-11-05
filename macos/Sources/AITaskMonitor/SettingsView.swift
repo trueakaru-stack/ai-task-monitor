@@ -6,9 +6,11 @@ private struct SettingsPreviewSourcesKey: EnvironmentKey { static let defaultVal
 enum SettingsPreviewClaude: Equatable { case unconfirmed, connected }
 enum SettingsPreviewCloud: Equatable { case disconnected, connected, error, partial }
 enum SettingsPreviewKimi: Equatable { case disconnected, connected, disabled, error }
+enum SettingsPreviewHermes: String, Equatable { case absent, prepared, enabled, error, unavailable }
 private struct SettingsPreviewClaudeKey: EnvironmentKey { static let defaultValue: SettingsPreviewClaude? = nil }
 private struct SettingsPreviewCloudKey: EnvironmentKey { static let defaultValue: SettingsPreviewCloud? = nil }
 private struct SettingsPreviewKimiKey: EnvironmentKey { static let defaultValue: SettingsPreviewKimi? = nil }
+private struct SettingsPreviewHermesKey: EnvironmentKey { static let defaultValue: SettingsPreviewHermes? = nil }
 extension EnvironmentValues {
     var settingsPreviewEnd: Bool {
         get { self[SettingsPreviewEndKey.self] }
@@ -30,6 +32,10 @@ extension EnvironmentValues {
         get { self[SettingsPreviewKimiKey.self] }
         set { self[SettingsPreviewKimiKey.self] = newValue }
     }
+    var settingsPreviewHermes: SettingsPreviewHermes? {
+        get { self[SettingsPreviewHermesKey.self] }
+        set { self[SettingsPreviewHermesKey.self] = newValue }
+    }
 }
 
 struct SettingsView: View {
@@ -44,6 +50,7 @@ struct SettingsView: View {
     @Environment(\.settingsPreviewClaude) private var settingsPreviewClaude
     @Environment(\.settingsPreviewCloud) private var settingsPreviewCloud
     @Environment(\.settingsPreviewKimi) private var settingsPreviewKimi
+    @Environment(\.settingsPreviewHermes) private var settingsPreviewHermes
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -170,6 +177,40 @@ struct SettingsView: View {
                         if !store.deepSeekMessage.isEmpty {
                             Text(store.deepSeekMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
                         }
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Hermes Agent").font(.system(size: 13, weight: .medium))
+                                Text(tr("Проверено с исходной установкой Hermes Agent v0.22.7. Выберите профиль и подготовьте плагин. Полностью закройте Hermes и его фоновые службы, затем выполните команду включения в терминале. Перед запуском менеджера команда локально проверяет файлы .env, которые могут содержать ключи; сама проверка не сохраняет, не выводит и не передаёт их. После запуска монитора или повторного подключения источника дождитесь статуса «Плагин включён в локальных настройках», затем запустите или перезапустите Hermes. Прежние задачи не показываются. Для отключения снова закройте Hermes и его фоновые службы и выполните команду отключения.", "Tested with a source installation of Hermes Agent v0.22.7. Select a profile and prepare the plugin. Fully close Hermes and its background services, then run the enable command in Terminal. Before starting the manager, the command checks local .env files that may contain keys; the check itself does not save, display or transmit them. After starting the monitor or reconnecting the source, wait for ‘Plugin enabled in local settings’, then start or restart Hermes. Previous tasks are not shown. To disable, close Hermes and its background services again, then run the disable command."))
+                                    .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                Text(store.hermesStatusMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                Picker(tr("Профиль", "Profile"), selection: $store.selectedHermesProfile) {
+                                    Text(tr("Выберите профиль", "Select a profile")).tag("")
+                                    ForEach(store.hermesProfiles) { profile in
+                                        Text(profile.id == "root" ? tr("По умолчанию", "Default") : profile.name).tag(profile.id)
+                                    }
+                                }
+                                .disabled(store.hermesProfiles.isEmpty || store.hermesSetupInProgress || store.hermesScanInProgress)
+                                .accessibilityLabel(tr("Профиль Hermes Agent", "Hermes Agent profile"))
+                                if let enable = store.hermesEnableCommand, let disable = store.hermesDisableCommand {
+                                    Text(tr("Включение:", "Enable:"))
+                                        .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                                    Text(enable).font(.system(size: 11.5)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                    Text(tr("Отключение:", "Disable:"))
+                                        .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                                    Text(disable).font(.system(size: 11.5)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            Spacer(minLength: 20)
+                            Button(tr("Подготовить", "Prepare")) {
+                                if settingsPreviewHermes == nil { store.prepareHermes() }
+                            }
+                            .disabled(!store.hermesCanPrepare)
+                            .accessibilityLabel(tr("Подготовить плагин Hermes Agent", "Prepare Hermes Agent plugin"))
+                        }
+                        .id("settings-hermes")
+                        if !store.hermesMessage.isEmpty {
+                            Text(store.hermesMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     .id("settings-sources")
                     section(tr("Журнал", "Journal")) {
@@ -287,9 +328,10 @@ struct SettingsView: View {
                 .id("feedback-end")
              }
              .onAppear {
-                 if settingsPreviewEnd || settingsPreviewSources || settingsPreviewKimi != nil {
+                 if settingsPreviewEnd || settingsPreviewSources || settingsPreviewKimi != nil || settingsPreviewHermes != nil {
                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                          if settingsPreviewEnd { scrollProxy.scrollTo("feedback-end", anchor: .bottom) }
+                         else if settingsPreviewHermes != nil { scrollProxy.scrollTo("settings-hermes", anchor: .top) }
                          else if settingsPreviewKimi != nil { scrollProxy.scrollTo("settings-kimi", anchor: .top) }
                          else { scrollProxy.scrollTo("settings-sources", anchor: .top) }
                      }

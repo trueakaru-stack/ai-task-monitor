@@ -54,10 +54,14 @@ jobs:
             "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/b200f5bc60e31588ba2cb60e288029c4a54ba5fa" \
             --output "$RUNNER_TEMP/aitm-hermes-upstream.tar.gz"
           python3 -B integration-tests/Extract-HermesFixture.py "$RUNNER_TEMP/aitm-hermes-upstream.tar.gz" "$RUNNER_TEMP/aitm-hermes-upstream"
+          python3 -m venv "$RUNNER_TEMP/aitm-hermes-pm-python"
+          "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: 'ruamel.yaml==0.18.16' 'packaging==26.0' 'python-dotenv==1.2.4'
+          "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -I -S -B integration-tests/Test-HermesSetup.py integrations "$RUNNER_TEMP/aitm-hermes-upstream"
+          "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -I -B integration-tests/Test-HermesManager.py integrations "$RUNNER_TEMP/aitm-hermes-upstream"
+          python3 -I -S -B integration-tests/Test-HermesPackaging.py
+          AITM_HERMES_PYTHON="$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" AITM_HERMES_SOURCE="$RUNNER_TEMP/aitm-hermes-upstream" swift test --filter HermesIntegrationTests/testPinnedBridgePreparesAnIsolatedProfileWithoutChangingSettings
           python3 -B integration-tests/Test-HermesUpstreamDispatch.py "$RUNNER_TEMP/aitm-hermes-upstream"
           python3 -B integration-tests/Test-HermesLiveness.py "$RUNNER_TEMP/aitm-hermes-upstream/hermes_cli/active_sessions.py"
-          python3 -m venv "$RUNNER_TEMP/aitm-hermes-pm-python"
-          "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: 'ruamel.yaml==0.18.16' 'packaging==26.0'
           "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -B integration-tests/Test-HermesPublication.py "$RUNNER_TEMP/aitm-hermes-upstream"
           npm pack @moonshot-ai/kimi-code@2.5.0 --ignore-scripts --pack-destination "$RUNNER_TEMP" --json > "$RUNNER_TEMP/aitm-kimi-package.json"
           tar -xOf "$RUNNER_TEMP/moonshot-ai-kimi-code-2.5.0.tgz" package/dist/main.mjs > "$RUNNER_TEMP/aitm-kimi-upstream.mjs"

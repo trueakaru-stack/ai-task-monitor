@@ -21,6 +21,14 @@ final class TaskStore: ObservableObject {
     @Published private(set) var kimiState = "disconnected"
     @Published private(set) var kimiScanned = false
     @Published private(set) var kimiScanError: String?
+    @Published private(set) var hermesProfiles: [HermesProfile] = []
+    @Published var selectedHermesProfile = "" {
+        didSet { if selectedHermesProfile != oldValue { hermesMessage = "" } }
+    }
+    @Published private(set) var hermesMessage = ""
+    @Published private(set) var hermesSetupInProgress = false
+    @Published private(set) var hermesScanInProgress = false
+    @Published private(set) var hermesInstallationAvailable = false
     @Published private(set) var codexCloudEnabled = false
     @Published private(set) var codexCloudFailed = false
     @Published private(set) var codexCloudPartial = false
@@ -47,6 +55,10 @@ final class TaskStore: ObservableObject {
     private let makeExternalRuntime: () throws -> ExternalProviderRuntime
     private let inspectKimiConnection: () throws -> KimiConnection
     private let kimiScanInterval: TimeInterval
+    private let discoverHermesContext: () -> HermesIntegration.Context?
+    private let inspectHermesProfiles: (HermesIntegration.Context) throws -> [HermesProfile]
+    private let prepareHermesProfile: (HermesProfile, HermesIntegration.Context) throws -> Void
+    private let hermesScanInterval: TimeInterval
     private let codexCloudAllowed: Bool
     private let codexCloudDefaults: UserDefaults
     private let makeCodexCloudClient: () -> CodexCloudClient?
@@ -71,6 +83,10 @@ final class TaskStore: ObservableObject {
     private var deepSeekSeenScopes: [String: String] = [:]
     private var deepSeekScanError: String?
     private var nextDeepSeekScan = Date.distantPast
+    private var hermesContext: HermesIntegration.Context?
+    private var hermesSeenScopes: [String: String] = [:]
+    private var hermesScanError: String?
+    private var nextHermesScan = Date.distantPast
     private var taskFocus = TaskFocusTracker()
     private var sawCodexHome = false
     private var sawClaudeEvents = false
@@ -264,10 +280,135 @@ final class TaskStore: ObservableObject {
         return deepSeekUncertainScopes.isEmpty ? .disconnected : .partial
     }
 
+    func prepareHermes() {
+        guard !hermesSetupInProgress, !hermesScanInProgress, hermesScanError == nil,
+              let context = hermesContext, let profile = hermesSelectedProfile,
+              profile.state == "absent", HermesIntegration.command(profile, context: context, enable: true) != nil else { return }
+        let prepare = prepareHermesProfile
+        hermesSetupInProgress = true
+        hermesMessage = ""
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try prepare(profile, context) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.hermesSetupInProgress = false
+                if case .failure(let error) = result {
+                    self.hermesMessage = self.hermesErrorMessage((error as? HermesIntegrationError)?.code ?? "operation-failed")
+                }
+                self.nextHermesScan = .distantPast
+                self.refresh()
+            }
+        }
+    }
+
+    private func scheduleHermesScan() {
+        guard externalProvidersEnabled, externalConnections[.hermes] == nil, !hermesSetupInProgress,
+              !hermesScanInProgress, Date() >= nextHermesScan else { return }
+        hermesScanInProgress = true
+        let discover = discoverHermesContext, inspect = inspectHermesProfiles
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let context = discover()
+            let result: Result<[HermesProfile], Error>
+            if let context { result = Result { try inspect(context) } }
+            else { result = .failure(HermesIntegrationError(code: "installation-unconfirmed")) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.hermesScanInProgress = false
+                self.nextHermesScan = Date().addingTimeInterval(self.hermesScanInterval)
+                self.hermesContext = context
+                self.hermesInstallationAvailable = context != nil
+                switch result {
+                case .success(let profiles) where HermesIntegration.validProfiles(profiles):
+                    self.hermesScanError = nil
+                    self.hermesProfiles = profiles
+                    for item in profiles {
+                        if item.state == "prepared", item.enabled == true, let scope = item.scope {
+                            self.hermesSeenScopes[item.id] = scope
+                        } else if item.state == "absent" || (item.state == "prepared" && item.enabled == false) {
+                            self.hermesSeenScopes.removeValue(forKey: item.id)
+                        }
+                    }
+                    if !profiles.contains(where: { $0.id == self.selectedHermesProfile }) { self.selectedHermesProfile = "" }
+                case .success:
+                    self.hermesScanError = "invalid-response"
+                case .failure(let error):
+                    self.hermesScanError = (error as? HermesIntegrationError)?.code ?? "operation-failed"
+                }
+                self.refresh()
+            }
+        }
+    }
+
+    private func hermesErrorMessage(_ code: String) -> String {
+        switch code {
+        case "unsupported-version":
+            return tr("Версия Hermes не поддерживается.", "This Hermes version is not supported.")
+        case "bundle-conflict", "bundle-busy", "bundle-update-required", "modified-bundle", "profile-unavailable":
+            return tr("Плагин Hermes недоступен или его файлы изменены.", "The Hermes plugin is unavailable or its files were changed.")
+        default:
+            return tr("Не удалось проверить или подготовить плагин Hermes.", "Could not check or prepare the Hermes plugin.")
+        }
+    }
+
+    var hermesSelectedProfile: HermesProfile? { hermesProfiles.first { $0.id == selectedHermesProfile } }
+    var hermesCanPrepare: Bool {
+        guard hermesScanError == nil, let context = hermesContext, let profile = hermesSelectedProfile else { return false }
+        return !hermesSetupInProgress && !hermesScanInProgress && profile.state == "absent" &&
+            HermesIntegration.command(profile, context: context, enable: true) != nil
+    }
+    var hermesStatusMessage: String {
+        if let code = hermesScanError {
+            return code == "installation-unconfirmed" ? tr("Установка не подтверждена", "Installation unconfirmed") : hermesErrorMessage(code)
+        }
+        guard hermesInstallationAvailable else { return tr("Проверка", "Checking") }
+        guard let profile = hermesSelectedProfile else { return tr("Выберите профиль", "Select a profile") }
+        switch profile.state {
+        case "prepared":
+            return profile.enabled == true
+                ? tr("Плагин включён в локальных настройках", "Plugin enabled in local settings")
+                : tr("Плагин подготовлен; включите его в Hermes", "Plugin prepared; enable it in Hermes")
+        case "error": return hermesErrorMessage(profile.error ?? "operation-failed")
+        default: return tr("Плагин не подготовлен", "Plugin not prepared")
+        }
+    }
+    var hermesEnableCommand: String? {
+        guard hermesScanError == nil, let context = hermesContext, let profile = hermesSelectedProfile,
+              profile.state == "prepared" else { return nil }
+        return HermesIntegration.command(profile, context: context, enable: true)
+    }
+    var hermesDisableCommand: String? {
+        guard hermesScanError == nil, let context = hermesContext, let profile = hermesSelectedProfile,
+              profile.state == "prepared" else { return nil }
+        return HermesIntegration.command(profile, context: context, enable: false)
+    }
+    private var hermesAllowedScopes: Set<String> {
+        guard hermesScanError == nil else { return [] }
+        return Set(hermesProfiles.compactMap { $0.state == "prepared" && $0.enabled == true ? $0.scope : nil })
+    }
+    private var hermesUncertainScopes: Set<String> {
+        Set(hermesSeenScopes.compactMap { id, scope in
+            let profile = hermesProfiles.first { $0.id == id }
+            return hermesScanError != nil || profile == nil || profile?.state == "error" ? scope : nil
+        })
+    }
+    private func hermesConnectionState() throws -> ExternalProviderConnectionState {
+        if hermesScanError != nil {
+            if hermesSeenScopes.isEmpty { return .disconnected }
+            throw HermesIntegrationError(code: "operation-failed")
+        }
+        if !hermesAllowedScopes.isEmpty { return hermesUncertainScopes.isEmpty ? .connected : .connectedDegraded }
+        return hermesUncertainScopes.isEmpty ? .disconnected : .partial
+    }
+
     init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, additionalExternalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState] = [:], makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }, inspectKimiConnection: @escaping () throws -> KimiConnection = {
         guard let context = KimiIntegration.discover() else { throw KimiIntegrationError(code: "installation-unconfirmed") }
         return try KimiIntegration.inspect(context)
-    }, kimiScanInterval: TimeInterval = 15, enableCodexCloud: Bool = false, codexCloudDefaults: UserDefaults = .standard, codexCloudInterval: TimeInterval = 30, makeCodexCloudClient: @escaping () -> CodexCloudClient? = { CodexCloudClient.discover().map { CodexCloudClient(executable: $0) } }) {
+    }, kimiScanInterval: TimeInterval = 15,
+       discoverHermesContext: @escaping () -> HermesIntegration.Context? = { HermesIntegration.discover() },
+       inspectHermesProfiles: @escaping (HermesIntegration.Context) throws -> [HermesProfile] = { try HermesIntegration.profiles($0) },
+       prepareHermesProfile: @escaping (HermesProfile, HermesIntegration.Context) throws -> Void = { try HermesIntegration.prepare($0, context: $1) },
+       hermesScanInterval: TimeInterval = 15,
+       enableCodexCloud: Bool = false, codexCloudDefaults: UserDefaults = .standard, codexCloudInterval: TimeInterval = 30, makeCodexCloudClient: @escaping () -> CodexCloudClient? = { CodexCloudClient.discover().map { CodexCloudClient(executable: $0) } }) {
         self.codexReader = codexReader
         self.claudeReader = claudeReader
         self.claudeLoopProfile = claudeLoopProfile
@@ -278,6 +419,10 @@ final class TaskStore: ObservableObject {
         self.makeExternalRuntime = makeExternalRuntime
         self.inspectKimiConnection = inspectKimiConnection
         self.kimiScanInterval = max(0.1, kimiScanInterval)
+        self.discoverHermesContext = discoverHermesContext
+        self.inspectHermesProfiles = inspectHermesProfiles
+        self.prepareHermesProfile = prepareHermesProfile
+        self.hermesScanInterval = max(0.1, hermesScanInterval)
         self.codexCloudAllowed = enableCodexCloud && previewTasks == nil
         self.codexCloudDefaults = codexCloudDefaults
         self.makeCodexCloudClient = makeCodexCloudClient
@@ -388,6 +533,26 @@ final class TaskStore: ObservableObject {
                             DeepSeekProfile(name: "Profile Two", state: "connected", scope: String(repeating: "b", count: 32), error: nil),
                             DeepSeekProfile(name: "desktop", state: "error", scope: nil, error: "unsupported-desktop")]
         selectedDeepSeekProfile = desktop ? "desktop" : "Profile Two"
+    }
+
+    func setPreviewHermesProfile(_ state: String) {
+        if state == "unavailable" {
+            hermesInstallationAvailable = false
+            hermesScanError = "installation-unconfirmed"
+            hermesProfiles = []
+            selectedHermesProfile = ""
+            return
+        }
+        hermesInstallationAvailable = true
+        let root = URL(fileURLWithPath: "/Users/example/.hermes", isDirectory: true)
+        hermesContext = HermesIntegration.Context(python: root.appendingPathComponent("python3"), home: root,
+                                                   project: root.appendingPathComponent("hermes-agent"), assets: root)
+        let prepared = state == "prepared" || state == "enabled"
+        hermesProfiles = [HermesProfile(id: "root", name: "default", state: prepared ? "prepared" : state,
+                                        scope: prepared ? String(repeating: "a", count: 32) : nil,
+                                        error: state == "error" ? "profile-unavailable" : nil,
+                                        enabled: prepared ? state == "enabled" : nil)]
+        selectedHermesProfile = "root"
     }
 
     static func preview(unavailableSources: [TaskProvider] = [], planUnconfirmed: Bool = false) -> TaskStore {
@@ -591,7 +756,7 @@ final class TaskStore: ObservableObject {
             if !unavailable.contains(.claude) { unavailable.append(.claude) }
             previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         }
-        if externalProvidersEnabled { scheduleKimiScan(); scheduleDeepSeekScan(); refreshExternalProviders(unavailable: &unavailable) }
+        if externalProvidersEnabled { scheduleKimiScan(); scheduleDeepSeekScan(); scheduleHermesScan(); refreshExternalProviders(unavailable: &unavailable) }
         scheduleCodexCloudScan()
         unavailableSources = unavailable
         var combined = (previousCodex + previousClaude + previousExternal + codexCloudTasks)
@@ -656,6 +821,7 @@ final class TaskStore: ObservableObject {
                 if let connection = externalConnections[provider] { state = try connection() }
                 else if provider == .deepseek { state = try deepSeekConnectionState() }
                 else if provider == .kimi { state = try kimiConnectionState() }
+                else if provider == .hermes { state = try hermesConnectionState() }
                 else { continue }
                 switch state {
                 case .connected:
@@ -695,6 +861,10 @@ final class TaskStore: ObservableObject {
             }
             if allowed.contains(.kimi), externalConnections[.kimi] == nil, let scope = kimiScope {
                 scopes[.kimi] = [scope]
+            }
+            if allowed.contains(.hermes), externalConnections[.hermes] == nil {
+                scopes[.hermes] = hermesAllowedScopes
+                uncertainScopes[.hermes] = hermesUncertainScopes
             }
             previousExternal = (externalRuntime?.snapshot(allowed: allowed, profileScopes: scopes, uncertainScopes: uncertainScopes) ?? []) + retained
         } catch {

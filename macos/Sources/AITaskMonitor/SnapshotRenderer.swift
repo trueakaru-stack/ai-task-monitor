@@ -51,11 +51,15 @@ enum SnapshotRenderer {
                 AppLanguage.previewOverride = language
                 for mode in [AppearanceMode.dark, .light] {
                     for compact in [false, true] {
+                        try render(name: "empty-\(language.rawValue)-\(mode.rawValue)-\(compact ? "compact" : "expanded")", mode: mode, compact: compact, settings: false, outputDirectory: outputDirectory, emptyTasks: true)
                         for unconfirmed in [false, true] {
                             let name = "plan-\(language.rawValue)-\(mode.rawValue)-\(compact ? "compact" : "expanded")-\(unconfirmed ? "unconfirmed" : "confirmed")"
                             try render(name: name, mode: mode, compact: compact, settings: false, outputDirectory: outputDirectory, planUnconfirmed: unconfirmed)
                         }
                     }
+                    try render(name: "about-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, about: true)
+                    try render(name: "journal-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: false, outputDirectory: outputDirectory, journal: true)
+                    try render(name: "update-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: false, outputDirectory: outputDirectory, update: true)
                     try render(name: "settings-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory)
                     try render(name: "settings-end-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsEnd: true)
                     try render(name: "settings-sources-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true)
@@ -68,6 +72,9 @@ enum SnapshotRenderer {
                         let label: String
                         switch kimi { case .disconnected: label = "disconnected"; case .connected: label = "connected"; case .disabled: label = "disabled"; case .error: label = "error" }
                         try render(name: "settings-kimi-\(label)-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true, kimiPreview: kimi)
+                    }
+                    for hermes in [SettingsPreviewHermes.absent, .prepared, .enabled, .error, .unavailable] {
+                        try render(name: "settings-hermes-\(hermes.rawValue)-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true, hermesPreview: hermes)
                     }
                     for compact in [false, true] {
                         try render(name: "cloud-task-\(language.rawValue)-\(mode.rawValue)-\(compact ? "compact" : "expanded")", mode: mode, compact: compact, settings: false, outputDirectory: outputDirectory, cloudTask: true)
@@ -101,10 +108,12 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, desktopProfile: Bool = false, claudePreview: SettingsPreviewClaude? = nil, cloudPreview: SettingsPreviewCloud? = nil, kimiPreview: SettingsPreviewKimi? = nil, cloudTask: Bool = false, kimiTask: Bool = false, manyProviders: Bool = false, tasksEnd: Bool = false, tabsEnd: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, desktopProfile: Bool = false, claudePreview: SettingsPreviewClaude? = nil, cloudPreview: SettingsPreviewCloud? = nil, kimiPreview: SettingsPreviewKimi? = nil, hermesPreview: SettingsPreviewHermes? = nil, cloudTask: Bool = false, kimiTask: Bool = false, manyProviders: Bool = false, tasksEnd: Bool = false, tabsEnd: Bool = false, emptyTasks: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
         let store: TaskStore
-        if kimiTask {
+        if emptyTasks {
+            store = TaskStore(previewTasks: [])
+        } else if kimiTask {
             let state = ExternalProviderStateStore()
             let json = #"{"version":1,"provider":"kimi","session":"synthetic","kind":"started"}"#
             guard let event = ExternalProviderEventParser.parse(Data(json.utf8)), state.apply(event, now: Date()) else { throw SnapshotError.bitmap }
@@ -116,6 +125,7 @@ enum SnapshotRenderer {
             store = manyProviders ? TaskStore.manySourcesPreview() : (journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources, planUnconfirmed: planUnconfirmed)))
         }
         if settingsSources { store.setPreviewDeepSeekProfiles(desktop: desktopProfile) }
+        if let hermesPreview { store.setPreviewHermesProfile(hermesPreview.rawValue) }
         store.isCompact = compact
         store.showsSettings = settings || journal
         store.showsJournal = journal
@@ -132,6 +142,7 @@ enum SnapshotRenderer {
             .environment(\.settingsPreviewClaude, claudePreview)
             .environment(\.settingsPreviewCloud, cloudPreview)
             .environment(\.settingsPreviewKimi, kimiPreview)
+            .environment(\.settingsPreviewHermes, hermesPreview)
         let hosting = NSHostingView(rootView: view)
         hosting.appearance = NSAppearance(named: mode == .dark ? .darkAqua : .aqua)
         hosting.frame = NSRect(origin: .zero, size: size)
