@@ -43,21 +43,24 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           mkdir -p "$RUNNER_TEMP/aitm-update-input"
-          for name in frozen-wip.patch.b64 hardening.patch.b64 candidate.sha256 ReleaseRedirectDiagnosticTests.swift; do
+          for name in frozen-wip.patch.b64 hardening.patch.b64 redirect-test-fix.patch.b64 candidate.sha256 ReleaseRedirectDiagnosticTests.swift; do
             git show "$GITHUB_SHA:.github/updater-audit/$name" > "$RUNNER_TEMP/aitm-update-input/$name"
           done
           cd "$RUNNER_TEMP/aitm-update-input"
           printf '%s  %s\n' \
             'b97325dac7df58f96441ab74f748d572ef3e4bd01e7adc77d229d5fb1ab89bd1' 'frozen-wip.patch.b64' \
             'bf9cb606149e6a4ca6eadff54d6cecf1938a040147f7e6240e9b87b4499f574a' 'hardening.patch.b64' \
+            '7a53f005ef73dd8fa4501937c2a84995cc74e2fc13fe24417aff4da24a507c6f' 'redirect-test-fix.patch.b64' \
             '91ddc5ea89fd8b8279717966fc0e548812df3303963448130b13f3d37f9e33b2' 'candidate.sha256' \
             '5f1d4c865e72bc9e490ca17770a614e5fa1fc38da8e7c5589ce27fc546d600a5' 'ReleaseRedirectDiagnosticTests.swift' \
             | shasum -a 256 -c -
           /usr/bin/base64 -D < frozen-wip.patch.b64 > "$RUNNER_TEMP/aitm-frozen-wip.patch"
           /usr/bin/base64 -D < hardening.patch.b64 > "$RUNNER_TEMP/aitm-hardening.patch"
+          /usr/bin/base64 -D < redirect-test-fix.patch.b64 > "$RUNNER_TEMP/aitm-redirect-test-fix.patch"
           printf '%s  %s\n' \
             '436a7815494753d4510b6e986bd762a49271acb2b1fe24bc0a5bb2fa7706134c' "$RUNNER_TEMP/aitm-frozen-wip.patch" \
             'da35492ce9177bc54474de61b6d46132819fcfbc402ffe07683dbc44974cc124' "$RUNNER_TEMP/aitm-hardening.patch" \
+            '615f18743bad50c0f59913c3a0d401f135db8cbcc9aa08021c8570d3fd8cf0ec' "$RUNNER_TEMP/aitm-redirect-test-fix.patch" \
             | shasum -a 256 -c -
 
       - name: Checkout fixed baseline
@@ -93,6 +96,12 @@ jobs:
           git -C "$TREE" apply --include='macos/**' "$RUNNER_TEMP/aitm-hardening.patch"
           cd "$TREE"
           shasum -a 256 -c "$INPUT/candidate.sha256"
+          test "$(git apply --numstat "$RUNNER_TEMP/aitm-redirect-test-fix.patch" | cut -f3)" = 'macos/Tests/AITaskMonitorTests/ReleaseRequestSyntheticTests.swift'
+          git apply --check "$RUNNER_TEMP/aitm-redirect-test-fix.patch"
+          git apply "$RUNNER_TEMP/aitm-redirect-test-fix.patch"
+          printf '%s  %s\n' 'de75ff9bf942f8923d46f57b3d0aa5387b89c3e379361cea35f34c9340a75af9' \
+            macos/Tests/AITaskMonitorTests/ReleaseRequestSyntheticTests.swift | shasum -a 256 -c -
+          awk '$2 ~ /^macos\/Sources\// { print }' "$INPUT/candidate.sha256" | shasum -a 256 -c -
           cp "$INPUT/ReleaseRedirectDiagnosticTests.swift" macos/Tests/AITaskMonitorTests/ReleaseRedirectDiagnosticTests.swift
           printf '%s  %s\n' '5f1d4c865e72bc9e490ca17770a614e5fa1fc38da8e7c5589ce27fc546d600a5' \
             macos/Tests/AITaskMonitorTests/ReleaseRedirectDiagnosticTests.swift | shasum -a 256 -c -
