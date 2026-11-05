@@ -461,14 +461,16 @@ final class TaskStore: ObservableObject {
     }
 
     private var codexCloudTasks: [MonitoredTask] {
-        previousCodexCloud.map { item in
-            let title = item.title ?? tr("Задача Codex", "Codex task")
-            return MonitoredTask(id: item.id, provider: .codex,
-                                 title: tr("Облако: ", "Cloud: ") + title,
-                                 activity: tr("Статус не подтверждён", "Status unconfirmed"),
-                                 isActive: false, progress: nil, progressKind: .none, steps: [],
-                                 updatedAt: item.updatedAt ?? .distantPast, isUnconfirmed: true, planConfirmed: false)
-        }
+        previousCodexCloud.map(Self.codexCloudMonitoredTask)
+    }
+
+    static func codexCloudMonitoredTask(_ item: CodexCloudReader.Task) -> MonitoredTask {
+        let title = item.title ?? tr("Задача Codex", "Codex task")
+        return MonitoredTask(id: item.id, provider: .codex,
+                             title: tr("Облако: ", "Cloud: ") + title,
+                             activity: tr("Статус не подтверждён", "Status unconfirmed"),
+                             isActive: false, progress: nil, progressKind: .none, steps: [],
+                             updatedAt: item.updatedAt ?? .distantPast, isUnconfirmed: true, planConfirmed: false)
     }
 
     func refresh() {
