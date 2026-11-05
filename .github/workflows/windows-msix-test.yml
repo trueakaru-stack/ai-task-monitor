@@ -10,6 +10,8 @@ on:
       - "windows/tests/Test-MsixPackage.ps1"
       - "windows/tests/Test-StoreChannel.ps1"
       - "windows/tests/Test-StoreClaudeInterop.ps1"
+      - "windows/tests/Test-LocalPipeSecurity.ps1"
+      - "windows/tests/Test-CodexSessionDiscovery.ps1"
       - ".github/workflows/windows-msix-test.yml"
 
 permissions:
@@ -37,6 +39,12 @@ jobs:
       - name: Test Store update behavior
         shell: powershell
         run: .\windows\tests\Test-StoreChannel.ps1
+      - name: Test local channel security
+        shell: powershell
+        run: .\windows\tests\Test-LocalPipeSecurity.ps1
+      - name: Test delayed Codex session discovery
+        shell: powershell
+        run: .\windows\tests\Test-CodexSessionDiscovery.ps1
       - name: Test Store Claude hook safety
         shell: powershell
         run: .\windows\tests\Test-StoreClaudeInterop.ps1

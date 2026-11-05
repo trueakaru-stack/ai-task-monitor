@@ -134,14 +134,26 @@ $claudeEventPath = if($ClaudeEventFile){$ClaudeEventFile}else{Join-Path $dataDir
 $claudeLegacyEventPath = if($ClaudeEventFile){""}else{Join-Path $dataDirectory "claude-events.jsonl"}
 $script:fingerprint = ""
 $script:sessionFiles = @{}
-$script:sessionDates = @{}
+$script:sessionDates = [hashtable]::Synchronized(@{})
+$script:sessionDiscovery = [PSCustomObject]@{
+ Gate=[object]::new()
+ Files=$script:sessionFiles
+ Rollouts=$null
+ LastScanTicks=[long]0
+ Attempted=$false
+ ScanFailed=$false
+ RetrySeconds=5
+ HotUntilTicks=[long]0
+ IndexVersions=@{}
+ DatedMisses=@{}
+ RolloutMisses=@{}
+}
 $script:sessionIndexLookup = @{}
 $script:planCache = @{}
 $script:planConfirmations = @{}
 $script:lifecycleState = @{}
 $script:observedCodex = @{}
 $script:monitorStartedUtc = [DateTime]::UtcNow
-$script:allRollouts = $null
 $script:lastTasks = @()
 $script:lastAllTasks = @()
 $script:lastCodexTasks = @()
@@ -1958,22 +1970,107 @@ function Codex-Uncertain([string]$id,$threadState) {
 }
 
 function Session-File([string]$id) {
- if ($script:sessionFiles.ContainsKey($id)) { return $script:sessionFiles[$id] }
- if ($script:sessionDates.ContainsKey($id)) {
-  $folder = $script:sessionDates[$id]
-  if (Test-Path -LiteralPath $folder) {
-   $datedFile = Get-ChildItem -LiteralPath $folder -File -Filter ("*" + $id + ".jsonl") -ErrorAction SilentlyContinue | Select-Object -First 1
-   if ($null -ne $datedFile) {
-    $script:sessionFiles[$id] = $datedFile.FullName
-    return $datedFile.FullName
+ $cache=$script:sessionDiscovery
+ [Threading.Monitor]::Enter($cache.Gate)
+ try {
+  $markActivity={
+   $cache.RetrySeconds=5
+   $cache.HotUntilTicks=[Diagnostics.Stopwatch]::GetTimestamp()+([long][Diagnostics.Stopwatch]::Frequency * 30)
+  }
+  $fileAvailable={param([string]$candidate)
+   try {
+    $attributes=[IO.File]::GetAttributes($candidate)
+    if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) { throw 'Not a session file.' }
+    return $true
+   } catch {
+    $exception=$_.Exception
+    while($null -ne $exception.InnerException){$exception=$exception.InnerException}
+    if($exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException]){return $false}
+    throw 'Codex session file cannot be read.'
    }
   }
+  if ($cache.Files.ContainsKey($id)) {
+   $cached=[string]$cache.Files[$id]
+   if ($cached -and (& $fileAvailable $cached)) { return $cached }
+   [void]$cache.Files.Remove($id)
+   [void]$cache.DatedMisses.Remove($id)
+   & $markActivity
+  }
+  if ($script:sessionDates.ContainsKey($id)) {
+   $folder = $script:sessionDates[$id]
+   $skipDated=$false
+   if ($cache.DatedMisses.ContainsKey($id)) {
+    $miss=$cache.DatedMisses[$id]
+    $age=[Diagnostics.Stopwatch]::GetTimestamp()-[long]$miss.Tick
+    if ([string]::Equals([string]$miss.Folder,[string]$folder,[StringComparison]::OrdinalIgnoreCase) -and
+        $age -ge 0 -and $age -lt [Diagnostics.Stopwatch]::Frequency) { $skipDated=$true }
+    else { [void]$cache.DatedMisses.Remove($id) }
+   }
+   if (-not $skipDated) {
+    try {
+     if (Test-Path -LiteralPath $folder -PathType Container -ErrorAction Stop) {
+      $datedFile = Get-ChildItem -LiteralPath $folder -File -Filter ("*" + $id + ".jsonl") -ErrorAction Stop | Select-Object -First 1
+      if ($null -ne $datedFile) {
+       [void]$cache.DatedMisses.Remove($id)
+       $cache.Files[$id] = $datedFile.FullName
+       & $markActivity
+       return $datedFile.FullName
+      }
+     }
+     $cache.DatedMisses[$id]=[PSCustomObject]@{Folder=$folder;Tick=[Diagnostics.Stopwatch]::GetTimestamp()}
+    } catch {
+     [void]$cache.DatedMisses.Remove($id)
+     throw 'Codex session files cannot be read.'
+    }
+   }
+  }
+  try {
+   $rootAttributes=[IO.File]::GetAttributes($sessionsDirectory)
+   if (($rootAttributes -band [IO.FileAttributes]::Directory) -eq 0) { throw 'Not a session directory.' }
+  } catch {
+   throw 'Codex session files cannot be read.'
+  }
+  $now=[Diagnostics.Stopwatch]::GetTimestamp()
+  if ($cache.Attempted -and $now -lt $cache.LastScanTicks) { $cache.LastScanTicks=$now; $cache.RetrySeconds=5 }
+  $interval=[long][Diagnostics.Stopwatch]::Frequency * [Math]::Max(5,[int]$cache.RetrySeconds)
+  if (-not $cache.Attempted -or ($now - $cache.LastScanTicks) -ge $interval) {
+   $previousAttempt=[bool]$cache.Attempted
+   $previousFailure=[bool]$cache.ScanFailed
+   $cache.RolloutMisses.Clear()
+   try {
+    $cache.Rollouts = @([IO.Directory]::EnumerateFiles($sessionsDirectory, "*.jsonl", [IO.SearchOption]::AllDirectories))
+    $cache.ScanFailed = $false
+    if ($previousFailure) { & $markActivity }
+   } catch {
+    $cache.Rollouts = $null
+    $cache.ScanFailed = $true
+   } finally {
+    $cache.LastScanTicks = [Diagnostics.Stopwatch]::GetTimestamp()
+    $cache.Attempted = $true
+    if ($previousAttempt -and $cache.LastScanTicks -ge $cache.HotUntilTicks) {
+     $cache.RetrySeconds = [Math]::Min(60,[int]$cache.RetrySeconds * 2)
+    }
+   }
+  }
+  if ($cache.ScanFailed) { throw 'Codex session files cannot be read.' }
+  if ($cache.RolloutMisses.ContainsKey($id)) { return "" }
+  $matched=$false
+  foreach ($file in $cache.Rollouts) {
+   if ($file.EndsWith($id + ".jsonl", [StringComparison]::OrdinalIgnoreCase)) {
+    $matched=$true
+    if (& $fileAvailable $file) {
+     $path = [string]$file
+     $cache.Files[$id] = $path
+     & $markActivity
+     return $path
+    }
+   }
+  }
+  if (-not $matched) { $cache.RolloutMisses[$id]=$true }
+  return ""
+ } finally {
+  [Threading.Monitor]::Exit($cache.Gate)
  }
- if ($null -eq $script:allRollouts) { $script:allRollouts = @([IO.Directory]::EnumerateFiles($sessionsDirectory, "*.jsonl", [IO.SearchOption]::AllDirectories)) }
- $file = $script:allRollouts | Where-Object { $_.EndsWith($id + ".jsonl", [StringComparison]::OrdinalIgnoreCase) } | Select-Object -First 1
- $path = if ($null -ne $file) { [string]$file } else { "" }
- $script:sessionFiles[$id] = $path
- return $path
 }
 
 function Session-Workspace([string]$id) {
@@ -2253,6 +2350,31 @@ function Codex-Tasks {
   return @()
  }
  $sessions = @(Codex-IndexCandidates)
+ $discoveryVariable=Get-Variable -Scope Script -Name 'sessionDiscovery' -ErrorAction SilentlyContinue
+ if ($null -ne $discoveryVariable -and $null -ne $discoveryVariable.Value) {
+  $cache=$discoveryVariable.Value
+  [Threading.Monitor]::Enter($cache.Gate)
+  try {
+   $cache.DatedMisses.Clear()
+   $versions=@{}
+   $newActivity=$false
+   foreach ($session in $sessions) {
+    $id=[string](Prop $session 'id' '')
+    if ($id -notmatch '^[A-Za-z0-9_-]{1,128}$') { continue }
+    $updated=[string](Prop $session 'updated_at' '')
+    $versions[$id]=$updated
+    if (-not $cache.Files.ContainsKey($id) -and
+        (-not $cache.IndexVersions.ContainsKey($id) -or $cache.IndexVersions[$id] -cne $updated)) { $newActivity=$true }
+   }
+   $cache.IndexVersions=$versions
+   if ($newActivity) {
+    $cache.RetrySeconds=5
+    $cache.HotUntilTicks=[Diagnostics.Stopwatch]::GetTimestamp()+([long][Diagnostics.Stopwatch]::Frequency * 30)
+   }
+  } finally {
+   [Threading.Monitor]::Exit($cache.Gate)
+  }
+ }
  $manual = Manual-Tasks $sessions
  $items = New-Object Collections.Generic.List[object]
  foreach ($session in $sessions) {
