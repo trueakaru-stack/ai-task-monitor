@@ -83,28 +83,36 @@ final class WindowShadowAuditTests: XCTestCase {
             try skip("own_window_not_shareable")
         }
         let filter = SCContentFilter(desktopIndependentWindow: ownWindow)
-        func configuration(ignoreShadow: Bool) -> SCStreamConfiguration {
+        func configuration(ignoreShadow: Bool) throws -> SCStreamConfiguration {
             let value = SCStreamConfiguration()
+            let phase = ignoreShadow ? "without_shadow" : "with_shadow"
+            try checkpoint("\(phase)_configuration_created")
             let scale = window.backingScaleFactor
             value.width = max(1, Int(ceil(window.frame.width * scale)))
             value.height = max(1, Int(ceil(window.frame.height * scale)))
             value.showsCursor = false
             value.includeChildWindows = false
             value.shouldBeOpaque = false
+            try checkpoint("\(phase)_configuration_size_set")
             value.backgroundColor = NSColor.clear.cgColor
             value.ignoreShadowsSingleWindow = ignoreShadow
             value.ignoreGlobalClipSingleWindow = true
+            try checkpoint("\(phase)_configuration_ready")
             return value
         }
         let withShadow: CGImage
         let withoutShadow: CGImage
         do {
             try checkpoint("before_shadow_capture")
+            let withConfig = try configuration(ignoreShadow: false)
+            try checkpoint("before_shadow_api")
             withShadow = try await SCScreenshotManager.captureImage(contentFilter: filter,
-                                                                     configuration: configuration(ignoreShadow: false))
+                                                                     configuration: withConfig)
             try checkpoint("before_no_shadow_capture")
+            let withoutConfig = try configuration(ignoreShadow: true)
+            try checkpoint("before_no_shadow_api")
             withoutShadow = try await SCScreenshotManager.captureImage(contentFilter: filter,
-                                                                        configuration: configuration(ignoreShadow: true))
+                                                                        configuration: withoutConfig)
         } catch {
             try skip("own_window_capture_unavailable")
         }
