@@ -53,8 +53,9 @@ final class ExternalProviderStateTests: XCTestCase {
         XCTAssertEqual(store.snapshot(now: now.addingTimeInterval(1_800)).first?.status, "unknown")
         try apply(store, #"{"version":1,"provider":"deepseek","session":"one","kind":"plan","steps":[]}"#, now.addingTimeInterval(10_800))
         XCTAssertEqual(store.snapshot(now: now.addingTimeInterval(10_800)).first?.status, "unknown")
-        try apply(store, #"{"version":1,"provider":"hermes","session":"two","kind":"active"}"#, now)
-        try apply(store, #"{"version":1,"provider":"hermes","session":"two","kind":"plan","steps":[{"title":"One","status":"done"}]}"#, now)
+        let epoch = DispatchTime.now().uptimeNanoseconds
+        try apply(store, #"{"version":1,"provider":"hermes","session":"two","kind":"started","turn":"one","epoch":\#(epoch),"tick":\#(epoch + 1)}"#, now)
+        try apply(store, #"{"version":1,"provider":"hermes","session":"two","kind":"plan","steps":[{"title":"One","status":"done"}],"epoch":\#(epoch),"tick":\#(epoch + 2)}"#, now)
         try apply(store, #"{"version":1,"provider":"deepseek","session":"one","kind":"gap"}"#, now)
         let unaffected = try XCTUnwrap(store.snapshot(now: now).first { $0.provider == "hermes" })
         XCTAssertEqual(unaffected.status, "active")

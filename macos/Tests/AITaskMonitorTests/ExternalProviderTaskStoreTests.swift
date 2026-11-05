@@ -156,7 +156,8 @@ final class ExternalProviderTaskStoreTests: XCTestCase {
                                   return runtime
                               })
         try send(#"{"version":1,"provider":"opencode","session":"one","kind":"started"}"#, directory: directory)
-        try send(#"{"version":1,"provider":"hermes","session":"two","kind":"started"}"#, directory: directory)
+        let firstEpoch = DispatchTime.now().uptimeNanoseconds
+        try send(#"{"version":1,"provider":"hermes","session":"two","kind":"started","turn":"turn_1","epoch":\#(firstEpoch),"tick":\#(firstEpoch + 1)}"#, directory: directory)
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline {
             store.refresh()
@@ -183,7 +184,8 @@ final class ExternalProviderTaskStoreTests: XCTestCase {
         hermes = .connected
         store.refresh()
         XCTAssertFalse(store.tasks.contains { $0.provider == .hermes }, "Reconnect must not resurrect an old task")
-        try send(#"{"version":1,"provider":"hermes","session":"new","kind":"started"}"#, directory: directory)
+        let secondEpoch = DispatchTime.now().uptimeNanoseconds
+        try send(#"{"version":1,"provider":"hermes","session":"new","kind":"started","turn":"turn_2","epoch":\#(secondEpoch),"tick":\#(secondEpoch + 1)}"#, directory: directory)
         store.refresh()
         XCTAssertTrue(try XCTUnwrap(store.tasks.first { $0.id == "hermes:new" }).isActive)
         openCode = .disconnected

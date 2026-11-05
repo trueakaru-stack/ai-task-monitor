@@ -12,7 +12,8 @@ final class ExternalProviderTaskMapperTests: XCTestCase {
         }
         try apply(#"{"version":1,"provider":"deepseek","session":"one","kind":"tool_started","call":"call_1","action":"command"}"#)
         try apply(#"{"version":1,"provider":"deepseek","session":"one","kind":"plan","steps":[{"title":"One","status":"done"},{"title":"Two","status":"active"}]}"#)
-        try apply(#"{"version":1,"provider":"hermes","session":"two","kind":"waiting"}"#)
+        let epoch = DispatchTime.now().uptimeNanoseconds
+        try apply(#"{"version":1,"provider":"hermes","session":"two","kind":"waiting","request":"request_1","epoch":\#(epoch),"tick":\#(epoch + 1)}"#)
         let tasks = ExternalProviderTaskMapper.tasks(store.snapshot(now: now))
         let deep = try XCTUnwrap(tasks.first { $0.provider == .deepseek })
         XCTAssertTrue(deep.isActive)

@@ -48,7 +48,7 @@ def from_hermes(data):
         if name == "post_tool_call":
             # We deliberately do not subscribe to the blocking pre-tool hook.
             # A completed tool is evidence of activity, not a matched open call.
-            return _event("hermes", data, "active")
+            return _event("hermes", data, "active", extra.get("turn_id"))
         if name == "pre_api_request":
             turn = extra.get("turn_id")
             # Without a reliable turn ID, an API retry must not look like a new task.
@@ -69,7 +69,7 @@ def from_hermes(data):
         mapping = {
             "on_session_start": "unknown", "post_llm_call": "unknown",
             "on_human_input_request": "waiting",
-            "on_human_input_resolved": "unknown", "on_session_finalize": "idle",
+            "on_human_input_resolved": "unknown", "on_session_finalize": "unknown",
         }
         return _event("hermes", data, mapping[name], extra.get("turn_id")) if name in mapping else None
     except (TypeError, ValueError, AttributeError):

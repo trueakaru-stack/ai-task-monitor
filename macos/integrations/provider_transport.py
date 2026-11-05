@@ -13,7 +13,7 @@ _SAFE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
 _SAFE_PIPE = re.compile(r"AITaskMonitor\.[A-Za-z0-9_.-]{1,100}\Z", re.ASCII)
 _PROVIDERS = {"kimi", "deepseek", "hermes", "opencode"}
 _KINDS = {"started", "active", "waiting", "unknown", "idle", "completed", "failed", "interrupted", "plan", "gap", "tool_started", "tool_finished", "heartbeat"}
-_FIELDS = {"version", "provider", "session", "kind", "turn", "steps", "call", "action"}
+_FIELDS = {"version", "provider", "session", "kind", "turn", "steps", "call", "action", "tick", "epoch", "request"}
 _IN_FLIGHT_SENDS = threading.BoundedSemaphore(4)
 
 
@@ -33,6 +33,18 @@ def _encode(value):
                 or value.get("kind") not in _KINDS):
             return None
         if "turn" in value and (not isinstance(value["turn"], str) or not _SAFE_ID.fullmatch(value["turn"])):
+            return None
+        if "tick" in value and (value["provider"] != "hermes" or type(value["tick"]) is not int
+                                or not 0 < value["tick"] < 2**63):
+            return None
+        if "epoch" in value and (value["provider"] != "hermes" or type(value["epoch"]) is not int
+                                 or not 0 < value["epoch"] <= value.get("tick", 0)):
+            return None
+        if value["provider"] == "hermes" and value["kind"] == "gap" and ("tick" not in value or "epoch" not in value):
+            return None
+        if "request" in value and (value["provider"] != "hermes" or value["kind"] not in {"waiting", "unknown"}
+                                   or "tick" not in value or not isinstance(value["request"], str)
+                                   or not _SAFE_ID.fullmatch(value["request"])):
             return None
         if value["kind"] == "heartbeat" and len(value) != 4:
             return None
@@ -87,7 +99,7 @@ def publish(value, pipe_name=None, wait_seconds=0.2):
     """Send at most one sanitized event; an absent monitor is never an error."""
     payload = _encode(value)
     target = _endpoint(pipe_name)
-    if payload is None or target is None or not 0 <= wait_seconds <= 1:
+    if payload is None or target is None or (wait_seconds is not None and not 0 <= wait_seconds <= 1):
         return False
     if not _IN_FLIGHT_SENDS.acquire(blocking=False):
         return False
