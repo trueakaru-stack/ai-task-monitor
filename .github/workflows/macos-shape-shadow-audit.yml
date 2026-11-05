@@ -1,0 +1,82 @@
+name: macOS synthetic shape and shadow audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-shape-shadow-audit.yml"
+      - ".github/audits/SquirclePathAuditTests.swift"
+      - ".github/audits/WindowShadowAuditTests.swift"
+
+permissions:
+  contents: read
+
+jobs:
+  shape-and-shadow:
+    if: ${{ github.event_name == 'workflow_dispatch' || (contains(github.event.head_commit.message, '[tests-only]') && contains(github.event.head_commit.message, '[shape-shadow-audit]')) }}
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      AITM_LAYOUT_SYNTHETIC_CI: "1"
+      AITM_LAYOUT_SYNTHETIC_ROOT: ${{ runner.temp }}/aitm-layout-shape-shadow
+    steps:
+      - name: Checkout the triggering commit in the disposable runner
+        uses: actions/checkout@v4
+        with:
+          path: audit-checkout
+      - name: Copy only the synthetic audit tests
+        id: copy
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          mkdir -p "$AITM_LAYOUT_SYNTHETIC_ROOT"
+          cp "$GITHUB_WORKSPACE/audit-checkout/.github/audits/SquirclePathAuditTests.swift" "$GITHUB_WORKSPACE/audit-checkout/macos/Tests/AITaskMonitorTests/"
+          cp "$GITHUB_WORKSPACE/audit-checkout/.github/audits/WindowShadowAuditTests.swift" "$GITHUB_WORKSPACE/audit-checkout/macos/Tests/AITaskMonitorTests/"
+      - name: Export native synthetic shapes
+        id: shapes
+        working-directory: audit-checkout/macos
+        env:
+          AITM_LAYOUT_EXPORT_SQUIRCLE: "1"
+        run: |
+          set -euo pipefail
+          swift test --filter SquirclePathAuditTests
+          test -s "$AITM_LAYOUT_SYNTHETIC_ROOT/squircle-paths.json"
+      - name: Compare one synthetic window with its host bitmap
+        if: ${{ !cancelled() && steps.copy.outcome == 'success' }}
+        working-directory: audit-checkout/macos
+        env:
+          AITM_LAYOUT_CAPTURE_OWN_WINDOW: "1"
+        run: |
+          set -euo pipefail
+          swift test --filter WindowShadowAuditTests
+          test -s "$AITM_LAYOUT_SYNTHETIC_ROOT/window-shadow.json"
+          python3 - <<'PY'
+          import json, os, pathlib
+          root = pathlib.Path(os.environ['AITM_LAYOUT_SYNTHETIC_ROOT'])
+          result = json.loads((root / 'window-shadow.json').read_text(encoding='utf-8'))
+          status = result.get('status')
+          if status == 'captured_for_review':
+              for name in ('window-shadow-host.png', 'window-shadow-system-with.png', 'window-shadow-system-without.png'):
+                  if not (root / name).is_file():
+                      raise SystemExit('Synthetic own-window capture is incomplete.')
+          elif status != 'skipped' or not result.get('reason'):
+              raise SystemExit('Synthetic own-window capture has no valid outcome.')
+          print('Own-window capture status:', status)
+          PY
+      - name: Document the scope of this audit
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          printf '%s\n' 'Synthetic shape and own-window diagnostics only. The reconnect regression and the full suite were not run by this job.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload the synthetic diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-shape-shadow-${{ github.run_id }}
+          path: ${{ runner.temp }}/aitm-layout-shape-shadow/
+          if-no-files-found: warn
+          retention-days: 7
