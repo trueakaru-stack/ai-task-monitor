@@ -40,10 +40,12 @@ enum CodexCloudReader {
                   item.id.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }),
                   ids.insert(item.id).inserted else { throw Error.invalidResponse }
             let digest = SHA256.hash(data: Data(item.id.utf8)).map { String(format: "%02x", $0) }.joined()
-            let title = item.title.map {
-                let scalars = $0.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }.joined()
-                return FileHelpers.normalized(scalars, limit: 240)
-            }.flatMap { $0.isEmpty ? nil : $0 }
+            let title: String?
+            if let rawTitle = item.title {
+                let scalars = rawTitle.unicodeScalars.map { CharacterSet.controlCharacters.contains($0) ? " " : String($0) }.joined()
+                let normalized = FileHelpers.normalized(scalars, limit: 240)
+                title = normalized.isEmpty ? nil : normalized
+            } else { title = nil }
             let status: Status
             switch item.status {
             case "pending": status = .pending
