@@ -104,9 +104,13 @@ function selections(manifest) {
   return value.filter(item => item === packageName);
 }
 
-function pointsToBundle(value, paths) {
-  return typeof value === 'string' && value.startsWith('link:') &&
-    resolve(paths.profile, value.slice(5)) === paths.folder;
+async function pointsToBundle(value, paths) {
+  if (typeof value !== 'string' || !value.startsWith('link:')) return false;
+  try {
+    // macOS may return decomposed Unicode names from directory enumeration.
+    // Compare actual destinations, never the spelling of a path alone.
+    return await realpath(resolve(paths.profile, value.slice(5))) === await realpath(paths.folder);
+  } catch { return false; }
 }
 
 async function ownedBundle(paths) {
@@ -135,10 +139,13 @@ async function stateFor(paths, manifest, bundle = undefined) {
   const selected = selections(manifest);
   const entry = await statOrNull(paths.nodeEntry);
   if (!bundle && value === null && !selected.length && !entry) return 'disconnected';
-  if (!bundle || (value !== null && !pointsToBundle(value, paths)) || selected.length > 1) fail('bundle-conflict');
-  if (pointsToBundle(value, paths) && selected.length === 1 && entry) {
+  const matches = value !== null && await pointsToBundle(value, paths);
+  if (!bundle) fail('bundle-conflict');
+  if (value !== null && !matches) fail('bundle-conflict-dependency');
+  if (selected.length > 1) fail('bundle-conflict-selection');
+  if (matches && selected.length === 1 && entry) {
     const target = await realpath(paths.nodeEntry);
-    if (target !== await realpath(paths.folder)) fail('bundle-conflict');
+    if (target !== await realpath(paths.folder)) fail('bundle-conflict-link');
     return 'connected';
   }
   return 'partial';

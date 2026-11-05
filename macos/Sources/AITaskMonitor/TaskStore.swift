@@ -137,6 +137,9 @@ final class TaskStore: ObservableObject {
     }
 
     private func deepSeekErrorMessage(_ code: String) -> String {
+        if code.hasPrefix("bundle-conflict") {
+            return tr("Подключение DeepSeek Harness неполное или его файлы изменены.", "The DeepSeek Harness connection is incomplete or its files were changed.")
+        }
         switch code {
         case "unverified-dsh", "unverified-pnpm":
             return tr("Версия DeepSeek Harness или pnpm не подтверждена.", "The DeepSeek Harness or pnpm version could not be verified.")
