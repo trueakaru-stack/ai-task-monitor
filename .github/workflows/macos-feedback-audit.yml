@@ -1,0 +1,241 @@
+name: macOS feedback and candidate audit
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-feedback-audit.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  feedback-native:
+    if: ${{ contains(github.event.head_commit.message, '[tests-only]') && contains(github.event.head_commit.message, '[feedback-audit]') }}
+    name: feedback-native (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact candidate source
+        uses: actions/checkout@v4
+        with:
+          ref: c034eef660922c9a06ee601e6ab9f8eac22b7889
+      - name: Checkout pinned baseline
+        uses: actions/checkout@v4
+        with:
+          ref: ab4de7012b2f452005b918cc73130d4a9a489e9e
+          path: baseline-feedback
+      - name: Select Xcode for macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Test original copy button on disposable runner
+        working-directory: baseline-feedback/macos
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          cp "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/FeedbackAlignmentTests.swift" Tests/AITaskMonitorTests/
+          export AITM_FEEDBACK_SYNTHETIC_ROOT="$(mktemp -d "$RUNNER_TEMP/aitm-feedback-XXXXXXXX")"
+          export AITM_FEEDBACK_SYNTHETIC_CI=1
+          export AITM_FEEDBACK_BASELINE=1
+          swift test --filter FeedbackAlignmentTests
+      - name: Test candidate copy button on disposable runner
+        if: ${{ !cancelled() }}
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          export AITM_FEEDBACK_SYNTHETIC_ROOT="$(mktemp -d "$RUNNER_TEMP/aitm-feedback-XXXXXXXX")"
+          export AITM_FEEDBACK_SYNTHETIC_CI=1
+          swift test --filter FeedbackAlignmentTests
+      - name: Render candidate previews
+        if: ${{ !cancelled() }}
+        working-directory: macos
+        run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-audit-candidate-previews"
+      - name: Render baseline previews on the same runner
+        if: ${{ !cancelled() }}
+        working-directory: baseline-feedback/macos
+        run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-audit-baseline-previews"
+      - name: Upload all candidate previews
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-c034eef-previews-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-audit-candidate-previews/*.png
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload baseline feedback previews
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-ab4de70-feedback-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-audit-baseline-previews/settings-end-*.png
+          if-no-files-found: error
+          retention-days: 7
+
+  candidate-build:
+    if: ${{ contains(github.event.head_commit.message, '[tests-only]') && contains(github.event.head_commit.message, '[feedback-audit]') }}
+    name: candidate-build (tests remain authoritative)
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact candidate source
+        uses: actions/checkout@v4
+        with:
+          ref: c034eef660922c9a06ee601e6ab9f8eac22b7889
+      - name: Run full Swift tests
+        id: tests
+        working-directory: macos
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift build
+          AITM_CLAUDE_TEST_EXECUTABLE="$(swift build --show-bin-path)/AITaskMonitor" swift test 2>&1 | tee "$RUNNER_TEMP/aitm-candidate-swift-tests.log"
+      - name: Gate diagnostic build and record test outcome
+        id: gate
+        if: ${{ !cancelled() && (steps.tests.outcome == 'success' || steps.tests.outcome == 'failure') }}
+        env:
+          AITM_TEST_OUTCOME: ${{ steps.tests.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aitm-candidate-result/bundle-previews"
+          python3 - "$RUNNER_TEMP/aitm-candidate-swift-tests.log" "$RUNNER_TEMP/aitm-candidate-result/TEST-STATUS.txt" <<'PY'
+          import os, pathlib, re, sys
+          log = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8', errors='replace')
+          outcome = os.environ['AITM_TEST_OUTCOME']
+          expected = 'AITaskMonitorTests.ExternalProviderQueueRaceTests testQueuedOldConnectionCannotAcquireNewPermissionGeneration'
+          if outcome == 'failure':
+              failed = re.findall(r"Test Case '-\[([^\]]+)\]' failed", log)
+              errors = [line for line in log.splitlines() if ': error: -[' in line]
+              if failed != [expected] or len(errors) != 2 or any(expected not in line for line in errors) or "Test Suite 'All tests' failed" not in log:
+                  raise SystemExit('Unexpected test failure; diagnostic candidate will not be built.')
+              detail = 'Known provider queue race reproduced: stale ACK and event.'
+          elif outcome == 'success' and "Test Suite 'All tests' passed" in log:
+              detail = 'All Swift tests passed.'
+          else:
+              raise SystemExit('Incomplete or unknown test outcome; diagnostic candidate will not be built.')
+          pathlib.Path(sys.argv[2]).write_text(
+              'Source commit: c034eef660922c9a06ee601e6ab9f8eac22b7889\n'
+              f'Swift test outcome: {outcome}\n{detail}\n'
+              'Diagnostic CI artifact only; not a public release.\n', encoding='utf-8')
+          PY
+      - name: Build universal application
+        id: build
+        if: ${{ !cancelled() && steps.gate.outcome == 'success' }}
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          ./scripts/build-app.sh
+          lipo -verify_arch arm64 x86_64 "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
+          lipo -archs "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor" > "$RUNNER_TEMP/aitm-candidate-result/ARCHITECTURES.txt"
+      - name: Smoke test application and hook
+        id: smoke
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        working-directory: macos
+        run: ./scripts/smoke-test.sh "dist/AI Task Monitor.app"
+      - name: Verify packaged integration resources
+        id: resources
+        if: ${{ !cancelled() && steps.smoke.outcome == 'success' }}
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          python3 - "$RUNNER_TEMP/aitm-candidate-result/INTEGRATION-SHA256.txt" <<'PY'
+          import hashlib, pathlib, sys
+          source = pathlib.Path('integrations')
+          packaged = pathlib.Path('dist/AI Task Monitor.app/Contents/Resources/integrations')
+          files = sorted(path for path in packaged.rglob('*') if path.is_file())
+          if len(files) != 26:
+              raise SystemExit('Unexpected number of packaged integration resources.')
+          lines = []
+          for path in files:
+              relative = path.relative_to(packaged)
+              original = source / relative
+              digest = hashlib.sha256(path.read_bytes()).hexdigest()
+              if not original.is_file() or hashlib.sha256(original.read_bytes()).hexdigest() != digest:
+                  raise SystemExit('Packaged integration resource differs from the pinned source.')
+              lines.append(f'{digest}  {relative.as_posix()}')
+          pathlib.Path(sys.argv[1]).write_text('\n'.join(lines) + '\n', encoding='utf-8')
+          PY
+      - name: Render screenshots from the built bundle
+        id: screenshots
+        if: ${{ !cancelled() && steps.resources.outcome == 'success' }}
+        working-directory: macos
+        run: '"dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor" --render-previews "$RUNNER_TEMP/aitm-candidate-result/bundle-previews"'
+      - name: Create and verify disk image
+        id: disk_image
+        if: ${{ !cancelled() && steps.screenshots.outcome == 'success' }}
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          ./scripts/create-dmg.sh
+          (cd dist && shasum -a 256 -c SHA256SUMS-macOS.txt)
+          cp dist/*.dmg dist/SHA256SUMS-macOS.txt "$RUNNER_TEMP/aitm-candidate-result/"
+      - name: Upload diagnostic candidate
+        if: ${{ !cancelled() && steps.disk_image.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-c034eef-diagnostic-test-${{ steps.tests.outcome }}
+          path: ${{ runner.temp }}/aitm-candidate-result/
+          if-no-files-found: error
+          retention-days: 7
+
+  isolated-integrations:
+    if: ${{ contains(github.event.head_commit.message, '[tests-only]') && contains(github.event.head_commit.message, '[feedback-audit]') }}
+    name: isolated agent integrations
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact candidate source
+        uses: actions/checkout@v4
+        with:
+          ref: c034eef660922c9a06ee601e6ab9f8eac22b7889
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Prepare isolated DeepSeek test tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/aitm-dsh-upstream" --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.5 pnpm@11.25.0
+          echo "AITM_DSH_ANCHOR=$(node -p 'require("node:fs").realpathSync(process.argv[1])' "$RUNNER_TEMP/aitm-dsh-upstream/node_modules/@deepseek-ai/dsh/package.json")" >> "$GITHUB_ENV"
+          echo "AITM_PNPM_SCRIPT=$(node -p 'require("node:fs").realpathSync(process.argv[1])' "$RUNNER_TEMP/aitm-dsh-upstream/node_modules/pnpm/bin/pnpm.mjs")" >> "$GITHUB_ENV"
+          echo "AITM_NODE=$(command -v node)" >> "$GITHUB_ENV"
+      - name: Test isolated agent integrations
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          node integration-tests/Test-ExternalProviderEvents.mjs
+          node integration-tests/Test-ExternalProviderObservers.mjs
+          node integration-tests/Test-ProviderBundles.mjs
+          node integration-tests/Test-DeepSeekCordisRuntime.mjs "$RUNNER_TEMP/aitm-dsh-upstream/node_modules"
+          node integration-tests/Test-DeepSeekIntegration.mjs "$AITM_DSH_ANCHOR" "$AITM_PNPM_SCRIPT"
+          python3 -B integration-tests/test_external_provider_hooks.py
+          python3 -B integration-tests/test_provider_bundle.py
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
+            "https://codeload.github.com/NousResearch/hermes-agent/tar.gz/b200f5bc60e31588ba2cb60e288029c4a54ba5fa" \
+            --output "$RUNNER_TEMP/aitm-hermes-upstream.tar.gz"
+          python3 -B integration-tests/Extract-HermesFixture.py "$RUNNER_TEMP/aitm-hermes-upstream.tar.gz" "$RUNNER_TEMP/aitm-hermes-upstream"
+          python3 -m venv "$RUNNER_TEMP/aitm-hermes-pm-python"
+          "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: 'ruamel.yaml==0.18.16' 'packaging==26.0' 'python-dotenv==1.2.4'
+          "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -I -S -B integration-tests/Test-HermesSetup.py integrations "$RUNNER_TEMP/aitm-hermes-upstream"
+          "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -I -B integration-tests/Test-HermesManager.py integrations "$RUNNER_TEMP/aitm-hermes-upstream"
+          python3 -I -S -B integration-tests/Test-HermesPackaging.py
+          AITM_HERMES_PYTHON="$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" AITM_HERMES_SOURCE="$RUNNER_TEMP/aitm-hermes-upstream" swift test --filter HermesIntegrationTests/testPinnedBridgePreparesAnIsolatedProfileWithoutChangingSettings
+          python3 -B integration-tests/Test-HermesUpstreamDispatch.py "$RUNNER_TEMP/aitm-hermes-upstream"
+          python3 -B integration-tests/Test-HermesLiveness.py "$RUNNER_TEMP/aitm-hermes-upstream/hermes_cli/active_sessions.py"
+          "$RUNNER_TEMP/aitm-hermes-pm-python/bin/python" -B integration-tests/Test-HermesPublication.py "$RUNNER_TEMP/aitm-hermes-upstream"
+          npm pack @moonshot-ai/kimi-code@2.5.0 --ignore-scripts --pack-destination "$RUNNER_TEMP" --json > "$RUNNER_TEMP/aitm-kimi-package.json"
+          tar -xOf "$RUNNER_TEMP/moonshot-ai-kimi-code-2.5.0.tgz" package/dist/main.mjs > "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
+          node integration-tests/Test-KimiIntegration.mjs
+          node integration-tests/Test-KimiObserver.mjs
+          node integration-tests/Test-KimiUpstreamHook.mjs "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
+          node integration-tests/Test-KimiUpstreamContract.mjs "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
+          node integration-tests/Test-KimiUpstreamInstall.mjs "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
+          npm install --prefix "$RUNNER_TEMP/aitm-kimi-full" --ignore-scripts --omit=optional --no-audit --no-fund "$RUNNER_TEMP/moonshot-ai-kimi-code-2.5.0.tgz"
+          node integration-tests/Test-KimiApprovalWeb.mjs "$RUNNER_TEMP/aitm-kimi-full"
