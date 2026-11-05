@@ -18,6 +18,9 @@ final class TaskStore: ObservableObject {
     @Published private(set) var deepSeekSetupInProgress = false
     @Published private(set) var deepSeekScanInProgress = false
     @Published private(set) var deepSeekInstallationAvailable = false
+    @Published private(set) var kimiState = "disconnected"
+    @Published private(set) var kimiScanned = false
+    @Published private(set) var kimiScanError: String?
     @Published private(set) var codexCloudEnabled = false
     @Published private(set) var codexCloudFailed = false
     @Published private(set) var codexCloudPartial = false
@@ -42,6 +45,8 @@ final class TaskStore: ObservableObject {
     private let externalProvidersEnabled: Bool
     private let externalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState]
     private let makeExternalRuntime: () throws -> ExternalProviderRuntime
+    private let inspectKimiConnection: () throws -> KimiConnection
+    private let kimiScanInterval: TimeInterval
     private let codexCloudAllowed: Bool
     private let codexCloudDefaults: UserDefaults
     private let makeCodexCloudClient: () -> CodexCloudClient?
@@ -58,6 +63,10 @@ final class TaskStore: ObservableObject {
     private var previousExternal: [MonitoredTask] = []
     private var externalRuntime: ExternalProviderRuntime?
     private var seenExternalConnections: Set<TaskProvider> = []
+    private var kimiScope: String?
+    private var kimiSeenScope: String?
+    private var kimiScanInProgress = false
+    private var nextKimiScan = Date.distantPast
     private var deepSeekContext: DeepSeekIntegration.Context?
     private var deepSeekSeenScopes: [String: String] = [:]
     private var deepSeekScanError: String?
@@ -113,6 +122,60 @@ final class TaskStore: ObservableObject {
                 self.refresh()
             }
         }
+    }
+
+    private func scheduleKimiScan() {
+        guard externalProvidersEnabled, externalConnections[.kimi] == nil, !kimiScanInProgress,
+              Date() >= nextKimiScan else { return }
+        kimiScanInProgress = true
+        let inspect = inspectKimiConnection
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = Result { try inspect() }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.kimiScanInProgress = false
+                self.nextKimiScan = Date().addingTimeInterval(self.kimiScanInterval)
+                switch result {
+                case .success(let connection):
+                    guard ["connected", "disabled", "disconnected"].contains(connection.state),
+                          (connection.state == "connected" ? DeepSeekIntegration.validScope(connection.scope) : connection.scope == nil) else {
+                        self.kimiScanError = "invalid-response"
+                        self.refresh()
+                        return
+                    }
+                    self.kimiScanned = true
+                    self.kimiScanError = nil
+                    self.kimiState = connection.state
+                    self.kimiScope = connection.scope
+                    self.kimiSeenScope = connection.state == "connected" ? connection.scope : nil
+                case .failure(let error):
+                    self.kimiScanError = (error as? KimiIntegrationError)?.code ?? "operation-failed"
+                }
+                self.refresh()
+            }
+        }
+    }
+
+    var kimiStatusMessage: String {
+        if let code = kimiScanError {
+            return code == "installation-unconfirmed" ? tr("Установка не подтверждена", "Installation unconfirmed") : tr("Не удалось проверить плагин Kimi Code.", "Could not check the Kimi Code plugin.")
+        }
+        guard kimiScanned else { return tr("Проверка", "Checking") }
+        switch kimiState {
+        case "connected": return tr("Плагин включён", "Plugin enabled")
+        case "disabled": return tr("Плагин отключён", "Plugin disabled")
+        default: return tr("Плагин не установлен", "Plugin not installed")
+        }
+    }
+
+    var kimiCanCopyPath: Bool { kimiScanned && kimiScanError == nil && KimiIntegration.pluginDirectory() != nil }
+
+    private func kimiConnectionState() throws -> ExternalProviderConnectionState {
+        if kimiScanError != nil {
+            if kimiSeenScope == nil { return .disconnected }
+            throw KimiIntegrationError(code: "operation-failed")
+        }
+        return kimiScanned && kimiState == "connected" ? .connected : .disconnected
     }
 
     private func scheduleDeepSeekScan() {
@@ -201,7 +264,10 @@ final class TaskStore: ObservableObject {
         return deepSeekUncertainScopes.isEmpty ? .disconnected : .partial
     }
 
-    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, additionalExternalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState] = [:], makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }, enableCodexCloud: Bool = false, codexCloudDefaults: UserDefaults = .standard, codexCloudInterval: TimeInterval = 30, makeCodexCloudClient: @escaping () -> CodexCloudClient? = { CodexCloudClient.discover().map { CodexCloudClient(executable: $0) } }) {
+    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, additionalExternalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState] = [:], makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }, inspectKimiConnection: @escaping () throws -> KimiConnection = {
+        guard let context = KimiIntegration.discover() else { throw KimiIntegrationError(code: "installation-unconfirmed") }
+        return try KimiIntegration.inspect(context)
+    }, kimiScanInterval: TimeInterval = 15, enableCodexCloud: Bool = false, codexCloudDefaults: UserDefaults = .standard, codexCloudInterval: TimeInterval = 30, makeCodexCloudClient: @escaping () -> CodexCloudClient? = { CodexCloudClient.discover().map { CodexCloudClient(executable: $0) } }) {
         self.codexReader = codexReader
         self.claudeReader = claudeReader
         self.claudeLoopProfile = claudeLoopProfile
@@ -210,6 +276,8 @@ final class TaskStore: ObservableObject {
         connections[.opencode] = openCodeConnection
         self.externalConnections = connections
         self.makeExternalRuntime = makeExternalRuntime
+        self.inspectKimiConnection = inspectKimiConnection
+        self.kimiScanInterval = max(0.1, kimiScanInterval)
         self.codexCloudAllowed = enableCodexCloud && previewTasks == nil
         self.codexCloudDefaults = codexCloudDefaults
         self.makeCodexCloudClient = makeCodexCloudClient
@@ -523,7 +591,7 @@ final class TaskStore: ObservableObject {
             if !unavailable.contains(.claude) { unavailable.append(.claude) }
             previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         }
-        if externalProvidersEnabled { scheduleDeepSeekScan(); refreshExternalProviders(unavailable: &unavailable) }
+        if externalProvidersEnabled { scheduleKimiScan(); scheduleDeepSeekScan(); refreshExternalProviders(unavailable: &unavailable) }
         scheduleCodexCloudScan()
         unavailableSources = unavailable
         var combined = (previousCodex + previousClaude + previousExternal + codexCloudTasks)
@@ -587,6 +655,7 @@ final class TaskStore: ObservableObject {
                 let state: ExternalProviderConnectionState
                 if let connection = externalConnections[provider] { state = try connection() }
                 else if provider == .deepseek { state = try deepSeekConnectionState() }
+                else if provider == .kimi { state = try kimiConnectionState() }
                 else { continue }
                 switch state {
                 case .connected:
@@ -623,6 +692,9 @@ final class TaskStore: ObservableObject {
             if allowed.contains(.deepseek), externalConnections[.deepseek] == nil {
                 scopes[.deepseek] = deepSeekAllowedScopes
                 uncertainScopes[.deepseek] = deepSeekUncertainScopes
+            }
+            if allowed.contains(.kimi), externalConnections[.kimi] == nil, let scope = kimiScope {
+                scopes[.kimi] = [scope]
             }
             previousExternal = (externalRuntime?.snapshot(allowed: allowed, profileScopes: scopes, uncertainScopes: uncertainScopes) ?? []) + retained
         } catch {

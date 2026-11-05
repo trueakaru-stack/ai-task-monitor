@@ -3,6 +3,14 @@ import Foundation
 import XCTest
 @testable import AITaskMonitor
 
+private final class KimiInspectionFixture {
+    private let lock = NSLock()
+    private var value: Result<KimiConnection, Error>
+    init(_ value: Result<KimiConnection, Error>) { self.value = value }
+    func set(_ value: Result<KimiConnection, Error>) { lock.lock(); self.value = value; lock.unlock() }
+    func inspect() throws -> KimiConnection { lock.lock(); defer { lock.unlock() }; return try value.get() }
+}
+
 final class ExternalProviderTaskStoreTests: XCTestCase {
     private func send(_ json: String, directory: String) throws {
         let descriptor = try XCTUnwrap(ClaudeLoopSocket.connect(path: directory + "/events.sock"))
@@ -12,6 +20,60 @@ final class ExternalProviderTaskStoreTests: XCTestCase {
         let header = Data([UInt8(count & 255), UInt8((count >> 8) & 255), UInt8((count >> 16) & 255), UInt8((count >> 24) & 255)])
         XCTAssertTrue(ClaudeLoopSocket.write(descriptor, data: header + body))
         XCTAssertEqual(ClaudeLoopSocket.read(descriptor, count: 1), Data([0x06]))
+    }
+
+    @MainActor
+    func testKimiManualConnectionPreservesOnlyUnconfirmedTasks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-kimi-store-" + UUID().uuidString, isDirectory: true)
+        let directory = "/private/tmp/aitm-kimi-store-\(UUID().uuidString)"
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var activeRuntime: ExternalProviderRuntime?
+        defer {
+            activeRuntime?.stop()
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: directory))
+            try? FileManager.default.removeItem(at: root)
+        }
+        let scope = String(repeating: "a", count: 32)
+        let fixture = KimiInspectionFixture(.success(KimiConnection(state: "connected", scope: scope)))
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: root.appendingPathComponent("codex")),
+                              claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("claude.jsonl")),
+                              journal: DiagnosticJournal(directory: root.appendingPathComponent("journal")),
+                              enableExternalProviders: true,
+                              openCodeConnection: { .connected },
+                              makeExternalRuntime: {
+                                  let runtime = ExternalProviderRuntime(channel: try ExternalProviderChannel(directory: directory))
+                                  activeRuntime = runtime
+                                  return runtime
+                              }, inspectKimiConnection: { try fixture.inspect() }, kimiScanInterval: 0.1)
+        func wait(_ message: String, until predicate: () -> Bool) {
+            let deadline = Date().addingTimeInterval(4)
+            while Date() < deadline && !predicate() {
+                store.refresh()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+            }
+            XCTAssertTrue(predicate(), message)
+        }
+        wait("Kimi was not connected") { store.kimiState == "connected" && activeRuntime != nil }
+        let session = scope + "_synthetic"
+        try send(#"{"version":1,"provider":"kimi","session":"\#(session)","kind":"started"}"#, directory: directory)
+        try send(#"{"version":1,"provider":"kimi","session":"\#(String(repeating: "b", count: 32))_other","kind":"started"}"#, directory: directory)
+        wait("Kimi task did not arrive") { store.tasks.contains { $0.provider == .kimi } }
+        XCTAssertEqual(store.tasks.filter { $0.provider == .kimi }.count, 1)
+        let task = try XCTUnwrap(store.tasks.first { $0.provider == .kimi })
+        XCTAssertTrue(task.isUnconfirmed)
+        XCTAssertFalse(task.isActive)
+        XCTAssertFalse(task.isWaiting)
+        XCTAssertNil(task.progress)
+        fixture.set(.failure(KimiIntegrationError(code: "modified-bundle")))
+        wait("A failed check was not reported") { store.unavailableSources.contains(.kimi) }
+        XCTAssertTrue(try XCTUnwrap(store.tasks.first { $0.provider == .kimi }).isUnconfirmed)
+        fixture.set(.success(KimiConnection(state: "disabled", scope: nil)))
+        wait("A disabled plugin remained connected") { store.kimiState == "disabled" && !store.tasks.contains { $0.provider == .kimi } }
+        XCTAssertFalse(store.unavailableSources.contains(.kimi))
+        XCTAssertNotNil(activeRuntime, "Other connected sources must retain the receiver")
+        fixture.set(.success(KimiConnection(state: "connected", scope: scope)))
+        wait("Kimi did not reconnect") { store.kimiState == "connected" }
+        XCTAssertFalse(store.tasks.contains { $0.provider == .kimi }, "Reconnect must not resurrect an old task")
     }
 
     @MainActor

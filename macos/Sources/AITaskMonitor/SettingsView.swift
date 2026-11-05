@@ -5,8 +5,10 @@ private struct SettingsPreviewEndKey: EnvironmentKey { static let defaultValue =
 private struct SettingsPreviewSourcesKey: EnvironmentKey { static let defaultValue = false }
 enum SettingsPreviewClaude: Equatable { case unconfirmed, connected }
 enum SettingsPreviewCloud: Equatable { case disconnected, connected, error, partial }
+enum SettingsPreviewKimi: Equatable { case disconnected, connected, disabled, error }
 private struct SettingsPreviewClaudeKey: EnvironmentKey { static let defaultValue: SettingsPreviewClaude? = nil }
 private struct SettingsPreviewCloudKey: EnvironmentKey { static let defaultValue: SettingsPreviewCloud? = nil }
+private struct SettingsPreviewKimiKey: EnvironmentKey { static let defaultValue: SettingsPreviewKimi? = nil }
 extension EnvironmentValues {
     var settingsPreviewEnd: Bool {
         get { self[SettingsPreviewEndKey.self] }
@@ -24,6 +26,10 @@ extension EnvironmentValues {
         get { self[SettingsPreviewCloudKey.self] }
         set { self[SettingsPreviewCloudKey.self] = newValue }
     }
+    var settingsPreviewKimi: SettingsPreviewKimi? {
+        get { self[SettingsPreviewKimiKey.self] }
+        set { self[SettingsPreviewKimiKey.self] = newValue }
+    }
 }
 
 struct SettingsView: View {
@@ -32,10 +38,12 @@ struct SettingsView: View {
     @AppStorage("languageMode") private var languageRaw = AppLanguage.system.rawValue
     @State private var confirmsJournalClear = false
     @State private var feedbackCopyError = false
+    @State private var kimiCopyError = false
     @Environment(\.settingsPreviewEnd) private var settingsPreviewEnd
     @Environment(\.settingsPreviewSources) private var settingsPreviewSources
     @Environment(\.settingsPreviewClaude) private var settingsPreviewClaude
     @Environment(\.settingsPreviewCloud) private var settingsPreviewCloud
+    @Environment(\.settingsPreviewKimi) private var settingsPreviewKimi
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -119,6 +127,27 @@ struct SettingsView: View {
                         if !store.openCodeMessage.isEmpty {
                             Text(store.openCodeMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
                         }
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Kimi Code").font(.system(size: 13, weight: .medium))
+                                Text(tr("Для локальных задач Kimi Code CLI 2.5.0, установленного через npm: скопируйте путь, откройте в Kimi меню /plugins и установите плагин через Custom. Затем выполните /reload или откройте новую сессию. Статус задач не подтверждён; завершённые задачи могут оставаться в списке. Отключение выполняется в меню Kimi.", "For local tasks in Kimi Code CLI 2.5.0 installed via npm: copy the path, open /plugins in Kimi and install the plugin through Custom. Then run /reload or open a new session. Task status is unconfirmed; finished tasks may remain listed. Disable the plugin in Kimi."))
+                                    .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                Text(kimiStatusMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                if kimiCopyError {
+                                    Text(tr("Не удалось скопировать путь.", "Could not copy the path."))
+                                        .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                                }
+                            }
+                            Spacer(minLength: 20)
+                            Button(tr("Скопировать путь", "Copy path")) {
+                                guard settingsPreviewKimi == nil, let directory = KimiIntegration.pluginDirectory() else { return }
+                                NSPasteboard.general.clearContents()
+                                kimiCopyError = !NSPasteboard.general.setString(directory.path, forType: .string)
+                            }
+                            .disabled(settingsPreviewKimi == .error || (settingsPreviewKimi == nil && !store.kimiCanCopyPath))
+                            .accessibilityLabel(tr("Скопировать путь Kimi Code", "Copy Kimi Code path"))
+                        }
+                        .id("settings-kimi")
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("DeepSeek Harness").font(.system(size: 13, weight: .medium))
@@ -258,9 +287,10 @@ struct SettingsView: View {
                 .id("feedback-end")
              }
              .onAppear {
-                 if settingsPreviewEnd || settingsPreviewSources {
+                 if settingsPreviewEnd || settingsPreviewSources || settingsPreviewKimi != nil {
                      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                          if settingsPreviewEnd { scrollProxy.scrollTo("feedback-end", anchor: .bottom) }
+                         else if settingsPreviewKimi != nil { scrollProxy.scrollTo("settings-kimi", anchor: .top) }
                          else { scrollProxy.scrollTo("settings-sources", anchor: .top) }
                      }
                  }
@@ -289,6 +319,16 @@ struct SettingsView: View {
 
     private var cloudFailed: Bool { settingsPreviewCloud == nil ? store.codexCloudFailed : settingsPreviewCloud == .error }
     private var cloudPartial: Bool { settingsPreviewCloud == nil ? store.codexCloudPartial : settingsPreviewCloud == .partial }
+
+    private var kimiStatusMessage: String {
+        switch settingsPreviewKimi {
+        case .disconnected: return tr("Плагин не установлен", "Plugin not installed")
+        case .connected: return tr("Плагин включён", "Plugin enabled")
+        case .disabled: return tr("Плагин отключён", "Plugin disabled")
+        case .error: return tr("Не удалось проверить плагин Kimi Code.", "Could not check the Kimi Code plugin.")
+        case nil: return store.kimiStatusMessage
+        }
+    }
 
     private var claudeInstallation: ClaudeIntegration.InstallationState {
         settingsPreviewClaude == nil ? ClaudeIntegration.installationState() : .unconfirmed
