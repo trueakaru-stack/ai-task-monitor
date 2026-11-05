@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           mkdir -p "$RUNNER_TEMP/aitm-update-input"
-          for name in frozen-wip.patch.b64 hardening.patch.b64 candidate.sha256; do
+          for name in frozen-wip.patch.b64 hardening.patch.b64 candidate.sha256 ReleaseRedirectDiagnosticTests.swift; do
             git show "$GITHUB_SHA:.github/updater-audit/$name" > "$RUNNER_TEMP/aitm-update-input/$name"
           done
           cd "$RUNNER_TEMP/aitm-update-input"
@@ -51,6 +51,7 @@ jobs:
             'b97325dac7df58f96441ab74f748d572ef3e4bd01e7adc77d229d5fb1ab89bd1' 'frozen-wip.patch.b64' \
             'bf9cb606149e6a4ca6eadff54d6cecf1938a040147f7e6240e9b87b4499f574a' 'hardening.patch.b64' \
             '91ddc5ea89fd8b8279717966fc0e548812df3303963448130b13f3d37f9e33b2' 'candidate.sha256' \
+            '5f1d4c865e72bc9e490ca17770a614e5fa1fc38da8e7c5589ce27fc546d600a5' 'ReleaseRedirectDiagnosticTests.swift' \
             | shasum -a 256 -c -
           /usr/bin/base64 -D < frozen-wip.patch.b64 > "$RUNNER_TEMP/aitm-frozen-wip.patch"
           /usr/bin/base64 -D < hardening.patch.b64 > "$RUNNER_TEMP/aitm-hardening.patch"
@@ -92,6 +93,9 @@ jobs:
           git -C "$TREE" apply --include='macos/**' "$RUNNER_TEMP/aitm-hardening.patch"
           cd "$TREE"
           shasum -a 256 -c "$INPUT/candidate.sha256"
+          cp "$INPUT/ReleaseRedirectDiagnosticTests.swift" macos/Tests/AITaskMonitorTests/ReleaseRedirectDiagnosticTests.swift
+          printf '%s  %s\n' '5f1d4c865e72bc9e490ca17770a614e5fa1fc38da8e7c5589ce27fc546d600a5' \
+            macos/Tests/AITaskMonitorTests/ReleaseRedirectDiagnosticTests.swift | shasum -a 256 -c -
 
       - name: Run isolated synthetic Swift tests and two-process fixture
         shell: bash
@@ -132,7 +136,7 @@ jobs:
           cd "$TREE/macos"
           run_isolated /usr/bin/xcrun swift --version
           audit_status=0
-          for suite in ReleaseUpdatesTests ReleaseRetryScheduleTests ReleaseUpdateCoordinatorTests ReleaseRequestSyntheticTests; do
+          for suite in ReleaseUpdatesTests ReleaseRetryScheduleTests ReleaseUpdateCoordinatorTests ReleaseRequestSyntheticTests ReleaseRedirectDiagnosticTests; do
             printf '%s\n' "Running synthetic suite: $suite"
             if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite"; then
               audit_status=1
