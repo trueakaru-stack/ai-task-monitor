@@ -119,6 +119,21 @@ final class ExternalProviderStateStore {
         }
         guard var state = states[key] else { return false }
         expire(&state, now: now)
+        if event.provider == "kimi" {
+            // Kimi's passive hooks can be delayed or lost and do not reliably
+            // report successful turn completion.
+            if event.kind == "started" && (state.startKey.isEmpty || event.turn != state.turn) {
+                start(&state, now: now, turn: event.turn)
+            }
+            state.status = "unknown"
+            state.steps = []
+            state.planConfirmed = false
+            state.calls.removeAll()
+            state.lastHeartbeat = nil
+            state.updatedAt = now
+            states[key] = state
+            return true
+        }
         if event.kind == "started" {
             let newTurn = state.status != "active" || event.turn.isEmpty || event.turn != state.turn
             if newTurn { start(&state, now: now, turn: event.turn) }

@@ -49,19 +49,35 @@ final class ExternalProviderStateTests: XCTestCase {
 
     func testGapAndStaleActivityBecomeUnknown() throws {
         let store = ExternalProviderStateStore()
-        try apply(store, #"{"version":1,"provider":"kimi","session":"one","kind":"active"}"#, now)
+        try apply(store, #"{"version":1,"provider":"deepseek","session":"one","kind":"active"}"#, now)
         XCTAssertEqual(store.snapshot(now: now.addingTimeInterval(1_800)).first?.status, "unknown")
-        try apply(store, #"{"version":1,"provider":"kimi","session":"one","kind":"plan","steps":[]}"#, now.addingTimeInterval(10_800))
+        try apply(store, #"{"version":1,"provider":"deepseek","session":"one","kind":"plan","steps":[]}"#, now.addingTimeInterval(10_800))
         XCTAssertEqual(store.snapshot(now: now.addingTimeInterval(10_800)).first?.status, "unknown")
         try apply(store, #"{"version":1,"provider":"hermes","session":"two","kind":"active"}"#, now)
         try apply(store, #"{"version":1,"provider":"hermes","session":"two","kind":"plan","steps":[{"title":"One","status":"done"}]}"#, now)
-        try apply(store, #"{"version":1,"provider":"kimi","session":"one","kind":"gap"}"#, now)
+        try apply(store, #"{"version":1,"provider":"deepseek","session":"one","kind":"gap"}"#, now)
         let unaffected = try XCTUnwrap(store.snapshot(now: now).first { $0.provider == "hermes" })
         XCTAssertEqual(unaffected.status, "active")
         XCTAssertTrue(unaffected.planConfirmed)
         store.markGap()
         XCTAssertTrue(store.snapshot(now: now).allSatisfy { $0.status == "unknown" })
         XCTAssertFalse(try XCTUnwrap(store.snapshot(now: now).first { $0.provider == "hermes" }).planConfirmed)
+    }
+
+    func testKimiEventsRemainUnconfirmedEvenIfTheyArriveOutOfOrder() throws {
+        let store = ExternalProviderStateStore()
+        for kind in ["started", "waiting", "interrupted", "active", "completed"] {
+            try apply(store, #"{"version":1,"provider":"kimi","session":"one","kind":"\#(kind)"}"#, now)
+            let state = try XCTUnwrap(store.snapshot(now: now).first)
+            XCTAssertEqual(state.status, "unknown")
+            XCTAssertFalse(state.planConfirmed)
+            XCTAssertTrue(state.steps.isEmpty)
+            let task = try XCTUnwrap(ExternalProviderTaskMapper.tasks([state]).first)
+            XCTAssertTrue(task.isUnconfirmed)
+            XCTAssertFalse(task.isActive)
+            XCTAssertFalse(task.isWaiting)
+            XCTAssertNil(task.progress)
+        }
     }
 
     func testInvalidPrivateAndOversizedInputsAreRejected() {
@@ -122,9 +138,9 @@ final class ExternalProviderStateTests: XCTestCase {
     func testOverflowInvalidatesActiveClaims() throws {
         let store = ExternalProviderStateStore()
         for index in 0..<256 {
-            try apply(store, #"{"version":1,"provider":"kimi","session":"s\#(index)","kind":"active"}"#, now)
+            try apply(store, #"{"version":1,"provider":"deepseek","session":"s\#(index)","kind":"active"}"#, now)
         }
-        let overflow = try XCTUnwrap(parse(#"{"version":1,"provider":"kimi","session":"overflow","kind":"active"}"#))
+        let overflow = try XCTUnwrap(parse(#"{"version":1,"provider":"deepseek","session":"overflow","kind":"active"}"#))
         XCTAssertFalse(store.apply(overflow, now: now))
         XCTAssertTrue(store.snapshot(now: now).allSatisfy { $0.status == "unknown" })
     }
