@@ -191,7 +191,8 @@ final class WindowLayoutAuditTests: XCTestCase {
                 XCTAssertEqual(menus.map(\.numberOfItems), [7, 10, 30, 100, 8, 30])
                 let fittedMaximum = menus.map { $0.fittingSize.width }.max() ?? 0
                 XCTAssertGreaterThan(fittedMaximum, 0)
-                var expectedWidth: CGFloat = 120
+                // On the measured macOS 15 runner the 120 pt visible control has a 130 pt NSView frame.
+                var expectedWidth: CGFloat = 130
                 #if compiler(>=6.2)
                 if #available(macOS 26.0, *) { expectedWidth = fittedMaximum }
                 #endif
