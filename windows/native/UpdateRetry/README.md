@@ -18,6 +18,10 @@ consistent positive monotonic clock frequency, and stale request generations
 filtered by the caller. `Record` returns false before the current deadline;
 it rejects the entire early result, including any longer server hint that it
 contains. That guard is not a substitute for single-flight request control.
+If the monotonic counter resets while an admitted request is in flight, its
+result can also be rejected as early. The controller must detect and handle
+that reset without discarding the result or a longer server hint; simply
+ignoring a false return can shorten the requested delay.
 The caller must also bound the number of supplied headers and handle transport
 errors, cancellation and shutdown. No UI responsiveness or real network
 behavior is established by this library.
