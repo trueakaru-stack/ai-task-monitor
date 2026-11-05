@@ -110,3 +110,12 @@ function Get-KimiUncertainScopes {
  if($Controller.LastError -and $Controller.SeenScope -cmatch '^[a-f0-9]{32}$'){return @($Controller.SeenScope)}
  return @()
 }
+
+function Stop-KimiMonitorController {
+ param([Parameter(Mandatory=$true)]$Controller)
+ if($null -eq $Controller.Request){return}
+ $process=$Controller.Request.Process
+ try{if(-not $process.HasExited){$process.Kill()}}catch{}
+ try{$process.Dispose()}catch{}
+ $Controller.Request=$null
+}

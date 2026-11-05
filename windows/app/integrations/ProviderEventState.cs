@@ -145,6 +145,20 @@ namespace AITaskMonitor.ExternalProviders
                 states.Add(key, state);
             }
             Expire(state, now);
+            if (input.Provider == "kimi")
+            {
+                // Kimi's passive hooks can arrive late or be lost, and do not
+                // reliably report a successful turn end. Never claim a state.
+                if (input.Kind == "started" && (String.IsNullOrEmpty(state.StartKey) || input.Turn != state.Turn))
+                    Start(state, now, input.Turn);
+                state.Status = "unknown";
+                state.Steps = new Step[0];
+                state.PlanConfirmed = false;
+                state.Calls.Clear();
+                state.LastHeartbeat = null;
+                state.Updated = now;
+                return true;
+            }
             if (input.Kind == "started")
             {
                 bool newTurn = state.Status != "active" || String.IsNullOrEmpty(input.Turn) || input.Turn != state.Turn;

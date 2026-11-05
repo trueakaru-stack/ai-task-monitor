@@ -19,8 +19,11 @@
  [ValidateSet('','disconnected','connected','error','partial')][string]$PreviewCloudState = '',
  [switch]$PreviewCloudUiTest,
  [switch]$PreviewCloudTask,
+ [switch]$PreviewKimiTask,
  [switch]$PreviewDeepSeekUiTest,
  [switch]$PreviewDeepSeekErrorUiTest,
+ [ValidateSet('','disconnected','connected','disabled','error')][string]$PreviewKimiState = '',
+ [switch]$PreviewKimiUiTest,
  [switch]$PreviewAbout,
  [switch]$PreviewAboutUiTest,
  [switch]$PreviewClipboardUiTest,
@@ -83,8 +86,10 @@ if($PreviewSources -and (-not $SnapshotFile -or -not $SettingsSnapshotFile -or $
 if($PreviewCloudState -and -not $PreviewSources){throw 'Cloud source previews require synthetic source snapshots.'}
 if($PreviewCloudUiTest -and (-not $PreviewSources -or -not $PreferencesFile)){throw 'Cloud UI tests require synthetic sources and isolated preferences.'}
 if($PreviewCloudTask -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw 'Cloud task previews require synthetic tasks and a snapshot.'}
+if($PreviewKimiTask -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw 'Kimi task previews require synthetic tasks and a snapshot.'}
 if($PreviewDeepSeekUiTest -and -not $PreviewSources){throw 'DeepSeek UI tests require a synthetic source preview.'}
 if($PreviewDeepSeekErrorUiTest -and -not $PreviewDeepSeekUiTest){throw 'DeepSeek error previews require the synthetic DeepSeek UI test.'}
+if(($PreviewKimiState -or $PreviewKimiUiTest) -and -not $PreviewSources){throw 'Kimi source previews require synthetic source snapshots.'}
 if(($PreviewManyProviders -or $PreviewTabsUiTest) -and (-not $SnapshotFile -or -not $PreviewManyProviders -or $PreviewActiveTasks -ne 6)){throw 'Provider tab previews require six synthetic tasks and a snapshot.'}
 if($PreviewActivityUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or $PreviewScenario -eq "default")){throw "Activity UI tests require one synthetic task, a scenario and a snapshot."}
 if($PreviewFocusUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or -not $CompactMode)){throw "Focus UI tests require a compact synthetic snapshot."}
@@ -180,6 +185,13 @@ try{
  $script:externalProviderController=New-ExternalProviderController
  $script:externalProviderModulesAvailable=$true
 }catch{}
+$script:kimiModulesAvailable=$false
+$script:kimiController=$null
+try{
+ . (Join-Path $PSScriptRoot 'integrations\KimiRuntime.ps1')
+ $script:kimiController=New-KimiMonitorController -AppRoot $PSScriptRoot
+ $script:kimiModulesAvailable=$true
+}catch{}
 $script:deepSeekModulesAvailable=$false
 $script:deepSeekController=$null
 try{
@@ -240,6 +252,13 @@ $script:translations=@{
  'Приложение добавит локальный плагин OpenCode. Поддерживаются совместимые версии 1 начиная с 1.18.29 и версия 2. После подключения перезапустите OpenCode.'='The app adds a local OpenCode plugin. Compatible versions 1.18.29 and later within version 1, and version 2, are supported. Restart OpenCode after connecting.'
  'Не удалось подтвердить установку или совместимость OpenCode'='Could not confirm the OpenCode installation or compatibility'
  'Не удалось прочитать подключение OpenCode'='Could not read the OpenCode connection'
+ 'Для локальных задач Kimi Code CLI 2.5.0, установленного через npm: скопируйте путь, откройте в Kimi меню /plugins и установите плагин через Custom. Затем выполните /reload или откройте новую сессию. Статус задач не подтверждён; завершённые задачи могут оставаться в списке. Отключение выполняется в меню Kimi.'='For local tasks in Kimi Code CLI 2.5.0 installed via npm: copy the path, open /plugins in Kimi and install the plugin through Custom. Then run /reload or open a new session. Task status is unconfirmed; finished tasks may remain listed. Disable the plugin in Kimi.'
+ 'Скопировать путь'='Copy path'
+ 'Плагин включён'='Plugin enabled'
+ 'Плагин отключён'='Plugin disabled'
+ 'Плагин не установлен'='Plugin not installed'
+ 'Не удалось проверить плагин Kimi Code.'='Could not check the Kimi Code plugin.'
+ 'Не удалось скопировать путь.'='Could not copy the path.'
  'Подключение проверено с DeepSeek Harness 0.2.1-rc.5 и pnpm 11.25.0. Приложение добавит локальный плагин в выбранный профиль. После подключения перезапустите DeepSeek Harness.'='Connection has been tested with DeepSeek Harness 0.2.1-rc.5 and pnpm 11.25.0. The app adds a local plugin to the selected profile. Restart DeepSeek Harness after connecting.'
  'Профиль'='Profile'
  'Профиль DeepSeek Harness'='DeepSeek Harness profile'
@@ -755,6 +774,15 @@ function Tr([string]$text){
         <Border Height="1" Background="{DynamicResource Divider}"/>
         <Grid Height="50">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <TextBlock Text="Kimi Code" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimary}"/>
+         <TextBlock x:Name="KimiSourceStatus" Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
+         <Button x:Name="KimiSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
+        </Grid>
+        <TextBlock x:Name="KimiSourceError" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextSecondary}"/>
+        <TextBlock Margin="0,0,0,12" Text="Для локальных задач Kimi Code CLI 2.5.0, установленного через npm: скопируйте путь, откройте в Kimi меню /plugins и установите плагин через Custom. Затем выполните /reload или откройте новую сессию. Статус задач не подтверждён; завершённые задачи могут оставаться в списке. Отключение выполняется в меню Kimi." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+        <Border Height="1" Background="{DynamicResource Divider}"/>
+        <Grid Height="50">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
          <TextBlock Text="DeepSeek Harness" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimary}"/>
          <TextBlock x:Name="DeepSeekSourceStatus" Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
          <Button x:Name="DeepSeekSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
@@ -1102,6 +1130,10 @@ $claudeSourceStatus = $window.FindName("ClaudeSourceStatus")
 $claudeSourceAction = $window.FindName("ClaudeSourceAction")
 $openCodeSourceStatus = $window.FindName("OpenCodeSourceStatus")
 $openCodeSourceAction = $window.FindName("OpenCodeSourceAction")
+$kimiSourceStatus = $window.FindName("KimiSourceStatus")
+$kimiSourceAction = $window.FindName("KimiSourceAction")
+$kimiSourceError = $window.FindName("KimiSourceError")
+$script:kimiCopyError = ''
 $deepSeekSourceStatus = $window.FindName("DeepSeekSourceStatus")
 $deepSeekSourceAction = $window.FindName("DeepSeekSourceAction")
 $deepSeekProfileCombo = $window.FindName("DeepSeekProfileCombo")
@@ -1414,6 +1446,7 @@ function Update-SourceSettings {
  $codexSourceStatus.Text=Tr $(if($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
  Update-CodexCloudSourceSettings
  Update-OpenCodeSourceSettings
+ Update-KimiSourceSettings
  Update-DeepSeekSourceSettings
  $installation=Claude-InstallationState $env:USERPROFILE $env:APPDATA $env:LOCALAPPDATA $env:PATH
  try{$connectionState=Claude-ConnectionState;$connected=$connectionState -eq "connected"}
@@ -1475,6 +1508,24 @@ function Update-OpenCodeSourceSettings {
   $openCodeSourceAction.ToolTip=Tr 'Не удалось прочитать подключение OpenCode'
  }
  [Windows.Automation.AutomationProperties]::SetName($openCodeSourceAction,$openCodeSourceAction.Content+' OpenCode')
+}
+
+function Update-KimiSourceSettings {
+ $kimiSourceAction.Content=Tr 'Скопировать путь'
+ [Windows.Automation.AutomationProperties]::SetName($kimiSourceAction,((Tr 'Скопировать путь')+' Kimi Code'))
+ $kimiSourceAction.IsEnabled=$false
+ $kimiSourceStatus.Text=Tr 'Установка не подтверждена'
+ $kimiSourceError.Visibility='Collapsed';$kimiSourceError.Text=''
+ if(-not $script:kimiModulesAvailable -or $null -eq $script:kimiController){return}
+ $controller=$script:kimiController
+ if($controller.LastError -and $controller.LastError -ne 'installation-unconfirmed'){
+  $kimiSourceStatus.Text=Tr 'Нет данных'
+  $kimiSourceError.Text=Tr 'Не удалось проверить плагин Kimi Code.';$kimiSourceError.Visibility='Visible'
+ }elseif($controller.Scanned -and -not $controller.LastError){
+  $kimiSourceStatus.Text=Tr $(switch($controller.State){'connected'{'Плагин включён'} 'disabled'{'Плагин отключён'} default{'Плагин не установлен'}})
+  $kimiSourceAction.IsEnabled=[IO.Directory]::Exists((Join-Path $PSScriptRoot 'integrations\kimi-plugin'))
+ }
+ if($script:kimiCopyError){$kimiSourceError.Text=Tr $script:kimiCopyError;$kimiSourceError.Visibility='Visible'}
 }
 
 function Get-DeepSeekErrorMessage([string]$code,[bool]$profileScan=$false) {
@@ -2116,6 +2167,16 @@ function Source-Snapshot {
   $connection=try{Get-OpenCodeConnectionState -AppRoot $PSScriptRoot}catch{'error'}
   $connections=@{opencode=$connection}
   $profileScopes=@{};$uncertainProfileScopes=@{}
+  $kimiAvailable=Get-Variable -Scope Script -Name 'kimiModulesAvailable' -ErrorAction SilentlyContinue
+  if($null -ne $kimiAvailable -and $kimiAvailable.Value -and -not ($SnapshotFile -and $PreviewActiveTasks -ge 0)){
+   $connections.kimi=try{
+    Update-KimiMonitorController $script:kimiController
+    if($script:showingSettings){Update-KimiSourceSettings}
+    $profileScopes.kimi=@(Get-KimiAllowedScopes $script:kimiController)
+    $uncertainProfileScopes.kimi=@(Get-KimiUncertainScopes $script:kimiController)
+    Get-KimiMonitorConnectionState $script:kimiController
+   }catch{'error'}
+  }
   $deepSeekAvailable=Get-Variable -Scope Script -Name 'deepSeekModulesAvailable' -ErrorAction SilentlyContinue
   if($null -ne $deepSeekAvailable -and $deepSeekAvailable.Value){
    $connections.deepseek=try{
@@ -2131,7 +2192,7 @@ function Source-Snapshot {
    $external=@($group.Tasks);$script:lastExternalTasks=$external
    foreach($name in $group.Unavailable){[void]$unavailable.Add($name)}
   }catch{
-   foreach($pair in @(@('opencode','OpenCode'),@('deepseek','DeepSeek Harness'))){if($script:seenExternalConnections.ContainsKey($pair[0])){[void]$unavailable.Add($pair[1])}}
+   foreach($pair in @(@('opencode','OpenCode'),@('kimi','Kimi Code'),@('deepseek','DeepSeek Harness'))){if($script:seenExternalConnections.ContainsKey($pair[0])){[void]$unavailable.Add($pair[1])}}
    $external=@(Unconfirmed-ExternalTasks $script:lastExternalTasks);$script:lastExternalTasks=$external
    try{Stop-ExternalProviderController $script:externalProviderController}catch{}
   }
@@ -3190,6 +3251,16 @@ function Update-View {
     $fixture=[PSCustomObject]@{Id='codex-cloud:synthetic';Title='Synthetic cloud task';State='pending';Updated=[DateTimeOffset]::UtcNow}
     $allTasks+=@(ConvertTo-CodexCloudMonitorTasks @($fixture) (Tr 'Облако: ') (Tr 'Задача Codex') 'Статус не подтверждён')
    }
+   if($PreviewKimiTask -and $script:externalProviderModulesAvailable){
+    if(-not ('AITaskMonitor.ExternalProviders.StateStore' -as [type])){
+     Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+     Add-Type -Path @((Join-Path $PSScriptRoot 'integrations\ProviderEventState.cs'),(Join-Path $PSScriptRoot 'integrations\ProviderEventChannel.cs')) -ReferencedAssemblies System.Web.Extensions -ErrorAction Stop
+    }
+    $state=[AITaskMonitor.ExternalProviders.StateStore]::new()
+    $event=[AITaskMonitor.ExternalProviders.EventParser]::Parse('{"version":1,"provider":"kimi","session":"synthetic","kind":"started"}')
+    if($null -eq $event -or -not $state.Apply($event,[DateTimeOffset]::UtcNow)){throw 'Kimi task preview could not be prepared.'}
+    $allTasks+=@(Convert-ExternalProviderStates -States @($state.Snapshot([DateTimeOffset]::UtcNow)) -Language $script:resolvedLanguage)
+   }
   }
   $ordered=Prioritize-Tasks $allTasks $previousAllTasks $script:compactTaskId
   $allTasks=@($ordered.Tasks);$script:compactTaskId=[string]$ordered.SelectedId
@@ -3318,6 +3389,16 @@ $openCodeSourceAction.Add_Click({
   Update-View
  }catch{$openCodeSourceStatus.Text=Tr 'Ошибка подключения';$openCodeSourceAction.ToolTip=Tr 'Не удалось подтвердить установку или совместимость OpenCode'}
 })
+$kimiSourceAction.Add_Click({
+ if(-not $kimiSourceAction.IsEnabled){return}
+ try{
+  $path=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'integrations\kimi-plugin'))
+  if(-not [IO.Directory]::Exists($path)){throw 'Plugin folder unavailable.'}
+  if($PreviewSources){$script:kimiPreviewCopied=$path}else{[Windows.Clipboard]::SetText($path)}
+  $script:kimiCopyError=''
+ }catch{$script:kimiCopyError='Не удалось скопировать путь.'}
+ Update-KimiSourceSettings
+})
 $deepSeekProfileCombo.Add_SelectionChanged({
  if(-not $script:updatingDeepSeekControls){
   if($null -ne $script:deepSeekController){$script:deepSeekController.ActionError=''}
@@ -3340,7 +3421,7 @@ $journalCloseButton.Add_Click({$window.Close()})
 $windowFrame.Add_SizeChanged({Update-SquircleGeometry})
 $tray=New-Object Windows.Forms.NotifyIcon; $tray.Icon=if($null -ne $script:applicationIcon){$script:applicationIcon}else{[Drawing.SystemIcons]::Application}; $tray.Text="AI task monitor"; $tray.Visible=$true; $tray.Add_DoubleClick({Restore-Window})
 $menu=New-Object Windows.Forms.ContextMenuStrip; $script:trayShowMenu=$menu.Items.Add("Развернуть"); $script:trayExitMenu=$menu.Items.Add("Выход"); $script:trayShowMenu.Add_Click({Restore-Window;Set-CompactMode $false}); $script:trayExitMenu.Add_Click({$window.Close()}); $tray.ContextMenuStrip=$menu
-$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
+$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:kimiModulesAvailable){Stop-KimiMonitorController $script:kimiController};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
 if($script:codexCloudModulesAvailable -and -not $SnapshotFile -and $PreviewActiveTasks -lt 0 -and (Load-CodexCloudEnabled)){Set-CodexCloudControllerEnabled $script:codexCloudController $true}
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
@@ -3770,6 +3851,29 @@ if ($SnapshotFile) {
    $script:codexCloudController.Partial=$PreviewCloudState -eq 'partial'
    Update-CodexCloudSourceSettings
   }
+  if($PreviewKimiUiTest){
+   if(-not $script:kimiModulesAvailable){throw 'Kimi UI fixture requires its runtime module.'}
+   $script:kimiController.Scanned=$true;$script:kimiController.LastError='';$script:kimiController.State='disconnected'
+   Update-KimiSourceSettings
+   if(-not $kimiSourceAction.IsEnabled -or $kimiSourceStatus.Text -cne (Tr 'Плагин не установлен')){throw 'Kimi manual installation action is incorrect.'}
+   $script:kimiPreviewCopied=''
+   $kimiSourceAction.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+   if($script:kimiPreviewCopied -cne [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'integrations\kimi-plugin'))){throw 'Kimi action did not copy the plugin path.'}
+   $script:kimiController.State='connected';Update-KimiSourceSettings
+   if($kimiSourceStatus.Text -cne (Tr 'Плагин включён')){throw 'Kimi enabled state is incorrect.'}
+   $script:kimiController.State='disabled';Update-KimiSourceSettings
+   if($kimiSourceStatus.Text -cne (Tr 'Плагин отключён')){throw 'Kimi disabled state is incorrect.'}
+   $script:kimiController.LastError='operation-failed';Update-KimiSourceSettings
+   if($kimiSourceAction.IsEnabled -or $kimiSourceError.Visibility -ne 'Visible'){throw 'Kimi error state is incorrect.'}
+   Write-Output 'Kimi manual setup: isolated path action and source states verified.'
+  }
+  if($PreviewKimiState){
+   if(-not $script:kimiModulesAvailable){throw 'Kimi preview requires its runtime module.'}
+   $script:kimiController.Scanned=$true
+   $script:kimiController.State=if($PreviewKimiState -eq 'error'){'disconnected'}else{$PreviewKimiState}
+   $script:kimiController.LastError=if($PreviewKimiState -eq 'error'){'operation-failed'}else{''}
+   Update-KimiSourceSettings
+  }
   if($PreviewDeepSeekUiTest){
    if(-not $script:deepSeekModulesAvailable){throw 'DeepSeek UI fixture requires its runtime module.'}
    $script:deepSeekController.Scanned=$true;$script:deepSeekController.LastError=''
@@ -3792,8 +3896,8 @@ if ($SnapshotFile) {
   if($PreviewSettingsBackHover){$settingsBackButton.Background=Brush $script:palette.Hover}
   $window.UpdateLayout()
   if($PreviewSources){
-   $target=if($PreviewCloudState -or $PreviewCloudUiTest){$codexCloudSourceAction}else{$openCodeSourceAction}
-   $targetY=if($PreviewCloudState -or $PreviewCloudUiTest){140}else{290}
+   $target=if($PreviewKimiState -or $PreviewKimiUiTest){$kimiSourceAction}elseif($PreviewCloudState -or $PreviewCloudUiTest){$codexCloudSourceAction}else{$openCodeSourceAction}
+   $targetY=if($PreviewKimiState -or $PreviewKimiUiTest){180}elseif($PreviewCloudState -or $PreviewCloudUiTest){140}else{290}
    $point=$target.TranslatePoint([Windows.Point]::new(0,0),$settingsScroll)
    $settingsScroll.ScrollToVerticalOffset([Math]::Max(0,$settingsScroll.VerticalOffset+$point.Y-$targetY))
    $window.Dispatcher.Invoke([Action]{},[Windows.Threading.DispatcherPriority]::ApplicationIdle);$window.UpdateLayout()

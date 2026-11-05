@@ -15,7 +15,7 @@ $one=@($tasks|Where-Object Provider -eq 'opencode')[0]
 $two=@($tasks|Where-Object Provider -eq 'kimi')[0]
 Assert ($one.Id -eq 'opencode:one' -and $one.Active -and $one.Activity -eq 'Выполняет команду') 'Incorrect current action.'
 Assert ($one.Progress -eq 50 -and $one.ProgressKind -eq 'exact' -and $one.ProgressBasis -eq 'steps') 'Incorrect plan-based progress.'
-Assert (-not $two.Active -and $two.Paused -and $null -eq $two.Progress -and $two.Steps.Count -eq 0) 'Waiting task must not invent progress.'
+Assert (-not $two.Active -and -not $two.Paused -and $null -eq $two.Progress -and $two.Steps.Count -eq 0) 'Kimi must not assert waiting or progress.'
 $english=@(Convert-ExternalProviderStates -States @($store.Snapshot($now)) -Language 'en')
 Assert ((@($english|Where-Object Provider -eq 'opencode')[0]).Title -eq 'OpenCode task') 'The generated title must follow the selected language.'
 Add $store '{"version":1,"provider":"opencode","session":"one","kind":"heartbeat"}' $now.AddMinutes(29)
