@@ -24,7 +24,7 @@ assert.equal(fromOpenCodeTool('before', { tool: 'bash', sessionID: 'ses_123', ca
 const openV2 = (type, fields = {}) => ({ type, id: 'event_1', data: { sessionID: 'ses_2', ...fields, input: secret, error: secret, content: secret } });
 assert.deepEqual(fromOpenCodeV2(openV2('session.execution.started')),
   { version: 1, provider: 'opencode', session: 'ses_2', kind: 'started', turn: 'event_1' });
-for (const [type, kind] of Object.entries({ 'session.execution.succeeded': 'completed', 'session.execution.failed': 'failed',
+for (const [type, kind] of Object.entries({ 'session.execution.succeeded': 'idle', 'session.execution.failed': 'failed',
   'session.execution.interrupted': 'interrupted', 'session.step.started': 'active', 'session.idle': 'idle',
   'permission.asked': 'waiting', 'permission.replied': 'unknown' })) {
   assert.equal(fromOpenCodeV2(openV2(type)).kind, kind);
@@ -66,7 +66,7 @@ assert.deepEqual(deep('tool/call', { callId: 'call_1', name: 'edit', arguments: 
   { version: 1, provider: 'deepseek', session: 'session_1', kind: 'tool_started', call: 'call_1', action: 'edit' });
 assert.equal(deep('tool/result', { message: { source: { callId: 'call_1' }, content: secret } }).kind, 'tool_finished');
 assert.deepEqual(deep('todo/write', { todos }).steps, expectedSteps);
-for (const [reason, expected] of Object.entries({ completed: 'completed', error: 'failed', aborted: 'interrupted',
+for (const [reason, expected] of Object.entries({ completed: 'idle', error: 'failed', aborted: 'interrupted',
   interrupted: 'interrupted', blocked: 'unknown', 'max-tokens': 'unknown', other: 'unknown' })) {
   assert.equal(deep('turn/end', { reason: { kind: reason, error: secret } }).kind, expected);
 }

@@ -38,7 +38,7 @@ $assets=Join-Path $layout 'assets';[void][IO.Directory]::CreateDirectory($assets
 $runtimeFiles=@('CodexProgress.ps1','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','ClaudeLoopDetection.ps1','ClaudeLoopChannel.cs','ClaudeReaderCore.ps1','ClaudeRetention.cs','AppShellIdentity.cs','Configure-ClaudeIntegration.ps1','Configure-OpenCodeIntegration.ps1','DiagnosticPolicy.ps1','DiagnosticStore.ps1','LoopDetection.ps1','DiagnosticCollector.ps1','DiagnosticRuntime.ps1','ReleaseUpdates.ps1')
 foreach($name in $runtimeFiles){$path=Join-Path $appRoot $name;if(-not (Test-Path -LiteralPath $path -PathType Leaf)){throw ('Missing runtime file: '+$name)};Copy-Item -LiteralPath $path -Destination (Join-Path $layout $name)}
 $integrationLayout=Join-Path $layout 'integrations';[void][IO.Directory]::CreateDirectory($integrationLayout)
-foreach($name in @('ProviderEventView.ps1','ProviderRuntime.ps1','ProviderEventState.cs','ProviderEventChannel.cs','provider-events.mjs','provider-observers.mjs','provider-transport.mjs','opencode-entry.js')){
+foreach($name in @('ProviderEventView.ps1','ProviderRuntime.ps1','ProviderEventState.cs','ProviderEventChannel.cs','provider-events.mjs','provider-observers.mjs','provider-transport.mjs','opencode-entry.js','DeepSeekRuntime.ps1','deepseek-integration.mjs','deepseek-setup.mjs','deepseek-plugin.js','package.json','cordis.patch.yml')){
  $path=Join-Path (Join-Path $appRoot 'integrations') $name
  if(-not (Test-Path -LiteralPath $path -PathType Leaf)){throw ('Missing integration file: '+$name)}
  Copy-Item -LiteralPath $path -Destination (Join-Path $integrationLayout $name)

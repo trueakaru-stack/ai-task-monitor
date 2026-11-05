@@ -21,7 +21,7 @@ function Read-ManagedExternalProviderSnapshot {
 }
 function Stop-ExternalProviderController { $script:stops++ }
 $ClaudeEventFile='';$script:lastCodexTasks=@();$script:lastClaudeTasks=@();$script:lastExternalTasks=@()
-$script:externalProviderModulesAvailable=$true;$script:externalProviderController=[PSCustomObject]@{}
+$script:externalProviderModulesAvailable=$true;$script:externalProviderController=New-ExternalProviderController;$script:seenExternalConnections=@{}
 $script:lastOpenCodeConnected=$false;$script:resolvedLanguage='ru';$script:fixtureChannelFailure=$false;$script:stops=0
 $script:fixtureConnection='connected'
 $combined=Source-Snapshot
@@ -41,4 +41,5 @@ $task=@($failed.Tasks|Where-Object Id -eq 'opencode:one')[0]
 Assert ($failed.Unavailable -contains 'OpenCode' -and -not $task.Active -and -not $task.Paused) 'A channel failure must not claim ongoing work.'
 Write-Output 'External source snapshot: connected, partial, disconnected and channel failure states verified.'
 '@
-& ([scriptblock]::Create(($definitions -join "`n")+"`n"+$checks))
+$runtime=Get-Content -LiteralPath (Join-Path $PSScriptRoot '../app/integrations/ProviderRuntime.ps1') -Raw
+& ([scriptblock]::Create(($definitions -join "`n")+"`n"+$runtime+"`n"+$checks))

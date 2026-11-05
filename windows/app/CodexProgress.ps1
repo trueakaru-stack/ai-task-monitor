@@ -16,6 +16,8 @@
  [switch]$PreviewSettingsBackHover,
  [switch]$PreviewSettingsEnd,
  [switch]$PreviewSources,
+ [switch]$PreviewDeepSeekUiTest,
+ [switch]$PreviewDeepSeekErrorUiTest,
  [switch]$PreviewAbout,
  [switch]$PreviewAboutUiTest,
  [switch]$PreviewClipboardUiTest,
@@ -75,6 +77,8 @@ if($PreviewJournalRecoveryUiTest){
 }
 if($PreviewIconUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw "Icon UI tests require a synthetic snapshot."}
 if($PreviewSources -and (-not $SnapshotFile -or -not $SettingsSnapshotFile -or $PreviewActiveTasks -lt 0)){throw 'Source previews require synthetic tasks and settings snapshots.'}
+if($PreviewDeepSeekUiTest -and -not $PreviewSources){throw 'DeepSeek UI tests require a synthetic source preview.'}
+if($PreviewDeepSeekErrorUiTest -and -not $PreviewDeepSeekUiTest){throw 'DeepSeek error previews require the synthetic DeepSeek UI test.'}
 if(($PreviewManyProviders -or $PreviewTabsUiTest) -and (-not $SnapshotFile -or -not $PreviewManyProviders -or $PreviewActiveTasks -ne 6)){throw 'Provider tab previews require six synthetic tasks and a snapshot.'}
 if($PreviewActivityUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or $PreviewScenario -eq "default")){throw "Activity UI tests require one synthetic task, a scenario and a snapshot."}
 if($PreviewFocusUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or -not $CompactMode)){throw "Focus UI tests require a compact synthetic snapshot."}
@@ -170,6 +174,13 @@ try{
  $script:externalProviderController=New-ExternalProviderController
  $script:externalProviderModulesAvailable=$true
 }catch{}
+$script:deepSeekModulesAvailable=$false
+$script:deepSeekController=$null
+try{
+ . (Join-Path $PSScriptRoot 'integrations\DeepSeekRuntime.ps1')
+ $script:deepSeekController=New-DeepSeekMonitorController -AppRoot $PSScriptRoot
+ $script:deepSeekModulesAvailable=$true
+}catch{}
 $script:currentVersion='0.2.6-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
@@ -207,6 +218,15 @@ $script:translations=@{
  'Приложение добавит локальный плагин OpenCode. Поддерживаются совместимые версии 1 начиная с 1.18.29 и версия 2. После подключения перезапустите OpenCode.'='The app adds a local OpenCode plugin. Compatible versions 1.18.29 and later within version 1, and version 2, are supported. Restart OpenCode after connecting.'
  'Не удалось подтвердить установку или совместимость OpenCode'='Could not confirm the OpenCode installation or compatibility'
  'Не удалось прочитать подключение OpenCode'='Could not read the OpenCode connection'
+ 'Подключение проверено с DeepSeek Harness 0.2.1-rc.5 и pnpm 11.25.0. Приложение добавит локальный плагин в выбранный профиль. После подключения перезапустите DeepSeek Harness.'='Connection has been tested with DeepSeek Harness 0.2.1-rc.5 and pnpm 11.25.0. The app adds a local plugin to the selected profile. Restart DeepSeek Harness after connecting.'
+ 'Профиль'='Profile'
+ 'Профиль DeepSeek Harness'='DeepSeek Harness profile'
+ 'Выберите профиль'='Select a profile'
+ 'Подключение DeepSeek Harness неполное или его файлы изменены.'='The DeepSeek Harness connection is incomplete or its files were changed.'
+ 'Версия DeepSeek Harness или pnpm не подтверждена.'='The DeepSeek Harness or pnpm version could not be verified.'
+ 'Не удалось изменить подключение DeepSeek Harness.'='Could not change the DeepSeek Harness connection.'
+ 'Не удалось проверить профиль DeepSeek Harness.'='Could not check the DeepSeek Harness profile.'
+ 'Профиль DeepSeek Desktop пока не поддерживается.'='The DeepSeek Desktop profile is not supported yet.'
  'Журнал'='Journal'
  'Срок хранения'='Retention period'
  'Срок хранения журнала'='Journal retention period'
@@ -701,6 +721,20 @@ function Tr([string]$text){
          <Button x:Name="OpenCodeSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
         </Grid>
         <TextBlock Margin="0,0,0,12" Text="Приложение добавит локальный плагин OpenCode. Поддерживаются совместимые версии 1 начиная с 1.18.29 и версия 2. После подключения перезапустите OpenCode." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+        <Border Height="1" Background="{DynamicResource Divider}"/>
+        <Grid Height="50">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <TextBlock Text="DeepSeek Harness" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimary}"/>
+         <TextBlock x:Name="DeepSeekSourceStatus" Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
+         <Button x:Name="DeepSeekSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
+        </Grid>
+        <Grid Height="46">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <TextBlock Text="Профиль" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimary}"/>
+         <ComboBox x:Name="DeepSeekProfileCombo" Grid.Column="1" Margin="16,0,0,0" HorizontalAlignment="Stretch" VerticalAlignment="Center" Style="{StaticResource JournalComboStyle}" AutomationProperties.Name="Профиль DeepSeek Harness"/>
+        </Grid>
+        <TextBlock x:Name="DeepSeekSourceError" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextSecondary}"/>
+        <TextBlock Margin="0,0,0,12" Text="Подключение проверено с DeepSeek Harness 0.2.1-rc.5 и pnpm 11.25.0. Приложение добавит локальный плагин в выбранный профиль. После подключения перезапустите DeepSeek Harness." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
        </StackPanel>
       </Border>
       <TextBlock Text="Журнал" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
@@ -1034,6 +1068,11 @@ $claudeSourceStatus = $window.FindName("ClaudeSourceStatus")
 $claudeSourceAction = $window.FindName("ClaudeSourceAction")
 $openCodeSourceStatus = $window.FindName("OpenCodeSourceStatus")
 $openCodeSourceAction = $window.FindName("OpenCodeSourceAction")
+$deepSeekSourceStatus = $window.FindName("DeepSeekSourceStatus")
+$deepSeekSourceAction = $window.FindName("DeepSeekSourceAction")
+$deepSeekProfileCombo = $window.FindName("DeepSeekProfileCombo")
+$deepSeekSourceError = $window.FindName("DeepSeekSourceError")
+$script:updatingDeepSeekControls = $false
 $script:isCompact = $false
 $script:showingSettings = $false
 $script:showingAbout = $false
@@ -1324,6 +1363,7 @@ function Claude-InstallationState([string]$profile,[string]$appData,[string]$loc
 function Update-SourceSettings {
  $codexSourceStatus.Text=Tr $(if($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
  Update-OpenCodeSourceSettings
+ Update-DeepSeekSourceSettings
  $installation=Claude-InstallationState $env:USERPROFILE $env:APPDATA $env:LOCALAPPDATA $env:PATH
  try{$connectionState=Claude-ConnectionState;$connected=$connectionState -eq "connected"}
  catch{
@@ -1368,6 +1408,58 @@ function Update-OpenCodeSourceSettings {
   $openCodeSourceAction.ToolTip=Tr 'Не удалось прочитать подключение OpenCode'
  }
  [Windows.Automation.AutomationProperties]::SetName($openCodeSourceAction,$openCodeSourceAction.Content+' OpenCode')
+}
+
+function Get-DeepSeekErrorMessage([string]$code,[bool]$profileScan=$false) {
+ $message=switch($code){
+  'unsupported-desktop'{'Профиль DeepSeek Desktop пока не поддерживается.';break}
+  {$_ -in @('unverified-dsh','unverified-pnpm')}{'Версия DeepSeek Harness или pnpm не подтверждена.';break}
+  {$_ -in @('linked-path','modified-bundle','partial-connection') -or $_ -like 'bundle-conflict*'}{'Подключение DeepSeek Harness неполное или его файлы изменены.';break}
+  default{if($profileScan){'Не удалось проверить профиль DeepSeek Harness.'}else{'Не удалось изменить подключение DeepSeek Harness.'}}
+ }
+ return (Tr $message)
+}
+
+function Update-DeepSeekSourceSettings {
+ $deepSeekSourceAction.Visibility='Visible';$deepSeekSourceAction.IsEnabled=$false
+ $deepSeekSourceAction.Content=Tr 'Подключить';$deepSeekSourceAction.Tag=''
+ [Windows.Automation.AutomationProperties]::SetName($deepSeekSourceAction,$deepSeekSourceAction.Content+' DeepSeek Harness')
+ $deepSeekSourceStatus.Text=Tr 'Установка не подтверждена'
+ $deepSeekSourceError.Visibility='Collapsed';$deepSeekSourceError.Text=''
+ if(-not $script:deepSeekModulesAvailable -or $null -eq $script:deepSeekController){$deepSeekProfileCombo.IsEnabled=$false;return}
+ $controller=$script:deepSeekController
+ $names=@($controller.Profiles | ForEach-Object {[string]$_.Name})
+ $selected=[string]$deepSeekProfileCombo.SelectedItem
+ $changed=($names.Count -ne $deepSeekProfileCombo.Items.Count)
+ if(-not $changed){for($index=0;$index -lt $names.Count;$index++){if([string]$deepSeekProfileCombo.Items[$index] -cne $names[$index]){$changed=$true;break}}}
+ if($changed){
+  $script:updatingDeepSeekControls=$true
+  try{
+   $deepSeekProfileCombo.Items.Clear()
+   foreach($name in $names){[void]$deepSeekProfileCombo.Items.Add($name)}
+   if($selected -and $names -ccontains $selected){$deepSeekProfileCombo.SelectedItem=$selected}else{$deepSeekProfileCombo.SelectedIndex=-1;$selected=''}
+  }finally{$script:updatingDeepSeekControls=$false}
+ }
+ $changing=$null -ne $controller.Request -and $controller.Request.Action -ne 'list'
+ $deepSeekProfileCombo.IsEnabled=$names.Count -gt 0 -and -not $changing
+ $errorCode=if($controller.ActionError){[string]$controller.ActionError}else{[string]$controller.LastError}
+ if($errorCode -and $errorCode -ne 'installation-unconfirmed'){
+  $deepSeekSourceError.Text=Get-DeepSeekErrorMessage $errorCode;$deepSeekSourceError.Visibility='Visible'
+ }
+ if($controller.LastError -or -not $controller.Scanned){return}
+ if(-not $selected){$deepSeekSourceStatus.Text=Tr 'Выберите профиль';return}
+ $profile=@($controller.Profiles | Where-Object {$_.Name -ceq $selected})
+ if($profile.Count -ne 1){return}
+ $state=[string]$profile[0].State
+ $deepSeekSourceStatus.Text=Tr $(if($state -eq 'connected'){'Подключён'}elseif($state -eq 'partial'){'Подключён частично'}elseif($state -eq 'error'){'Нет данных'}else{'Не подключён'})
+ if($state -eq 'error'){
+  $profileError=if($null -ne $profile[0].PSObject.Properties['Error']){[string]$profile[0].Error}else{'operation-failed'}
+  $deepSeekSourceError.Text=Get-DeepSeekErrorMessage $profileError $true;$deepSeekSourceError.Visibility='Visible'
+ }elseif($null -eq $controller.Request){
+  $deepSeekSourceAction.IsEnabled=$true
+  if($state -in @('connected','partial')){$deepSeekSourceAction.Content=Tr 'Отключить';$deepSeekSourceAction.Tag='Remove'}else{$deepSeekSourceAction.Tag='Install'}
+ }
+ [Windows.Automation.AutomationProperties]::SetName($deepSeekSourceAction,$deepSeekSourceAction.Content+' DeepSeek Harness')
 }
 
 function Apply-Theme([string]$mode,[bool]$persist) {
@@ -1949,12 +2041,25 @@ function Source-Snapshot {
  }catch{[void]$unavailable.Add("Claude Code");$claude=@(Unconfirmed-Tasks $script:lastClaudeTasks)}
  if($script:externalProviderModulesAvailable){
   $connection=try{Get-OpenCodeConnectionState -AppRoot $PSScriptRoot}catch{'error'}
+  $connections=@{opencode=$connection}
+  $profileScopes=@{};$uncertainProfileScopes=@{}
+  $deepSeekAvailable=Get-Variable -Scope Script -Name 'deepSeekModulesAvailable' -ErrorAction SilentlyContinue
+  if($null -ne $deepSeekAvailable -and $deepSeekAvailable.Value){
+   $connections.deepseek=try{
+    Update-DeepSeekMonitorController $script:deepSeekController
+    if($script:showingSettings){Update-DeepSeekSourceSettings}
+    $profileScopes.deepseek=@(Get-DeepSeekAllowedScopes $script:deepSeekController)
+    $uncertainProfileScopes.deepseek=@(Get-DeepSeekUncertainScopes $script:deepSeekController)
+    Get-DeepSeekMonitorConnectionState $script:deepSeekController
+   }catch{'error'}
+  }
   try{
-   $group=Read-ExternalProviderGroupSnapshot -Controller $script:externalProviderController -Connections @{opencode=$connection} -Seen $script:seenExternalConnections -PreviousTasks $script:lastExternalTasks -Language $script:resolvedLanguage
+   $group=Read-ExternalProviderGroupSnapshot -Controller $script:externalProviderController -Connections $connections -Seen $script:seenExternalConnections -PreviousTasks $script:lastExternalTasks -ProfileScopes $profileScopes -UncertainProfileScopes $uncertainProfileScopes -Language $script:resolvedLanguage
    $external=@($group.Tasks);$script:lastExternalTasks=$external
    foreach($name in $group.Unavailable){[void]$unavailable.Add($name)}
   }catch{
-   if($script:seenExternalConnections.ContainsKey('opencode')){[void]$unavailable.Add('OpenCode');$external=@(Unconfirmed-ExternalTasks $script:lastExternalTasks);$script:lastExternalTasks=$external}
+   foreach($pair in @(@('opencode','OpenCode'),@('deepseek','DeepSeek Harness'))){if($script:seenExternalConnections.ContainsKey($pair[0])){[void]$unavailable.Add($pair[1])}}
+   $external=@(Unconfirmed-ExternalTasks $script:lastExternalTasks);$script:lastExternalTasks=$external
    try{Stop-ExternalProviderController $script:externalProviderController}catch{}
   }
  }
@@ -3120,6 +3225,20 @@ $openCodeSourceAction.Add_Click({
   Update-View
  }catch{$openCodeSourceStatus.Text=Tr 'Ошибка подключения';$openCodeSourceAction.ToolTip=Tr 'Не удалось подтвердить установку или совместимость OpenCode'}
 })
+$deepSeekProfileCombo.Add_SelectionChanged({
+ if(-not $script:updatingDeepSeekControls){
+  if($null -ne $script:deepSeekController){$script:deepSeekController.ActionError=''}
+  Update-DeepSeekSourceSettings
+ }
+})
+$deepSeekSourceAction.Add_Click({
+ $mode=[string]$deepSeekSourceAction.Tag
+ $profile=[string]$deepSeekProfileCombo.SelectedItem
+ if($mode -notin @('Install','Remove') -or -not $profile -or $null -eq $script:deepSeekController){return}
+ try{Request-DeepSeekProfileConnection $script:deepSeekController $profile ($mode -eq 'Install')}
+ catch{$script:deepSeekController.ActionError='operation-failed'}
+ Update-DeepSeekSourceSettings
+})
 $closeButton.Add_Click({$window.Close()})
 $compactCloseButton.Add_Click({$window.Close()})
 $settingsCloseButton.Add_Click({$window.Close()})
@@ -3539,6 +3658,25 @@ if ($SnapshotFile) {
  }
  if($SettingsSnapshotFile -or $JournalDropdownSnapshotFile){
   Show-SettingsView
+  if($PreviewDeepSeekUiTest){
+   if(-not $script:deepSeekModulesAvailable){throw 'DeepSeek UI fixture requires its runtime module.'}
+   $script:deepSeekController.Scanned=$true;$script:deepSeekController.LastError=''
+   $script:deepSeekController.Profiles=@([PSCustomObject]@{Name='Profile One';State='disconnected'},[PSCustomObject]@{Name='Profile Two';State='connected'},[PSCustomObject]@{Name='desktop';State='error';Error='operation-failed'})
+   Update-DeepSeekSourceSettings
+   $deepSeekProfileCombo.SelectedItem='Profile One'
+   Update-DeepSeekSourceSettings
+   if([string]$deepSeekSourceAction.Tag -cne 'Install' -or -not $deepSeekSourceAction.IsEnabled){throw 'DeepSeek disconnected profile action is incorrect.'}
+   $deepSeekProfileCombo.SelectedItem='Profile Two'
+   Update-DeepSeekSourceSettings
+   if([string]$deepSeekSourceAction.Tag -cne 'Remove' -or -not $deepSeekSourceAction.IsEnabled){throw 'DeepSeek connected profile action is incorrect.'}
+   $deepSeekProfileCombo.SelectedItem='desktop'
+   Update-DeepSeekSourceSettings
+   if($deepSeekSourceAction.IsEnabled -or $deepSeekSourceError.Visibility -ne 'Visible' -or $deepSeekSourceError.Text -cne (Tr 'Не удалось проверить профиль DeepSeek Harness.')){throw 'DeepSeek profile error is not shown accurately.'}
+   $script:deepSeekController.Profiles[2].Error='unsupported-desktop'
+   Update-DeepSeekSourceSettings
+   if($deepSeekSourceAction.IsEnabled -or $deepSeekSourceError.Text -cne (Tr 'Профиль DeepSeek Desktop пока не поддерживается.')){throw 'The DeepSeek Desktop profile must be unavailable.'}
+   if(-not $PreviewDeepSeekErrorUiTest){$deepSeekProfileCombo.SelectedItem='Profile Two';Update-DeepSeekSourceSettings}
+  }
   if($PreviewSettingsBackHover){$settingsBackButton.Background=Brush $script:palette.Hover}
   $window.UpdateLayout()
   if($PreviewSources){

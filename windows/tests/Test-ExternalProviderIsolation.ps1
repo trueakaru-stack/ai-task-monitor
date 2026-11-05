@@ -34,6 +34,16 @@ try {
     $state = Read-ExternalProviderGroupSnapshot -Controller $controller -Connections $connections -Seen $seen -PreviousTasks $state.Tasks
     Assert (@($state.Tasks | Where-Object { $_.Id -in @('opencode:one','hermes:two') -and $_.Active }).Count -eq 2) 'Both source tasks must be active.'
 
+    Send-Event $name '{"version":1,"provider":"hermes","session":"queued","kind":"started"}'
+    $connections.hermes = 'connected-degraded'
+    $state = Read-ExternalProviderGroupSnapshot -Controller $controller -Connections $connections -Seen $seen -PreviousTasks $state.Tasks
+    Assert (@($state.Tasks | Where-Object { $_.Provider -eq 'hermes' -and $_.Active }).Count -eq 0) 'A newly degraded provider must invalidate its earlier and queued claims.'
+    Assert (@($state.Tasks | Where-Object { $_.Id -eq 'opencode:one' -and $_.Active }).Count -eq 1) 'A profile error must not interrupt another provider.'
+    Send-Event $name '{"version":1,"provider":"hermes","session":"healthy","kind":"started"}'
+    $state = Read-ExternalProviderGroupSnapshot -Controller $controller -Connections $connections -Seen $seen -PreviousTasks $state.Tasks
+    Assert (@($state.Tasks | Where-Object { $_.Id -eq 'hermes:healthy' -and $_.Active }).Count -eq 1) 'A healthy profile must keep reporting while a sibling is unavailable.'
+    Assert ($state.Unavailable.Count -eq 1 -and $state.Unavailable[0] -eq 'Hermes Agent') 'A degraded profile must remain visible as unavailable.'
+
     $connections.hermes = 'partial'
     $state = Read-ExternalProviderGroupSnapshot -Controller $controller -Connections $connections -Seen $seen -PreviousTasks $state.Tasks
     Assert (@($state.Tasks | Where-Object { $_.Id -eq 'hermes:two' -and -not $_.Active -and -not $_.PlanConfirmed }).Count -eq 1) 'A partial source must retain an unconfirmed task.'

@@ -195,7 +195,7 @@ namespace AITaskMonitor.ExternalProviders
             MarkProviderGap(null);
         }
 
-        private void MarkProviderGap(string provider)
+        public void MarkProviderGap(string provider)
         {
             foreach (TaskState state in states.Values)
             {
@@ -213,6 +213,30 @@ namespace AITaskMonitor.ExternalProviders
             var allowed = new HashSet<string>(providers ?? new string[0], StringComparer.Ordinal);
             foreach (string key in states.Where(pair => !allowed.Contains(pair.Value.Provider)).Select(pair => pair.Key).ToArray())
                 states.Remove(key);
+        }
+
+        public void RetainSessionScopes(string provider, string[] scopes)
+        {
+            var allowed = new HashSet<string>(scopes ?? new string[0], StringComparer.Ordinal);
+            foreach (string key in states.Where(pair => pair.Value.Provider == provider && !allowed.Contains(SessionScope(pair.Value.Session)))
+                .Select(pair => pair.Key).ToArray()) states.Remove(key);
+        }
+
+        public void MarkSessionScopesGap(string provider, string[] scopes)
+        {
+            var uncertain = new HashSet<string>(scopes ?? new string[0], StringComparer.Ordinal);
+            foreach (TaskState state in states.Values)
+            {
+                if (state.Provider != provider || !uncertain.Contains(SessionScope(state.Session))) continue;
+                if (state.Steps.Length > 0) state.PlanConfirmed = false;
+                if (state.Status == "active" || state.Status == "waiting") { state.Status = "unknown"; state.Calls.Clear(); }
+                state.LastHeartbeat = null;
+            }
+        }
+
+        private static string SessionScope(string session)
+        {
+            return session != null && session.Length > 32 && session[32] == '_' ? session.Substring(0, 32) : "";
         }
 
         public TaskState[] Snapshot(DateTimeOffset now)

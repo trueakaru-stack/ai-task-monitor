@@ -3,6 +3,8 @@ function Read-ExternalProviderSnapshot {
   [Parameter(Mandatory=$true)]$Channel,
   [Parameter(Mandatory=$true)]$Store,
   [string[]]$AllowedProviders = @(),
+  [hashtable]$ProfileScopes = @{},
+  [hashtable]$UncertainProfileScopes = @{},
   [ValidateSet('ru','en')][string]$Language = 'ru',
   [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
  )
@@ -10,15 +12,28 @@ function Read-ExternalProviderSnapshot {
  foreach($name in $AllowedProviders){if($name -in @('kimi','deepseek','hermes','opencode')){$allowed[$name]=$true}}
  $Channel.SetAllowedProviders([string[]]@($allowed.Keys))
  $Store.RetainProviders([string[]]@($allowed.Keys))
+ $scoped=@{}
+ foreach($provider in $ProfileScopes.Keys){
+  if(-not $allowed.ContainsKey([string]$provider)){continue}
+  $valid=@($ProfileScopes[$provider] | Where-Object {$_ -cmatch '^[a-f0-9]{32}$'} | Select-Object -Unique)
+  $uncertain=@($UncertainProfileScopes[$provider] | Where-Object {$_ -cmatch '^[a-f0-9]{32}$'} | Select-Object -Unique)
+  $scoped[$provider]=$valid
+  $Store.RetainSessionScopes([string]$provider,[string[]]@($valid+$uncertain))
+ }
  $batch=$Channel.Drain()
  if($batch.Gap){$Store.MarkGap()}
  foreach($event in @($batch.Events)){
   if(-not $allowed.ContainsKey([string]$event.Provider)){continue}
+  if($scoped.ContainsKey([string]$event.Provider)){
+   $session=[string]$event.Session
+   if($session -cnotmatch '^([a-f0-9]{32})_' -or $scoped[[string]$event.Provider] -cnotcontains $Matches[1]){continue}
+  }
   $received=[DateTimeOffset]$event.ObservedAt
   if($received -eq [DateTimeOffset]::MinValue -or $received -gt $Now.AddMinutes(1)){$Store.MarkGap();continue}
   if($received -gt $Now){$received=$Now}
   [void]$Store.Apply($event,$received)
  }
+ foreach($provider in $scoped.Keys){$Store.MarkSessionScopesGap([string]$provider,[string[]]@($UncertainProfileScopes[$provider]))}
  return @(Convert-ExternalProviderStates -States @($Store.Snapshot($Now)) -Language $Language)
 }
 
@@ -26,7 +41,7 @@ function Read-ExternalProviderSnapshot {
 # connected. An empty allowlist stops it and clears all in-memory task state.
 function New-ExternalProviderController {
  param([string]$PipeName = '')
- return [PSCustomObject]@{Channel=$null;Store=$null;PipeName=$PipeName}
+ return [PSCustomObject]@{Channel=$null;Store=$null;PipeName=$PipeName;DegradedProviders=@{}}
 }
 
 function Stop-ExternalProviderController {
@@ -34,12 +49,15 @@ function Stop-ExternalProviderController {
  if($null -ne $Controller.Channel){$Controller.Channel.Dispose()}
  $Controller.Channel=$null
  $Controller.Store=$null
+ $Controller.DegradedProviders.Clear()
 }
 
 function Read-ManagedExternalProviderSnapshot {
  param(
   [Parameter(Mandatory=$true)]$Controller,
   [string[]]$AllowedProviders = @(),
+  [hashtable]$ProfileScopes = @{},
+  [hashtable]$UncertainProfileScopes = @{},
   [ValidateSet('ru','en')][string]$Language = 'ru',
   [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
  )
@@ -55,7 +73,7 @@ function Read-ManagedExternalProviderSnapshot {
   try{$Controller.Channel=[AITaskMonitor.ExternalProviders.EventChannel]::new($Controller.PipeName)}
   catch{$Controller.Store=$null;throw}
  }
- return @(Read-ExternalProviderSnapshot -Channel $Controller.Channel -Store $Controller.Store -AllowedProviders $allowed -Language $Language -Now $Now)
+ return @(Read-ExternalProviderSnapshot -Channel $Controller.Channel -Store $Controller.Store -AllowedProviders $allowed -ProfileScopes $ProfileScopes -UncertainProfileScopes $UncertainProfileScopes -Language $Language -Now $Now)
 }
 
 # Connection failures are isolated per provider; only a shared channel failure
@@ -66,16 +84,26 @@ function Read-ExternalProviderGroupSnapshot {
   [Parameter(Mandatory=$true)][hashtable]$Connections,
   [Parameter(Mandatory=$true)][hashtable]$Seen,
   [object[]]$PreviousTasks = @(),
+  [hashtable]$ProfileScopes = @{},
+  [hashtable]$UncertainProfileScopes = @{},
   [ValidateSet('ru','en')][string]$Language = 'ru'
  )
  $names=[ordered]@{kimi='Kimi Code';deepseek='DeepSeek Harness';hermes='Hermes Agent';opencode='OpenCode'}
  $allowed=New-Object 'Collections.Generic.List[string]'
  $uncertain=New-Object 'Collections.Generic.List[string]'
  $unavailable=New-Object 'Collections.Generic.List[string]'
+ $newGaps=New-Object 'Collections.Generic.List[string]'
+ foreach($provider in @($Controller.DegradedProviders.Keys)){
+  if(-not $Connections.ContainsKey($provider) -or $Connections[$provider] -ne 'connected-degraded'){[void]$Controller.DegradedProviders.Remove($provider)}
+ }
  foreach($provider in $names.Keys){
   if(-not $Connections.ContainsKey($provider)){continue}
   switch([string]$Connections[$provider]){
    'connected' {$Seen[$provider]=$true;$allowed.Add($provider)}
+   'connected-degraded' {
+    $Seen[$provider]=$true;$allowed.Add($provider);$unavailable.Add($names[$provider])
+    if(-not $ProfileScopes.ContainsKey($provider) -and -not $Controller.DegradedProviders.ContainsKey($provider)){$newGaps.Add($provider);$Controller.DegradedProviders[$provider]=$true}
+   }
    'partial' {$uncertain.Add($provider);$unavailable.Add($names[$provider])}
    'error' {if($Seen.ContainsKey($provider)){$uncertain.Add($provider);$unavailable.Add($names[$provider])}}
    'disconnected' {[void]$Seen.Remove($provider)}
@@ -88,7 +116,11 @@ function Read-ExternalProviderGroupSnapshot {
   return [PSCustomObject]@{Tasks=$retained;Unavailable=$unavailable.ToArray()}
  }
  try{
-  $current=@(Read-ManagedExternalProviderSnapshot -Controller $Controller -AllowedProviders $allowed.ToArray() -Language $Language)
+  $current=@(Read-ManagedExternalProviderSnapshot -Controller $Controller -AllowedProviders $allowed.ToArray() -ProfileScopes $ProfileScopes -UncertainProfileScopes $UncertainProfileScopes -Language $Language)
+  if($newGaps.Count -gt 0 -and $null -ne $Controller.Store){
+   foreach($provider in $newGaps){$Controller.Store.MarkProviderGap($provider)}
+   $current=@(Convert-ExternalProviderStates -States @($Controller.Store.Snapshot([DateTimeOffset]::UtcNow)) -Language $Language)
+  }
   return [PSCustomObject]@{Tasks=@($current+$retained);Unavailable=$unavailable.ToArray()}
  }catch{
   foreach($provider in $allowed){$uncertain.Add($provider);$unavailable.Add($names[$provider])}

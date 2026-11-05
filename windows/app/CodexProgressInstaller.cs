@@ -30,7 +30,7 @@ internal static class CodexProgressInstaller
             Extract("Configure-OpenCodeIntegration.ps1", Path.Combine(installDirectory, "Configure-OpenCodeIntegration.ps1"));
             string integrationsDirectory = Path.Combine(installDirectory, "integrations");
             Directory.CreateDirectory(integrationsDirectory);
-            foreach (string name in new[] { "ProviderEventView.ps1", "ProviderRuntime.ps1", "ProviderEventState.cs", "ProviderEventChannel.cs", "provider-events.mjs", "provider-observers.mjs", "provider-transport.mjs", "opencode-entry.js" })
+            foreach (string name in new[] { "ProviderEventView.ps1", "ProviderRuntime.ps1", "ProviderEventState.cs", "ProviderEventChannel.cs", "provider-events.mjs", "provider-observers.mjs", "provider-transport.mjs", "opencode-entry.js", "DeepSeekRuntime.ps1", "deepseek-integration.mjs", "deepseek-setup.mjs", "deepseek-plugin.js", "package.json", "cordis.patch.yml" })
                 Extract("integrations." + name, Path.Combine(integrationsDirectory, name));
             Extract("DiagnosticPolicy.ps1", Path.Combine(installDirectory, "DiagnosticPolicy.ps1"));
             Extract("DiagnosticStore.ps1", Path.Combine(installDirectory, "DiagnosticStore.ps1"));
