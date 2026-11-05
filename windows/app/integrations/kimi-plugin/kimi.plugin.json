@@ -1,0 +1,11 @@
+{
+  "name": "ai-task-monitor",
+  "version": "0.1.0",
+  "description": "Local, observation-only activity updates for AI Task Monitor",
+  "hooks": [
+    { "event": "TurnStarted", "command": "node ./kimi-hook.mjs", "timeout": 2 },
+    { "event": "PermissionRequest", "command": "node ./kimi-hook.mjs", "timeout": 2 },
+    { "event": "PermissionResult", "command": "node ./kimi-hook.mjs", "timeout": 2 },
+    { "event": "Interrupt", "command": "node ./kimi-hook.mjs", "timeout": 2 }
+  ]
+}
