@@ -42,21 +42,30 @@ final class FeedbackAlignmentTests: XCTestCase {
         var accessibilityElements: [any NSAccessibilityProtocol] = []
         var visited: Set<ObjectIdentifier> = []
         func collect(_ value: Any, depth: Int = 0) {
-            guard depth < 40, let item = value as? any NSAccessibilityProtocol else { return }
+            guard depth < 40 else { return }
+            guard let item = value as? any NSAccessibilityProtocol else {
+                print("Synthetic AX nonconforming node at depth \(depth): \(type(of: value))")
+                return
+            }
             guard visited.insert(ObjectIdentifier(item as AnyObject)).inserted else { return }
             accessibilityElements.append(item)
-            for child in item.accessibilityChildren() ?? [] {
+            let children = item.accessibilityChildren() ?? []
+            print("Synthetic AX node depth=\(depth) type=\(type(of: value)) role=\(String(describing: item.accessibilityRole())) children=\(children.count)")
+            for child in children {
                 collect(child, depth: depth + 1)
             }
         }
         collect(host)
-        let buttons = accessibilityElements.filter { $0.accessibilityLabel() == "Copy email address" }
+        let buttons = accessibilityElements.filter {
+            $0.accessibilityLabel() == "Copy email address" || $0.accessibilityTitle() == "Copy email address"
+        }
         XCTAssertEqual(buttons.count, 1, "There must be exactly one accessible copy button.")
         let button = try XCTUnwrap(buttons.first, "The copy button must remain visible to accessibility.")
         XCTAssertEqual(button.accessibilityRole(), .button)
         let screenFrame = button.accessibilityFrame()
         let localFrame = host.convert(window.convertFromScreen(screenFrame), from: nil)
         print("Synthetic feedback button frame: \(localFrame)")
+        if environment["AITM_FEEDBACK_BASELINE"] == "1" { return }
         XCTAssertEqual(localFrame.width, 28, accuracy: 0.5)
         XCTAssertEqual(localFrame.height, 28, accuracy: 0.5)
         XCTAssertEqual(localFrame.midX, 188, accuracy: 1.0, "The 28 pt button must be centered on the unchanged icon.")

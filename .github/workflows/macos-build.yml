@@ -23,7 +23,25 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout pinned baseline for the same diagnostic
+        uses: actions/checkout@v4
+        with:
+          ref: ab4de7012b2f452005b918cc73130d4a9a489e9e
+          path: baseline-feedback
+      - name: Test original copy button on disposable runner
+        working-directory: baseline-feedback/macos
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          cp "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/FeedbackAlignmentTests.swift" Tests/AITaskMonitorTests/
+          export AITM_FEEDBACK_SYNTHETIC_ROOT="$(mktemp -d "$RUNNER_TEMP/aitm-feedback-XXXXXXXX")"
+          export AITM_FEEDBACK_SYNTHETIC_CI=1
+          export AITM_FEEDBACK_BASELINE=1
+          swift test --filter FeedbackAlignmentTests
       - name: Test feedback copy button on disposable runner
+        if: ${{ !cancelled() }}
         working-directory: macos
         run: |
           set -euo pipefail
@@ -34,9 +52,11 @@ jobs:
           export AITM_FEEDBACK_SYNTHETIC_CI=1
           swift test --filter FeedbackAlignmentTests
       - name: Render synthetic settings previews
+        if: ${{ !cancelled() }}
         working-directory: macos
         run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-feedback-previews"
       - name: Upload feedback previews
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: macos-feedback-previews
