@@ -17,6 +17,11 @@ const end = source.indexOf('var DEFAULT_TIMEOUT_SECONDS, KILL_GRACE_MS$1', start
 assert.ok(start >= 0 && end > start, 'The verified Kimi hook runner was not found.');
 const runHook = Function('DEFAULT_TIMEOUT_SECONDS', 'KILL_GRACE_MS$1',
   source.slice(start, end) + '\nreturn runHook;')(30, 100);
+const spawnStart = source.indexOf('function buildSpawnOptions(options) {');
+const spawnEnd = source.indexOf('\nfunction waitForSpawn(child)', spawnStart);
+assert.ok(spawnStart >= 0 && spawnEnd > spawnStart, 'The verified Kimi process options were not found.');
+const buildSpawnOptions = Function('isWindows', source.slice(spawnStart, spawnEnd) + '\nreturn buildSpawnOptions;')
+  (process.platform === 'win32');
 
 const assets = join(dirname(dirname(fileURLToPath(import.meta.url))), 'app', 'integrations', 'kimi-plugin');
 const manifest = JSON.parse(await readFile(join(assets, 'kimi.plugin.json'), 'utf8'));
@@ -32,9 +37,9 @@ let usedWindowsHide = false;
 const host = {
   async spawn(command, args, options) {
     assert.equal(options.shell, true);
-    usedWindowsHide = true;
-    const child = spawn(command, args, { cwd: options.cwd, env, stdio: 'pipe', shell: options.shell,
-      detached: process.platform !== 'win32', windowsHide: true });
+    const upstreamOptions = buildSpawnOptions(options);
+    usedWindowsHide = upstreamOptions.windowsHide === true;
+    const child = spawn(command, args, { ...upstreamOptions, env });
     const exited = new Promise((resolve, reject) => {
       child.once('error', reject);
       child.once('close', code => resolve(code));
@@ -54,7 +59,7 @@ try {
   assert.equal(result.stderr, '');
   assert.notEqual(result.timedOut, true);
   assert.ok(usedWindowsHide);
-  console.log('Kimi 2.5.0 hook runner: silent, nonblocking synthetic hook passed.');
+  console.log('Kimi 2.5.0 hook runner and process options: silent synthetic hook passed.');
 } finally {
   const rel = relative(temp, fixture);
   if (await realpath(fixture) !== fixture || !rel.startsWith('aitm-kimi-upstream-') || rel.includes(sep)) throw Error('Unsafe fixture cleanup.');
