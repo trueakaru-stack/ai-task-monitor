@@ -11,6 +11,23 @@ private struct SettingsPreviewClaudeKey: EnvironmentKey { static let defaultValu
 private struct SettingsPreviewCloudKey: EnvironmentKey { static let defaultValue: SettingsPreviewCloud? = nil }
 private struct SettingsPreviewKimiKey: EnvironmentKey { static let defaultValue: SettingsPreviewKimi? = nil }
 private struct SettingsPreviewHermesKey: EnvironmentKey { static let defaultValue: SettingsPreviewHermes? = nil }
+
+private struct SettingsMenuWidth: ViewModifier {
+    let width: CGFloat
+
+    @ViewBuilder func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            content.buttonSizing(.flexible).frame(width: width)
+        } else {
+            content.frame(width: 120)
+        }
+        #else
+        content.frame(width: 120)
+        #endif
+    }
+}
+
 extension EnvironmentValues {
     var settingsPreviewEnd: Bool {
         get { self[SettingsPreviewEndKey.self] }
@@ -46,6 +63,7 @@ struct SettingsView: View {
     @State private var confirmsJournalClear = false
     @State private var feedbackCopyError = false
     @State private var kimiCopyError = false
+    @State private var settingsMenuWidth: CGFloat = 120
     @Environment(\.settingsPreviewEnd) private var settingsPreviewEnd
     @Environment(\.settingsPreviewSources) private var settingsPreviewSources
     @Environment(\.settingsPreviewClaude) private var settingsPreviewClaude
@@ -221,7 +239,7 @@ struct SettingsView: View {
                             Picker(tr("Срок хранения", "Retention period"), selection: retentionDays) {
                                 ForEach(1...7, id: \.self) { value in Text(dayLabel(value)).tag(value) }
                             }
-                            .labelsHidden().pickerStyle(.menu).frame(width: 120)
+                            .labelsHidden().pickerStyle(.menu).modifier(SettingsMenuWidth(width: settingsMenuWidth))
                         }
                         HStack {
                             Text(tr("Максимальный размер", "Maximum size")).font(.system(size: 13))
@@ -229,7 +247,7 @@ struct SettingsView: View {
                             Picker(tr("Максимальный размер", "Maximum size"), selection: maximumMB) {
                                 ForEach(1...10, id: \.self) { value in Text("\(value) \(tr("МБ", "MB"))").tag(value) }
                             }
-                            .labelsHidden().pickerStyle(.menu).frame(width: 120)
+                            .labelsHidden().pickerStyle(.menu).modifier(SettingsMenuWidth(width: settingsMenuWidth))
                         }
                         HStack {
                             Button(tr("Открыть журнал", "Open journal")) { store.openJournal() }
@@ -257,7 +275,7 @@ struct SettingsView: View {
                             Picker(tr("Срок хранения событий", "Event retention period"), selection: claudeRetentionDays) {
                                 ForEach(1...30, id: \.self) { value in Text(dayLabel(value)).tag(value) }
                             }
-                            .labelsHidden().pickerStyle(.menu).frame(width: 120).disabled(store.claudeRetentionPolicy == nil)
+                            .labelsHidden().pickerStyle(.menu).modifier(SettingsMenuWidth(width: settingsMenuWidth)).disabled(store.claudeRetentionPolicy == nil)
                         }
                         HStack {
                             Text(tr("Максимальный размер событий", "Maximum event size")).font(.system(size: 13))
@@ -265,7 +283,7 @@ struct SettingsView: View {
                             Picker(tr("Максимальный размер событий", "Maximum event size"), selection: claudeMaximumMB) {
                                 ForEach(1...100, id: \.self) { value in Text("\(value) \(tr("МБ", "MB"))").tag(value) }
                             }
-                            .labelsHidden().pickerStyle(.menu).frame(width: 120).disabled(store.claudeRetentionPolicy == nil)
+                            .labelsHidden().pickerStyle(.menu).modifier(SettingsMenuWidth(width: settingsMenuWidth)).disabled(store.claudeRetentionPolicy == nil)
                         }
                         Text(tr("События очищаются автоматически. Резервные копии настроек хранятся 30 дней; последняя сохраняется.", "Events are cleaned automatically. Settings backups are kept for 30 days; the most recent is retained."))
                             .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
@@ -281,7 +299,7 @@ struct SettingsView: View {
                             Picker(tr("Количество повторов", "Repeat count"), selection: loopThreshold) {
                                 ForEach(3...10, id: \.self) { value in Text("\(value)").tag(value) }
                             }
-                            .labelsHidden().pickerStyle(.menu).frame(width: 120)
+                            .labelsHidden().pickerStyle(.menu).modifier(SettingsMenuWidth(width: settingsMenuWidth))
                         }
                         HStack {
                             Text(tr("Период проверки", "Time window")).font(.system(size: 13))
@@ -289,7 +307,7 @@ struct SettingsView: View {
                             Picker(tr("Период проверки", "Time window"), selection: loopWindowMinutes) {
                                 ForEach(1...30, id: \.self) { value in Text("\(value) \(tr("мин", "min"))").tag(value) }
                             }
-                            .labelsHidden().pickerStyle(.menu).frame(width: 120)
+                            .labelsHidden().pickerStyle(.menu).modifier(SettingsMenuWidth(width: settingsMenuWidth))
                         }
                         if !store.claudeLoopError.isEmpty {
                             Text(store.claudeLoopError).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
@@ -343,7 +361,11 @@ struct SettingsView: View {
             }
         }
         .controlSize(.large)
-        .onChange(of: languageRaw) { _ in store.refresh() }
+        .onAppear { refreshSettingsMenuWidth() }
+        .onChange(of: languageRaw) { _ in
+            refreshSettingsMenuWidth()
+            store.refresh()
+        }
     }
 
     private var sourceDescription: String {
@@ -432,6 +454,28 @@ struct SettingsView: View {
         if AppLanguage.current == .en { return "\(value) " + (value == 1 ? "day" : "days") }
         let last = value % 10, lastTwo = value % 100
         return "\(value) " + ((11...14).contains(lastTwo) ? "дней" : last == 1 ? "день" : (2...4).contains(last) ? "дня" : "дней")
+    }
+
+    private func refreshSettingsMenuWidth() {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            let groups: [[String]] = [
+                (1...7).map(dayLabel),
+                (1...10).map { "\($0) \(tr("МБ", "MB"))" },
+                (1...30).map(dayLabel),
+                (1...100).map { "\($0) \(tr("МБ", "MB"))" },
+                (3...10).map { "\($0)" },
+                (1...30).map { "\($0) \(tr("мин", "min"))" }
+            ]
+            let widest = groups.map { titles in
+                let control = NSPopUpButton(frame: .zero, pullsDown: false)
+                control.controlSize = .large
+                control.addItems(withTitles: titles)
+                return control.fittingSize.width
+            }.max() ?? 0
+            settingsMenuWidth = widest.isFinite && widest > 0 ? widest : 120
+        }
+        #endif
     }
 
     private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {

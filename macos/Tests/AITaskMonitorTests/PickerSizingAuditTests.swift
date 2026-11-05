@@ -275,6 +275,9 @@ final class PickerSizingAuditTests: XCTestCase {
                         button.controlSize = .large
                         button.addItems(withTitles: fixture.ranges[row].map { fixture.label(row, $0) })
                         button.selectItem(at: selections[row] - fixture.ranges[row].lowerBound)
+                        let detachedDefaultWidth = button.fittingSize.width
+                        button.appearance = NSAppearance(named: theme == "dark" ? .darkAqua : .aqua)
+                        let detachedMatchedWidth = button.fittingSize.width
                         appKitContainer.addSubview(button)
                         let swiftButton = reference[row]
                         let swiftWidth = swiftButton.fittingSize.width
@@ -284,9 +287,15 @@ final class PickerSizingAuditTests: XCTestCase {
                         XCTAssertEqual(button.selectedItem?.title, expectedTitle)
                         XCTAssertGreaterThan(swiftWidth, 0)
                         XCTAssertGreaterThan(appKitWidth, 0)
+                        XCTAssertGreaterThan(detachedDefaultWidth, 0)
+                        XCTAssertGreaterThan(detachedMatchedWidth, 0)
                         rows.append(["row": row + 1, "selection": expectedTitle,
                                      "swiftUIWidth": Double(swiftWidth), "appKitWidth": Double(appKitWidth),
                                      "matchesWithinHalfPoint": abs(swiftWidth - appKitWidth) <= 0.5,
+                                     "detachedDefaultWidth": Double(detachedDefaultWidth),
+                                     "detachedMatchedWidth": Double(detachedMatchedWidth),
+                                     "detachedDefaultMatches": abs(swiftWidth - detachedDefaultWidth) <= 0.5,
+                                     "detachedMatchedMatches": abs(swiftWidth - detachedMatchedWidth) <= 0.5,
                                      "swiftUIFont": swiftButton.font?.fontName ?? "",
                                      "swiftUIFontSize": Double(swiftButton.font?.pointSize ?? 0),
                                      "appKitFont": button.font?.fontName ?? "",
@@ -294,7 +303,9 @@ final class PickerSizingAuditTests: XCTestCase {
                     }
                     records.append(["language": language, "theme": theme, "state": state, "rows": rows,
                                     "swiftUIMax": rows.compactMap { $0["swiftUIWidth"] as? Double }.max() ?? 0,
-                                    "appKitMax": rows.compactMap { $0["appKitWidth"] as? Double }.max() ?? 0])
+                                    "appKitMax": rows.compactMap { $0["appKitWidth"] as? Double }.max() ?? 0,
+                                    "detachedDefaultMax": rows.compactMap { $0["detachedDefaultWidth"] as? Double }.max() ?? 0,
+                                    "detachedMatchedMax": rows.compactMap { $0["detachedMatchedWidth"] as? Double }.max() ?? 0])
                 }
             }
         }

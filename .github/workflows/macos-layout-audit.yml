@@ -10,6 +10,7 @@ on:
       - "macos/Tests/AITaskMonitorTests/PreviewLocalizationSnapshotsTests.swift"
       - "macos/Tests/AITaskMonitorTests/PreviewLocalizationTests.swift"
       - "macos/Sources/AITaskMonitor/RootView.swift"
+      - "macos/Sources/AITaskMonitor/SettingsView.swift"
       - "macos/Sources/AITaskMonitor/UpdateDialog.swift"
       - "macos/Sources/AITaskMonitor/TaskStore.swift"
       - "macos/Sources/AITaskMonitor/SnapshotRenderer.swift"

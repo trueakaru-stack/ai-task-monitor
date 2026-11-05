@@ -87,6 +87,22 @@ final class WindowLayoutAuditTests: XCTestCase {
                         record["autohides"] = scroll.autohidesScrollers
                         record["scrollBounds"] = rect(scroll.convert(scroll.bounds, to: host))
                         record["clipBounds"] = rect(scroll.contentView.convert(scroll.contentView.bounds, to: host))
+                        if attached {
+                            var chain: [[String: Any]] = []
+                            var ancestor: NSView? = scroll
+                            var reachedHost = false
+                            while let view = ancestor, chain.count < 32 {
+                                chain.append(["type": String(describing: type(of: view)),
+                                              "frame": rect(view.frame), "bounds": rect(view.bounds),
+                                              "frameInHost": rect(view.convert(view.bounds, to: host)),
+                                              "isFlipped": view.isFlipped])
+                                if view === host { reachedHost = true; break }
+                                ancestor = view.superview
+                            }
+                            record["scrollAncestors"] = chain
+                            record["ancestorsReachHost"] = reachedHost
+                            XCTAssertTrue(reachedHost, "The synthetic scroll view must belong to its host.")
+                        }
                         if let document = scroll.documentView {
                             record["documentBounds"] = rect(document.convert(document.bounds, to: host))
                             if attached && !baseline {
@@ -126,6 +142,109 @@ final class WindowLayoutAuditTests: XCTestCase {
         }
         let report = try JSONSerialization.data(withJSONObject: records, options: [.prettyPrinted, .sortedKeys])
         try report.write(to: destination.appendingPathComponent("scroller-geometry.json"), options: .atomic)
+    }
+
+    @MainActor func testSyntheticActualSettingsMenusAndJournalButtons() throws {
+        let destination = try fixtureDirectory()
+        let baseline = ProcessInfo.processInfo.environment["AITM_LAYOUT_BASELINE"] == "1"
+        _ = NSApplication.shared
+        defer { AppLanguage.previewOverride = nil }
+        var records: [[String: Any]] = []
+        for language in [AppLanguage.ru, .en] {
+            AppLanguage.previewOverride = language
+            for theme in ["light", "dark"] {
+                let suiteName = "AITaskMonitor.synthetic-settings." + UUID().uuidString
+                let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+                defer { defaults.removePersistentDomain(forName: suiteName) }
+                let store = TaskStore.preview()
+                store.showsSettings = true
+                let view = RootView().environmentObject(store)
+                    .environment(\.colorScheme, theme == "dark" ? .dark : .light)
+                    .environment(\.settingsPreviewClaude, .unconfirmed)
+                    .environment(\.settingsPreviewCloud, .disconnected)
+                    .environment(\.settingsPreviewKimi, .disconnected)
+                    .environment(\.settingsPreviewHermes, .absent)
+                    .defaultAppStorage(defaults)
+                let host = NSHostingView(rootView: view)
+                host.appearance = NSAppearance(named: theme == "dark" ? .darkAqua : .aqua)
+                host.frame = NSRect(x: 0, y: 0, width: 560, height: 700)
+                let window = openWindow(host: host)
+                defer { window.close() }
+                host.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(1.2))
+                let probe = try XCTUnwrap(descendants(host).compactMap { $0 as? OverlayScrollerProbe.Probe }.first)
+                let scroll = try XCTUnwrap(probe.enclosingScrollView)
+                let document = try XCTUnwrap(scroll.documentView)
+                func orderedMenus() -> [NSPopUpButton] {
+                    descendants(host).compactMap { $0 as? NSPopUpButton }
+                        .filter { [7, 8, 10, 30, 100].contains($0.numberOfItems) }
+                        .sorted {
+                            let first = $0.convert($0.bounds, to: document)
+                            let second = $1.convert($1.bounds, to: document)
+                            return document.isFlipped ? first.minY < second.minY : first.maxY > second.maxY
+                        }
+                }
+                let menus = orderedMenus()
+                XCTAssertEqual(menus.count, 6, "The synthetic settings must expose all six journal and loop menus.")
+                guard menus.count == 6 else { continue }
+                XCTAssertEqual(menus.map(\.numberOfItems), [7, 10, 30, 100, 8, 30])
+                let fittedMaximum = menus.map { $0.fittingSize.width }.max() ?? 0
+                XCTAssertGreaterThan(fittedMaximum, 0)
+                var expectedWidth: CGFloat = 120
+                #if compiler(>=6.2)
+                if #available(macOS 26.0, *) { expectedWidth = fittedMaximum }
+                #endif
+                if !baseline {
+                    for menu in menus {
+                        XCTAssertEqual(menu.bounds.width, expectedWidth, accuracy: 0.5,
+                                       "The actual settings menu must match the widest fitted menu.")
+                    }
+                }
+                func scrollTo(_ menu: NSPopUpButton) {
+                    let frame = menu.convert(menu.bounds, to: document)
+                    let clipHeight = scroll.contentView.bounds.height
+                    let proposed = document.isFlipped ? frame.minY - 100 : frame.maxY - clipHeight + 100
+                    let y = min(max(0, proposed), max(0, document.bounds.height - clipHeight))
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                    window.displayIfNeeded()
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+                }
+                let names = language == .ru ? ["Открыть журнал", "Очистить"] : ["Open journal", "Clear"]
+                var captures: [[String: Any]] = []
+                for (label, anchor) in [("journal", menus[0]), ("loop", menus[4])] {
+                    scrollTo(anchor)
+                    let name = "settings-menus-\(language.rawValue)-\(theme)-\(label).png"
+                    try render(host, to: destination.appendingPathComponent(name))
+                    let clip = scroll.contentView.convert(scroll.contentView.bounds, to: host)
+                    let menuData: [[String: Any]] = menus.enumerated().map { index, menu in
+                        let frame = menu.convert(menu.bounds, to: host)
+                        return ["row": index + 1, "frame": rect(frame), "fittingWidth": Double(menu.fittingSize.width),
+                                "fullyVisible": clip.contains(frame), "itemCount": menu.numberOfItems]
+                    }
+                    let buttons: [[String: Any]] = descendants(host).compactMap { $0 as? NSButton }
+                        .filter { names.contains($0.title) }.map { button in
+                            ["title": button.title, "frame": rect(button.convert(button.bounds, to: host))]
+                        }
+                    captures.append(["file": name, "clip": rect(clip), "menus": menuData, "journalButtons": buttons])
+                }
+                scrollTo(menus[0])
+                let before = store.diagnosticSettings.retentionDays
+                let target = before == 1 ? 2 : 1
+                menus[0].selectItem(at: target - 1)
+                let actionSent = menus[0].sendAction(menus[0].action, to: menus[0].target)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+                let after = store.diagnosticSettings.retentionDays
+                records.append(["language": language.rawValue, "theme": theme, "mode": baseline ? "baseline" : "candidate",
+                                "expectedWidth": Double(expectedWidth), "fittedMaximum": Double(fittedMaximum),
+                                "captures": captures,
+                                "syntheticSelection": ["before": before, "requested": target,
+                                                       "after": after, "actionSent": actionSent]])
+            }
+        }
+        let report = try JSONSerialization.data(withJSONObject: records, options: [.prettyPrinted, .sortedKeys])
+        try report.write(to: destination.appendingPathComponent("settings-menu-geometry.json"), options: .atomic)
     }
 
     @MainActor func testDownloadAndLaterSyntheticClicks() throws {
