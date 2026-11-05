@@ -59,6 +59,11 @@ enum SnapshotRenderer {
                     try render(name: "settings-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory)
                     try render(name: "settings-end-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsEnd: true)
                     try render(name: "settings-sources-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true)
+                    for cloud in [SettingsPreviewCloud.disconnected, .connected, .error, .partial] {
+                        let label: String
+                        switch cloud { case .disconnected: label = "disconnected"; case .connected: label = "connected"; case .error: label = "error"; case .partial: label = "partial" }
+                        try render(name: "settings-cloud-\(label)-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true, cloudPreview: cloud)
+                    }
                     try render(name: "settings-claude-unconfirmed-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true, claudePreview: .unconfirmed)
                     try render(name: "settings-claude-connected-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true, claudePreview: .connected)
                     try render(name: "settings-desktop-profile-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true, desktopProfile: true)
@@ -87,7 +92,7 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, desktopProfile: Bool = false, claudePreview: SettingsPreviewClaude? = nil, manyProviders: Bool = false, tasksEnd: Bool = false, tabsEnd: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, desktopProfile: Bool = false, claudePreview: SettingsPreviewClaude? = nil, cloudPreview: SettingsPreviewCloud? = nil, manyProviders: Bool = false, tasksEnd: Bool = false, tabsEnd: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
         let store = manyProviders ? TaskStore.manySourcesPreview() : (journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources, planUnconfirmed: planUnconfirmed)))
         if settingsSources { store.setPreviewDeepSeekProfiles(desktop: desktopProfile) }
@@ -105,6 +110,7 @@ enum SnapshotRenderer {
             .environment(\.settingsPreviewEnd, settingsEnd)
             .environment(\.settingsPreviewSources, settingsSources)
             .environment(\.settingsPreviewClaude, claudePreview)
+            .environment(\.settingsPreviewCloud, cloudPreview)
         let hosting = NSHostingView(rootView: view)
         hosting.appearance = NSAppearance(named: mode == .dark ? .darkAqua : .aqua)
         hosting.frame = NSRect(origin: .zero, size: size)

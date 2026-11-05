@@ -18,6 +18,9 @@ final class TaskStore: ObservableObject {
     @Published private(set) var deepSeekSetupInProgress = false
     @Published private(set) var deepSeekScanInProgress = false
     @Published private(set) var deepSeekInstallationAvailable = false
+    @Published private(set) var codexCloudEnabled = false
+    @Published private(set) var codexCloudFailed = false
+    @Published private(set) var codexCloudPartial = false
     @Published private(set) var unavailableSources: [TaskProvider] = []
     @Published var showsJournal = false
     @Published private(set) var diagnosticSettings = DiagnosticSettings()
@@ -39,6 +42,14 @@ final class TaskStore: ObservableObject {
     private let externalProvidersEnabled: Bool
     private let externalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState]
     private let makeExternalRuntime: () throws -> ExternalProviderRuntime
+    private let codexCloudAllowed: Bool
+    private let codexCloudDefaults: UserDefaults
+    private let makeCodexCloudClient: () -> CodexCloudClient?
+    private let codexCloudInterval: TimeInterval
+    private var codexCloudClient: CodexCloudClient?
+    private var codexCloudGeneration = 0
+    private var nextCodexCloudScan = Date.distantPast
+    private var previousCodexCloud: [CodexCloudReader.Task] = []
     private var nextClaudeRetention = Date.distantPast
     private let updateChecksEnabled: Bool
     private let monitoringStartedAt = Date()
@@ -190,7 +201,7 @@ final class TaskStore: ObservableObject {
         return deepSeekUncertainScopes.isEmpty ? .disconnected : .partial
     }
 
-    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, additionalExternalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState] = [:], makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }) {
+    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, additionalExternalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState] = [:], makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }, enableCodexCloud: Bool = false, codexCloudDefaults: UserDefaults = .standard, codexCloudInterval: TimeInterval = 30, makeCodexCloudClient: @escaping () -> CodexCloudClient? = { CodexCloudClient.discover().map { CodexCloudClient(executable: $0) } }) {
         self.codexReader = codexReader
         self.claudeReader = claudeReader
         self.claudeLoopProfile = claudeLoopProfile
@@ -199,6 +210,11 @@ final class TaskStore: ObservableObject {
         connections[.opencode] = openCodeConnection
         self.externalConnections = connections
         self.makeExternalRuntime = makeExternalRuntime
+        self.codexCloudAllowed = enableCodexCloud && previewTasks == nil
+        self.codexCloudDefaults = codexCloudDefaults
+        self.makeCodexCloudClient = makeCodexCloudClient
+        self.codexCloudInterval = codexCloudInterval
+        self.codexCloudEnabled = enableCodexCloud && previewTasks == nil && codexCloudDefaults.bool(forKey: "codexCloudEnabled")
         self.claudeRetentionWorker = enableClaudeRetention && previewTasks == nil ? ClaudeRetentionWorker() : nil
         self.updateChecksEnabled = enableUpdateChecks && previewTasks == nil
         self.diagnosticWorker = previewTasks == nil ? DiagnosticWorker(journal: journal ?? DiagnosticJournal()) : nil
@@ -399,6 +415,62 @@ final class TaskStore: ObservableObject {
         return tasks.filter { $0.isActive && $0.provider == provider }.count
     }
 
+    func setCodexCloudEnabled(_ enabled: Bool) {
+        guard codexCloudAllowed else { return }
+        codexCloudDefaults.set(enabled, forKey: "codexCloudEnabled")
+        codexCloudGeneration += 1
+        codexCloudClient?.cancel()
+        codexCloudClient = nil
+        previousCodexCloud = []
+        codexCloudEnabled = enabled
+        codexCloudFailed = false
+        codexCloudPartial = false
+        nextCodexCloudScan = .distantPast
+        refresh()
+    }
+
+    private func scheduleCodexCloudScan() {
+        guard codexCloudAllowed, codexCloudEnabled, codexCloudClient == nil, Date() >= nextCodexCloudScan else { return }
+        guard let client = makeCodexCloudClient() else {
+            codexCloudFailed = true
+            nextCodexCloudScan = Date().addingTimeInterval(codexCloudInterval)
+            return
+        }
+        codexCloudClient = client
+        let generation = codexCloudGeneration
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = Result { try client.list() }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.codexCloudEnabled, self.codexCloudGeneration == generation,
+                      self.codexCloudClient === client else { return }
+                self.codexCloudClient = nil
+                self.nextCodexCloudScan = Date().addingTimeInterval(self.codexCloudInterval)
+                switch result {
+                case .success(let snapshot):
+                    let seen = Set(snapshot.tasks.map(\.id))
+                    let retained = snapshot.complete ? [] : self.previousCodexCloud.filter { !seen.contains($0.id) }
+                    self.previousCodexCloud = snapshot.tasks.filter { $0.status != .terminal } + retained
+                    self.codexCloudFailed = false
+                    self.codexCloudPartial = !snapshot.complete
+                case .failure:
+                    self.codexCloudFailed = true
+                }
+                self.refresh()
+            }
+        }
+    }
+
+    private var codexCloudTasks: [MonitoredTask] {
+        previousCodexCloud.map { item in
+            let title = item.title ?? tr("Задача Codex", "Codex task")
+            return MonitoredTask(id: item.id, provider: .codex,
+                                 title: tr("Облако: ", "Cloud: ") + title,
+                                 activity: tr("Статус не подтверждён", "Status unconfirmed"),
+                                 isActive: false, progress: nil, progressKind: .none, steps: [],
+                                 updatedAt: item.updatedAt ?? .distantPast, isUnconfirmed: true, planConfirmed: false)
+        }
+    }
+
     func refresh() {
         let previousTasks = tasks
         let previousUnavailable = unavailableSources
@@ -450,8 +522,9 @@ final class TaskStore: ObservableObject {
             previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         }
         if externalProvidersEnabled { scheduleDeepSeekScan(); refreshExternalProviders(unavailable: &unavailable) }
+        scheduleCodexCloudScan()
         unavailableSources = unavailable
-        var combined = (previousCodex + previousClaude + previousExternal)
+        var combined = (previousCodex + previousClaude + previousExternal + codexCloudTasks)
             .filter { $0.isActive || $0.isUnconfirmed || $0.isWaiting }
             .sorted { $0.updatedAt > $1.updatedAt }
         let now = Date()

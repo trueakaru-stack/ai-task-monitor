@@ -4,7 +4,9 @@ import SwiftUI
 private struct SettingsPreviewEndKey: EnvironmentKey { static let defaultValue = false }
 private struct SettingsPreviewSourcesKey: EnvironmentKey { static let defaultValue = false }
 enum SettingsPreviewClaude: Equatable { case unconfirmed, connected }
+enum SettingsPreviewCloud: Equatable { case disconnected, connected, error, partial }
 private struct SettingsPreviewClaudeKey: EnvironmentKey { static let defaultValue: SettingsPreviewClaude? = nil }
+private struct SettingsPreviewCloudKey: EnvironmentKey { static let defaultValue: SettingsPreviewCloud? = nil }
 extension EnvironmentValues {
     var settingsPreviewEnd: Bool {
         get { self[SettingsPreviewEndKey.self] }
@@ -18,6 +20,10 @@ extension EnvironmentValues {
         get { self[SettingsPreviewClaudeKey.self] }
         set { self[SettingsPreviewClaudeKey.self] = newValue }
     }
+    var settingsPreviewCloud: SettingsPreviewCloud? {
+        get { self[SettingsPreviewCloudKey.self] }
+        set { self[SettingsPreviewCloudKey.self] = newValue }
+    }
 }
 
 struct SettingsView: View {
@@ -29,6 +35,7 @@ struct SettingsView: View {
     @Environment(\.settingsPreviewEnd) private var settingsPreviewEnd
     @Environment(\.settingsPreviewSources) private var settingsPreviewSources
     @Environment(\.settingsPreviewClaude) private var settingsPreviewClaude
+    @Environment(\.settingsPreviewCloud) private var settingsPreviewCloud
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -57,6 +64,25 @@ struct SettingsView: View {
                         .pickerStyle(.segmented)
                     }
                     section(tr("Источники", "Sources")) {
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Codex Cloud").font(.system(size: 13, weight: .medium))
+                                Text(tr("Использует установленный Codex, его вход в аккаунт и интернет. Статус облачных задач может быть неподтверждённым.", "Uses the installed Codex, its signed-in account and the internet. Cloud task status may be unconfirmed."))
+                                    .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                if cloudFailed {
+                                    Text(tr("Не удалось получить облачные задачи. Проверьте установку Codex, вход и интернет.", "Could not retrieve cloud tasks. Check the Codex installation, sign-in and internet connection."))
+                                        .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                } else if cloudPartial {
+                                    Text(tr("Показаны не все облачные задачи.", "Not all cloud tasks are shown."))
+                                        .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                            Spacer(minLength: 20)
+                            Button(cloudEnabled ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
+                                if settingsPreviewCloud == nil { store.setCodexCloudEnabled(!cloudEnabled) }
+                            }
+                            .accessibilityLabel((cloudEnabled ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) + " Codex Cloud")
+                        }
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("Claude Code").font(.system(size: 13, weight: .medium))
@@ -255,6 +281,14 @@ struct SettingsView: View {
         if store.unavailableSources.contains(.claude) { return tr("Нет данных от Claude Code. Проверьте доступ к настройкам и журналу источника.", "No data from Claude Code. Check access to its settings and event log.") }
         return tr("Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии.", "The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Desktop or Claude Code after connecting. Only local sessions are monitored for now.")
     }
+
+    private var cloudEnabled: Bool {
+        guard let preview = settingsPreviewCloud else { return store.codexCloudEnabled }
+        return preview != .disconnected
+    }
+
+    private var cloudFailed: Bool { settingsPreviewCloud == nil ? store.codexCloudFailed : settingsPreviewCloud == .error }
+    private var cloudPartial: Bool { settingsPreviewCloud == nil ? store.codexCloudPartial : settingsPreviewCloud == .partial }
 
     private var claudeInstallation: ClaudeIntegration.InstallationState {
         settingsPreviewClaude == nil ? ClaudeIntegration.installationState() : .unconfirmed
