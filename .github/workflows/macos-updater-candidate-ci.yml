@@ -102,7 +102,7 @@ jobs:
           DEVELOPER="$(xcode-select -p)"
           PROFILE='(version 1) (allow default) (deny network*)'
           run_isolated() {
-            /usr/bin/env -i "DEVELOPER_DIR=$DEVELOPER" \
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
               "TMPDIR=$RUNNER_TEMP/aitm-update-tmp/" \
               "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-update-support" \
               /usr/bin/sandbox-exec -p "$PROFILE" "$@"
@@ -128,6 +128,7 @@ jobs:
           print("Synthetic network-deny probe passed: loopback connection denied")
           PY
           run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-network-deny.py"
+          run_isolated /usr/bin/which codesign
           cd "$TREE/macos"
           run_isolated /usr/bin/xcrun swift --version
           for suite in ReleaseUpdatesTests ReleaseRetryScheduleTests ReleaseUpdateCoordinatorTests ReleaseRequestSyntheticTests; do
