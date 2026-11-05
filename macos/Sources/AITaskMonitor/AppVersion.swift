@@ -2,7 +2,7 @@ import Foundation
 
 enum AppVersion {
     // Swift Package tests and source previews do not run inside the release bundle.
-    static let sourceVersion = "0.3.6-alpha"
+    static let sourceVersion = "0.3.7-alpha"
     static var current: String {
         Bundle.main.object(forInfoDictionaryKey: "AITaskMonitorReleaseVersion") as? String ?? sourceVersion
     }
