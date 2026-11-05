@@ -89,7 +89,7 @@ struct SettingsView: View {
                         HStack(alignment: .top) {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("DeepSeek Harness").font(.system(size: 13, weight: .medium))
-                                Text(tr("Приложение добавит локальный плагин в выбранный профиль DeepSeek Harness. После подключения перезапустите DeepSeek Harness.", "The app adds a local plugin to the selected DeepSeek Harness profile. Restart DeepSeek Harness after connecting."))
+                                Text(tr("Подключение проверено с DeepSeek Harness 0.2.1-rc.5 и pnpm 11.25.0. Приложение добавит локальный плагин в выбранный профиль. После подключения перезапустите DeepSeek Harness.", "Connection has been tested with DeepSeek Harness 0.2.1-rc.5 and pnpm 11.25.0. The app adds a local plugin to the selected profile. Restart DeepSeek Harness after connecting."))
                                     .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
                                 Text(store.deepSeekStatusMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
                                 Picker(tr("Профиль", "Profile"), selection: $store.selectedDeepSeekProfile) {

@@ -4,6 +4,7 @@ struct DeepSeekProfile: Decodable, Identifiable, Equatable {
     let name: String
     let state: String
     let scope: String?
+    let error: String?
     var id: String { name }
 }
 

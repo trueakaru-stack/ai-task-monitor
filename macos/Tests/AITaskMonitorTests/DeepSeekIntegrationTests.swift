@@ -68,7 +68,7 @@ final class DeepSeekIntegrationTests: XCTestCase {
         print("DeepSeek fixture: connecting")
         try DeepSeekIntegration.setConnected(true, profile: "тестовый-профиль", context: context)
         let connected = try XCTUnwrap(DeepSeekIntegration.profiles(context).first)
-        XCTAssertEqual(connected.state, "connected")
+        XCTAssertEqual(connected.state, "connected", "Fixture profile error: \(connected.error ?? "none")")
         XCTAssertTrue(DeepSeekIntegration.validScope(connected.scope))
         print("DeepSeek fixture: disconnecting")
         try DeepSeekIntegration.setConnected(false, profile: "тестовый-профиль", context: context)

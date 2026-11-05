@@ -22,7 +22,11 @@ try {
     result = [];
     for (const name of profiles) {
       try { result.push({ name, ...await deepSeekProfileInfo(request.home, name) }); }
-      catch { result.push({ name, state: 'error' }); }
+      catch (error) {
+        const code = typeof error?.code === 'string' && /^[a-z][a-z-]{0,63}$/.test(error.code)
+          ? error.code : 'operation-failed';
+        result.push({ name, state: 'error', error: code });
+      }
     }
   } else if (request.action === 'state') {
     result = await deepSeekProfileState(request.home, request.profile);

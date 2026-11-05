@@ -159,7 +159,7 @@ final class TaskStore: ObservableObject {
         switch profile.state {
         case "connected": return tr("Подключён", "Connected")
         case "partial": return tr("Подключён частично", "Partially connected")
-        case "error": return tr("Не удалось прочитать профиль", "Could not read the profile")
+        case "error": return deepSeekErrorMessage(profile.error ?? "operation-failed")
         default: return tr("Не подключён", "Not connected")
         }
     }
@@ -295,8 +295,8 @@ final class TaskStore: ObservableObject {
 
     func setPreviewDeepSeekProfiles() {
         deepSeekInstallationAvailable = true
-        deepSeekProfiles = [DeepSeekProfile(name: "Profile One", state: "disconnected", scope: nil),
-                            DeepSeekProfile(name: "Profile Two", state: "connected", scope: String(repeating: "b", count: 32))]
+        deepSeekProfiles = [DeepSeekProfile(name: "Profile One", state: "disconnected", scope: nil, error: nil),
+                            DeepSeekProfile(name: "Profile Two", state: "connected", scope: String(repeating: "b", count: 32), error: nil)]
         selectedDeepSeekProfile = "Profile Two"
     }
 

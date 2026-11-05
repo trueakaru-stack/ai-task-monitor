@@ -86,6 +86,11 @@ try {
   }
   assert.deepEqual(await bridge({ action: 'connect', ...options }),
     { status: 0, response: { ok: true, result: 'connected' } });
+  const listedConnected = await bridge({ action: 'list', home });
+  assert.equal(listedConnected.response.result[0].state, 'connected', 'A new bridge process must read the connected profile.');
+  assert.match(listedConnected.response.result[0].scope, /^[a-f0-9]{32}$/);
+  await execute(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'Test-DeepSeekUpstreamBoot.mjs'), anchor, profile],
+    { env, cwd: fixture, windowsHide: true, timeout: 30000, maxBuffer: 1048576 });
   await assert.rejects(readFile(marker), { code: 'ENOENT' });
   assert.equal(await deepSeekProfileState(home, profile), 'connected');
   assert.equal(await setDeepSeekConnected(options, true), 'connected');
