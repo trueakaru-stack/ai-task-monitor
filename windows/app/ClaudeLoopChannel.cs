@@ -1,14 +1,18 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
+using Microsoft.Win32.SafeHandles;
 
 namespace AITaskMonitor.ClaudeLoop
 {
@@ -106,8 +110,7 @@ namespace AITaskMonitor.ClaudeLoop
                 try
                 {
                     lock (gate) { if (stopping) break; }
-                    pipe = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
-                        PipeOptions.Asynchronous, 4096, 4096, security, HandleInheritability.None);
+                    pipe = CreateLocalPipe(name, security);
                     lock (gate)
                     {
                         if (stopping) { pipe.Dispose(); break; }
@@ -151,33 +154,87 @@ namespace AITaskMonitor.ClaudeLoop
             }
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PipeSecurityAttributes
+        {
+            public int Length;
+            public IntPtr Descriptor;
+            [MarshalAs(UnmanagedType.Bool)] public bool InheritHandle;
+        }
+
+        [DllImport("kernel32.dll", EntryPoint = "CreateNamedPipeW", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafePipeHandle CreateNamedPipe(string name, uint openMode, uint pipeMode,
+            uint maxInstances, uint outBufferSize, uint inBufferSize, uint defaultTimeout,
+            ref PipeSecurityAttributes securityAttributes);
+
+        private static NamedPipeServerStream CreateLocalPipe(string pipeName, PipeSecurity pipeSecurity)
+        {
+            const uint pipeAccessDuplex = 0x00000003;
+            const uint firstPipeInstance = 0x00080000;
+            const uint fileFlagOverlapped = 0x40000000;
+            const uint rejectRemoteClients = 0x00000008;
+            byte[] descriptor = pipeSecurity.GetSecurityDescriptorBinaryForm();
+            GCHandle pinned = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
+            try
+            {
+                var attributes = new PipeSecurityAttributes
+                {
+                    Length = Marshal.SizeOf(typeof(PipeSecurityAttributes)),
+                    Descriptor = pinned.AddrOfPinnedObject(),
+                    InheritHandle = false
+                };
+                SafePipeHandle handle = CreateNamedPipe(@"\\.\pipe\" + pipeName,
+                    pipeAccessDuplex | firstPipeInstance | fileFlagOverlapped,
+                    rejectRemoteClients, 1, 4096, 4096, 0, ref attributes);
+                if (handle.IsInvalid)
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    handle.Dispose();
+                    throw new Win32Exception(error);
+                }
+                try { return new NamedPipeServerStream(PipeDirection.InOut, true, false, handle); }
+                catch { handle.Dispose(); throw; }
+            }
+            finally { pinned.Free(); }
+        }
+
         private static byte[] ReadBounded(Stream stream, int length)
         {
             byte[] result = new byte[length];
             int offset = 0;
             while (offset < length)
             {
-                IAsyncResult pending = stream.BeginRead(result, offset, length - offset, null, null);
-                using (WaitHandle completed = pending.AsyncWaitHandle)
+                Task<int> pending = stream.ReadAsync(result, offset, length - offset);
+                if (!pending.Wait(500))
                 {
-                    if (!completed.WaitOne(500)) return null;
-                    int count = stream.EndRead(pending);
-                    if (count <= 0) return null;
-                    offset += count;
+                    ObserveFault(pending);
+                    stream.Dispose();
+                    return null;
                 }
+                int count = pending.GetAwaiter().GetResult();
+                if (count <= 0) return null;
+                offset += count;
             }
             return result;
         }
 
         private static bool WriteBounded(Stream stream, byte[] data)
         {
-            IAsyncResult pending = stream.BeginWrite(data, 0, data.Length, null, null);
-            using (WaitHandle completed = pending.AsyncWaitHandle)
+            Task pending = stream.WriteAsync(data, 0, data.Length);
+            if (!pending.Wait(500))
             {
-                if (!completed.WaitOne(500)) return false;
-                stream.EndWrite(pending);
-                return true;
+                ObserveFault(pending);
+                stream.Dispose();
+                return false;
             }
+            pending.GetAwaiter().GetResult();
+            return true;
+        }
+
+        private static void ObserveFault(Task pending)
+        {
+            pending.ContinueWith(completed => { var ignored = completed.Exception; }, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
 
         private LoopEvent Parse(byte[] payload)
