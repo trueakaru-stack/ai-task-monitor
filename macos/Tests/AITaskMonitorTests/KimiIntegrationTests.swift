@@ -5,7 +5,7 @@ import XCTest
 final class KimiIntegrationTests: XCTestCase {
     func testReadOnlyConnectionDetectionAndBoundedBridge() throws {
         guard let node = ProcessInfo.processInfo.environment["AITM_NODE"], !node.isEmpty else { throw XCTSkip("Isolated Node fixture is unavailable") }
-        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
             .appendingPathComponent("aitm-kimi-swift-" + UUID().uuidString, isDirectory: true)
         let manager = FileManager.default
         defer { try? manager.removeItem(at: root) }
