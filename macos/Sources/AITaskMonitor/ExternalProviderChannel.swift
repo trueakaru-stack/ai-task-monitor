@@ -25,10 +25,20 @@ final class ExternalProviderChannel {
     private var acceptedCount: UInt64 = 0
     private static let knownProviders: Set<String> = ["kimi", "deepseek", "hermes", "opencode"]
 
+    #if DEBUG
+    private let testBeforeAccept: (() -> Void)?
+
+    init(directory: String? = nil, testBeforeAccept: (() -> Void)? = nil) throws {
+        self.testBeforeAccept = testBeforeAccept
+        endpoint = try Self.openEndpoint(directory: directory ?? "/private/tmp/aitm-provider-\(geteuid())")
+        DispatchQueue(label: "com.aitaskmonitor.external-providers", qos: .utility).async { self.serve() }
+    }
+    #else
     init(directory: String? = nil) throws {
         endpoint = try Self.openEndpoint(directory: directory ?? "/private/tmp/aitm-provider-\(geteuid())")
         DispatchQueue(label: "com.aitaskmonitor.external-providers", qos: .utility).async { self.serve() }
     }
+    #endif
 
     // Authorization is checked when a connection is accepted and when its
     // event is queued. Reconnection creates a new generation for that provider.
@@ -95,6 +105,9 @@ final class ExternalProviderChannel {
             stateLock.unlock()
             if shouldStop { break }
             guard ClaudeLoopSocket.wait(endpoint.listener, Int16(POLLIN), milliseconds: 100) else { continue }
+            #if DEBUG
+            testBeforeAccept?()
+            #endif
             let client = accept(endpoint.listener, nil, nil)
             if client < 0 { markGap(); Thread.sleep(forTimeInterval: 0.025); continue }
             stateLock.lock()
