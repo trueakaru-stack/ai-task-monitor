@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <EnableDefaultPageItems>false</EnableDefaultPageItems>
+    <AssemblyName>AI Task Monitor</AssemblyName>
+    <RootNamespace>AITaskMonitor.Prototype</RootNamespace>
+    <ApplicationIcon>Assets\app-icon.ico</ApplicationIcon>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
+    <EmbeddedResource Include="PublishedWindow.xaml" />
+    <Resource Include="Assets\app-icon.ico" />
+    <ProjectReference Include="..\Providers\Providers.csproj" />
+  </ItemGroup>
+</Project>

@@ -4,7 +4,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Text.RegularExpressions;
+#if NET10_0_OR_GREATER
+using JavaScriptSerializer = AITaskMonitor.ExternalProviders.SafeJsonDeserializer;
+#else
 using System.Web.Script.Serialization;
+#endif
 
 namespace AITaskMonitor.ExternalProviders
 {
