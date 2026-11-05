@@ -29,7 +29,7 @@ final class DeepSeekIntegrationTests: XCTestCase {
         try manager.createSymbolicLink(at: bin.appendingPathComponent("pnpm"), withDestinationURL: pnpm.appendingPathComponent("pnpm.mjs"))
         let customHome = root.appendingPathComponent("chosen-home", isDirectory: true).path
         let context = try XCTUnwrap(DeepSeekIntegration.discover(home: root, environment: ["PATH": bin.path, "DSH_HOME": customHome], assets: assets))
-        XCTAssertEqual(context.home.standardizedFileURL, URL(fileURLWithPath: customHome).standardizedFileURL)
+        XCTAssertEqual(context.home.standardizedFileURL.path, URL(fileURLWithPath: customHome, isDirectory: true).standardizedFileURL.path)
         XCTAssertEqual(context.installAnchor.lastPathComponent, "package.json")
         XCTAssertEqual(context.pnpmScript.lastPathComponent, "pnpm.mjs")
         XCTAssertNil(DeepSeekIntegration.discover(home: root, environment: ["PATH": bin.path, "DSH_HOME": "relative"], assets: assets))
