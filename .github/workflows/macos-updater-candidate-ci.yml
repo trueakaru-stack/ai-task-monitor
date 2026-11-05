@@ -1,0 +1,123 @@
+name: macOS updater synthetic candidate audit
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-updater-candidate-ci.yml"
+      - ".github/updater-audit/**"
+
+permissions:
+  contents: read
+
+jobs:
+  updater-synthetic:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[tests-only]') && contains(github.event.head_commit.message, '[updater-candidate-audit]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Verify disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+
+      - name: Checkout only the test-route commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: updater-ci-input
+          persist-credentials: false
+          clean: true
+
+      - name: Verify candidate inputs
+        shell: bash
+        working-directory: updater-ci-input
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p "$RUNNER_TEMP/aitm-update-input"
+          for name in frozen-wip.patch.b64 hardening.patch.b64 candidate.sha256; do
+            git show "$GITHUB_SHA:.github/updater-audit/$name" > "$RUNNER_TEMP/aitm-update-input/$name"
+          done
+          cd "$RUNNER_TEMP/aitm-update-input"
+          printf '%s  %s\n' \
+            '13a37ba9d265aeb9a46a174c198f509d9a044209817780d6aba39da5dd3d7d23' 'frozen-wip.patch.b64' \
+            'bf9cb606149e6a4ca6eadff54d6cecf1938a040147f7e6240e9b87b4499f574a' 'hardening.patch.b64' \
+            '91ddc5ea89fd8b8279717966fc0e548812df3303963448130b13f3d37f9e33b2' 'candidate.sha256' \
+            | shasum -a 256 -c -
+          /usr/bin/base64 -D < frozen-wip.patch.b64 > "$RUNNER_TEMP/aitm-frozen-wip.patch"
+          /usr/bin/base64 -D < hardening.patch.b64 > "$RUNNER_TEMP/aitm-hardening.patch"
+          printf '%s  %s\n' \
+            'ce82049f4a11d789679f66d3a3a5a2298fa9fdb775652afa3a0c57818eaa37a3' "$RUNNER_TEMP/aitm-frozen-wip.patch" \
+            'da35492ce9177bc54474de61b6d46132819fcfbc402ffe07683dbc44974cc124' "$RUNNER_TEMP/aitm-hardening.patch" \
+            | shasum -a 256 -c -
+
+      - name: Checkout fixed baseline
+        uses: actions/checkout@v4
+        with:
+          ref: d09119082860ab0dd0129f0db8506504b6f37e0a
+          path: updater-baseline
+          persist-credentials: false
+          clean: true
+
+      - name: Reconstruct and verify the exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=d09119082860ab0dd0129f0db8506504b6f37e0a
+          INPUT="$RUNNER_TEMP/aitm-update-input"
+          TREE="$RUNNER_TEMP/aitm-update-candidate"
+          test "$(git -C "$GITHUB_WORKSPACE/updater-baseline" rev-parse HEAD)" = "$BASE"
+          test -z "$(git -C "$GITHUB_WORKSPACE/updater-baseline" status --porcelain)"
+          mkdir -p "$TREE"
+          git -C "$GITHUB_WORKSPACE/updater-baseline" archive "$BASE" macos | tar -xf - -C "$TREE"
+          git -C "$TREE" init --quiet
+          git -C "$TREE" config core.autocrlf false
+          {
+            git -C "$TREE" apply --numstat --include='macos/**' "$RUNNER_TEMP/aitm-frozen-wip.patch"
+            git -C "$TREE" apply --numstat --include='macos/**' "$RUNNER_TEMP/aitm-hardening.patch"
+          } | cut -f3 | LC_ALL=C sort -u > "$RUNNER_TEMP/aitm-update-patch-paths"
+          cut -c 67- "$INPUT/candidate.sha256" | LC_ALL=C sort -u > "$RUNNER_TEMP/aitm-update-allowed-paths"
+          diff -u "$RUNNER_TEMP/aitm-update-allowed-paths" "$RUNNER_TEMP/aitm-update-patch-paths"
+          git -C "$TREE" apply --check --include='macos/**' "$RUNNER_TEMP/aitm-frozen-wip.patch"
+          git -C "$TREE" apply --include='macos/**' "$RUNNER_TEMP/aitm-frozen-wip.patch"
+          git -C "$TREE" apply --check --include='macos/**' "$RUNNER_TEMP/aitm-hardening.patch"
+          git -C "$TREE" apply --include='macos/**' "$RUNNER_TEMP/aitm-hardening.patch"
+          cd "$TREE"
+          shasum -a 256 -c "$INPUT/candidate.sha256"
+
+      - name: Run isolated synthetic Swift tests and two-process fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          TREE="$RUNNER_TEMP/aitm-update-candidate"
+          mkdir -p "$RUNNER_TEMP/aitm-update-tmp" "$RUNNER_TEMP/aitm-update-support"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*)'
+          run_isolated() {
+            /usr/bin/env -i "DEVELOPER_DIR=$DEVELOPER" \
+              "TMPDIR=$RUNNER_TEMP/aitm-update-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-update-support" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          cd "$TREE/macos"
+          run_isolated /usr/bin/xcrun swift --version
+          for suite in ReleaseUpdatesTests ReleaseRetryScheduleTests ReleaseUpdateCoordinatorTests ReleaseRequestSyntheticTests; do
+            run_isolated /usr/bin/xcrun swift test --filter "$suite"
+          done
+          run_isolated /usr/bin/xcrun swiftc Sources/AITaskMonitor/ReleaseScheduleFileStore.swift \
+            integration-tests/release-lease-fixture/main.swift -o "$RUNNER_TEMP/aitm-release-lease-fixture"
+          run_isolated "$RUNNER_TEMP/aitm-release-lease-fixture"
+
+      - name: Record scope
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          printf '%s\n' 'Synthetic updater checks only. No live updater endpoint, user profile, installer, publication, or full-suite claim.' >> "$GITHUB_STEP_SUMMARY"
