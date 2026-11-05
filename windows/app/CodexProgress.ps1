@@ -214,7 +214,7 @@ $script:translations=@{
  'Светлая'='Light'
  'Язык'='Language'
  'Источники'='Sources'
- 'Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Code. Затем задачи будут появляться автоматически во время работы.'='The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Code after connecting; tasks will appear automatically.'
+ 'Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии.'='The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Desktop or Claude Code after connecting. Only local sessions are monitored for now.'
  'Приложение добавит локальный плагин OpenCode. Поддерживаются совместимые версии 1 начиная с 1.18.29 и версия 2. После подключения перезапустите OpenCode.'='The app adds a local OpenCode plugin. Compatible versions 1.18.29 and later within version 1, and version 2, are supported. Restart OpenCode after connecting.'
  'Не удалось подтвердить установку или совместимость OpenCode'='Could not confirm the OpenCode installation or compatibility'
  'Не удалось прочитать подключение OpenCode'='Could not read the OpenCode connection'
@@ -712,7 +712,7 @@ function Tr([string]$text){
          <TextBlock x:Name="ClaudeSourceStatus" Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
          <Button x:Name="ClaudeSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
         </Grid>
-        <TextBlock Margin="0,0,0,12" Text="Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Code. Затем задачи будут появляться автоматически во время работы." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+        <TextBlock Margin="0,0,0,12" Text="Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
         <Border Height="1" Background="{DynamicResource Divider}"/>
         <Grid Height="50">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -1344,18 +1344,23 @@ function Claude-HookConnected {
 
 function Claude-InstallationState([string]$profile,[string]$appData,[string]$localData,[string]$pathValue) {
  $directories=New-Object 'Collections.Generic.List[string]'
+ $desktopExecutable=if($localData){Join-Path $localData 'Programs\Claude\Claude.exe'}else{''}
  if($profile){$directories.Add((Join-Path $profile '.local\bin'))}
  if($appData){$directories.Add((Join-Path $appData 'npm'))}
- if($localData){$directories.Add((Join-Path $localData 'Programs\Claude'))}
  foreach($part in ($pathValue -split ';')){
   $directory=$part.Trim().Trim('"')
   if($directory){$directories.Add($directory)}
  }
  foreach($directory in $directories){
   foreach($name in @('claude.exe','claude.cmd','claude.bat')){
-   try{if(Test-Path -LiteralPath (Join-Path $directory $name) -PathType Leaf -ErrorAction Stop){return 'available'}}catch{}
+   try{
+    $candidate=Join-Path $directory $name
+    if($desktopExecutable -and [string]::Equals([IO.Path]::GetFullPath($candidate),[IO.Path]::GetFullPath($desktopExecutable),[StringComparison]::OrdinalIgnoreCase)){continue}
+    if(Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction Stop){return 'available'}
+   }catch{}
   }
  }
+ if($desktopExecutable -and (Test-Path -LiteralPath $desktopExecutable -PathType Leaf)){return 'unconfirmed'}
  if($profile -and (Test-Path -LiteralPath (Join-Path $profile '.claude') -PathType Container)){return 'unconfirmed'}
  return 'not-found'
 }
@@ -1373,18 +1378,19 @@ function Update-SourceSettings {
   [Windows.Automation.AutomationProperties]::SetName($claudeSourceAction,(Tr "Claude Code: не удалось прочитать настройки"))
   return
  }
- if($installation -ne 'available' -and $connectionState -eq 'disconnected'){
-  $claudeSourceStatus.Text=Tr $(if($installation -eq 'unconfirmed'){'Установка не подтверждена'}else{'Не найден'})
+ if($installation -eq 'not-found' -and $connectionState -eq 'disconnected'){
+  $claudeSourceStatus.Text=Tr 'Не найден'
   $claudeSourceAction.Visibility="Visible";$claudeSourceAction.IsEnabled=$false;$claudeSourceAction.Content=Tr "Подключить";$claudeSourceAction.Tag=""
-  $claudeSourceAction.ToolTip=Tr $(if($installation -eq 'unconfirmed'){'Не удалось подтвердить установку Claude Code'}else{'Claude Code не найден на этом компьютере'})
+  $claudeSourceAction.ToolTip=Tr 'Claude Code не найден на этом компьютере'
   [Windows.Automation.AutomationProperties]::SetName($claudeSourceAction,([string]$claudeSourceAction.ToolTip))
   return
  }
- $claudeSourceStatus.Text=Tr $(if($connectionState -eq "partial"){"Подключён частично"}elseif($connected -and $script:sourceErrors -contains "Claude Code"){"Нет данных"}elseif($connected){"Подключён"}else{"Не подключён"})
+ $claudeSourceStatus.Text=Tr $(if($connectionState -eq "partial"){"Подключён частично"}elseif($connected -and $script:sourceErrors -contains "Claude Code"){"Нет данных"}elseif($connected){"Подключён"}elseif($installation -eq 'unconfirmed'){"Установка не подтверждена"}else{"Не подключён"})
  $claudeSourceAction.Visibility="Visible";$claudeSourceAction.IsEnabled=$true;$claudeSourceAction.ToolTip=$null
  $claudeSourceAction.Content=Tr $(if($connected){"Отключить"}else{"Подключить"})
  $claudeSourceAction.Tag=$(if($connected){"Remove"}else{"Install"})
  if($connectionState -eq "partial"){$claudeSourceAction.ToolTip=Tr "Подключение неполное. Нажмите, чтобы восстановить."}
+ elseif($installation -eq 'unconfirmed' -and -not $connected){$claudeSourceAction.ToolTip=Tr 'Не удалось подтвердить установку Claude Code'}
  [Windows.Automation.AutomationProperties]::SetName($claudeSourceAction,$claudeSourceAction.Content+" Claude Code")
 }
 

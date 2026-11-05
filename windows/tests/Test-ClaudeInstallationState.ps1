@@ -12,6 +12,10 @@ if (-not $root.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { thr
 $checks = @'
 $profile=Join-Path $args[0] 'profile';$appData=Join-Path $args[0] 'roaming';$localData=Join-Path $args[0] 'local';$bin=Join-Path $args[0] 'custom-bin'
 if ((Claude-InstallationState $profile $appData $localData '') -ne 'not-found') { throw 'A missing profile and command should be reported as not found.' }
+$desktop=Join-Path $localData 'Programs\Claude'
+[void][IO.Directory]::CreateDirectory($desktop)
+[IO.File]::WriteAllText((Join-Path $desktop 'Claude.exe'),'synthetic desktop')
+if ((Claude-InstallationState $profile $appData $localData $desktop) -ne 'unconfirmed') { throw 'Claude Desktop must permit a connection without claiming a CLI installation.' }
 [void][IO.Directory]::CreateDirectory((Join-Path $profile '.claude'))
 if ((Claude-InstallationState $profile $appData $localData '') -ne 'unconfirmed') { throw 'A profile directory alone must not prove installation.' }
 [void][IO.Directory]::CreateDirectory($bin)
