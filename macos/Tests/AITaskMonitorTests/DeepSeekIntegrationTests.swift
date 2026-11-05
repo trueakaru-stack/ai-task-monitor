@@ -3,6 +3,16 @@ import XCTest
 @testable import AITaskMonitor
 
 final class DeepSeekIntegrationTests: XCTestCase {
+    @MainActor
+    func testDesktopProfileIsExplainedAndUnavailable() {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let store = TaskStore.preview()
+        store.setPreviewDeepSeekProfiles(desktop: true)
+        XCTAssertEqual(store.deepSeekStatusMessage, "The DeepSeek Desktop profile is not supported yet.")
+        XCTAssertFalse(store.deepSeekCanChange)
+    }
+
     func testScopeValidation() {
         XCTAssertTrue(DeepSeekIntegration.validScope(String(repeating: "a", count: 32)))
         XCTAssertFalse(DeepSeekIntegration.validScope(String(repeating: "A", count: 32)))

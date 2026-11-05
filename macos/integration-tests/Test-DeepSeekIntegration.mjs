@@ -140,6 +140,22 @@ try {
   await assert.rejects(pending, { code: 'bundle-conflict' });
   manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   assert.equal(manifest.dependencies['ai-task-monitor-dsh-observer'], 'file:foreign-user-package');
+  // Desktop owns this profile and npm dsh cannot safely manage it. Check
+  // discovery and both actions, including Windows-style case variants.
+  const desktop = join(home, 'profiles', 'desktop');
+  await mkdir(desktop);
+  const desktopManifest = join(desktop, 'package.json');
+  const desktopContents = '{"desktop-owned":"preserve"}';
+  await writeFile(desktopManifest, desktopContents);
+  for (const name of ['desktop', 'Desktop', 'DESKTOP']) {
+    await assert.rejects(deepSeekProfileState(home, name), { code: 'unsupported-desktop' });
+    await assert.rejects(setDeepSeekConnected({ ...options, profile: name }, true), { code: 'unsupported-desktop' });
+    await assert.rejects(setDeepSeekConnected({ ...options, profile: name }, false), { code: 'unsupported-desktop' });
+  }
+  const desktopList = await bridge({ action: 'list', home });
+  assert.deepEqual(desktopList.response.result.find(item => item.name === 'desktop'),
+    { name: 'desktop', state: 'error', error: 'unsupported-desktop' });
+  assert.equal(await readFile(desktopManifest, 'utf8'), desktopContents);
   console.log('DeepSeek controller: isolated upstream add/remove, scripts, ownership and shared-lock checks passed.');
 } finally {
   const rel = relative(temp, fixture);

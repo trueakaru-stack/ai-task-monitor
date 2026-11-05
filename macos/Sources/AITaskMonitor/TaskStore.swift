@@ -141,6 +141,8 @@ final class TaskStore: ObservableObject {
             return tr("Подключение DeepSeek Harness неполное или его файлы изменены.", "The DeepSeek Harness connection is incomplete or its files were changed.")
         }
         switch code {
+        case "unsupported-desktop":
+            return tr("Профиль DeepSeek Desktop пока не поддерживается.", "The DeepSeek Desktop profile is not supported yet.")
         case "unverified-dsh", "unverified-pnpm":
             return tr("Версия DeepSeek Harness или pnpm не подтверждена.", "The DeepSeek Harness or pnpm version could not be verified.")
         case "linked-path", "bundle-conflict", "modified-bundle", "partial-connection":
@@ -296,11 +298,12 @@ final class TaskStore: ObservableObject {
         availableUpdate = AvailableUpdate(version: "0.4.0-alpha", url: URL(string: "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.4.0-alpha/app.dmg")!)
     }
 
-    func setPreviewDeepSeekProfiles() {
+    func setPreviewDeepSeekProfiles(desktop: Bool = false) {
         deepSeekInstallationAvailable = true
         deepSeekProfiles = [DeepSeekProfile(name: "Profile One", state: "disconnected", scope: nil, error: nil),
-                            DeepSeekProfile(name: "Profile Two", state: "connected", scope: String(repeating: "b", count: 32), error: nil)]
-        selectedDeepSeekProfile = "Profile Two"
+                            DeepSeekProfile(name: "Profile Two", state: "connected", scope: String(repeating: "b", count: 32), error: nil),
+                            DeepSeekProfile(name: "desktop", state: "error", scope: nil, error: "unsupported-desktop")]
+        selectedDeepSeekProfile = desktop ? "desktop" : "Profile Two"
     }
 
     static func preview(unavailableSources: [TaskProvider] = [], planUnconfirmed: Bool = false) -> TaskStore {

@@ -59,6 +59,7 @@ enum SnapshotRenderer {
                     try render(name: "settings-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory)
                     try render(name: "settings-end-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsEnd: true)
                     try render(name: "settings-sources-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true)
+                    try render(name: "settings-desktop-profile-\(language.rawValue)-\(mode.rawValue)", mode: mode, compact: false, settings: true, outputDirectory: outputDirectory, settingsSources: true, desktopProfile: true)
                     try render(name: "many-providers-\(language.rawValue)-\(mode.rawValue)-expanded", mode: mode, compact: false, settings: false, outputDirectory: outputDirectory, manyProviders: true)
                     try render(name: "many-providers-\(language.rawValue)-\(mode.rawValue)-compact", mode: mode, compact: true, settings: false, outputDirectory: outputDirectory, manyProviders: true)
                     try render(name: "many-providers-\(language.rawValue)-\(mode.rawValue)-bottom", mode: mode, compact: false, settings: false, outputDirectory: outputDirectory, manyProviders: true, tasksEnd: true)
@@ -84,10 +85,10 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, manyProviders: Bool = false, tasksEnd: Bool = false, tabsEnd: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, desktopProfile: Bool = false, manyProviders: Bool = false, tasksEnd: Bool = false, tabsEnd: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
         let store = manyProviders ? TaskStore.manySourcesPreview() : (journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources, planUnconfirmed: planUnconfirmed)))
-        if settingsSources { store.setPreviewDeepSeekProfiles() }
+        if settingsSources { store.setPreviewDeepSeekProfiles(desktop: desktopProfile) }
         store.isCompact = compact
         store.showsSettings = settings || journal
         store.showsJournal = journal

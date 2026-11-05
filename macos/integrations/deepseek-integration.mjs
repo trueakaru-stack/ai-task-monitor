@@ -74,6 +74,8 @@ async function readJson(path, limit = maxBytes) {
 function profilePaths(home, name) {
   if (typeof name !== 'string' || !name || name.length > 128 || name === '.' || name === '..' ||
       name === 'node_modules' || /[\\/\u0000-\u001f\u007f]/.test(name)) fail('invalid-profile');
+  // Desktop exclusively owns this profile; npm dsh must never mutate it.
+  if (name.toLowerCase() === 'desktop') fail('unsupported-desktop');
   if (typeof home !== 'string' || !isAbsolute(home)) fail('invalid-path');
   const root = resolve(home);
   const profile = join(root, 'profiles', name);
