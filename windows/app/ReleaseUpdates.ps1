@@ -225,10 +225,12 @@ function Test-ReleasePayload([string]$json) {
 }
 
 function ConvertTo-ReleaseVersion([string]$value) {
- if($value.Length -gt 80 -or $value -cnotmatch '^v?(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'){return $null}
+ if($value.Length -gt 80 -or $value -cnotmatch '\Av?(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\z'){return $null}
+ # The prerelease validation below also uses -cmatch and changes $Matches.
+ $major=[int]$Matches[1];$minor=[int]$Matches[2];$patch=[int]$Matches[3]
  $pre=[string]$Matches[4]
- if($pre -and @($pre.Split('.') | Where-Object {$_ -cmatch '^\d+$' -and $_.Length -gt 1 -and $_.StartsWith('0')}).Count){return $null}
- return [PSCustomObject]@{Major=[int]$Matches[1];Minor=[int]$Matches[2];Patch=[int]$Matches[3];Pre=$pre}
+ if($pre -and @($pre.Split('.') | Where-Object {$_ -cmatch '^[0-9]+$' -and $_.Length -gt 1 -and $_.StartsWith('0')}).Count){return $null}
+ return [PSCustomObject]@{Major=$major;Minor=$minor;Patch=$patch;Pre=$pre}
 }
 
 function Compare-ReleaseVersions($left,$right) {
@@ -238,7 +240,7 @@ function Compare-ReleaseVersions($left,$right) {
  $a=$left.Pre.Split('.');$b=$right.Pre.Split('.')
  for($i=0;$i -lt [Math]::Max($a.Length,$b.Length);$i++){
   if($i -ge $a.Length){return -1};if($i -ge $b.Length){return 1}
-  $an=$a[$i] -cmatch '^\d+$';$bn=$b[$i] -cmatch '^\d+$'
+  $an=$a[$i] -cmatch '^[0-9]+$';$bn=$b[$i] -cmatch '^[0-9]+$'
   if($an -and $bn){if($a[$i].Length -ne $b[$i].Length){if($a[$i].Length -lt $b[$i].Length){return -1}else{return 1}};$c=[string]::CompareOrdinal($a[$i],$b[$i])}
   elseif($an){return -1}elseif($bn){return 1}else{$c=[string]::CompareOrdinal($a[$i],$b[$i])}
   if($c -lt 0){return -1};if($c -gt 0){return 1}
@@ -254,7 +256,7 @@ function Get-ReleaseProperty($item,[string]$name) {
 }
 
 function Get-TrustedReleaseUrl([string]$url,[string]$tag,[string]$asset,[string]$platform) {
- if($tag -cnotmatch '^v?[0-9A-Za-z.-]{1,80}$' -or $asset -cnotmatch '^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$'){return $null}
+ if($tag -cnotmatch '\Av?[0-9A-Za-z.-]{1,80}\z' -or $asset -cnotmatch '\A[0-9A-Za-z][0-9A-Za-z._-]{0,127}\z'){return $null}
  if($platform -eq 'windows' -and $asset -inotmatch '\.(exe|msi)$'){return $null}
  if($platform -eq 'macos' -and $asset -inotmatch '\.(dmg|pkg)$'){return $null}
  try{$uri=[Uri]$url}catch{return $null}
