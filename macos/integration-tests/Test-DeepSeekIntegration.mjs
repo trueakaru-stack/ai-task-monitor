@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, realpath, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative, sep } from 'node:path';
+import { delimiter, dirname, join, relative, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -23,11 +23,19 @@ const manifestPath = join(profileDir, 'package.json');
 const assets = await realpath(join(dirname(dirname(fileURLToPath(import.meta.url))), 'integrations'));
 const marker = join(fixture, 'foreign-script-ran');
 const setup = join(assets, 'deepseek-setup.mjs');
-const env = { ...process.env, USERPROFILE: fixture, HOME: fixture, APPDATA: fixture, LOCALAPPDATA: fixture,
+const inherited = Object.fromEntries(['PATH', 'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'OS', 'LANG', 'LC_ALL']
+  .filter(name => typeof process.env[name] === 'string').map(name => [name, process.env[name]]));
+const env = { ...inherited, USERPROFILE: fixture, HOME: fixture, APPDATA: fixture, LOCALAPPDATA: fixture,
   DSH_HOME: home, XDG_CONFIG_HOME: join(fixture, 'xdg-config'), XDG_CACHE_HOME: join(fixture, 'xdg-cache'),
   NPM_CONFIG_CACHE: join(fixture, 'cache'), NPM_CONFIG_USERCONFIG: join(fixture, 'empty-npmrc'),
   PNPM_CONFIG_STORE_DIR: join(fixture, 'store'), PNPM_CONFIG_OFFLINE: 'true', PNPM_CONFIG_IGNORE_SCRIPTS: 'true',
   PNPM_CONFIG_IGNORE_PNPMFILE: 'true', AITM_SCRIPT_MARKER: marker };
+if (process.platform !== 'win32') {
+  const binDirectory = join(fixture, 'fixture-bin');
+  await mkdir(binDirectory);
+  await symlink(pnpmScript, join(binDirectory, 'pnpm'));
+  env.PATH = [binDirectory, dirname(process.execPath), process.env.PATH || '/usr/bin:/bin'].join(delimiter);
+}
 Object.assign(process.env, env);
 
 async function bridge(request) {

@@ -102,12 +102,33 @@ def _same_code(actual, expected):
     if len(actual.co_consts) != len(expected.co_consts):
         return False
     for left, right in zip(actual.co_consts, expected.co_consts):
-        if isinstance(right, types.CodeType):
-            if not _same_code(left, right):
-                return False
-        elif type(left) is not type(right) or left != right:
+        if not _same_constant(left, right):
             return False
     return True
+
+
+def _same_constant(actual, expected):
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, types.CodeType):
+        return _same_code(actual, expected)
+    if isinstance(expected, tuple):
+        return len(actual) == len(expected) and all(_same_constant(a, b) for a, b in zip(actual, expected))
+    if isinstance(expected, frozenset):
+        if len(actual) != len(expected) or len(actual) > 4096:
+            return False
+        remaining = list(actual)
+        for value in expected:
+            index = next((i for i, item in enumerate(remaining) if _same_constant(item, value)), None)
+            if index is None:
+                return False
+            remaining.pop(index)
+        return True
+    if isinstance(expected, float):
+        return struct.pack("<d", actual) == struct.pack("<d", expected)
+    if isinstance(expected, complex):
+        return struct.pack("<dd", actual.real, actual.imag) == struct.pack("<dd", expected.real, expected.imag)
+    return actual == expected
 
 
 def _write_new(path, value):

@@ -54,23 +54,13 @@ final class DeepSeekIntegrationTests: XCTestCase {
         let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
         let context = DeepSeekIntegration.Context(node: node, home: dshHome, assets: project.appendingPathComponent("integrations"),
             installAnchor: anchor, pnpmScript: URL(fileURLWithPath: pnpmPath).resolvingSymlinksInPath().standardizedFileURL, environment: fixtureEnvironment)
-        let diagnostic = Process()
-        diagnostic.executableURL = node
-        diagnostic.environment = fixtureEnvironment
-        diagnostic.arguments = ["-e", #"const fs=require('fs'),p=require('path'),r=require('module').createRequire(process.argv[1]); const values={anchor:process.argv[1],pnpm:process.argv[2],home:process.argv[3],assets:process.argv[4],manager:r.resolve('@deepseek-ai/dsh-plugin-manager/package.json'),atomic:r.resolve('@deepseek-ai/dsh-atomic-write/package.json')}; for(const [label,value] of Object.entries(values)){for(let item=value;;item=p.dirname(item)){if(fs.lstatSync(item).isSymbolicLink())console.log('DeepSeek fixture linked component:',label,p.basename(item));if(p.dirname(item)===item)break}}"#,
-                                anchor.path, context.pnpmScript.path, dshHome.path, context.assets.path]
-        try diagnostic.run()
-        diagnostic.waitUntilExit()
-        print("DeepSeek fixture: listing profiles")
         let first = try DeepSeekIntegration.profiles(context)
         XCTAssertEqual(first.map(\.name), ["тестовый-профиль"])
         XCTAssertEqual(first.first?.state, "disconnected")
-        print("DeepSeek fixture: connecting")
         try DeepSeekIntegration.setConnected(true, profile: "тестовый-профиль", context: context)
         let connected = try XCTUnwrap(DeepSeekIntegration.profiles(context).first)
         XCTAssertEqual(connected.state, "connected", "Fixture profile error: \(connected.error ?? "none")")
         XCTAssertTrue(DeepSeekIntegration.validScope(connected.scope))
-        print("DeepSeek fixture: disconnecting")
         try DeepSeekIntegration.setConnected(false, profile: "тестовый-профиль", context: context)
         XCTAssertEqual(try DeepSeekIntegration.profiles(context).first?.state, "disconnected")
         let profileManifest = try Data(contentsOf: dshHome.appendingPathComponent("profiles/тестовый-профиль/package.json"))
