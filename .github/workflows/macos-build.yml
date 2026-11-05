@@ -37,7 +37,9 @@ jobs:
           echo "AITM_NODE=$(command -v node)" >> "$GITHUB_ENV"
       - name: Test
         working-directory: macos
-        run: swift test
+        run: |
+          swift build
+          AITM_CLAUDE_TEST_EXECUTABLE="$(swift build --show-bin-path)/AITaskMonitor" swift test
       - name: Test isolated agent integrations
         working-directory: macos
         run: |

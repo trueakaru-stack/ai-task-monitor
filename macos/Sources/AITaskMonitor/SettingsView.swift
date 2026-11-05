@@ -3,6 +3,8 @@ import SwiftUI
 
 private struct SettingsPreviewEndKey: EnvironmentKey { static let defaultValue = false }
 private struct SettingsPreviewSourcesKey: EnvironmentKey { static let defaultValue = false }
+enum SettingsPreviewClaude: Equatable { case unconfirmed, connected }
+private struct SettingsPreviewClaudeKey: EnvironmentKey { static let defaultValue: SettingsPreviewClaude? = nil }
 extension EnvironmentValues {
     var settingsPreviewEnd: Bool {
         get { self[SettingsPreviewEndKey.self] }
@@ -11,6 +13,10 @@ extension EnvironmentValues {
     var settingsPreviewSources: Bool {
         get { self[SettingsPreviewSourcesKey.self] }
         set { self[SettingsPreviewSourcesKey.self] = newValue }
+    }
+    var settingsPreviewClaude: SettingsPreviewClaude? {
+        get { self[SettingsPreviewClaudeKey.self] }
+        set { self[SettingsPreviewClaudeKey.self] = newValue }
     }
 }
 
@@ -22,6 +28,7 @@ struct SettingsView: View {
     @State private var feedbackCopyError = false
     @Environment(\.settingsPreviewEnd) private var settingsPreviewEnd
     @Environment(\.settingsPreviewSources) private var settingsPreviewSources
+    @Environment(\.settingsPreviewClaude) private var settingsPreviewClaude
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -56,10 +63,10 @@ struct SettingsView: View {
                                 Text(sourceDescription).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
                             }
                             Spacer(minLength: 20)
-                            Button(ClaudeIntegration.isConnected ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
-                                store.setClaudeConnected(!ClaudeIntegration.isConnected)
+                            Button(claudeConnection == .connected ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
+                                if settingsPreviewClaude == nil { store.setClaudeConnected(claudeConnection != .connected) }
                             }
-                            .disabled((!ClaudeIntegration.isClaudeInstalled && !ClaudeIntegration.isConnected && !claudePartiallyConnected) || (store.unavailableSources.contains(.claude) && !claudePartiallyConnected && !ClaudeIntegration.isConnected))
+                            .disabled(!ClaudeIntegration.canChangeConnection(installation: claudeInstallation, connection: claudeConnection, sourceUnavailable: store.unavailableSources.contains(.claude)))
                         }
                         if !store.sourceMessage.isEmpty {
                             Text(store.sourceMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
@@ -239,17 +246,24 @@ struct SettingsView: View {
     }
 
     private var sourceDescription: String {
-        if claudePartiallyConnected { return tr("Claude Code подключён частично. Нажмите «Подключить», чтобы восстановить недостающие hooks.", "Claude Code is partially connected. Select Connect to restore missing hooks.") }
-        if !ClaudeIntegration.isClaudeInstalled && !ClaudeIntegration.isConnected {
-            if ClaudeIntegration.installationState() == .unconfirmed { return tr("Установку Claude Code не удалось подтвердить. Проверьте доступность команды Claude Code.", "Claude Code installation could not be confirmed. Check that its command is available.") }
+        if claudeConnection == nil { return tr("Не удалось прочитать настройки Claude Code.", "Could not read Claude Code settings.") }
+        if claudeConnection == .partial { return tr("Claude Code подключён частично. Нажмите «Подключить», чтобы восстановить недостающие hooks.", "Claude Code is partially connected. Select Connect to restore missing hooks.") }
+        if claudeConnection == .disconnected && claudeInstallation != .available {
+            if claudeInstallation == .unconfirmed { return tr("Команда Claude Code не найдена. Для локальных сессий нажмите «Подключить» и перезапустите Claude Desktop или Claude Code.", "The Claude Code command was not found. For local sessions, select Connect and restart Claude Desktop or Claude Code.") }
             return tr("Claude Code не найден. Установите его, затем вернитесь в настройки.", "Claude Code was not found. Install it, then return to Settings.")
         }
         if store.unavailableSources.contains(.claude) { return tr("Нет данных от Claude Code. Проверьте доступ к настройкам и журналу источника.", "No data from Claude Code. Check access to its settings and event log.") }
-        return tr("Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Code; задачи будут появляться автоматически.", "The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Code after connecting; tasks will appear automatically.")
+        return tr("Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии.", "The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Desktop or Claude Code after connecting. Only local sessions are monitored for now.")
     }
 
-    private var claudePartiallyConnected: Bool {
-        (try? ClaudeIntegration.connectionState()) == .partial
+    private var claudeInstallation: ClaudeIntegration.InstallationState {
+        settingsPreviewClaude == nil ? ClaudeIntegration.installationState() : .unconfirmed
+    }
+
+    private var claudeConnection: ClaudeIntegration.ConnectionState? {
+        if settingsPreviewClaude == .unconfirmed { return .disconnected }
+        if settingsPreviewClaude == .connected { return .connected }
+        return try? ClaudeIntegration.connectionState()
     }
 
     private var openCodeState: OpenCodeIntegration.State? { try? OpenCodeIntegration.state() }

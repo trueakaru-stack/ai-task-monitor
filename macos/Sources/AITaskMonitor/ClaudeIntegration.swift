@@ -12,8 +12,10 @@ enum ClaudeIntegration {
         case available, unconfirmed, notFound
     }
 
-    static var isClaudeInstalled: Bool {
-        installationState() == .available
+    static func canChangeConnection(installation: InstallationState, connection: ConnectionState?, sourceUnavailable: Bool) -> Bool {
+        guard let connection else { return false }
+        if connection != .disconnected { return true }
+        return installation != .notFound && !sourceUnavailable
     }
 
     static func installationState(home: URL = FileManager.default.homeDirectoryForCurrentUser,

@@ -20,6 +20,70 @@ final class ClaudeIntegrationSafetyTests: XCTestCase {
         XCTAssertEqual(ClaudeIntegration.installationState(home: home, searchPath: bin.path, includeStandardPaths: false), .available)
     }
 
+    func testConnectionControlsAllowUnconfirmedProfileWithoutClaimingInstallation() {
+        XCTAssertTrue(ClaudeIntegration.canChangeConnection(installation: .unconfirmed, connection: .disconnected, sourceUnavailable: false))
+        XCTAssertFalse(ClaudeIntegration.canChangeConnection(installation: .notFound, connection: .disconnected, sourceUnavailable: false))
+        XCTAssertFalse(ClaudeIntegration.canChangeConnection(installation: .unconfirmed, connection: .disconnected, sourceUnavailable: true))
+        XCTAssertFalse(ClaudeIntegration.canChangeConnection(installation: .unconfirmed, connection: nil, sourceUnavailable: false))
+        XCTAssertTrue(ClaudeIntegration.canChangeConnection(installation: .notFound, connection: .connected, sourceUnavailable: true))
+        XCTAssertTrue(ClaudeIntegration.canChangeConnection(installation: .notFound, connection: .partial, sourceUnavailable: true))
+    }
+
+    func testGeneratedHookCommandRunsExecutableAndUpdatesReader() throws {
+        guard let binary = ProcessInfo.processInfo.environment["AITM_CLAUDE_TEST_EXECUTABLE"], !binary.isEmpty else {
+            throw XCTSkip("Set AITM_CLAUDE_TEST_EXECUTABLE to the built monitor executable for the end-to-end fixture")
+        }
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let binaryDirectory = directory.appendingPathComponent("AI user's $(synthetic)", isDirectory: true)
+        try FileManager.default.createDirectory(at: binaryDirectory, withIntermediateDirectories: true)
+        let copiedBinary = binaryDirectory.appendingPathComponent("AI Task Monitor")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: binary), to: copiedBinary)
+        let settings = directory.appendingPathComponent("profile/.claude/settings.json")
+        let support = directory.appendingPathComponent("monitor data", isDirectory: true)
+        try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: copiedBinary.path)
+        let hooks = try XCTUnwrap(try readObject(settings)["hooks"] as? [String: Any])
+
+        func invoke(_ event: String) throws {
+            let groups = try XCTUnwrap(hooks[event] as? [[String: Any]])
+            let commands = try XCTUnwrap(groups.first?["hooks"] as? [[String: Any]])
+            let command = try XCTUnwrap(commands.first?["command"] as? String)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/sh")
+            process.arguments = ["-c", command]
+            process.environment = ["HOME": directory.path, "PATH": "/usr/bin:/bin",
+                                   "AI_TASK_MONITOR_SUPPORT_DIR": support.path, "AI_TASK_MONITOR_AUDIT": "1"]
+            let input = Pipe(), output = Pipe(), errors = Pipe()
+            process.standardInput = input
+            process.standardOutput = output
+            process.standardError = errors
+            try process.run()
+            let payload: [String: Any] = ["hook_event_name": event, "session_id": "synthetic-session",
+                                          "prompt": "SYNTHETIC_PROMPT_SECRET", "cwd": "/synthetic/private/path"]
+            try input.fileHandleForWriting.write(contentsOf: JSONSerialization.data(withJSONObject: payload))
+            try input.fileHandleForWriting.close()
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 0)
+            XCTAssertTrue(output.fileHandleForReading.readDataToEndOfFile().isEmpty)
+            XCTAssertTrue(errors.fileHandleForReading.readDataToEndOfFile().isEmpty)
+        }
+
+        let since = Date().addingTimeInterval(-1)
+        try invoke("UserPromptSubmit")
+        let eventFile = support.appendingPathComponent("claude-events-v2.jsonl")
+        let reader = ClaudeTaskReader(eventFile: eventFile)
+        let active = try reader.readSnapshot(observedSince: since)
+        XCTAssertEqual(active.tasks.map(\.id), ["claude:synthetic-session"])
+        XCTAssertEqual(active.tasks.first?.isActive, true)
+        try invoke("Stop")
+        let stopped = try reader.readSnapshot(observedSince: since)
+        XCTAssertTrue(stopped.tasks.isEmpty)
+        XCTAssertTrue(stopped.terminalIDs.contains("claude:synthetic-session"))
+        let saved = try String(contentsOf: eventFile, encoding: .utf8)
+        XCTAssertFalse(saved.contains("SYNTHETIC_PROMPT_SECRET"))
+        XCTAssertFalse(saved.contains("/synthetic/private/path"))
+    }
+
     func testConnectAndDisconnectPreserveUnrelatedSettingsAndPermissions() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
