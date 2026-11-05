@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import AITaskMonitor
@@ -26,6 +27,16 @@ final class KimiIntegrationTests: XCTestCase {
         let assets = try XCTUnwrap(KimiIntegration.pluginDirectory(resources: resources))
         let context = KimiIntegration.Context(node: URL(fileURLWithPath: node), home: home, assets: assets, installAnchor: anchor,
                                               environment: ["HOME": root.path, "PATH": "/usr/bin:/bin", "TMPDIR": root.path])
+        for (label, url) in [("home", context.home), ("assets", context.assets), ("anchor", context.installAnchor)] {
+            var current = ""
+            var links: [String] = []
+            for component in url.pathComponents {
+                current = (current as NSString).appendingPathComponent(component)
+                var info = stat()
+                if lstat(current, &info) == 0 && (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFLNK) { links.append(current) }
+            }
+            print("Kimi fixture \(label): \(url.path); symbolic links: \(links)")
+        }
         XCTAssertEqual(try KimiIntegration.inspect(context).state, "disconnected")
         let plugins = home.appendingPathComponent("plugins", isDirectory: true)
         let managed = plugins.appendingPathComponent("managed/ai-task-monitor", isDirectory: true)
