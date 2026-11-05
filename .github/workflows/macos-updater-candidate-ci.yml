@@ -131,12 +131,21 @@ jobs:
           run_isolated /usr/bin/which codesign
           cd "$TREE/macos"
           run_isolated /usr/bin/xcrun swift --version
+          audit_status=0
           for suite in ReleaseUpdatesTests ReleaseRetryScheduleTests ReleaseUpdateCoordinatorTests ReleaseRequestSyntheticTests; do
-            run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite"
+            printf '%s\n' "Running synthetic suite: $suite"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite"; then
+              audit_status=1
+            fi
           done
-          run_isolated /usr/bin/xcrun swiftc Sources/AITaskMonitor/ReleaseScheduleFileStore.swift \
-            integration-tests/release-lease-fixture/main.swift -o "$RUNNER_TEMP/aitm-release-lease-fixture"
-          run_isolated "$RUNNER_TEMP/aitm-release-lease-fixture"
+          printf '%s\n' 'Running synthetic two-process lease fixture'
+          if run_isolated /usr/bin/xcrun swiftc Sources/AITaskMonitor/ReleaseScheduleFileStore.swift \
+            integration-tests/release-lease-fixture/main.swift -o "$RUNNER_TEMP/aitm-release-lease-fixture"; then
+            if ! run_isolated "$RUNNER_TEMP/aitm-release-lease-fixture"; then audit_status=1; fi
+          else
+            audit_status=1
+          fi
+          exit "$audit_status"
 
       - name: Record scope
         if: ${{ always() }}
