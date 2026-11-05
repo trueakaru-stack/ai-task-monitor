@@ -5,13 +5,19 @@ plugins_dispatch modules from Hermes v0.22.7; no real profile is accessed.
 """
 
 import hashlib
+import contextvars
 import importlib
 import importlib.util
+import inspect
 import json
+import os
 from pathlib import Path
 import sys
 import threading
 import types
+
+os.environ["HERMES_MANAGED_DIR"] = ""
+os.environ["HERMES_CONFIG_BACKEND"] = ""
 
 
 if len(sys.argv) != 2:
@@ -63,14 +69,43 @@ observer.register_observers(first, events.append, "a" * 32)
 observer.register_observers(second, events.append, "b" * 32)
 assert set(first._hooks) == set(observer._EVENTS)
 assert not {"pre_tool_call", "pre_llm_call"} & set(first._hooks)
+assert all(not any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in inspect.signature(callback).parameters.values())
+           for callbacks in first._hooks.values() for callback in callbacks)
 payload = {"session_id": "same:session", "turn_id": "turn:1", "user_message": "PRIVATE_PROMPT"}
 assert first.invoke_hook("pre_api_request", **payload) == []
 assert second.invoke_hook("pre_api_request", **payload) == []
 assert first.invoke_hook("post_tool_call", **payload, args={"command": "PRIVATE_COMMAND"}) == []
-assert first.invoke_hook("on_human_input_request", **payload, prompt="PRIVATE_PROMPT") == []
+assert first.invoke_hook("on_human_input_request", **payload, request_id="request:1", prompt="PRIVATE_PROMPT") == []
 assert first.invoke_hook("on_session_end", **payload, completed=True, failed=False, interrupted=False) == []
 assert [item["kind"] for item in events] == ["started", "started", "active", "waiting", "idle"]
 assert events[0]["session"] == events[2]["session"] != events[1]["session"]
 assert events[0]["turn"] == events[1]["turn"]
+assert events[0]["turn"] == events[2]["turn"]
+assert events[3]["request"] != "request:1" and events[3]["tick"] > 0
 assert "PRIVATE" not in json.dumps(events) and "same:session" not in json.dumps(events)
+events.clear()
+assert first.invoke_hook("on_session_end", session_id="same:session", turn_id="old:turn", completed=True) == []
+assert first.invoke_hook("pre_api_request", session_id="same:session", turn_id="old:turn") == []
+assert [item["kind"] for item in events] == ["idle", "started"]
+assert events[0]["turn"] == events[1]["turn"] and events[0]["epoch"] == events[1]["epoch"]
+assert events[1]["tick"] >= events[0]["tick"]
+events.clear()
+assert first.invoke_hook("pre_api_request", session_id="same:session", turn_id="old:turn") == []
+assert first.invoke_hook("pre_api_request", session_id="same:session", turn_id="new:turn") == []
+assert first.invoke_hook("on_session_end", session_id="same:session", turn_id="old:turn", completed=True) == []
+assert [item["kind"] for item in events] == ["started", "started", "idle"]
+assert events[0]["turn"] == events[2]["turn"] != events[1]["turn"]
+events.clear()
+previous = sys.modules.get("tools.approval_context")
+synthetic = types.ModuleType("tools.approval_context")
+synthetic._approval_turn_id = contextvars.ContextVar("synthetic_turn", default="")
+token = synthetic._approval_turn_id.set("new:turn")
+sys.modules["tools.approval_context"] = synthetic
+try:
+    assert first.invoke_hook("on_human_input_request", session_id="same:session", request_id="request:2") == []
+    assert events[0]["turn"] == observer.scoped_turn("new:turn")
+finally:
+    synthetic._approval_turn_id.reset(token)
+    if previous is None: sys.modules.pop("tools.approval_context", None)
+    else: sys.modules["tools.approval_context"] = previous
 print("Hermes v0.22.7 dispatcher: scoped synthetic observer events and privacy passed.")

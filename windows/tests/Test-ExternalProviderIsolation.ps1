@@ -11,6 +11,19 @@ if ($null -eq $function) { throw 'Unconfirmed task mapper is missing.' }
 
 function Assert($value, [string]$message) { if (-not $value) { throw $message } }
 function Send-Event([string]$name, [string]$json) {
+    $event = $json | ConvertFrom-Json
+    if ($event.provider -eq 'hermes') {
+        $frequency = [System.Diagnostics.Stopwatch]::Frequency
+        $ticks = [System.Diagnostics.Stopwatch]::GetTimestamp()
+        $epoch = [long]([math]::Floor($ticks / $frequency) * 1000000000 + (($ticks % $frequency) * (1000000000.0 / $frequency)))
+        Start-Sleep -Milliseconds 2
+        $ticks = [System.Diagnostics.Stopwatch]::GetTimestamp()
+        $tick = [long]([math]::Floor($ticks / $frequency) * 1000000000 + (($ticks % $frequency) * (1000000000.0 / $frequency)))
+        $event | Add-Member -NotePropertyName tick -NotePropertyValue $tick
+        $event | Add-Member -NotePropertyName epoch -NotePropertyValue $epoch
+        if ($event.kind -eq 'started') { $event | Add-Member -NotePropertyName turn -NotePropertyValue 'synthetic_turn' }
+        $json = $event | ConvertTo-Json -Compress
+    }
     $stream = [IO.Pipes.NamedPipeClientStream]::new('.', $name, [IO.Pipes.PipeDirection]::InOut)
     try {
         $stream.Connect(2000)

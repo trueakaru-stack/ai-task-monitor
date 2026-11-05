@@ -119,6 +119,69 @@ class ProviderBundleTests(unittest.TestCase):
             self.assertEqual((bundle.folder / "provider_hooks.py").read_bytes(), b"NEW")
             self.assertTrue((bundle.folder / "plugin.yaml").exists())
 
+    def test_abrupt_exit_does_not_leave_a_busy_lock_or_a_discoverable_stage(self):
+        with tempfile.TemporaryDirectory(prefix="aitm-bundle-crash-", dir=os.path.realpath(tempfile.gettempdir())) as root:
+            profile = self.profile(root, "hermes")
+            bundle = bundles.ProviderBundle("hermes", profile)
+            code = ("import importlib.util,os,sys; "
+                    "spec=importlib.util.spec_from_file_location('fixture_bundle',sys.argv[1]); "
+                    "m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); "
+                    "b=m.ProviderBundle('hermes',sys.argv[2]); "
+                    "b.install(sys.argv[3],'hermes.observer.v1',before_commit=lambda:os._exit(23))")
+            child_env = {name: os.environ[name] for name in ("SYSTEMROOT", "WINDIR", "PATH") if name in os.environ}
+            child_env.update({"TMP": root, "TEMP": root, "TMPDIR": root})
+            result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code,
+                                     str(ASSETS / "provider_bundle.py"), str(profile), str(ASSETS)],
+                                    env=child_env, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 23)
+            self.assertFalse(list((profile / "plugins").glob(".aitm-stage-*")))
+            self.assertEqual(len(list(profile.glob(".aitm-stage-*"))), 1)
+            self.assertEqual(bundle.install(ASSETS, "hermes.observer.v1"), "staged")
+            self.assertTrue((bundle.folder / "plugin.yaml").is_file())
+
+    def test_existing_lock_contents_are_not_changed(self):
+        with tempfile.TemporaryDirectory(prefix="aitm-bundle-lock-", dir=os.path.realpath(tempfile.gettempdir())) as root:
+            profile = self.profile(root, "hermes")
+            bundle = bundles.ProviderBundle("hermes", profile)
+            bundle.parent.mkdir()
+            lock = bundle.parent / ".ai-task-monitor.lock"
+            lock.write_bytes(b"FOREIGN DATA")
+            self.assertEqual(bundle.install(ASSETS, "hermes.observer.v1"), "staged")
+            self.assertEqual(lock.read_bytes(), b"FOREIGN DATA")
+
+    def test_active_lock_prevents_concurrent_preparation(self):
+        with tempfile.TemporaryDirectory(prefix="aitm-bundle-lease-", dir=os.path.realpath(tempfile.gettempdir())) as root:
+            profile = self.profile(root, "hermes")
+            bundle = bundles.ProviderBundle("hermes", profile)
+            bundle.parent.mkdir()
+            lock = bundle.parent / ".ai-task-monitor.lock"
+            code = ("import importlib.util,sys;from pathlib import Path; "
+                    "s=importlib.util.spec_from_file_location('fixture_bundle',sys.argv[1]); "
+                    "m=importlib.util.module_from_spec(s);s.loader.exec_module(m); "
+                    "d=m._acquire_lock(Path(sys.argv[2])); print('LOCKED',flush=True); "
+                    "sys.stdin.read();m._release_lock(d)")
+            child_env = {name: os.environ[name] for name in ("SYSTEMROOT", "WINDIR", "PATH") if name in os.environ}
+            child_env.update({"TMP": root, "TEMP": root, "TMPDIR": root})
+            child = subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", code,
+                                      str(ASSETS / "provider_bundle.py"), str(lock)],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env)
+            try:
+                self.assertEqual(child.stdout.readline().strip(), b"LOCKED")
+                with self.assertRaisesRegex(bundles.BundleError, "bundle-busy"):
+                    bundle.install(ASSETS, "hermes.observer.v1")
+                self.assertFalse(bundle.folder.exists())
+            finally:
+                child.stdin.close()
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+                child.stdout.close()
+                child.stderr.close()
+            self.assertEqual(child.returncode, 0)
+            self.assertEqual(bundle.install(ASSETS, "hermes.observer.v1"), "staged")
+
     def test_missing_profile_and_existing_foreign_directory_are_rejected(self):
         with tempfile.TemporaryDirectory(prefix="aitm-bundle-", dir=os.path.realpath(tempfile.gettempdir())) as root:
             with self.assertRaises(bundles.BundleError):

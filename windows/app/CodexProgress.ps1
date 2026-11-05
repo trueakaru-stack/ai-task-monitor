@@ -24,6 +24,11 @@
  [switch]$PreviewDeepSeekErrorUiTest,
  [ValidateSet('','disconnected','connected','disabled','error')][string]$PreviewKimiState = '',
  [switch]$PreviewKimiUiTest,
+ [ValidateSet('','absent','prepared','enabled','long','error','unselected')][string]$PreviewHermesState = '',
+ [switch]$PreviewHermesUiTest,
+ [switch]$PreviewHermesFocus,
+ [switch]$PreviewHermesSelection,
+ [switch]$PreviewHermesDisableSelection,
  [switch]$PreviewAbout,
  [switch]$PreviewAboutUiTest,
  [switch]$PreviewClipboardUiTest,
@@ -90,6 +95,10 @@ if($PreviewKimiTask -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 0)){thr
 if($PreviewDeepSeekUiTest -and -not $PreviewSources){throw 'DeepSeek UI tests require a synthetic source preview.'}
 if($PreviewDeepSeekErrorUiTest -and -not $PreviewDeepSeekUiTest){throw 'DeepSeek error previews require the synthetic DeepSeek UI test.'}
 if(($PreviewKimiState -or $PreviewKimiUiTest) -and -not $PreviewSources){throw 'Kimi source previews require synthetic source snapshots.'}
+if(($PreviewHermesState -or $PreviewHermesUiTest) -and -not $PreviewSources){throw 'Hermes source previews require synthetic source snapshots.'}
+if($PreviewHermesFocus -and (-not $PreviewSources -or $PreviewHermesState -notin @('prepared','enabled','long'))){throw 'Hermes focus previews require a prepared synthetic profile.'}
+if($PreviewHermesSelection -and -not $PreviewHermesFocus){throw 'Hermes selection previews require the isolated focus preview.'}
+if($PreviewHermesDisableSelection -and -not $PreviewHermesSelection){throw 'Hermes disable selection requires the isolated selection preview.'}
 if(($PreviewManyProviders -or $PreviewTabsUiTest) -and (-not $SnapshotFile -or -not $PreviewManyProviders -or $PreviewActiveTasks -ne 6)){throw 'Provider tab previews require six synthetic tasks and a snapshot.'}
 if($PreviewActivityUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or $PreviewScenario -eq "default")){throw "Activity UI tests require one synthetic task, a scenario and a snapshot."}
 if($PreviewFocusUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or -not $CompactMode)){throw "Focus UI tests require a compact synthetic snapshot."}
@@ -199,6 +208,16 @@ try{
  $script:deepSeekController=New-DeepSeekMonitorController -AppRoot $PSScriptRoot
  $script:deepSeekModulesAvailable=$true
 }catch{}
+$script:hermesModulesAvailable=$false
+$script:hermesController=$null
+$script:hermesPreviewRequest=''
+if(-not $PreviewSources){
+ try{
+  . (Join-Path $PSScriptRoot 'integrations\HermesRuntime.ps1')
+  $script:hermesController=New-HermesMonitorController -AppRoot $PSScriptRoot
+  $script:hermesModulesAvailable=$true
+ }catch{}
+}
 $script:codexCloudModulesAvailable=$false
 $script:codexCloudController=$null
 $script:codexCloudPreferenceError=''
@@ -268,6 +287,21 @@ $script:translations=@{
  'Не удалось изменить подключение DeepSeek Harness.'='Could not change the DeepSeek Harness connection.'
  'Не удалось проверить профиль DeepSeek Harness.'='Could not check the DeepSeek Harness profile.'
  'Профиль DeepSeek Desktop пока не поддерживается.'='The DeepSeek Desktop profile is not supported yet.'
+ 'Профиль Hermes'='Hermes profile'
+ 'Подготовить'='Prepare'
+ 'Не подготовлен'='Not prepared'
+ 'Плагин подготовлен'='Plugin prepared'
+ 'Включён локально'='Enabled locally'
+ 'Отключён локально'='Disabled locally'
+ 'Подготовка'='Preparing'
+ 'Не удалось подготовить плагин Hermes.'='Could not prepare the Hermes plugin.'
+ 'Не удалось проверить профиль Hermes.'='Could not check the Hermes profile.'
+ 'Не удалось скопировать команду.'='Could not copy the command.'
+ 'Выберите профиль и нажмите «Подготовить». Полностью закройте Hermes и фоновые службы. Выполните команду включения в PowerShell. После запуска или переподключения монитора дождитесь статуса «Включён локально» у выбранного профиля, затем запустите или перезапустите Hermes. Прежние задачи не показываются. Для отключения снова закройте Hermes и фоновые службы и выполните команду отключения в PowerShell. Перед запуском менеджера команда локально проверяет файлы .env, которые могут содержать ключи; сама проверка не сохраняет, не выводит и не передаёт их. Проверено с исходной установкой Hermes Agent v0.22.7.'='Select a profile and choose Prepare. Close Hermes and its background services completely. Run the enable command in PowerShell. After starting or reconnecting the monitor, wait until the selected profile says “Enabled locally”, then start or restart Hermes. Previous tasks are not shown. To disable, close Hermes and its background services again and run the disable command in PowerShell. Before starting the manager, the command checks local .env files, which may contain keys; the check itself does not save, display or transmit them. Tested with a source installation of Hermes Agent v0.22.7.'
+ 'Включение: '='Enable: '
+ 'Отключение: '='Disable: '
+ 'Команда включения Hermes'='Hermes enable command'
+ 'Команда отключения Hermes'='Hermes disable command'
  'Журнал'='Journal'
  'Срок хранения'='Retention period'
  'Срок хранения журнала'='Journal retention period'
@@ -299,7 +333,7 @@ $script:translations=@{
  'Не удалось скопировать адрес. Выделите его и скопируйте вручную.'='Could not copy the address. Select and copy it manually.'
  'Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com.'='Could not open your email app. Write to truea.k.a.ru@gmail.com.'
  'Назад к настройкам'='Back to settings'
- 'AI Task Monitor показывает активные задачи и текущее действие. Сейчас поддерживаются Codex и Claude Code.'='AI Task Monitor shows active tasks and their current action. Codex and Claude Code are currently supported.'
+ 'AI Task Monitor показывает задачи и доступные сведения об их ходе. Локальные источники: Codex, Claude Code, OpenCode, DeepSeek Harness, Kimi Code и Hermes Agent. Для Codex также доступны облачные задачи с неподтверждённым статусом.'='AI Task Monitor shows tasks and available progress information. Local sources: Codex, Claude Code, OpenCode, DeepSeek Harness, Kimi Code and Hermes Agent. Codex cloud tasks are also available with unconfirmed status.'
  'При нескольких источниках можно переключать задачи по вкладкам. Компактное окно остаётся поверх других и показывает до трёх задач с переключением между ними. Тему можно выбрать вручную или использовать тему Windows. Если источник недоступен, приложение сообщит об этом.'='When multiple sources are available, use tabs to switch between them. The compact window stays on top and lets you switch between up to three tasks. Choose a theme or follow Windows. The app reports unavailable sources.'
  'Если задача публикует план, приложение показывает выполненные, текущий и следующие этапы. В карточке одновременно видны до пяти этапов; остальные можно прокрутить. Без плана отображается текущее действие без списка этапов.'='When a task publishes a plan, the app shows completed, current and upcoming steps. Up to five steps are visible at once; scroll to see the rest. Without a plan, only the current action is shown.'
  'Если источник сообщает общий прогресс задачи, точный процент показывается числом, а приблизительный — со знаком ≈. Если известен только план, показывается текущий этап или число завершённых этапов.'='When a source reports overall task progress, an exact percentage is shown as a number and an estimate is marked ≈. If only a plan is available, the current step or completed step count is shown.'
@@ -794,6 +828,36 @@ function Tr([string]$text){
         </Grid>
         <TextBlock x:Name="DeepSeekSourceError" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextSecondary}"/>
         <TextBlock Margin="0,0,0,12" Text="Подключение проверено с DeepSeek Harness 0.2.1-rc.5 и pnpm 11.25.0. Приложение добавит локальный плагин в выбранный профиль. После подключения перезапустите DeepSeek Harness." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+        <Border Height="1" Background="{DynamicResource Divider}"/>
+        <Grid Height="50">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <TextBlock Text="Hermes Agent" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimary}"/>
+         <TextBlock x:Name="HermesSourceStatus" Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
+         <Button x:Name="HermesSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
+        </Grid>
+        <Grid Height="46">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <TextBlock Text="Профиль" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimary}"/>
+         <ComboBox x:Name="HermesProfileCombo" Grid.Column="1" Margin="16,0,0,0" HorizontalAlignment="Stretch" VerticalAlignment="Center" Style="{StaticResource JournalComboStyle}" AutomationProperties.Name="Профиль Hermes"/>
+        </Grid>
+        <TextBlock x:Name="HermesSourceError" Visibility="Collapsed" Margin="0,0,0,6" TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextSecondary}"/>
+        <TextBlock x:Name="HermesSourceDescription" Margin="0,0,0,6" Text="Выберите профиль и нажмите «Подготовить». Полностью закройте Hermes и фоновые службы. Выполните команду включения в PowerShell. После запуска или переподключения монитора дождитесь статуса «Включён локально» у выбранного профиля, затем запустите или перезапустите Hermes. Прежние задачи не показываются. Для отключения снова закройте Hermes и фоновые службы и выполните команду отключения в PowerShell. Перед запуском менеджера команда локально проверяет файлы .env, которые могут содержать ключи; сама проверка не сохраняет, не выводит и не передаёт их. Проверено с исходной установкой Hermes Agent v0.22.7." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+        <StackPanel x:Name="HermesSourceCommands" Visibility="Collapsed" Margin="0,0,0,12">
+         <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <TextBlock xml:space="preserve" Text="Включение: " FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+          <RichTextBox x:Name="HermesEnableCommand" Grid.Column="1" Margin="-5,0,0,0" Padding="0" BorderThickness="0" Background="Transparent" CaretBrush="{DynamicResource TextPrimary}" IsReadOnly="True" IsReadOnlyCaretVisible="True" AcceptsTab="False" ScrollViewer.VerticalScrollBarVisibility="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled" FocusVisualStyle="{StaticResource KeyboardFocusStyle}" AutomationProperties.Name="Команда включения Hermes">
+           <FlowDocument PagePadding="0" FontSize="11.5" Foreground="{DynamicResource TextPrimary}"><Paragraph Margin="0" LineHeight="16"><Run x:Name="HermesEnableRun"/></Paragraph></FlowDocument>
+          </RichTextBox>
+         </Grid>
+         <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <TextBlock xml:space="preserve" Text="Отключение: " FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+          <RichTextBox x:Name="HermesDisableCommand" Grid.Column="1" Margin="-5,0,0,0" Padding="0" BorderThickness="0" Background="Transparent" CaretBrush="{DynamicResource TextPrimary}" IsReadOnly="True" IsReadOnlyCaretVisible="True" AcceptsTab="False" ScrollViewer.VerticalScrollBarVisibility="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Disabled" FocusVisualStyle="{StaticResource KeyboardFocusStyle}" AutomationProperties.Name="Команда отключения Hermes">
+           <FlowDocument PagePadding="0" FontSize="11.5" Foreground="{DynamicResource TextPrimary}"><Paragraph Margin="0" LineHeight="16"><Run x:Name="HermesDisableRun"/></Paragraph></FlowDocument>
+          </RichTextBox>
+         </Grid>
+        </StackPanel>
        </StackPanel>
       </Border>
       <TextBlock Text="Журнал" Margin="0,26,0,0" FontFamily="Segoe UI Variable Display Semibold" FontSize="19" Foreground="{DynamicResource TextPrimary}"/>
@@ -902,7 +966,7 @@ function Tr([string]$text){
       <StackPanel>
        <TextBlock x:Name="AboutHeading" Text="О приложении" FontFamily="Segoe UI Variable Display Semibold" FontSize="22" Foreground="{DynamicResource TextPrimary}"/>
        <TextBlock x:Name="AboutVersionText" Text="AI task monitor · версия $($script:currentVersion.Replace('-',' '))" Margin="0,18,0,0" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
-       <TextBlock x:Name="AboutProviders" Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="AI Task Monitor показывает активные задачи и текущее действие. Сейчас поддерживаются Codex и Claude Code."/>
+       <TextBlock x:Name="AboutProviders" Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="AI Task Monitor показывает задачи и доступные сведения об их ходе. Локальные источники: Codex, Claude Code, OpenCode, DeepSeek Harness, Kimi Code и Hermes Agent. Для Codex также доступны облачные задачи с неподтверждённым статусом."/>
        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="При нескольких источниках можно переключать задачи по вкладкам. Компактное окно остаётся поверх других и показывает до трёх задач с переключением между ними. Тему можно выбрать вручную или использовать тему Windows. Если источник недоступен, приложение сообщит об этом."/>
        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Если задача публикует план, приложение показывает выполненные, текущий и следующие этапы. В карточке одновременно видны до пяти этапов; остальные можно прокрутить. Без плана отображается текущее действие без списка этапов."/>
        <TextBlock Margin="0,12,0,0" TextWrapping="Wrap" FontSize="12.5" LineHeight="18" Foreground="{DynamicResource TextSecondary}" Text="Если источник сообщает общий прогресс задачи, точный процент показывается числом, а приблизительный — со знаком ≈. Если известен только план, показывается текущий этап или число завершённых этапов."/>
@@ -1139,6 +1203,19 @@ $deepSeekSourceAction = $window.FindName("DeepSeekSourceAction")
 $deepSeekProfileCombo = $window.FindName("DeepSeekProfileCombo")
 $deepSeekSourceError = $window.FindName("DeepSeekSourceError")
 $script:updatingDeepSeekControls = $false
+$hermesSourceStatus = $window.FindName("HermesSourceStatus")
+$hermesSourceAction = $window.FindName("HermesSourceAction")
+$hermesProfileCombo = $window.FindName("HermesProfileCombo")
+$hermesSourceError = $window.FindName("HermesSourceError")
+$hermesSourceDescription = $window.FindName("HermesSourceDescription")
+$hermesSourceCommands = $window.FindName("HermesSourceCommands")
+$hermesEnableCommand = $window.FindName("HermesEnableCommand")
+$hermesDisableCommand = $window.FindName("HermesDisableCommand")
+$hermesEnableRun = $window.FindName("HermesEnableRun")
+$hermesDisableRun = $window.FindName("HermesDisableRun")
+$script:updatingHermesControls = $false
+$script:hermesCopyError = ''
+$script:hermesPreviewCopiedCommand = ''
 $script:isCompact = $false
 $script:showingSettings = $false
 $script:showingAbout = $false
@@ -1448,6 +1525,7 @@ function Update-SourceSettings {
  Update-OpenCodeSourceSettings
  Update-KimiSourceSettings
  Update-DeepSeekSourceSettings
+ Update-HermesSourceSettings
  $installation=Claude-InstallationState $env:USERPROFILE $env:APPDATA $env:LOCALAPPDATA $env:PATH
  try{$connectionState=Claude-ConnectionState;$connected=$connectionState -eq "connected"}
  catch{
@@ -1578,6 +1656,119 @@ function Update-DeepSeekSourceSettings {
   if($state -in @('connected','partial')){$deepSeekSourceAction.Content=Tr 'Отключить';$deepSeekSourceAction.Tag='Remove'}else{$deepSeekSourceAction.Tag='Install'}
  }
  [Windows.Automation.AutomationProperties]::SetName($deepSeekSourceAction,$deepSeekSourceAction.Content+' DeepSeek Harness')
+}
+
+function Test-HermesUiProfile($profile) {
+ if($null -eq $profile){return $false}
+ foreach($property in @('Id','Name','State')){
+  if($null -eq $profile.PSObject.Properties[$property]){return $false}
+ }
+ $name=[string]$profile.Name;$id=[string]$profile.Id
+ if($name -cnotmatch '^[a-z0-9][a-z0-9_-]{0,63}$'){return $false}
+ if($id -ceq 'root'){return $name -ceq 'default'}
+ if($name -in @('default','hermes','test','tmp','root','sudo')){return $false}
+ return $id -ceq ('profile:'+$name)
+}
+
+function ConvertTo-HermesPowerShellLiteral([string]$value) {
+ if([string]::IsNullOrWhiteSpace($value)){return $null}
+ $builder=New-Object Text.StringBuilder
+ $quotes=@([char]0x0027,[char]0x2018,[char]0x2019,[char]0x201A,[char]0x201B)
+ foreach($character in $value.ToCharArray()){
+  if([char]::IsControl($character) -or [char]::GetUnicodeCategory($character) -in @([Globalization.UnicodeCategory]::Format,[Globalization.UnicodeCategory]::LineSeparator,[Globalization.UnicodeCategory]::ParagraphSeparator)){return $null}
+  [void]$builder.Append($character)
+  if($quotes -contains $character){[void]$builder.Append($character)}
+ }
+ return "'"+$builder.ToString()+"'"
+}
+
+function Get-HermesManualCommand($context,$profile,[string]$action) {
+ if($null -eq $context -or -not (Test-HermesUiProfile $profile) -or $action -cnotin @('enable','disable')){return $null}
+ $paths=@{}
+ foreach($property in @('Python','Assets','Home','Project')){
+  $entry=$context.PSObject.Properties[$property]
+  if($null -eq $entry -or $entry.Value -isnot [string] -or [string]::IsNullOrWhiteSpace($entry.Value) -or
+     $entry.Value -notmatch '^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/.?][^\\/]*[\\/][^\\/]+(?:[\\/]|$))'){return $null}
+  $paths[$property]=[string]$entry.Value
+ }
+ if($paths.Python.EndsWith('\') -or $paths.Python.EndsWith('/')){return $null}
+ # Windows PowerShell 5.1 can corrupt a native argument ending in a slash.
+ # A final "." denotes the same directory without a trailing separator.
+ foreach($property in @('Home','Project')){
+  if($paths[$property].EndsWith('\') -or $paths[$property].EndsWith('/')){$paths[$property]+='.'}
+ }
+ try{$helper=[IO.Path]::Combine($paths.Assets,'hermes-manager.py')}catch{return $null}
+ $literals=@(foreach($value in @($paths.Python,$helper,$paths.Home,$paths.Project,[string]$profile.Name,$action)){
+  $literal=ConvertTo-HermesPowerShellLiteral $value
+  if($null -eq $literal){return $null}
+  $literal
+ })
+ if($literals.Count -ne 6){return $null}
+ return '& '+$literals[0]+' -I -B '+$literals[1]+' '+$literals[2]+' '+$literals[3]+' '+$literals[4]+' '+$literals[5]
+}
+
+function Hide-HermesSourceCommands {
+ if($hermesSourceCommands.Visibility -ne 'Collapsed'){$hermesSourceCommands.Visibility='Collapsed'}
+ if($hermesEnableRun.Text){$hermesEnableRun.Text=''}
+ if($hermesDisableRun.Text){$hermesDisableRun.Text=''}
+}
+
+function Update-HermesSourceSettings {
+ $hermesSourceAction.Content=Tr 'Подготовить';$hermesSourceAction.IsEnabled=$false
+ [Windows.Automation.AutomationProperties]::SetName($hermesSourceAction,((Tr 'Подготовить')+' Hermes Agent'))
+ $hermesSourceStatus.Text=Tr 'Установка не подтверждена'
+ $hermesSourceError.Visibility='Collapsed';$hermesSourceError.Text=''
+ if(-not $script:hermesModulesAvailable -or $null -eq $script:hermesController){$hermesProfileCombo.IsEnabled=$false;Hide-HermesSourceCommands;return}
+ $controller=$script:hermesController
+ $profiles=@($controller.Profiles | Where-Object {Test-HermesUiProfile $_})
+ $names=@($profiles | ForEach-Object {[string]$_.Name})
+ $selected=[string]$hermesProfileCombo.SelectedItem
+ $changed=$names.Count -ne $hermesProfileCombo.Items.Count
+ if(-not $changed){for($index=0;$index -lt $names.Count;$index++){if([string]$hermesProfileCombo.Items[$index] -cne $names[$index]){$changed=$true;break}}}
+ if($changed){
+  $script:updatingHermesControls=$true
+  try{
+   $hermesProfileCombo.Items.Clear()
+   foreach($name in $names){[void]$hermesProfileCombo.Items.Add($name)}
+   if($selected -and $names -ccontains $selected){$hermesProfileCombo.SelectedItem=$selected}else{$hermesProfileCombo.SelectedIndex=-1;$selected=''}
+  }finally{$script:updatingHermesControls=$false}
+ }
+ $changing=$null -ne $controller.Request -and ($null -eq $controller.Request.PSObject.Properties['Action'] -or $controller.Request.Action -ne 'list')
+ $hermesProfileCombo.IsEnabled=$names.Count -gt 0 -and -not $changing -and -not $controller.LastError
+ $errorCode=if($controller.ActionError){[string]$controller.ActionError}else{[string]$controller.LastError}
+ if($errorCode -and $errorCode -ne 'installation-unconfirmed'){
+  if($controller.LastError){$hermesSourceStatus.Text=Tr 'Нет данных'}
+  $hermesSourceError.Text=Tr $(if($controller.ActionError){'Не удалось подготовить плагин Hermes.'}else{'Не удалось проверить профиль Hermes.'})
+  $hermesSourceError.Visibility='Visible'
+ }elseif($script:hermesCopyError){
+  $hermesSourceError.Text=Tr $script:hermesCopyError;$hermesSourceError.Visibility='Visible'
+ }
+ if($controller.LastError -or -not $controller.Scanned){Hide-HermesSourceCommands;return}
+ if(-not $selected){$hermesSourceStatus.Text=Tr 'Выберите профиль';Hide-HermesSourceCommands;return}
+ $match=@($profiles | Where-Object {[string]$_.Name -ceq $selected})
+ if($match.Count -ne 1){$hermesSourceStatus.Text=Tr 'Нет данных';Hide-HermesSourceCommands;return}
+ $profile=$match[0];$name=[string]$profile.Name
+ if($changing){$hermesSourceStatus.Text=Tr 'Подготовка';Hide-HermesSourceCommands;return}
+ if($profile.State -in @('prepared','absent')){
+  $enable=Get-HermesManualCommand $controller.Context $profile 'enable'
+  $disable=Get-HermesManualCommand $controller.Context $profile 'disable'
+  if(-not $enable -or -not $disable){
+   $hermesSourceStatus.Text=Tr 'Нет данных';$hermesSourceError.Text=Tr 'Не удалось проверить профиль Hermes.';$hermesSourceError.Visibility='Visible';Hide-HermesSourceCommands;return
+  }
+ }
+ switch([string]$profile.State){
+  'prepared' {
+   if($null -eq $profile.PSObject.Properties['Enabled'] -or $profile.Enabled -isnot [bool]){
+    $hermesSourceStatus.Text=Tr 'Нет данных';$hermesSourceError.Text=Tr 'Не удалось проверить профиль Hermes.';$hermesSourceError.Visibility='Visible';Hide-HermesSourceCommands;return
+   }
+   $hermesSourceStatus.Text=Tr $(if($profile.Enabled){'Включён локально'}else{'Отключён локально'})
+   if($hermesEnableRun.Text -cne $enable){$hermesEnableRun.Text=$enable}
+   if($hermesDisableRun.Text -cne $disable){$hermesDisableRun.Text=$disable}
+   if($hermesSourceCommands.Visibility -ne 'Visible'){$hermesSourceCommands.Visibility='Visible'}
+  }
+  'absent' {$hermesSourceStatus.Text=Tr 'Не подготовлен';$hermesSourceAction.IsEnabled=$null -eq $controller.Request;Hide-HermesSourceCommands}
+  default {$hermesSourceStatus.Text=Tr 'Нет данных';$hermesSourceError.Text=Tr 'Не удалось проверить профиль Hermes.';$hermesSourceError.Visibility='Visible';Hide-HermesSourceCommands}
+ }
 }
 
 function Apply-Theme([string]$mode,[bool]$persist) {
@@ -2187,12 +2378,22 @@ function Source-Snapshot {
     Get-DeepSeekMonitorConnectionState $script:deepSeekController
    }catch{'error'}
   }
+  $hermesAvailable=Get-Variable -Scope Script -Name 'hermesModulesAvailable' -ErrorAction SilentlyContinue
+  if($null -ne $hermesAvailable -and $hermesAvailable.Value -and -not ($SnapshotFile -and $PreviewActiveTasks -ge 0)){
+   $connections.hermes=try{
+    Update-HermesMonitorController $script:hermesController
+    if($script:showingSettings){Update-HermesSourceSettings}
+    $profileScopes.hermes=@(Get-HermesAllowedScopes $script:hermesController)
+    $uncertainProfileScopes.hermes=@(Get-HermesUncertainScopes $script:hermesController)
+    Get-HermesMonitorConnectionState $script:hermesController
+   }catch{'error'}
+  }
   try{
    $group=Read-ExternalProviderGroupSnapshot -Controller $script:externalProviderController -Connections $connections -Seen $script:seenExternalConnections -PreviousTasks $script:lastExternalTasks -ProfileScopes $profileScopes -UncertainProfileScopes $uncertainProfileScopes -Language $script:resolvedLanguage
    $external=@($group.Tasks);$script:lastExternalTasks=$external
    foreach($name in $group.Unavailable){[void]$unavailable.Add($name)}
   }catch{
-   foreach($pair in @(@('opencode','OpenCode'),@('kimi','Kimi Code'),@('deepseek','DeepSeek Harness'))){if($script:seenExternalConnections.ContainsKey($pair[0])){[void]$unavailable.Add($pair[1])}}
+   foreach($pair in @(@('opencode','OpenCode'),@('kimi','Kimi Code'),@('deepseek','DeepSeek Harness'),@('hermes','Hermes Agent'))){if($script:seenExternalConnections.ContainsKey($pair[0])){[void]$unavailable.Add($pair[1])}}
    $external=@(Unconfirmed-ExternalTasks $script:lastExternalTasks);$script:lastExternalTasks=$external
    try{Stop-ExternalProviderController $script:externalProviderController}catch{}
   }
@@ -3413,6 +3614,47 @@ $deepSeekSourceAction.Add_Click({
  catch{$script:deepSeekController.ActionError='operation-failed'}
  Update-DeepSeekSourceSettings
 })
+$hermesProfileCombo.Add_SelectionChanged({
+ if(-not $script:updatingHermesControls){
+  $script:hermesCopyError=''
+  if($null -ne $script:hermesController){$script:hermesController.ActionError=''}
+  Update-HermesSourceSettings
+ }
+})
+foreach($control in @($hermesEnableCommand,$hermesDisableCommand)){
+ $copyBinding=[Windows.Input.CommandBinding]::new([Windows.Input.ApplicationCommands]::Copy)
+ $copyBinding.Add_CanExecute({
+  param($sender,$eventArgs)
+  $eventArgs.CanExecute=$sender.IsReadOnly -and -not $sender.Selection.IsEmpty -and [bool]$sender.Selection.Text.TrimEnd([char[]]"`r`n")
+  $eventArgs.Handled=$true
+ })
+ $copyBinding.Add_Executed({
+  param($sender,$eventArgs)
+  $value=[string]$sender.Selection.Text
+  $value=$value.TrimEnd([char[]]"`r`n")
+  try{
+   if($value){
+    if($PreviewSources){$script:hermesPreviewCopiedCommand=$value}else{[Windows.Clipboard]::SetText($value)}
+    $script:hermesCopyError=''
+   }
+  }catch{$script:hermesCopyError='Не удалось скопировать команду.'}
+  $eventArgs.Handled=$true
+  Update-HermesSourceSettings
+ })
+ [void]$control.CommandBindings.Add($copyBinding)
+}
+$hermesSourceAction.Add_Click({
+ if(-not $hermesSourceAction.IsEnabled -or $null -eq $script:hermesController){return}
+ $selected=[string]$hermesProfileCombo.SelectedItem
+ $matches=@($script:hermesController.Profiles | Where-Object {(Test-HermesUiProfile $_) -and [string]$_.Name -ceq $selected -and [string]$_.State -ceq 'absent'})
+ if($matches.Count -ne 1){return}
+ $profileId=[string]$matches[0].Id
+ try{
+  if($PreviewSources){$script:hermesPreviewRequest=$profileId}
+  else{Request-HermesProfilePrepare $script:hermesController $profileId}
+ }catch{$script:hermesController.ActionError='operation-failed'}
+ Update-HermesSourceSettings
+})
 $closeButton.Add_Click({$window.Close()})
 $compactCloseButton.Add_Click({$window.Close()})
 $settingsCloseButton.Add_Click({$window.Close()})
@@ -3421,7 +3663,7 @@ $journalCloseButton.Add_Click({$window.Close()})
 $windowFrame.Add_SizeChanged({Update-SquircleGeometry})
 $tray=New-Object Windows.Forms.NotifyIcon; $tray.Icon=if($null -ne $script:applicationIcon){$script:applicationIcon}else{[Drawing.SystemIcons]::Application}; $tray.Text="AI task monitor"; $tray.Visible=$true; $tray.Add_DoubleClick({Restore-Window})
 $menu=New-Object Windows.Forms.ContextMenuStrip; $script:trayShowMenu=$menu.Items.Add("Развернуть"); $script:trayExitMenu=$menu.Items.Add("Выход"); $script:trayShowMenu.Add_Click({Restore-Window;Set-CompactMode $false}); $script:trayExitMenu.Add_Click({$window.Close()}); $tray.ContextMenuStrip=$menu
-$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:kimiModulesAvailable){Stop-KimiMonitorController $script:kimiController};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
+$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:kimiModulesAvailable){Stop-KimiMonitorController $script:kimiController};if($script:hermesModulesAvailable -and -not $PreviewSources){try{Stop-HermesMonitorController $script:hermesController}catch{}};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
 if($script:codexCloudModulesAvailable -and -not $SnapshotFile -and $PreviewActiveTasks -lt 0 -and (Load-CodexCloudEnabled)){Set-CodexCloudControllerEnabled $script:codexCloudController $true}
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
@@ -3590,8 +3832,9 @@ if ($SnapshotFile) {
  }
  if($PreviewAboutUiTest){
   $expectedVersion=$(if($script:resolvedLanguage -eq 'en'){'AI task monitor · version '}else{'AI task monitor · версия '})+$script:currentVersion.Replace('-',' ')
+  $expectedProviders=if($script:resolvedLanguage -eq 'en'){'AI Task Monitor shows tasks and available progress information. Local sources: Codex, Claude Code, OpenCode, DeepSeek Harness, Kimi Code and Hermes Agent. Codex cloud tasks are also available with unconfirmed status.'}else{'AI Task Monitor показывает задачи и доступные сведения об их ходе. Локальные источники: Codex, Claude Code, OpenCode, DeepSeek Harness, Kimi Code и Hermes Agent. Для Codex также доступны облачные задачи с неподтверждённым статусом.'}
   if($aboutView.Visibility -ne "Visible" -or $aboutHeading.Text -ne (Tr 'О приложении') -or $aboutVersionText.Text -ne $expectedVersion -or
-     -not $aboutProviders.Text.Contains("Codex") -or -not $aboutProviders.Text.Contains("Claude Code")){
+     $aboutProviders.Text -cne $expectedProviders){
    throw "The About page does not expose the expected content."
   }
   $aboutBackButton.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
@@ -3893,14 +4136,170 @@ if ($SnapshotFile) {
    if($deepSeekSourceAction.IsEnabled -or $deepSeekSourceError.Text -cne (Tr 'Профиль DeepSeek Desktop пока не поддерживается.')){throw 'The DeepSeek Desktop profile must be unavailable.'}
    if(-not $PreviewDeepSeekErrorUiTest){$deepSeekProfileCombo.SelectedItem='Profile Two';Update-DeepSeekSourceSettings}
   }
+  if($PreviewHermesState -or $PreviewHermesUiTest){
+   $previewHermesContext=[PSCustomObject]@{
+    Python='C:\Users\Тест О''Брайен\.hermes\hermes-agent\venv\Scripts\python.exe'
+    Assets='C:\Program Files\AI Task Monitor\integrations'
+    Home='C:\Users\Тест О''Брайен\.hermes'
+    Project='C:\Users\Тест О''Брайен\.hermes\hermes-agent'
+   }
+   $longHermesRoot='C:\Users\Тестовый Пользователь\'+('long-folder\'*5)+'.hermes'
+   $longHermesContext=[PSCustomObject]@{
+    Python=($longHermesRoot+'\hermes-agent\venv\Scripts\python.exe')
+    Assets=('C:\Program Files\AI Task Monitor\'+('long-folder\'*5)+'integrations')
+    Home=$longHermesRoot
+    Project=($longHermesRoot+'\hermes-agent')
+   }
+   $script:hermesController=[PSCustomObject]@{
+    Profiles=@(
+     [PSCustomObject]@{Id='root';Name='default';State='absent';Enabled=$false;Scope='';Error=''},
+     [PSCustomObject]@{Id='profile:work';Name='work';State='prepared';Enabled=$false;Scope=('a'*32);Error=''},
+     [PSCustomObject]@{Id='profile:active';Name='active';State='prepared';Enabled=$true;Scope=('b'*32);Error=''},
+     [PSCustomObject]@{Id=('profile:'+('a'*64));Name=('a'*64);State='prepared';Enabled=$false;Scope=('c'*32);Error=''},
+     [PSCustomObject]@{Id='profile:broken';Name='broken';State='error';Enabled=$false;Scope='';Error='profile-unavailable'},
+     [PSCustomObject]@{Id='profile:bad;command';Name='bad;command';State='absent';Enabled=$false;Scope='';Error=''},
+     [PSCustomObject]@{Id='profile:root';Name='root';State='absent';Enabled=$false;Scope='';Error=''},
+     [PSCustomObject]@{Id='profile:other';Name='work';State='absent';Enabled=$false;Scope='';Error=''}
+    );Context=$previewHermesContext;Request=$null;Scanned=$true;LastError='';ActionError='';Seen=@{}
+   }
+   $script:hermesModulesAvailable=$true
+   Update-HermesSourceSettings
+   if($PreviewHermesUiTest){
+    $testedVersion=if($script:resolvedLanguage -eq 'en'){'Tested with a source installation of Hermes Agent v0.22.7.'}else{'Проверено с исходной установкой Hermes Agent v0.22.7.'}
+    if(-not $hermesSourceDescription.Text.EndsWith($testedVersion)){throw 'The tested Hermes source installation must be identified accurately.'}
+    if(-not $hermesSourceDescription.Text.Contains('PowerShell') -or $hermesSourceDescription.Text.Contains('HERMES_HOME')){throw 'Hermes commands must be explained for PowerShell without manual environment changes.'}
+    $restartHint=if($script:resolvedLanguage -eq 'en'){'After starting or reconnecting the monitor, wait until the selected profile says “Enabled locally”, then start or restart Hermes. Previous tasks are not shown.'}else{'После запуска или переподключения монитора дождитесь статуса «Включён локально» у выбранного профиля, затем запустите или перезапустите Hermes. Прежние задачи не показываются.'}
+    if(-not $hermesSourceDescription.Text.Contains($restartHint)){throw 'Hermes restart and old-task behavior must be explained.'}
+    $privacyHint=if($script:resolvedLanguage -eq 'en'){'Before starting the manager, the command checks local .env files, which may contain keys; the check itself does not save, display or transmit them.'}else{'Перед запуском менеджера команда локально проверяет файлы .env, которые могут содержать ключи; сама проверка не сохраняет, не выводит и не передаёт их.'}
+    if(-not $hermesSourceDescription.Text.Contains($privacyHint)){throw 'Hermes must explain the local .env check before running the manager.'}
+    function Test-HermesPreviewCommand([string]$command,[string]$profile,[string]$action){
+     $tokens=$null;$errors=$null
+     $tree=[Management.Automation.Language.Parser]::ParseInput($command,[ref]$tokens,[ref]$errors)
+     $statements=@($tree.EndBlock.Statements)
+     if($errors.Count -ne 0 -or $statements.Count -ne 1 -or $statements[0] -isnot [Management.Automation.Language.PipelineAst] -or @($statements[0].PipelineElements).Count -ne 1){throw 'The Hermes command is not a single PowerShell invocation.'}
+     $invocation=$statements[0].PipelineElements[0]
+     if($invocation -isnot [Management.Automation.Language.CommandAst] -or $invocation.InvocationOperator -ne [Management.Automation.Language.TokenKind]::Ampersand -or @($invocation.Redirections).Count -ne 0){throw 'The Hermes command has an unexpected invocation shape.'}
+     $elements=@($invocation.CommandElements)
+     $expected=@($previewHermesContext.Python,'-I','-B',[IO.Path]::Combine($previewHermesContext.Assets,'hermes-manager.py'),$previewHermesContext.Home,$previewHermesContext.Project,$profile,$action)
+     if($elements.Count -ne $expected.Count){throw 'The Hermes command has an unexpected argument count.'}
+     for($index=0;$index -lt $expected.Count;$index++){
+      $element=$elements[$index]
+      $actual=if($element -is [Management.Automation.Language.StringConstantExpressionAst]){[string]$element.Value}elseif($element -is [Management.Automation.Language.CommandParameterAst] -and $null -eq $element.Argument){'-'+$element.ParameterName}else{throw 'The Hermes command contains an unsafe expression.'}
+      if($actual -cne $expected[$index]){throw 'The Hermes command changed an argument.'}
+     }
+    }
+    if($hermesProfileCombo.Items.Count -ne 5 -or $hermesSourceAction.IsEnabled -or $hermesSourceCommands.Visibility -ne 'Collapsed'){throw 'Unsafe profiles or an unselected action were exposed.'}
+    $hermesProfileCombo.SelectedItem='default';Update-HermesSourceSettings
+    if(-not $hermesSourceAction.IsEnabled -or $hermesSourceStatus.Text -cne (Tr 'Не подготовлен')){throw 'The unprepared profile cannot be prepared.'}
+    if($hermesSourceCommands.Visibility -ne 'Collapsed'){throw 'Commands must not be shown before preparation.'}
+    $script:hermesPreviewRequest=''
+    $hermesSourceAction.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+    if($script:hermesPreviewRequest -cne 'root'){throw 'Preparation did not select the default profile.'}
+    $script:hermesController.Profiles[0].State='prepared';Update-HermesSourceSettings
+    Test-HermesPreviewCommand $hermesEnableRun.Text 'default' 'enable'
+    Test-HermesPreviewCommand $hermesDisableRun.Text 'default' 'disable'
+    $script:hermesController.Profiles[0].State='absent';Update-HermesSourceSettings
+    $script:hermesController.Profiles+=@([PSCustomObject]@{Id='root';Name='default';State='absent';Enabled=$false;Scope='';Error=''})
+    Update-HermesSourceSettings
+    if($hermesSourceAction.IsEnabled -or $hermesSourceCommands.Visibility -ne 'Collapsed'){throw 'An ambiguous profile must not be prepared.'}
+    $script:hermesController.Profiles=@($script:hermesController.Profiles | Select-Object -First 8)
+    Update-HermesSourceSettings
+    $hermesProfileCombo.SelectedItem='work';Update-HermesSourceSettings
+    if($hermesSourceStatus.Text -cne (Tr 'Отключён локально') -or $hermesSourceAction.IsEnabled){throw 'The disabled prepared profile is not represented accurately.'}
+    Test-HermesPreviewCommand $hermesEnableRun.Text 'work' 'enable'
+    Test-HermesPreviewCommand $hermesDisableRun.Text 'work' 'disable'
+    $script:hermesController.Context=[PSCustomObject]@{Python=$previewHermesContext.Python;Assets=$previewHermesContext.Assets;Home=($previewHermesContext.Home+[char]10);Project=$previewHermesContext.Project}
+    Update-HermesSourceSettings
+    if($hermesSourceCommands.Visibility -ne 'Collapsed' -or $hermesSourceError.Visibility -ne 'Visible'){throw 'An unsafe installation must not show commands.'}
+    $hermesProfileCombo.SelectedItem='default';Update-HermesSourceSettings
+    if($hermesSourceAction.IsEnabled -or $hermesSourceCommands.Visibility -ne 'Collapsed'){throw 'An unsafe installation must not permit preparation.'}
+    $script:hermesController.Context=$previewHermesContext
+    $hermesProfileCombo.SelectedItem='work';Update-HermesSourceSettings
+    $window.UpdateLayout()
+    $copyGesture=@([Windows.Input.ApplicationCommands]::Copy.InputGestures | Where-Object {$_.Key -eq [Windows.Input.Key]::C -and $_.Modifiers -eq [Windows.Input.ModifierKeys]::Control})
+    $selectGesture=@([Windows.Input.ApplicationCommands]::SelectAll.InputGestures | Where-Object {$_.Key -eq [Windows.Input.Key]::A -and $_.Modifiers -eq [Windows.Input.ModifierKeys]::Control})
+    if($copyGesture.Count -ne 1 -or $selectGesture.Count -ne 1){throw 'Standard keyboard shortcuts are unavailable.'}
+    [void][Windows.Input.Keyboard]::Focus($hermesProfileCombo)
+    if(-not $hermesProfileCombo.MoveFocus([Windows.Input.TraversalRequest]::new([Windows.Input.FocusNavigationDirection]::Next)) -or [Windows.Input.Keyboard]::FocusedElement -ne $hermesEnableCommand){throw 'The enable command is not reachable by keyboard navigation.'}
+    if(-not $hermesEnableCommand.MoveFocus([Windows.Input.TraversalRequest]::new([Windows.Input.FocusNavigationDirection]::Next)) -or [Windows.Input.Keyboard]::FocusedElement -ne $hermesDisableCommand){throw 'The disable command is not reachable by keyboard navigation.'}
+    function Test-HermesCommandSelection($control,$run){
+     $expected=[string]$run.Text
+     if(-not $control.IsReadOnly -or -not $control.Focusable -or -not $control.IsTabStop -or -not $control.IsHitTestVisible){throw 'A Hermes command is not available for selection.'}
+     [void][Windows.Input.Keyboard]::Focus($control)
+     if([Windows.Input.Keyboard]::FocusedElement -ne $control){throw 'A Hermes command did not receive keyboard focus.'}
+     [Windows.Input.ApplicationCommands]::SelectAll.Execute($null,$control)
+     if($control.Selection.Text.TrimEnd([char[]]"`r`n") -cne $expected -or -not [Windows.Input.ApplicationCommands]::Copy.CanExecute($null,$control)){throw 'A Hermes command cannot be selected and copied by keyboard.'}
+     $script:hermesPreviewCopiedCommand=''
+     [Windows.Input.ApplicationCommands]::Copy.Execute($null,$control)
+     if($script:hermesPreviewCopiedCommand -cne $expected){throw 'Keyboard copy changed the command or added a newline.'}
+     Update-HermesSourceSettings
+     if($control.Selection.Text.TrimEnd([char[]]"`r`n") -cne $expected -or [Windows.Input.Keyboard]::FocusedElement -ne $control){throw 'Refreshing Hermes cleared the command selection or focus.'}
+     $first=$run.ContentStart.GetCharacterRect([Windows.Documents.LogicalDirection]::Forward)
+     $last=$run.ContentEnd.GetCharacterRect([Windows.Documents.LogicalDirection]::Backward)
+     if($first.IsEmpty -or $last.IsEmpty){throw 'A Hermes command does not expose text positions for mouse selection.'}
+     if($last.X -lt 0 -or $last.Y -lt 0 -or $last.X -gt $control.ActualWidth+1 -or $last.Y+$last.Height -gt $control.ActualHeight+1){throw 'A Hermes command is clipped.'}
+     $from=$control.GetPositionFromPoint([Windows.Point]::new([Math]::Max(0,$first.X-1),$first.Y+$first.Height/2),$true)
+     $to=$control.GetPositionFromPoint([Windows.Point]::new($last.X+$last.Width+1,$last.Y+$last.Height/2),$true)
+     if($null -eq $from -or $null -eq $to){throw 'A Hermes command cannot be hit-tested for mouse selection.'}
+     $control.Selection.Select($from,$to)
+     if($control.Selection.Text.TrimEnd([char[]]"`r`n") -cne $expected -or -not [Windows.Input.ApplicationCommands]::Copy.CanExecute($null,$control)){throw 'Mouse-selected Hermes command text is incorrect.'}
+     $script:hermesPreviewCopiedCommand=''
+     [Windows.Input.ApplicationCommands]::Copy.Execute($null,$control)
+     if($script:hermesPreviewCopiedCommand -cne $expected){throw 'Mouse selection copy changed the command or added a newline.'}
+     $control.Selection.Select($run.ContentStart,$run.ContentStart)
+    }
+    foreach($pair in @(@($hermesEnableCommand,$hermesEnableRun),@($hermesDisableCommand,$hermesDisableRun))){Test-HermesCommandSelection $pair[0] $pair[1]}
+    $hermesProfileCombo.SelectedItem=('a'*64);Update-HermesSourceSettings;$window.UpdateLayout()
+    foreach($pair in @(@($hermesEnableCommand,$hermesEnableRun),@($hermesDisableCommand,$hermesDisableRun))){Test-HermesCommandSelection $pair[0] $pair[1]}
+    $script:hermesController.Context=$longHermesContext;Update-HermesSourceSettings;$window.UpdateLayout()
+    foreach($pair in @(@($hermesEnableCommand,$hermesEnableRun),@($hermesDisableCommand,$hermesDisableRun))){Test-HermesCommandSelection $pair[0] $pair[1]}
+    $script:hermesController.Context=$previewHermesContext
+    [Windows.Input.Keyboard]::ClearFocus()|Out-Null
+    $hermesProfileCombo.SelectedItem='active';Update-HermesSourceSettings
+    if($hermesSourceStatus.Text -cne (Tr 'Включён локально') -or $hermesSourceAction.IsEnabled){throw 'The enabled prepared profile is not represented accurately.'}
+    Test-HermesPreviewCommand $hermesDisableRun.Text 'active' 'disable'
+    $script:hermesController.Profiles[2].Enabled='unverified';Update-HermesSourceSettings
+    if($hermesSourceCommands.Visibility -ne 'Collapsed' -or $hermesSourceError.Visibility -ne 'Visible'){throw 'An unverified enabled state must not show setup commands.'}
+    $script:hermesController.Profiles[2].Enabled=$true
+    $hermesProfileCombo.SelectedItem='broken';Update-HermesSourceSettings
+    if($hermesSourceAction.IsEnabled -or $hermesSourceError.Visibility -ne 'Visible' -or $hermesSourceCommands.Visibility -ne 'Collapsed'){throw 'An unavailable profile must not show setup commands.'}
+    $hermesProfileCombo.SelectedItem='default';$script:hermesController.Request=[PSCustomObject]@{Action='prepare'};Update-HermesSourceSettings
+    if($hermesSourceAction.IsEnabled -or $hermesProfileCombo.IsEnabled -or $hermesSourceStatus.Text -cne (Tr 'Подготовка')){throw 'A pending preparation did not disable controls.'}
+    $script:hermesController.Request=$null;$script:hermesController.LastError='operation-failed';Update-HermesSourceSettings
+    if($hermesSourceAction.IsEnabled -or $hermesProfileCombo.IsEnabled -or $hermesSourceStatus.Text -cne (Tr 'Нет данных') -or $hermesSourceCommands.Visibility -ne 'Collapsed' -or $hermesSourceError.Visibility -ne 'Visible'){throw 'A failed scan must disable preparation and hide unverified commands.'}
+    if(-not $hermesProfileCombo.Focusable -or -not $hermesSourceAction.Focusable -or [Windows.Automation.AutomationProperties]::GetName($hermesSourceAction) -notlike '*Hermes Agent'){throw 'Hermes controls are not accessible.'}
+    $script:hermesController.LastError=''
+    Write-Output 'Hermes manual setup: isolated profile selection, commands and source states verified.'
+   }
+   if($PreviewHermesState){
+    $script:hermesController.LastError=''
+    if($PreviewHermesState -eq 'long'){$script:hermesController.Context=$longHermesContext}else{$script:hermesController.Context=$previewHermesContext}
+    $hermesProfileCombo.SelectedIndex=-1
+    if($PreviewHermesState -ne 'unselected'){
+     $name=switch($PreviewHermesState){'absent'{'default'} 'prepared'{'work'} 'enabled'{'active'} 'long'{('a'*64)} default{'broken'}}
+     $hermesProfileCombo.SelectedItem=$name
+    }
+    Update-HermesSourceSettings
+   }
+  }
   if($PreviewSettingsBackHover){$settingsBackButton.Background=Brush $script:palette.Hover}
   $window.UpdateLayout()
   if($PreviewSources){
-   $target=if($PreviewKimiState -or $PreviewKimiUiTest){$kimiSourceAction}elseif($PreviewCloudState -or $PreviewCloudUiTest){$codexCloudSourceAction}else{$openCodeSourceAction}
-   $targetY=if($PreviewKimiState -or $PreviewKimiUiTest){180}elseif($PreviewCloudState -or $PreviewCloudUiTest){140}else{290}
+   $target=if($PreviewHermesState -or $PreviewHermesUiTest){$hermesSourceAction}elseif($PreviewKimiState -or $PreviewKimiUiTest){$kimiSourceAction}elseif($PreviewCloudState -or $PreviewCloudUiTest){$codexCloudSourceAction}else{$openCodeSourceAction}
+   $targetY=if($PreviewHermesState -or $PreviewHermesUiTest){100}elseif($PreviewKimiState -or $PreviewKimiUiTest){180}elseif($PreviewCloudState -or $PreviewCloudUiTest){140}else{290}
    $point=$target.TranslatePoint([Windows.Point]::new(0,0),$settingsScroll)
    $settingsScroll.ScrollToVerticalOffset([Math]::Max(0,$settingsScroll.VerticalOffset+$point.Y-$targetY))
    $window.Dispatcher.Invoke([Action]{},[Windows.Threading.DispatcherPriority]::ApplicationIdle);$window.UpdateLayout()
+  }
+  if($PreviewHermesFocus){
+   [void][Windows.Input.Keyboard]::Focus($hermesProfileCombo)
+   if(-not $hermesProfileCombo.MoveFocus([Windows.Input.TraversalRequest]::new([Windows.Input.FocusNavigationDirection]::Next)) -or [Windows.Input.Keyboard]::FocusedElement -ne $hermesEnableCommand){throw 'The focused Hermes preview is not reachable by keyboard.'}
+   if($PreviewHermesDisableSelection){
+    if(-not $hermesEnableCommand.MoveFocus([Windows.Input.TraversalRequest]::new([Windows.Input.FocusNavigationDirection]::Next)) -or [Windows.Input.Keyboard]::FocusedElement -ne $hermesDisableCommand){throw 'The disable command is not reachable by keyboard.'}
+    [Windows.Input.ApplicationCommands]::SelectAll.Execute($null,$hermesDisableCommand)
+   }elseif($PreviewHermesSelection){[Windows.Input.ApplicationCommands]::SelectAll.Execute($null,$hermesEnableCommand)}
+   else{$hermesEnableCommand.Selection.Select($hermesEnableRun.ContentStart,$hermesEnableRun.ContentStart)}
+   $window.UpdateLayout()
   }
   if($PreviewJournalClearConfirmation){$journalClearConfirmation.Visibility="Visible";Update-JournalSettings;$window.UpdateLayout()}
   if($PreviewJournalSettings -or $PreviewJournalClearConfirmation -or $JournalDropdownSnapshotFile){

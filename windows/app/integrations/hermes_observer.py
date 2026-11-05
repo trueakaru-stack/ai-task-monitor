@@ -2,18 +2,56 @@
 
 from .provider_hooks import from_hermes
 from .provider_sender import OrderedSender
+from .provider_transport import publish
+from contextvars import ContextVar
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import stat
+import sys
+import time
 
 _EVENTS = (
     "pre_api_request", "post_llm_call", "post_tool_call",
     "on_session_start", "on_session_end", "on_session_finalize",
     "on_human_input_request", "on_human_input_resolved",
 )
+_DEFAULT_MANAGED_DIR = Path("/etc/hermes")
+
+
+def environment_unconfirmed():
+    """Check only selection variables; never emit their values."""
+    try:
+        return (bool(os.environ.get("HERMES_MANAGED_DIR", "").strip()) or
+                os.environ.get("HERMES_CONFIG_BACKEND", "").strip().lower() not in ("", "file"))
+    except (OSError, ValueError, TypeError):
+        return True
+
+
+def managed_scope_unconfirmed():
+    """Detect a possible Hermes managed overlay without opening its contents."""
+    try:
+        if environment_unconfirmed():
+            return True
+        try:
+            return stat.S_ISDIR(_DEFAULT_MANAGED_DIR.stat().st_mode)
+        except FileNotFoundError:
+            return False
+    except (OSError, ValueError, TypeError):
+        return True
+
+
+def guarded_publish(event):
+    """Recheck managed scope on the daemon, never on the agent's hook thread."""
+    try:
+        if managed_scope_unconfirmed():
+            event = {"version": 1, "provider": "hermes", "session": event["session"],
+                     "kind": "gap", "tick": time.monotonic_ns(), "epoch": event["epoch"]}
+        return publish(event, wait_seconds=None)
+    except Exception:
+        return False
 
 
 def scoped_session(namespace, session):
@@ -75,24 +113,59 @@ def profile_namespace(path=None):
             os.close(descriptor)
 
 
-def register_observers(ctx, enqueue, namespace=None):
+def register_observers(ctx, enqueue, namespace=None, unconfirmed=False):
+    epoch = time.monotonic_ns()
+    if unconfirmed and namespace is not None:
+        enqueue({"version": 1, "provider": "hermes", "session": namespace + "_unknown",
+                 "kind": "gap", "tick": epoch, "epoch": epoch})
     def handler(name):
-        def observe(**values):
+        # Hermes filters hook payloads by signature. Do not receive prompts,
+        # messages, responses, tool arguments, or other unrelated fields.
+        def observe(*, telemetry_schema_version=None, session_id=None, turn_id=None,
+                    request_id=None, completed=None, failed=None, interrupted=None):
             try:
-                if namespace is not None and values.get("telemetry_schema_version") != "hermes.observer.v1":
+                observed = time.monotonic_ns()
+                def unknown_scope():
+                    enqueue({"version": 1, "provider": "hermes", "session": namespace + "_unknown",
+                             "kind": "gap", "tick": observed, "epoch": epoch})
+                if namespace is not None and (unconfirmed or environment_unconfirmed()):
+                    unknown_scope()
                     return None
-                # Build an explicit view; never pass arguments, response or prompt on.
-                extra = {key: values.get(key) for key in
-                         ("turn_id", "tool_call_id", "completed", "failed", "interrupted")}
-                session = values.get("session_id")
+                if namespace is not None and telemetry_schema_version != "hermes.observer.v1":
+                    unknown_scope()
+                    return None
+                if not turn_id and name in ("on_human_input_request", "on_human_input_resolved"):
+                    # Hermes v0.22.7 keeps this correlation ID in its current
+                    # task context but omits it from human-input payloads.
+                    module = sys.modules.get("tools.approval_context")
+                    variable = getattr(module, "_approval_turn_id", None)
+                    if isinstance(variable, ContextVar):
+                        turn_id = variable.get()
+                extra = {"turn_id": turn_id, "completed": completed,
+                         "failed": failed, "interrupted": interrupted}
+                session = session_id
                 if namespace is not None:
                     session = scoped_session(namespace, session)
                     extra["turn_id"] = scoped_turn(extra["turn_id"])
                     if session is None:
+                        # An unidentifiable event may belong to any monitored task.
+                        unknown_scope()
                         return None
                 event = from_hermes({"hook_event_name": name, "session_id": session,
-                                     "tool_name": values.get("tool_name"), "extra": extra})
+                                     "extra": extra})
                 if event is not None:
+                    event["tick"] = observed
+                    event["epoch"] = epoch
+                    if name in ("on_human_input_request", "on_human_input_resolved"):
+                        request = scoped_turn(request_id)
+                        if request is None:
+                            # Uncorrelated prompts cannot support a confirmed state.
+                            if namespace is not None:
+                                unknown_scope()
+                                return None
+                            event["kind"] = "unknown"
+                        else:
+                            event["request"] = request
                     enqueue(event)
             except Exception:
                 pass
@@ -119,9 +192,10 @@ def register(ctx):
         namespace = profile_namespace()
         if namespace is None:
             return
-        sender = OrderedSender()
+        unconfirmed = managed_scope_unconfirmed()
+        sender = OrderedSender(send=guarded_publish)
         ctx.on_unload(lambda: sender.close(wait_seconds=0))
-        register_observers(ctx, sender.enqueue, namespace)
+        register_observers(ctx, sender.enqueue, namespace, unconfirmed=unconfirmed)
     except Exception:
         if sender is not None:
             sender.close(wait_seconds=0)

@@ -49,9 +49,17 @@ Assert ((@($store.Snapshot($now.AddSeconds(5)) | Where-Object Provider -eq 'deep
 $store.MarkGap()
 Assert (@($store.Snapshot($now.AddSeconds(5)) | Where-Object Status -ne 'unknown').Count -eq 0) 'An unscoped channel gap must invalidate all active claims.'
 Assert (-not (@($store.Snapshot($now.AddSeconds(5)) | Where-Object Provider -eq 'deepseek')[0]).PlanConfirmed) 'A transport gap must invalidate old plan confirmation.'
-Apply $store '{"version":1,"provider":"hermes","session":"session_1","kind":"active"}' $now
+$freq = [System.Diagnostics.Stopwatch]::Frequency
+$ticks = [System.Diagnostics.Stopwatch]::GetTimestamp()
+$epoch = [long]([math]::Floor($ticks / $freq) * 1000000000 + (($ticks % $freq) * (1000000000.0 / $freq)))
+Start-Sleep -Milliseconds 2
+$ticks = [System.Diagnostics.Stopwatch]::GetTimestamp()
+$first = [long]([math]::Floor($ticks / $freq) * 1000000000 + (($ticks % $freq) * (1000000000.0 / $freq)))
+Apply $store ('{"version":1,"provider":"hermes","session":"session_1","kind":"started","turn":"turn_1","tick":' + $first + ',"epoch":' + $epoch + '}') $now
 Assert ((@($store.Snapshot($now.AddMinutes(30)) | Where-Object Provider -eq 'hermes')[0]).Status -eq 'unknown') 'Stale activity must become unconfirmed.'
-Apply $store '{"version":1,"provider":"hermes","session":"session_1","kind":"plan","steps":[]}' $now.AddHours(3)
+$ticks = [System.Diagnostics.Stopwatch]::GetTimestamp()
+$second = [long]([math]::Floor($ticks / $freq) * 1000000000 + (($ticks % $freq) * (1000000000.0 / $freq)))
+Apply $store ('{"version":1,"provider":"hermes","session":"session_1","kind":"plan","steps":[],"tick":' + $second + ',"epoch":' + $epoch + '}') $now.AddHours(3)
 Assert ((@($store.Snapshot($now.AddHours(3)) | Where-Object Provider -eq 'hermes')[0]).Status -eq 'unknown') 'A plan update alone cannot revive stale activity.'
 
 $kimi=[AITaskMonitor.ExternalProviders.StateStore]::new()

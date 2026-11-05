@@ -151,6 +151,45 @@ def _move_new(source, target):
         raise BundleError("unsupported-platform")
 
 
+def _acquire_lock(path):
+    """Hold an OS lock, released automatically even if the process is killed."""
+    _plain_path(path, directory=False, missing=True)
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except OSError:
+        raise BundleError("bundle-busy") from None
+    try:
+        opened, current = os.fstat(descriptor), path.lstat()
+        if (not stat.S_ISREG(opened.st_mode) or
+                (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
+            raise BundleError("bundle-busy")
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return descriptor
+    except (OSError, BundleError):
+        os.close(descriptor)
+        raise BundleError("bundle-busy") from None
+
+
+def _release_lock(descriptor):
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
 class ProviderBundle:
     def __init__(self, provider, profile):
         if provider not in _BUNDLES:
@@ -242,10 +281,7 @@ class ProviderBundle:
         self.parent.mkdir(mode=0o700, parents=False, exist_ok=True)
         _plain_path(self.parent, directory=True)
         lock = self.parent / ("." + self.spec["folder"] + ".lock")
-        try:
-            descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            raise BundleError("bundle-busy") from None
+        descriptor = _acquire_lock(lock)
         stage = None
         created = []
         try:
@@ -254,7 +290,9 @@ class ProviderBundle:
                 if any(existing["files"][name] != _digest(value) for name, value in values.items()):
                     raise BundleError("bundle-update-required")
                 return "staged"
-            stage = self.parent / (".aitm-stage-" + uuid.uuid4().hex)
+            # Hermes discovers even hidden directories under plugins/. Keep
+            # an interrupted stage outside that directory so it cannot load.
+            stage = self.profile / (".aitm-stage-" + uuid.uuid4().hex)
             stage.mkdir(mode=0o700)
             values[_SCOPE] = json.dumps({"namespace": uuid.uuid4().hex}).encode("ascii")
             for name, value in values.items():
@@ -275,24 +313,23 @@ class ProviderBundle:
             stage = None
             return "staged"
         finally:
-            os.close(descriptor)
-            if stage is not None:
-                _plain_path(stage, directory=True)
-                for target in created:
-                    _plain_path(target, directory=False)
-                    target.unlink()
-                stage.rmdir()
-            lock.unlink()
+            try:
+                if stage is not None:
+                    _plain_path(stage, directory=True)
+                    for target in created:
+                        _plain_path(target, directory=False)
+                        target.unlink()
+                    stage.rmdir()
+            finally:
+                # Never unlink the lock inode: another process may be waiting.
+                _release_lock(descriptor)
 
     def remove(self, before_commit=None):
         _plain_path(self.parent, directory=True, missing=True)
         if not self.parent.exists():
             return "absent"
         lock = self.parent / ("." + self.spec["folder"] + ".lock")
-        try:
-            descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            raise BundleError("bundle-busy") from None
+        descriptor = _acquire_lock(lock)
         try:
             marker = self._owned()
             if marker is None:
@@ -316,5 +353,4 @@ class ProviderBundle:
             self.folder.rmdir()
             return "absent"
         finally:
-            os.close(descriptor)
-            lock.unlink()
+            _release_lock(descriptor)
