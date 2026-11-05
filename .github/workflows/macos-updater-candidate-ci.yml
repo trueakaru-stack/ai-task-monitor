@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   updater-synthetic:
-    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[tests-only]') && contains(github.event.head_commit.message, '[updater-background-audit]') }}
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[tests-only]') && contains(github.event.head_commit.message, '[updater-background-clock-audit]') }}
     strategy:
       fail-fast: false
       matrix:
@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           mkdir -p "$RUNNER_TEMP/aitm-update-input"
-          for name in frozen-wip.patch.b64 hardening.patch.b64 redirect-test-fix.patch.b64 background-parser.patch.b64 candidate.sha256 ReleaseRedirectDiagnosticTests.swift; do
+          for name in frozen-wip.patch.b64 hardening.patch.b64 redirect-test-fix.patch.b64 background-parser.patch.b64 clock-test-fix.patch.b64 candidate.sha256 ReleaseRedirectDiagnosticTests.swift; do
             git show "$GITHUB_SHA:.github/updater-audit/$name" > "$RUNNER_TEMP/aitm-update-input/$name"
           done
           cd "$RUNNER_TEMP/aitm-update-input"
@@ -52,6 +52,7 @@ jobs:
             'bf9cb606149e6a4ca6eadff54d6cecf1938a040147f7e6240e9b87b4499f574a' 'hardening.patch.b64' \
             '7a53f005ef73dd8fa4501937c2a84995cc74e2fc13fe24417aff4da24a507c6f' 'redirect-test-fix.patch.b64' \
             '3b669e663b6ea33512c05ef7c60472e5b21ba34da5717e0e16d1599157ca57f9' 'background-parser.patch.b64' \
+            '9df9d4d022dd412b1a2864fb9262bcf51959e980b2d56b1d09fe8a1d8a6d7ff1' 'clock-test-fix.patch.b64' \
             '91ddc5ea89fd8b8279717966fc0e548812df3303963448130b13f3d37f9e33b2' 'candidate.sha256' \
             '5f1d4c865e72bc9e490ca17770a614e5fa1fc38da8e7c5589ce27fc546d600a5' 'ReleaseRedirectDiagnosticTests.swift' \
             | shasum -a 256 -c -
@@ -59,11 +60,13 @@ jobs:
           /usr/bin/base64 -D < hardening.patch.b64 > "$RUNNER_TEMP/aitm-hardening.patch"
           /usr/bin/base64 -D < redirect-test-fix.patch.b64 > "$RUNNER_TEMP/aitm-redirect-test-fix.patch"
           /usr/bin/base64 -D < background-parser.patch.b64 > "$RUNNER_TEMP/aitm-background-parser.patch"
+          /usr/bin/base64 -D < clock-test-fix.patch.b64 > "$RUNNER_TEMP/aitm-clock-test-fix.patch"
           printf '%s  %s\n' \
             '436a7815494753d4510b6e986bd762a49271acb2b1fe24bc0a5bb2fa7706134c' "$RUNNER_TEMP/aitm-frozen-wip.patch" \
             'da35492ce9177bc54474de61b6d46132819fcfbc402ffe07683dbc44974cc124' "$RUNNER_TEMP/aitm-hardening.patch" \
             '615f18743bad50c0f59913c3a0d401f135db8cbcc9aa08021c8570d3fd8cf0ec' "$RUNNER_TEMP/aitm-redirect-test-fix.patch" \
             'fed63fd1fe9fc7a7b5bbe7c7a3e26ca1bc85c188afac6e0ba4622b0953d14d7d' "$RUNNER_TEMP/aitm-background-parser.patch" \
+            'd71f6507ed83e7c9fd5cc9b412db62476ed172f0744b0e0ea754d5321c15a851' "$RUNNER_TEMP/aitm-clock-test-fix.patch" \
             | shasum -a 256 -c -
 
       - name: Checkout fixed baseline
@@ -120,6 +123,11 @@ jobs:
             'aeaa65e539f77fd599fc65ef1d29eccf5cb77cf80fe1cef44202620c934127be' macos/Sources/AITaskMonitor/TaskStore.swift \
             '20cf82abd4d900bedcaa8942ecf73c94f614c3b91a683eb206cd7f03004f6339' macos/Tests/AITaskMonitorTests/ReleaseUpdateCoordinatorTests.swift \
             | shasum -a 256 -c -
+          test "$(git apply --numstat "$RUNNER_TEMP/aitm-clock-test-fix.patch" | cut -f3)" = 'macos/Tests/AITaskMonitorTests/ReleaseUpdateCoordinatorTests.swift'
+          git apply --check "$RUNNER_TEMP/aitm-clock-test-fix.patch"
+          git apply "$RUNNER_TEMP/aitm-clock-test-fix.patch"
+          printf '%s  %s\n' '35ea8e46b7e905458c6cccaed36c5a7bf0a7bcc22beee2d6af6260cc2e5251b7' \
+            macos/Tests/AITaskMonitorTests/ReleaseUpdateCoordinatorTests.swift | shasum -a 256 -c -
           cp "$INPUT/ReleaseRedirectDiagnosticTests.swift" macos/Tests/AITaskMonitorTests/ReleaseRedirectDiagnosticTests.swift
           printf '%s  %s\n' '5f1d4c865e72bc9e490ca17770a614e5fa1fc38da8e7c5589ce27fc546d600a5' \
             macos/Tests/AITaskMonitorTests/ReleaseRedirectDiagnosticTests.swift | shasum -a 256 -c -
