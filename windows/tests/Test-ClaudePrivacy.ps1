@@ -8,14 +8,23 @@ if (-not $expectedRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnore
 }
 [void][IO.Directory]::CreateDirectory($expectedRoot)
 $previousLocalAppData = $env:LOCALAPPDATA
+$previousUserProfile = $env:USERPROFILE
 $previousAudit = $env:AI_TASK_MONITOR_AUDIT
+$testMutex = 'AITM.Test.' + [Guid]::NewGuid().ToString('N')
+$testPipe = 'AITM.Test.' + [Guid]::NewGuid().ToString('N')
 
 try {
     $env:LOCALAPPDATA = $expectedRoot
+    $env:USERPROFILE = $expectedRoot
     $env:AI_TASK_MONITOR_AUDIT = "1"
     $appRoot = Join-Path $PSScriptRoot "..\app"
     . (Join-Path $appRoot "ClaudeReaderCore.ps1")
-    $hook = Join-Path $appRoot "ClaudeTaskHook.ps1"
+    $hookDirectory = Join-Path $expectedRoot "hook"
+    [void][IO.Directory]::CreateDirectory($hookDirectory)
+    foreach ($fileName in @("ClaudeTaskHook.ps1", "ClaudeLoopClient.ps1")) {
+        Copy-Item -LiteralPath (Join-Path $appRoot $fileName) -Destination (Join-Path $hookDirectory $fileName)
+    }
+    $hook = Join-Path $hookDirectory "ClaudeTaskHook.ps1"
     $secret = "SYNTHETIC_ONLY_SECRET_9D42EBF6"
     $dataDirectory = Join-Path $expectedRoot "CodexTaskProgress"
     [void][IO.Directory]::CreateDirectory($dataDirectory)
@@ -31,7 +40,7 @@ try {
             tool_name = "Read"
             tool_input = @{ taskId = "step-1"; subject = "Synthetic plan step"; status = "in_progress" }
         } | ConvertTo-Json -Compress -Depth 4
-        $inputEvent | & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hook
+        $inputEvent | & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hook -LogTestMutex $testMutex -LoopTestPipe $testPipe
         if ($LASTEXITCODE -ne 0) { throw "The Claude hook failed for $eventName." }
     }
 
@@ -46,7 +55,7 @@ try {
         if ($null -ne $record.PSObject.Properties["cwd"]) { throw "The hook event contains a working-directory path." }
     }
     $oversized='{"hook_event_name":"UserPromptSubmit","prompt":"'+('x' * 1050000)+'"}'
-    $oversized | & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hook
+    $oversized | & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hook -LogTestMutex $testMutex -LoopTestPipe $testPipe
     if ($LASTEXITCODE -ne 0) { throw "The hook did not reject oversized input safely." }
     if ([IO.File]::ReadAllText($eventFile) -ne $stored) { throw "Oversized hook input must not create an event." }
 
@@ -125,6 +134,7 @@ if ($tasks.Count -ne 1 -or -not $tasks[0].Active) { throw "A new event must rest
     Write-Output "Claude privacy: prompt excluded, oversized input rejected, legacy title neutral, and plan step preserved."
 } finally {
     $env:LOCALAPPDATA = $previousLocalAppData
+    $env:USERPROFILE = $previousUserProfile
     $env:AI_TASK_MONITOR_AUDIT = $previousAudit
     if (Test-Path -LiteralPath $expectedRoot) {
         $resolved = (Resolve-Path -LiteralPath $expectedRoot).Path

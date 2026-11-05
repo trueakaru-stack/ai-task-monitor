@@ -2167,8 +2167,10 @@ function Manual-Tasks($sessions) {
  return $map
 }
 
-function Read-TailText([string]$path,[long]$maxBytes) {
- $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+function Read-TailText([string]$path,[long]$maxBytes,[bool]$allowDelete=$false) {
+ $sharing=[IO.FileShare]::ReadWrite
+ if($allowDelete){$sharing=$sharing -bor [IO.FileShare]::Delete}
+ $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
  try {
   $bytes=[Math]::Min($maxBytes,$stream.Length); [void]$stream.Seek(-$bytes,[IO.SeekOrigin]::End)
   $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true,4096,$true)
@@ -2487,12 +2489,12 @@ function Claude-Tasks {
  catch [IO.FileNotFoundException]{if($script:lastClaudeTasks.Count -gt 0){throw};return @()}
  catch [IO.DirectoryNotFoundException]{if($script:lastClaudeTasks.Count -gt 0){throw};return @()}
  if(($attributes -band [IO.FileAttributes]::Directory) -ne 0){throw "Claude event source is not a file."}
- $tail=Read-TailText $claudeEventPath 4194304
+ $tail=Read-TailText $claudeEventPath 4194304 $true
  $legacyTail=""
  if($claudeLegacyEventPath){
   try{
    if(Test-Path -LiteralPath $claudeLegacyEventPath -PathType Leaf -ErrorAction Stop){
-    $legacyTail=Read-TailText $claudeLegacyEventPath 4194304
+    $legacyTail=Read-TailText $claudeLegacyEventPath 4194304 $true
    }
   }catch{}
  }
