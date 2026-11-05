@@ -43,8 +43,11 @@ jobs:
         run: |
           node integration-tests/Test-ExternalProviderEvents.mjs
           node integration-tests/Test-ExternalProviderObservers.mjs
+          node integration-tests/Test-ProviderBundles.mjs
           node integration-tests/Test-DeepSeekCordisRuntime.mjs "$RUNNER_TEMP/aitm-dsh-upstream/node_modules"
           node integration-tests/Test-DeepSeekIntegration.mjs "$AITM_DSH_ANCHOR" "$AITM_PNPM_SCRIPT"
+          python3 -B integration-tests/test_external_provider_hooks.py
+          python3 -B integration-tests/test_provider_bundle.py
       - name: Render native source-status previews
         working-directory: macos
         run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/ai-task-monitor-previews"

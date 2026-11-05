@@ -14,7 +14,8 @@ final class DeepSeekIntegrationTests: XCTestCase {
         guard let anchorPath = environment["AITM_DSH_ANCHOR"], let pnpmPath = environment["AITM_PNPM_SCRIPT"],
               let nodePath = environment["AITM_NODE"] else { throw XCTSkip("Isolated upstream DeepSeek fixture is unavailable.") }
         let manager = FileManager.default
-        let temp = manager.temporaryDirectory.resolvingSymlinksInPath().standardizedFileURL
+        let temp = URL(fileURLWithPath: environment["RUNNER_TEMP"] ?? manager.temporaryDirectory.path,
+                       isDirectory: true).resolvingSymlinksInPath()
         let root = temp.appendingPathComponent("aitm-swift-dsh-" + UUID().uuidString, isDirectory: true)
         try manager.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? manager.removeItem(at: root) }

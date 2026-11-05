@@ -1,0 +1,12 @@
+name: ai-task-monitor
+version: "0.1.0"
+description: Local, privacy-minimal activity observer for AI Task Monitor
+provides_hooks:
+  - pre_api_request
+  - post_llm_call
+  - post_tool_call
+  - on_session_start
+  - on_session_end
+  - on_session_finalize
+  - on_human_input_request
+  - on_human_input_resolved
