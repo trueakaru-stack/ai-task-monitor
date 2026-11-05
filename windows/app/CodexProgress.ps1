@@ -16,6 +16,9 @@
  [switch]$PreviewSettingsBackHover,
  [switch]$PreviewSettingsEnd,
  [switch]$PreviewSources,
+ [ValidateSet('','disconnected','connected','error','partial')][string]$PreviewCloudState = '',
+ [switch]$PreviewCloudUiTest,
+ [switch]$PreviewCloudTask,
  [switch]$PreviewDeepSeekUiTest,
  [switch]$PreviewDeepSeekErrorUiTest,
  [switch]$PreviewAbout,
@@ -77,6 +80,9 @@ if($PreviewJournalRecoveryUiTest){
 }
 if($PreviewIconUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw "Icon UI tests require a synthetic snapshot."}
 if($PreviewSources -and (-not $SnapshotFile -or -not $SettingsSnapshotFile -or $PreviewActiveTasks -lt 0)){throw 'Source previews require synthetic tasks and settings snapshots.'}
+if($PreviewCloudState -and -not $PreviewSources){throw 'Cloud source previews require synthetic source snapshots.'}
+if($PreviewCloudUiTest -and (-not $PreviewSources -or -not $PreferencesFile)){throw 'Cloud UI tests require synthetic sources and isolated preferences.'}
+if($PreviewCloudTask -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw 'Cloud task previews require synthetic tasks and a snapshot.'}
 if($PreviewDeepSeekUiTest -and -not $PreviewSources){throw 'DeepSeek UI tests require a synthetic source preview.'}
 if($PreviewDeepSeekErrorUiTest -and -not $PreviewDeepSeekUiTest){throw 'DeepSeek error previews require the synthetic DeepSeek UI test.'}
 if(($PreviewManyProviders -or $PreviewTabsUiTest) -and (-not $SnapshotFile -or -not $PreviewManyProviders -or $PreviewActiveTasks -ne 6)){throw 'Provider tab previews require six synthetic tasks and a snapshot.'}
@@ -181,6 +187,15 @@ try{
  $script:deepSeekController=New-DeepSeekMonitorController -AppRoot $PSScriptRoot
  $script:deepSeekModulesAvailable=$true
 }catch{}
+$script:codexCloudModulesAvailable=$false
+$script:codexCloudController=$null
+$script:codexCloudPreferenceError=''
+try{
+ if(-not ('AITaskMonitor.CodexCloud.Command' -as [type])){Add-Type -Path (Join-Path $PSScriptRoot 'integrations\CodexCloudProcess.cs') -ErrorAction Stop}
+ . (Join-Path $PSScriptRoot 'integrations\CodexCloudRuntime.ps1')
+ $script:codexCloudController=New-CodexCloudController
+ $script:codexCloudModulesAvailable=$true
+}catch{}
 $script:currentVersion='0.2.6-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
@@ -214,6 +229,13 @@ $script:translations=@{
  'Светлая'='Light'
  'Язык'='Language'
  'Источники'='Sources'
+ 'Использует установленный Codex, его вход в аккаунт и интернет. Статус облачных задач может быть неподтверждённым.'='Uses the installed Codex, its signed-in account and the internet. Cloud task status may be unconfirmed.'
+ 'Не удалось получить облачные задачи. Проверьте установку Codex, вход и интернет.'='Could not retrieve cloud tasks. Check the Codex installation, sign-in and internet connection.'
+ 'Показаны не все облачные задачи.'='Not all cloud tasks are shown.'
+ 'Не удалось сохранить настройку облака.'='Could not save the cloud setting.'
+ 'Не удалось сохранить настройку. Облако может включиться после перезапуска.'='Could not save the setting. Cloud monitoring may resume after restart.'
+ 'Проверка'='Checking'
+ 'Облако: '='Cloud: '
  'Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии.'='The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Desktop or Claude Code after connecting. Only local sessions are monitored for now.'
  'Приложение добавит локальный плагин OpenCode. Поддерживаются совместимые версии 1 начиная с 1.18.29 и версия 2. После подключения перезапустите OpenCode.'='The app adds a local OpenCode plugin. Compatible versions 1.18.29 and later within version 1, and version 2, are supported. Restart OpenCode after connecting.'
  'Не удалось подтвердить установку или совместимость OpenCode'='Could not confirm the OpenCode installation or compatibility'
@@ -708,6 +730,15 @@ function Tr([string]$text){
         <Border Height="1" Background="{DynamicResource Divider}"/>
         <Grid Height="50">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <TextBlock Text="Codex Cloud" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimary}"/>
+         <TextBlock x:Name="CodexCloudSourceStatus" Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
+         <Button x:Name="CodexCloudSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
+        </Grid>
+        <TextBlock Margin="0,0,0,12" Text="Использует установленный Codex, его вход в аккаунт и интернет. Статус облачных задач может быть неподтверждённым." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+        <TextBlock x:Name="CodexCloudSourceError" Visibility="Collapsed" Margin="0,0,0,12" TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+        <Border Height="1" Background="{DynamicResource Divider}"/>
+        <Grid Height="50">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
          <TextBlock Text="Claude Code" VerticalAlignment="Center" FontSize="13" Foreground="{DynamicResource TextPrimary}"/>
          <TextBlock x:Name="ClaudeSourceStatus" Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
          <Button x:Name="ClaudeSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
@@ -1064,6 +1095,9 @@ $russianLanguageButton = $window.FindName("RussianLanguageButton")
 $englishLanguageButton = $window.FindName("EnglishLanguageButton")
 $languageSettingsError = $window.FindName("LanguageSettingsError")
 $codexSourceStatus = $window.FindName("CodexSourceStatus")
+$codexCloudSourceStatus = $window.FindName("CodexCloudSourceStatus")
+$codexCloudSourceAction = $window.FindName("CodexCloudSourceAction")
+$codexCloudSourceError = $window.FindName("CodexCloudSourceError")
 $claudeSourceStatus = $window.FindName("ClaudeSourceStatus")
 $claudeSourceAction = $window.FindName("ClaudeSourceAction")
 $openCodeSourceStatus = $window.FindName("OpenCodeSourceStatus")
@@ -1227,6 +1261,17 @@ function Save-LanguageMode([string]$mode) {
  return (Save-DisplayPreference 'language' $mode)
 }
 
+function Load-CodexCloudEnabled {
+ try{
+  if(Test-Path -LiteralPath $script:settingsPath -PathType Leaf){
+   $saved=Get-Content -LiteralPath $script:settingsPath -Raw -Encoding UTF8|ConvertFrom-Json -ErrorAction Stop
+   $value=Prop $saved 'codexCloudEnabled' $false
+   if($value -is [bool]){return $value}
+  }
+ }catch{}
+ return $false
+}
+
 function Load-ClaudeRetentionSettings {
  $days=7;$maximum=10
  try{
@@ -1367,6 +1412,7 @@ function Claude-InstallationState([string]$profile,[string]$appData,[string]$loc
 
 function Update-SourceSettings {
  $codexSourceStatus.Text=Tr $(if($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
+ Update-CodexCloudSourceSettings
  Update-OpenCodeSourceSettings
  Update-DeepSeekSourceSettings
  $installation=Claude-InstallationState $env:USERPROFILE $env:APPDATA $env:LOCALAPPDATA $env:PATH
@@ -1392,6 +1438,21 @@ function Update-SourceSettings {
  if($connectionState -eq "partial"){$claudeSourceAction.ToolTip=Tr "Подключение неполное. Нажмите, чтобы восстановить."}
  elseif($installation -eq 'unconfirmed' -and -not $connected){$claudeSourceAction.ToolTip=Tr 'Не удалось подтвердить установку Claude Code'}
  [Windows.Automation.AutomationProperties]::SetName($claudeSourceAction,$claudeSourceAction.Content+" Claude Code")
+}
+
+function Update-CodexCloudSourceSettings {
+ $codexCloudSourceAction.Visibility='Visible';$codexCloudSourceAction.IsEnabled=$script:codexCloudModulesAvailable
+ $codexCloudSourceAction.ToolTip=$null;$codexCloudSourceError.Visibility='Collapsed'
+ $controller=$script:codexCloudController
+ $enabled=$null -ne $controller -and $controller.Enabled
+ $codexCloudSourceAction.Content=Tr $(if($enabled){'Отключить'}else{'Подключить'})
+ $codexCloudSourceAction.Tag=if($enabled){'Remove'}else{'Install'}
+ $codexCloudSourceStatus.Text=Tr $(if(-not $script:codexCloudModulesAvailable){'Нет данных'}elseif(-not $enabled){'Не подключён'}elseif($controller.LastError){'Нет данных'}elseif(-not $controller.Scanned){'Проверка'}else{'Подключён'})
+ $message=if($script:codexCloudPreferenceError){$script:codexCloudPreferenceError}
+  elseif(-not $script:codexCloudModulesAvailable -or ($enabled -and $controller.LastError)){'Не удалось получить облачные задачи. Проверьте установку Codex, вход и интернет.'}
+  elseif($enabled -and $controller.Partial){'Показаны не все облачные задачи.'}else{''}
+ if($message){$codexCloudSourceError.Text=Tr $message;$codexCloudSourceError.Visibility='Visible'}
+ [Windows.Automation.AutomationProperties]::SetName($codexCloudSourceAction,$codexCloudSourceAction.Content+' Codex Cloud')
 }
 
 function Update-OpenCodeSourceSettings {
@@ -2037,7 +2098,7 @@ function Claude-Tasks {
 }
 
 function Source-Snapshot {
- $codex=@(); $claude=@(); $external=@(); $unavailable=New-Object Collections.Generic.List[string]
+ $codex=@(); $claude=@(); $external=@(); $cloud=@(); $unavailable=New-Object Collections.Generic.List[string]
  try{$codex=@(Codex-Tasks);$script:lastCodexTasks=$codex}catch{[void]$unavailable.Add("Codex");$codex=@(Unconfirmed-Tasks $script:lastCodexTasks)}
  try{
   $connectionState=if($ClaudeEventFile){"connected"}else{Claude-ConnectionState}
@@ -2045,6 +2106,12 @@ function Source-Snapshot {
   elseif($connectionState -eq "partial"){$claude=@(Unconfirmed-Tasks @(Claude-Tasks));$script:lastClaudeTasks=$claude;[void]$unavailable.Add("Claude Code")}
   else{$script:lastClaudeTasks=@()}
  }catch{[void]$unavailable.Add("Claude Code");$claude=@(Unconfirmed-Tasks $script:lastClaudeTasks)}
+ if($script:codexCloudModulesAvailable -and $script:codexCloudController.Enabled){
+  try{Update-CodexCloudController $script:codexCloudController}catch{$script:codexCloudController.LastError='unavailable'}
+  try{$cloud=@(ConvertTo-CodexCloudMonitorTasks $script:codexCloudController.Tasks (Tr 'Облако: ') (Tr 'Задача Codex') 'Статус не подтверждён')}
+  catch{$script:codexCloudController.LastError='unavailable'}
+  if($script:showingSettings){Update-CodexCloudSourceSettings}
+ }
  if($script:externalProviderModulesAvailable){
   $connection=try{Get-OpenCodeConnectionState -AppRoot $PSScriptRoot}catch{'error'}
   $connections=@{opencode=$connection}
@@ -2069,7 +2136,7 @@ function Source-Snapshot {
    try{Stop-ExternalProviderController $script:externalProviderController}catch{}
   }
  }
- return [PSCustomObject]@{Tasks=@($codex+$claude+$external);Unavailable=$unavailable.ToArray()}
+ return [PSCustomObject]@{Tasks=@($codex+$claude+$external+$cloud);Unavailable=$unavailable.ToArray()}
 }
 
 function Sync-ClaudeLoopChannel {
@@ -3119,6 +3186,10 @@ function Update-View {
     $previewTime=[DateTime]::Now.AddSeconds(-$i)
     $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;ActivityGenerated=($PreviewManyProviders -and $i -ge 2);Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр";PlanConfirmed=(-not ($PreviewPlanUnconfirmed -and $i -eq 0))}
    }
+   if($PreviewCloudTask -and $script:codexCloudModulesAvailable){
+    $fixture=[PSCustomObject]@{Id='codex-cloud:synthetic';Title='Synthetic cloud task';State='pending';Updated=[DateTimeOffset]::UtcNow}
+    $allTasks+=@(ConvertTo-CodexCloudMonitorTasks @($fixture) (Tr 'Облако: ') (Tr 'Задача Codex') 'Статус не подтверждён')
+   }
   }
   $ordered=Prioritize-Tasks $allTasks $previousAllTasks $script:compactTaskId
   $allTasks=@($ordered.Tasks);$script:compactTaskId=[string]$ordered.SelectedId
@@ -3128,7 +3199,7 @@ function Update-View {
   Render-ProviderTabs $allTasks
   $tasks=@(Filtered-Tasks $allTasks)
   $script:lastTasks=$tasks
-  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
+  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
   if($next -ne $script:fingerprint){
    $script:fingerprint=$next; $tasksPanel.Children.Clear()
    if($script:sourceErrors.Count -gt 0){$warning=Text ((Tr "Нет данных от ")+($script:sourceErrors -join ", ")) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
@@ -3210,6 +3281,22 @@ $lightThemeButton.Add_Click({Apply-Theme "light" $true;Update-View})
 $systemLanguageButton.Add_Click({Apply-Language 'system' $true})
 $russianLanguageButton.Add_Click({Apply-Language 'ru' $true})
 $englishLanguageButton.Add_Click({Apply-Language 'en' $true})
+$codexCloudSourceAction.Add_Click({
+ if(-not $script:codexCloudModulesAvailable){return}
+ $enable=-not $script:codexCloudController.Enabled
+ if($enable){
+  if(Save-DisplayPreference 'codexCloudEnabled' $true){
+   $script:codexCloudPreferenceError=''
+   Set-CodexCloudControllerEnabled $script:codexCloudController $true
+  }else{$script:codexCloudPreferenceError='Не удалось сохранить настройку облака.'}
+ }else{
+  Set-CodexCloudControllerEnabled $script:codexCloudController $false
+  if(Save-DisplayPreference 'codexCloudEnabled' $false){$script:codexCloudPreferenceError=''}
+  else{$script:codexCloudPreferenceError='Не удалось сохранить настройку. Облако может включиться после перезапуска.'}
+ }
+ Update-CodexCloudSourceSettings
+ Update-View
+})
 $claudeSourceAction.Add_Click({
  $mode=[string]$claudeSourceAction.Tag
  $configScript=Join-Path $PSScriptRoot "Configure-ClaudeIntegration.ps1"
@@ -3253,7 +3340,8 @@ $journalCloseButton.Add_Click({$window.Close()})
 $windowFrame.Add_SizeChanged({Update-SquircleGeometry})
 $tray=New-Object Windows.Forms.NotifyIcon; $tray.Icon=if($null -ne $script:applicationIcon){$script:applicationIcon}else{[Drawing.SystemIcons]::Application}; $tray.Text="AI task monitor"; $tray.Visible=$true; $tray.Add_DoubleClick({Restore-Window})
 $menu=New-Object Windows.Forms.ContextMenuStrip; $script:trayShowMenu=$menu.Items.Add("Развернуть"); $script:trayExitMenu=$menu.Items.Add("Выход"); $script:trayShowMenu.Add_Click({Restore-Window;Set-CompactMode $false}); $script:trayExitMenu.Add_Click({$window.Close()}); $tray.ContextMenuStrip=$menu
-$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
+$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};if($null -ne $script:updateClient){$script:updateClient.Dispose();$script:updateClient=$null};if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
+if($script:codexCloudModulesAvailable -and -not $SnapshotFile -and $PreviewActiveTasks -lt 0 -and (Load-CodexCloudEnabled)){Set-CodexCloudControllerEnabled $script:codexCloudController $true}
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
 if($script:diagnosticModulesAvailable -and (($PreviewActiveTasks -lt 0 -and -not $SnapshotFile) -or $DiagnosticDirectory)){
@@ -3664,6 +3752,24 @@ if ($SnapshotFile) {
  }
  if($SettingsSnapshotFile -or $JournalDropdownSnapshotFile){
   Show-SettingsView
+  if($PreviewCloudUiTest){
+   if(-not $script:codexCloudModulesAvailable){throw 'Cloud UI fixture requires its runtime module.'}
+   Set-CodexCloudControllerEnabled $script:codexCloudController $false
+   Update-CodexCloudSourceSettings
+   $codexCloudSourceAction.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+   if(-not $script:codexCloudController.Enabled -or -not (Load-CodexCloudEnabled) -or $null -ne $script:codexCloudController.Request){throw 'Cloud opt-in did not save safely in the synthetic preview.'}
+   $codexCloudSourceAction.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+   if($script:codexCloudController.Enabled -or (Load-CodexCloudEnabled)){throw 'Cloud disconnect did not save in the synthetic preview.'}
+   Write-Output 'Codex cloud: isolated opt-in and disconnect controls verified.'
+  }
+  if($PreviewCloudState){
+   if(-not $script:codexCloudModulesAvailable){throw 'Cloud preview requires its runtime module.'}
+   $script:codexCloudController.Enabled=$PreviewCloudState -ne 'disconnected'
+   $script:codexCloudController.Scanned=$PreviewCloudState -in @('connected','partial')
+   $script:codexCloudController.LastError=if($PreviewCloudState -eq 'error'){'unavailable'}else{''}
+   $script:codexCloudController.Partial=$PreviewCloudState -eq 'partial'
+   Update-CodexCloudSourceSettings
+  }
   if($PreviewDeepSeekUiTest){
    if(-not $script:deepSeekModulesAvailable){throw 'DeepSeek UI fixture requires its runtime module.'}
    $script:deepSeekController.Scanned=$true;$script:deepSeekController.LastError=''
@@ -3686,8 +3792,10 @@ if ($SnapshotFile) {
   if($PreviewSettingsBackHover){$settingsBackButton.Background=Brush $script:palette.Hover}
   $window.UpdateLayout()
   if($PreviewSources){
-   $point=$openCodeSourceAction.TranslatePoint([Windows.Point]::new(0,0),$settingsScroll)
-   $settingsScroll.ScrollToVerticalOffset([Math]::Max(0,$settingsScroll.VerticalOffset+$point.Y-290))
+   $target=if($PreviewCloudState -or $PreviewCloudUiTest){$codexCloudSourceAction}else{$openCodeSourceAction}
+   $targetY=if($PreviewCloudState -or $PreviewCloudUiTest){140}else{290}
+   $point=$target.TranslatePoint([Windows.Point]::new(0,0),$settingsScroll)
+   $settingsScroll.ScrollToVerticalOffset([Math]::Max(0,$settingsScroll.VerticalOffset+$point.Y-$targetY))
    $window.Dispatcher.Invoke([Action]{},[Windows.Threading.DispatcherPriority]::ApplicationIdle);$window.UpdateLayout()
   }
   if($PreviewJournalClearConfirmation){$journalClearConfirmation.Visibility="Visible";Update-JournalSettings;$window.UpdateLayout()}

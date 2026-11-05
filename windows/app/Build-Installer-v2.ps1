@@ -58,6 +58,8 @@ $arguments = @(
     "/resource:$(Join-Path $source 'integrations\provider-transport.mjs'),integrations.provider-transport.mjs",
     "/resource:$(Join-Path $source 'integrations\opencode-entry.js'),integrations.opencode-entry.js",
     "/resource:$(Join-Path $source 'integrations\DeepSeekRuntime.ps1'),integrations.DeepSeekRuntime.ps1",
+    "/resource:$(Join-Path $source 'integrations\CodexCloudRuntime.ps1'),integrations.CodexCloudRuntime.ps1",
+    "/resource:$(Join-Path $source 'integrations\CodexCloudProcess.cs'),integrations.CodexCloudProcess.cs",
     "/resource:$(Join-Path $source 'integrations\deepseek-integration.mjs'),integrations.deepseek-integration.mjs",
     "/resource:$(Join-Path $source 'integrations\deepseek-setup.mjs'),integrations.deepseek-setup.mjs",
     "/resource:$(Join-Path $source 'integrations\deepseek-plugin.js'),integrations.deepseek-plugin.js",

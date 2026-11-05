@@ -10,6 +10,7 @@ if ($null -eq $definition) { throw 'The source settings function is missing.' }
 
 $checks = @'
 function Tr([string]$value) { return $value }
+function Update-CodexCloudSourceSettings {}
 function Update-OpenCodeSourceSettings {}
 function Update-DeepSeekSourceSettings {}
 function Claude-InstallationState { return $script:installationFixture }
