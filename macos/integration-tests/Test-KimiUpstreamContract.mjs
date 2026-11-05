@@ -40,7 +40,23 @@ try {
   assert.match(lifecycle, /event\.waitUntil\(this\.triggerSessionEnd/);
   const manifest = JSON.parse(await readFile(new URL('../integrations/kimi-plugin/kimi.plugin.json', import.meta.url)));
   assert.ok(!manifest.hooks.some(item => ['SessionStart', 'SessionEnd'].includes(item.event)));
-  console.log('Kimi 2.5.0 upstream contract: numeric turn ID and lifecycle wait boundaries verified.');
+  const calls = [];
+  const delayedHook = async (_host, _command, payload) => {
+    await new Promise(resolve => setTimeout(resolve, payload.hook_event_name === 'PermissionRequest' ? 40 : 0));
+    calls.push(payload);
+    return { action: 'allow' };
+  };
+  const matching = between('function indexHooks(hooks) {', '\nvar DEFAULT_HOOK_TIMEOUT_SECONDS;');
+  const matcher = Function('runHook', 'DEFAULT_HOOK_TIMEOUT_SECONDS', matching + '\nreturn { indexHooks, runMatchedHooks };')
+    (delayedHook, 30);
+  const indexed = matcher.indexHooks(manifest.hooks);
+  const details = { sessionId: 'synthetic-session', inputData: { id: 'approval-1', agentId: 'main', turnId: 7 } };
+  const requested = matcher.runMatchedHooks({}, indexed, 'PermissionRequest', details);
+  const resolved = matcher.runMatchedHooks({}, indexed, 'PermissionResult', details);
+  await Promise.all([requested, resolved]);
+  assert.deepEqual(calls.map(item => item.hook_event_name), ['PermissionResult', 'PermissionRequest']);
+  assert.ok(calls.every(item => item.turn_id === 7 && item.agent_id === 'main' && !Object.hasOwn(item, 'time')));
+  console.log('Kimi 2.5.0 upstream contract: numeric IDs, lifecycle waits and reordered passive events verified.');
 } finally {
   const rel = relative(temp, home);
   if (await realpath(home) !== home || !rel.startsWith('aitm-kimi-contract-') || rel.includes(sep)) throw Error('Unsafe fixture cleanup.');
