@@ -19,7 +19,6 @@ jobs:
     timeout-minutes: 15
     env:
       AITM_LAYOUT_SYNTHETIC_CI: "1"
-      AITM_LAYOUT_SYNTHETIC_ROOT: ${{ runner.temp }}/aitm-layout-shape-shadow
     steps:
       - name: Checkout the triggering commit in the disposable runner
         uses: actions/checkout@v4
@@ -28,6 +27,8 @@ jobs:
       - name: Copy only the synthetic audit tests
         id: copy
         shell: bash
+        env:
+          AITM_LAYOUT_SYNTHETIC_ROOT: ${{ runner.temp }}/aitm-layout-shape-shadow
         run: |
           set -euo pipefail
           test "$GITHUB_ACTIONS" = true
@@ -41,6 +42,7 @@ jobs:
         working-directory: audit-checkout/macos
         env:
           AITM_LAYOUT_EXPORT_SQUIRCLE: "1"
+          AITM_LAYOUT_SYNTHETIC_ROOT: ${{ runner.temp }}/aitm-layout-shape-shadow
         run: |
           set -euo pipefail
           swift test --filter SquirclePathAuditTests
@@ -50,6 +52,7 @@ jobs:
         working-directory: audit-checkout/macos
         env:
           AITM_LAYOUT_CAPTURE_OWN_WINDOW: "1"
+          AITM_LAYOUT_SYNTHETIC_ROOT: ${{ runner.temp }}/aitm-layout-shape-shadow
         run: |
           set -euo pipefail
           swift test --filter WindowShadowAuditTests
