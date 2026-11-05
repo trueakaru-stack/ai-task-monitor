@@ -4,6 +4,7 @@ using System.Text.Json;
 using AITaskMonitor.ClaudeHook;
 
 if (args.Length != 3) throw new ArgumentException("Expected synthetic hook path, work directory and Windows PowerShell path.");
+ClaudeHookInputReaderTests.RunAsync().GetAwaiter().GetResult();
 return HookChecks.Run(Path.GetFullPath(args[0]), Path.GetFullPath(args[1]), Path.GetFullPath(args[2]));
 
 static class HookChecks
