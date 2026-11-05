@@ -40,6 +40,7 @@ extension EnvironmentValues {
 
 struct SettingsView: View {
     @EnvironmentObject private var store: TaskStore
+    @Environment(\.colorScheme) private var colorScheme
     @AppStorage("appearanceMode") private var appearanceRaw = AppearanceMode.system.rawValue
     @AppStorage("languageMode") private var languageRaw = AppLanguage.system.rawValue
     @State private var confirmsJournalClear = false
@@ -181,7 +182,7 @@ struct SettingsView: View {
                             VStack(alignment: .leading, spacing: 5) {
                                 Text("Hermes Agent").font(.system(size: 13, weight: .medium))
                                 Text(tr("Проверено с исходной установкой Hermes Agent v0.22.7. Выберите профиль и подготовьте плагин. Полностью закройте Hermes и его фоновые службы, затем выполните команду включения в терминале. Перед запуском менеджера команда локально проверяет файлы .env, которые могут содержать ключи; сама проверка не сохраняет, не выводит и не передаёт их. После запуска монитора или повторного подключения источника дождитесь статуса «Плагин включён в локальных настройках», затем запустите или перезапустите Hermes. Прежние задачи не показываются. Для отключения снова закройте Hermes и его фоновые службы и выполните команду отключения.", "Tested with a source installation of Hermes Agent v0.22.7. Select a profile and prepare the plugin. Fully close Hermes and its background services, then run the enable command in Terminal. Before starting the manager, the command checks local .env files that may contain keys; the check itself does not save, display or transmit them. After starting the monitor or reconnecting the source, wait for ‘Plugin enabled in local settings’, then start or restart Hermes. Previous tasks are not shown. To disable, close Hermes and its background services again, then run the disable command."))
-                                    .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                    .font(.system(size: 11.5)).foregroundStyle(colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
                                 Text(store.hermesStatusMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
                                 Picker(tr("Профиль", "Profile"), selection: $store.selectedHermesProfile) {
                                     Text(tr("Выберите профиль", "Select a profile")).tag("")

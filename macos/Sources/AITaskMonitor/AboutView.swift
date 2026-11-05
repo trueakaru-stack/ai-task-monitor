@@ -27,6 +27,7 @@ enum FeedbackDraft {
 
 struct AboutView: View {
     @EnvironmentObject private var store: TaskStore
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -60,7 +61,7 @@ struct AboutView: View {
     }
 
     private func description(_ text: String) -> some View {
-        Text(text).font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary)
+        Text(text).font(.system(size: 12)).foregroundStyle(colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 }
