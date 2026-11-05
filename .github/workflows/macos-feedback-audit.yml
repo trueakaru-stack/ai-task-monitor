@@ -134,7 +134,7 @@ jobs:
         run: |
           set -euo pipefail
           ./scripts/build-app.sh
-          lipo -verify_arch arm64 x86_64 "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
+          lipo "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor" -verify_arch arm64 x86_64
           lipo -archs "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor" > "$RUNNER_TEMP/aitm-candidate-result/ARCHITECTURES.txt"
       - name: Smoke test application and hook
         id: smoke
