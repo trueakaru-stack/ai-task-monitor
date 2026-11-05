@@ -1,0 +1,74 @@
+import assert from 'node:assert/strict';
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { inspectKimiConnection } from '../integrations/kimi-integration.mjs';
+
+const temp = await realpath(tmpdir());
+const fixture = await mkdtemp(join(temp, 'aitm-kimi-connection-'));
+const assets = await realpath(join(dirname(dirname(fileURLToPath(import.meta.url))), 'integrations', 'kimi-plugin'));
+const home = join(fixture, 'kimi-home');
+const packageDir = join(fixture, 'kimi-package');
+const anchor = join(packageDir, 'package.json');
+const registry = join(home, 'plugins', 'installed.json');
+const managed = join(home, 'plugins', 'managed', 'ai-task-monitor');
+const options = { home, assets, installAnchor: anchor };
+try {
+  await mkdir(home);
+  await mkdir(packageDir);
+  await writeFile(anchor, JSON.stringify({ name: '@moonshot-ai/kimi-code', version: '2.5.0' }));
+  assert.equal(await inspectKimiConnection(options), 'disconnected');
+  await assert.rejects(readFile(registry), { code: 'ENOENT' });
+  await mkdir(dirname(registry), { recursive: true });
+  const unrelated = { id: 'foreign', root: 'SECRET_PATH', enabled: true, source: 'SECRET_URL' };
+  let document = { version: 1, plugins: [unrelated] };
+  let contents = JSON.stringify(document);
+  await writeFile(registry, contents);
+  assert.equal(await inspectKimiConnection(options), 'disconnected');
+  assert.equal(await readFile(registry, 'utf8'), contents);
+  await mkdir(dirname(managed), { recursive: true });
+  await cp(assets, managed, { recursive: true });
+  const own = { id: 'ai-task-monitor', root: managed, source: 'local-path', enabled: true };
+  document = { version: 1, plugins: [unrelated, own] };
+  contents = JSON.stringify(document);
+  await writeFile(registry, contents);
+  assert.equal(await inspectKimiConnection(options), 'connected');
+  assert.equal(await readFile(registry, 'utf8'), contents);
+  own.enabled = false;
+  await writeFile(registry, JSON.stringify(document));
+  assert.equal(await inspectKimiConnection(options), 'disabled');
+  own.enabled = true;
+  await writeFile(registry, JSON.stringify(document));
+  const observer = join(managed, 'kimi-observer.mjs');
+  const original = await readFile(observer);
+  await writeFile(observer, 'USER CHANGE');
+  await assert.rejects(inspectKimiConnection(options), { code: 'modified-bundle' });
+  assert.equal(await readFile(observer, 'utf8'), 'USER CHANGE');
+  await writeFile(observer, original);
+  await writeFile(join(managed, 'foreign.txt'), 'KEEP');
+  await assert.rejects(inspectKimiConnection(options), { code: 'modified-bundle' });
+  assert.equal(await readFile(join(managed, 'foreign.txt'), 'utf8'), 'KEEP');
+  await rm(join(managed, 'foreign.txt'));
+  await writeFile(anchor, JSON.stringify({ name: '@moonshot-ai/kimi-code', version: '99.0.0' }));
+  await assert.rejects(inspectKimiConnection(options), { code: 'unverified-kimi' });
+  await writeFile(anchor, JSON.stringify({ name: '@moonshot-ai/kimi-code', version: '2.5.0' }));
+  document.plugins.push({ ...own });
+  await writeFile(registry, JSON.stringify(document));
+  await assert.rejects(inspectKimiConnection(options), { code: 'invalid-registry' });
+  document.plugins.pop();
+  own.root = packageDir;
+  await writeFile(registry, JSON.stringify(document));
+  await assert.rejects(inspectKimiConnection(options), { code: 'foreign-bundle' });
+  if (process.platform === 'win32') await assert.rejects(inspectKimiConnection({ ...options, home: '\\relative' }), { code: 'invalid-path' });
+  const linkedHome = join(fixture, 'linked-home');
+  try {
+    await symlink(home, linkedHome, process.platform === 'win32' ? 'junction' : 'dir');
+    await assert.rejects(inspectKimiConnection({ ...options, home: linkedHome }), { code: 'linked-path' });
+  } catch (error) { if (!['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) throw error; }
+  console.log('Kimi connection: read-only registry, version, ownership and conflict checks passed.');
+} finally {
+  const rel = relative(temp, fixture);
+  if (await realpath(fixture) !== fixture || !rel.startsWith('aitm-kimi-connection-') || rel.includes(sep)) throw Error('Unsafe fixture cleanup.');
+  await rm(fixture, { recursive: true });
+}

@@ -5,10 +5,11 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fromKimi } from '../integrations/kimi-observer.mjs';
+import { fromKimi } from '../integrations/kimi-plugin/kimi-observer.mjs';
 import { userPipeName } from '../integrations/provider-transport.mjs';
 
-const assets = join(dirname(dirname(fileURLToPath(import.meta.url))), 'integrations');
+const assets = join(dirname(dirname(fileURLToPath(import.meta.url))), 'integrations', 'kimi-plugin');
+assert.deepEqual(await readFile(join(assets, 'provider-transport.mjs')), await readFile(join(assets, '..', 'provider-transport.mjs')));
 const manifest = JSON.parse(await readFile(join(assets, 'kimi.plugin.json'), 'utf8'));
 const names = ['TurnStarted', 'SessionStart', 'SessionEnd', 'PostToolUse', 'PostToolUseFailure',
   'PermissionRequest', 'PermissionResult', 'StopFailure', 'Interrupt'];

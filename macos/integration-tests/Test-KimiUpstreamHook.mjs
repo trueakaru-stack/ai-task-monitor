@@ -18,7 +18,7 @@ assert.ok(start >= 0 && end > start, 'The verified Kimi hook runner was not foun
 const runHook = Function('DEFAULT_TIMEOUT_SECONDS', 'KILL_GRACE_MS$1',
   source.slice(start, end) + '\nreturn runHook;')(30, 100);
 
-const assets = join(dirname(dirname(fileURLToPath(import.meta.url))), 'integrations');
+const assets = join(dirname(dirname(fileURLToPath(import.meta.url))), 'integrations', 'kimi-plugin');
 const manifest = JSON.parse(await readFile(join(assets, 'kimi.plugin.json'), 'utf8'));
 const temp = await realpath(tmpdir());
 const fixture = await mkdtemp(join(temp, 'aitm-kimi-upstream-'));

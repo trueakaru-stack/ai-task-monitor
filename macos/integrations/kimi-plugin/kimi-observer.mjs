@@ -7,6 +7,8 @@ const kinds = Object.freeze({
   PostToolUse: 'active', PostToolUseFailure: 'active', PermissionRequest: 'waiting',
   PermissionResult: 'unknown', StopFailure: 'failed', Interrupt: 'interrupted',
 });
+const fullyQualified = path => typeof path === 'string' && isAbsolute(path) &&
+  (process.platform !== 'win32' || /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/.?][^\\/]*[\\/][^\\/]+(?:[\\/]|$))/.test(path));
 
 function identifier(value, prefix, context = '') {
   if (typeof value !== 'string' || !value || value.length > 1024 || /[\u0000-\u001f\u007f]/.test(value)) return null;
@@ -18,7 +20,7 @@ function identifier(value, prefix, context = '') {
 export function fromKimi(input, kimiHome) {
   try {
     if (!input || typeof input !== 'object' || Array.isArray(input) ||
-        typeof kimiHome !== 'string' || kimiHome.length > 8192 || !isAbsolute(kimiHome) ||
+        !fullyQualified(kimiHome) || kimiHome.length > 8192 ||
         typeof input.hook_event_name !== 'string' || !Object.hasOwn(kinds, input.hook_event_name)) return null;
     const path = normalize(kimiHome);
     const homeKey = process.platform === 'win32' ? path.toLowerCase() : path;
