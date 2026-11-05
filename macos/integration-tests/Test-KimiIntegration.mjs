@@ -37,7 +37,7 @@ try {
   const connected = await inspectKimiConnection(options);
   assert.equal(connected.state, 'connected');
   assert.match(connected.scope, /^[a-f0-9]{32}$/);
-  assert.equal(fromKimi({ hook_event_name: 'TurnStarted', session_id: 'same' }, home).session.split('_')[0], connected.scope);
+  assert.equal(fromKimi({ hook_event_name: 'TurnStarted', session_id: 'same', turn_id: 1 }, home).session.split('_')[0], connected.scope);
   assert.equal(await readFile(registry, 'utf8'), contents);
   own.enabled = false;
   await writeFile(registry, JSON.stringify(document));
