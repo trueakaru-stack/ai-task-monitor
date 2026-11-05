@@ -1,0 +1,154 @@
+name: macOS synthetic autohide scroll
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-scroll-autohide-audit.yml"
+      - ".github/audits/ScrollAutohideAuditTests.swift"
+      - ".github/audits/generate-scroll-autohide.py"
+      - ".github/audits/compare-scroll-autohide.py"
+
+permissions:
+  contents: read
+
+jobs:
+  autohide-scroll:
+    if: ${{ github.event_name == 'workflow_dispatch' || (contains(github.event.head_commit.message, '[tests-only]') && contains(github.event.head_commit.message, '[scroll-autohide-audit]')) }}
+    name: synthetic autohide scroll (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, macos-15]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout audit tools
+        uses: actions/checkout@v4
+        with:
+          path: audit-control
+          persist-credentials: false
+      - name: Checkout pinned application source
+        uses: actions/checkout@v4
+        with:
+          ref: 835ad09e98efb59546a8b850b8b8c2777323b581
+          path: pinned-source
+          persist-credentials: false
+      - name: Select Xcode for macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Prepare isolated copies
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          for variant in baseline autohide; do
+            project="$RUNNER_TEMP/aitm-scroll-autohide-code-$variant"
+            output="$RUNNER_TEMP/aitm-layout-autohide-$variant"
+            test ! -e "$project"
+            mkdir -p "$project" "$output"
+            cp -R "$GITHUB_WORKSPACE/pinned-source/macos/." "$project/"
+            cp "$GITHUB_WORKSPACE/audit-control/.github/audits/ScrollWideProbes.swift" "$project/Sources/AITaskMonitor/"
+            cp "$GITHUB_WORKSPACE/audit-control/.github/audits/ScrollAutohideAuditTests.swift" "$project/Tests/AITaskMonitorTests/"
+            python3 "$GITHUB_WORKSPACE/audit-control/.github/audits/generate-scroll-wide.py" "$project" baseline "$output"
+            if [[ "$variant" == autohide ]]; then
+              python3 "$GITHUB_WORKSPACE/audit-control/.github/audits/generate-scroll-autohide.py" "$project" "$output"
+            fi
+            for file in RootView.swift TaskCardView.swift OverlayScrollerProbe.swift; do
+              if diff -u "$GITHUB_WORKSPACE/pinned-source/macos/Sources/AITaskMonitor/$file" "$project/Sources/AITaskMonitor/$file" > "$output/$file.patch"; then
+                :
+              else
+                test "$?" -eq 1
+              fi
+            done
+          done
+      - name: Baseline transitions and scrolling
+        id: baseline_geometry
+        timeout-minutes: 8
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AITM_LAYOUT_SYNTHETIC_CI=1
+          export AITM_LAYOUT_SYNTHETIC_ROOT="$RUNNER_TEMP/aitm-layout-autohide-baseline"
+          export AITM_SCROLL_VARIANT=baseline
+          cd "$RUNNER_TEMP/aitm-scroll-autohide-code-baseline"
+          swift test --filter ScrollAutohideAuditTests/testTransitionsAndScrolling
+          test -s "$AITM_LAYOUT_SYNTHETIC_ROOT/autohide-geometry.json"
+      - name: Autohide transitions and scrolling
+        id: candidate_geometry
+        if: ${{ always() }}
+        timeout-minutes: 8
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AITM_LAYOUT_SYNTHETIC_CI=1
+          export AITM_LAYOUT_SYNTHETIC_ROOT="$RUNNER_TEMP/aitm-layout-autohide-autohide"
+          export AITM_SCROLL_VARIANT=autohide
+          cd "$RUNNER_TEMP/aitm-scroll-autohide-code-autohide"
+          swift test --filter ScrollAutohideAuditTests/testTransitionsAndScrolling
+          test -s "$AITM_LAYOUT_SYNTHETIC_ROOT/autohide-geometry.json"
+      - name: Upload transition evidence before input tests
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-autohide-geometry-${{ matrix.runner }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/aitm-layout-autohide-*/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Baseline button input
+        id: baseline_input
+        if: ${{ always() }}
+        timeout-minutes: 3
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AITM_LAYOUT_SYNTHETIC_CI=1
+          export AITM_LAYOUT_SYNTHETIC_ROOT="$RUNNER_TEMP/aitm-layout-autohide-baseline"
+          export AITM_SCROLL_VARIANT=baseline
+          cd "$RUNNER_TEMP/aitm-scroll-autohide-code-baseline"
+          swift test --skip-build --filter ScrollAutohideAuditTests/testSyntheticWarningButtonHits
+          test -s "$AITM_LAYOUT_SYNTHETIC_ROOT/autohide-hit-tests.json"
+      - name: Autohide button input
+        id: candidate_input
+        if: ${{ always() }}
+        timeout-minutes: 3
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AITM_LAYOUT_SYNTHETIC_CI=1
+          export AITM_LAYOUT_SYNTHETIC_ROOT="$RUNNER_TEMP/aitm-layout-autohide-autohide"
+          export AITM_SCROLL_VARIANT=autohide
+          cd "$RUNNER_TEMP/aitm-scroll-autohide-code-autohide"
+          swift test --skip-build --filter ScrollAutohideAuditTests/testSyntheticWarningButtonHits
+          test -s "$AITM_LAYOUT_SYNTHETIC_ROOT/autohide-hit-tests.json"
+      - name: Compare baseline and candidate button input
+        id: input_comparison
+        if: ${{ always() }}
+        continue-on-error: true
+        shell: bash
+        run: python3 "$GITHUB_WORKSPACE/audit-control/.github/audits/compare-scroll-autohide.py" "$RUNNER_TEMP"
+      - name: Upload input evidence and checkpoints
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-autohide-input-${{ matrix.runner }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/aitm-layout-autohide-*/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Preserve test failures
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          printf '%s\n' 'Synthetic transitions and in-process input only. No product change or installer; full reconnect regression not run.' >> "$GITHUB_STEP_SUMMARY"
+          test '${{ steps.baseline_geometry.outcome }}' = success
+          test '${{ steps.candidate_geometry.outcome }}' = success
+          test '${{ steps.baseline_input.outcome }}' = success
+          test '${{ steps.candidate_input.outcome }}' = success
+          test '${{ steps.input_comparison.outcome }}' = success
