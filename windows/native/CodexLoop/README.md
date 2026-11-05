@@ -27,9 +27,11 @@ expression accepts a final newline; it is not a general validation boundary.
 
 ## Synthetic verification
 
-Use Python 3.9 or newer, an isolated .NET 10 SDK, and the Windows PowerShell 5.1 executable
-already present on Windows. All three are test tools; the library has no runtime
-dependency on Python or PowerShell. From the repository root, run:
+Use Python 3.9 or newer, Git, an isolated .NET 10 SDK, and the Windows
+PowerShell 5.1 executable already present on Windows. These are test tools;
+the library has no runtime dependency on Git, Python or PowerShell. Run the
+tests from a Git checkout or worktree, with absolute paths to the SDK, reference
+directory and work directory. From the repository root, run:
 
 ```powershell
 python .\windows\native\CodexLoop\Tests\run_synthetic_tests.py `
@@ -38,11 +40,23 @@ python .\windows\native\CodexLoop\Tests\run_synthetic_tests.py `
   --work-directory '<new-directory-outside-repository-and-user-profile>'
 ```
 
+Before creating any work directory, the runner discovers the source repository
+through a local Git query and rejects paths inside it. `USERPROFILE`, `APPDATA`
+and `LOCALAPPDATA` must each name an existing absolute directory; `HOME`, if
+present, must meet the same requirement. The runner resolves these directories
+and rejects work paths inside them. If the repository or a required directory
+cannot be verified, it stops without creating the work directory.
+
+The profile guard relies on these environment variables. It does not identify
+other users' profiles, prove that the variables were not deliberately changed,
+or protect against a junction being swapped concurrently after validation. Use
+a trusted local work directory outside all profiles and repositories.
+
 The runner verifies the SHA-256 of the normalized `LoopDetection.ps1` and
-`DiagnosticPolicy.ps1` source from `150672b`, copies them to a synthetic test
-directory, disables SDK telemetry and first-run certificate generation, clears
-NuGet package sources, and compares 9,158 operations against the actual legacy
-functions. Checks include one-item arrays, thresholds, expiry,
+`DiagnosticPolicy.ps1` source from `150672b` before creating its work directory,
+copies them to a synthetic test directory, disables SDK telemetry and first-run
+certificate generation, clears NuGet package sources, and compares 9,158
+operations against the actual legacy functions. Checks include one-item arrays, thresholds, expiry,
 dismissal, deduplication and eviction, settings changes, copied state, size
 limits, unusual strings and out-of-order synthetic events. An independent
 reviewer repeated the comparisons and separately checked copy, settings and key

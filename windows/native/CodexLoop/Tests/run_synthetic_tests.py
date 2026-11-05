@@ -17,31 +17,74 @@ parser.add_argument('--sdk-root', type=Path, required=True)
 parser.add_argument('--reference-directory', type=Path, required=True)
 parser.add_argument('--work-directory', type=Path, required=True)
 args = parser.parse_args()
-SDK = args.sdk_root.resolve(strict=True)
-REFERENCE = args.reference_directory.resolve(strict=True)
-work = args.work_directory.resolve()
-if work == ROOT or work.is_relative_to(ROOT):
-    raise SystemExit('The work directory must be outside the source directory.')
-if ROOT.parent.name == 'native' and ROOT.parent.parent.name == 'windows':
-    repository = ROOT.parent.parent.parent
-    if work == repository or work.is_relative_to(repository):
-        raise SystemExit('The work directory must be outside the repository.')
-for variable in ('USERPROFILE', 'APPDATA', 'LOCALAPPDATA'):
-    if os.environ.get(variable):
-        profile = Path(os.environ[variable]).resolve()
-        if work == profile or work.is_relative_to(profile):
-            raise SystemExit('The work directory must be outside user profiles and application data.')
-work.mkdir(parents=True, exist_ok=True)
+
+
+def protected_directory(variable, optional=False):
+    value = os.environ.get(variable)
+    if value is None and optional:
+        return None
+    if not value or not value.strip() or not Path(value).is_absolute():
+        raise SystemExit('Cannot verify the protected directory: ' + variable)
+    try:
+        directory = Path(value).resolve(strict=True)
+        if not directory.is_dir():
+            raise OSError('Not a directory')
+        return directory
+    except (OSError, RuntimeError, ValueError):
+        raise SystemExit('Cannot verify the protected directory: ' + variable)
+
+
+protected = [protected_directory(name) for name in ('USERPROFILE', 'APPDATA', 'LOCALAPPDATA')]
+home = protected_directory('HOME', optional=True)
+if home is not None:
+    protected.append(home)
+if not all(path.is_absolute() for path in (args.sdk_root, args.reference_directory, args.work_directory)):
+    raise SystemExit('The SDK, reference and work directory paths must be absolute.')
+try:
+    SDK = args.sdk_root.resolve(strict=True)
+    REFERENCE = args.reference_directory.resolve(strict=True)
+    work = args.work_directory.resolve()
+except (OSError, RuntimeError, ValueError):
+    raise SystemExit('Cannot resolve a supplied path.')
+if not SDK.is_dir() or not REFERENCE.is_dir():
+    raise SystemExit('The SDK and reference paths must be directories.')
+
+# Discover the real checkout without reading a user's Git configuration or
+# trusting inherited GIT_DIR/GIT_WORK_TREE overrides. This is a local query.
+git_env = {name: os.environ[name] for name in ('SystemRoot', 'windir', 'PATH', 'ComSpec') if name in os.environ}
+git_env.update({'HOME': str(ROOT), 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+                'GIT_OPTIONAL_LOCKS': '0', 'GIT_TERMINAL_PROMPT': '0'})
+try:
+    git = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '--show-toplevel'], env=git_env,
+                         capture_output=True, text=True, encoding='utf-8', errors='strict', timeout=15, check=True)
+    repository_path = Path(git.stdout.rstrip('\r\n'))
+    if not repository_path.is_absolute():
+        raise ValueError('Repository root is not absolute')
+    repository = repository_path.resolve(strict=True)
+    if not repository.is_dir() or not ROOT.is_relative_to(repository):
+        raise ValueError('Source is not inside the discovered repository')
+except (OSError, RuntimeError, UnicodeError, ValueError, subprocess.SubprocessError):
+    raise SystemExit('Cannot verify the source repository; no work directory was created.')
+
+if work == repository or work.is_relative_to(repository):
+    raise SystemExit('The work directory must be outside the repository.')
+for directory in protected:
+    if work == directory or work.is_relative_to(directory):
+        raise SystemExit('The work directory must be outside the current profile and application data.')
 EXPECTED = {
     'LoopDetection.ps1': 'c1b17cbc6df9a3ac61a6a1effdb3e512255843ecc28eefca39213ee1e4805c81',
     'DiagnosticPolicy.ps1': '2dfe87c650a75a2411194fdae6de62f03901bae01a6f176b42a67d5c83c35a91',
 }
 reference_data = {}
 for name, expected in EXPECTED.items():
-    data = (REFERENCE / name).read_bytes().replace(b'\r\n', b'\n')
+    try:
+        data = (REFERENCE / name).read_bytes().replace(b'\r\n', b'\n')
+    except OSError:
+        raise SystemExit('Pinned reference unavailable: ' + name)
     if hashlib.sha256(data).hexdigest() != expected:
         raise SystemExit('Pinned reference changed: ' + name)
     reference_data[name] = data
+work.mkdir(parents=True, exist_ok=True)
 run = work / ('codex-loop-' + uuid.uuid4().hex)
 run.mkdir()
 for name in ('home', 'temp', 'nuget', 'appdata', 'localappdata'):
