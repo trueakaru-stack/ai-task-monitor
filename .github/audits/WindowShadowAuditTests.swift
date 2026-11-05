@@ -28,11 +28,17 @@ final class WindowShadowAuditTests: XCTestCase {
             try writeReport(["status": "skipped", "reason": reason])
             throw XCTSkip("Own-window shadow audit skipped: \(reason).")
         }
+        func checkpoint(_ phase: String) throws {
+            try writeReport(["status": "in_progress", "phase": phase])
+        }
         #if compiler(>=6.2)
         guard #available(macOS 14.4, *) else { try skip("api_unavailable") }
+        try checkpoint("before_preflight")
         guard CGPreflightScreenCaptureAccess() else { try skip("capture_permission_unavailable") }
+        try checkpoint("preflight_approved")
 
         _ = NSApplication.shared
+        try checkpoint("application_ready")
         AppLanguage.previewOverride = .ru
         defer { AppLanguage.previewOverride = nil }
         let store = TaskStore.preview()
@@ -50,9 +56,11 @@ final class WindowShadowAuditTests: XCTestCase {
         window.contentView = host
         window.makeKeyAndOrderFront(nil)
         defer { window.close() }
+        try checkpoint("window_ordered")
         host.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
         try await Task.sleep(nanoseconds: 1_200_000_000)
+        try checkpoint("window_delay_complete")
         host.layoutSubtreeIfNeeded()
         guard window.isVisible, window.windowNumber > 0,
               window.windowNumber <= Int(UInt32.max), host.window === window else {
@@ -61,10 +69,12 @@ final class WindowShadowAuditTests: XCTestCase {
 
         let shareable: SCShareableContent
         do {
+            try checkpoint("before_shareable_content")
             shareable = try await SCShareableContent.currentProcess
         } catch {
             try skip("shareable_content_unavailable")
         }
+        try checkpoint("shareable_content_ready")
         let ownID = CGWindowID(window.windowNumber)
         let ownPID = ProcessInfo.processInfo.processIdentifier
         guard let ownWindow = shareable.windows.first(where: {
@@ -89,13 +99,16 @@ final class WindowShadowAuditTests: XCTestCase {
         let withShadow: CGImage
         let withoutShadow: CGImage
         do {
+            try checkpoint("before_shadow_capture")
             withShadow = try await SCScreenshotManager.captureImage(contentFilter: filter,
                                                                      configuration: configuration(ignoreShadow: false))
+            try checkpoint("before_no_shadow_capture")
             withoutShadow = try await SCScreenshotManager.captureImage(contentFilter: filter,
                                                                         configuration: configuration(ignoreShadow: true))
         } catch {
             try skip("own_window_capture_unavailable")
         }
+        try checkpoint("captures_ready")
         guard withShadow.width > 0, withShadow.height > 0, withoutShadow.width > 0, withoutShadow.height > 0,
               let hostBitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
             try skip("bitmap_unavailable")

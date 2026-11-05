@@ -15,7 +15,7 @@ private struct PickerAuditView: View {
     let fittedControlWidth: CGFloat?
     private let variantNames = ["baseline", "flexible frame", "framed option labels",
                                 "buttonSizing flexible: 120 pt", "buttonSizing flexible: max fittingSize"]
-    private let ranges = [1...7, 1...10, 1...30, 1...100, 3...10, 1...30]
+    let ranges = [1...7, 1...10, 1...30, 1...100, 3...10, 1...30]
 
     init(model: PickerAuditModel, language: String, sharedTextWidth: CGFloat,
          variants: [Int] = [0, 1, 2], fittedControlWidth: CGFloat? = nil) {
@@ -26,7 +26,7 @@ private struct PickerAuditView: View {
         self.fittedControlWidth = fittedControlWidth
     }
 
-    private func label(_ row: Int, _ value: Int) -> String {
+    func label(_ row: Int, _ value: Int) -> String {
         if row == 0 || row == 2 {
             if language == "en" { return "\(value) " + (value == 1 ? "day" : "days") }
             let last = value % 10, lastTwo = value % 100
@@ -225,5 +225,81 @@ final class PickerSizingAuditTests: XCTestCase {
         }
         let data = try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: destination.appendingPathComponent("picker-geometry.json"), options: .atomic)
+    }
+
+    @MainActor func testSyntheticAppKitAndSwiftUIFittingMeasurements() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["AITM_LAYOUT_SYNTHETIC_CI"] == "1" else {
+            throw XCTSkip("Picker audit runs only on an ephemeral GitHub-hosted runner.")
+        }
+        guard env["GITHUB_ACTIONS"] == "true", env["CI"] == "true",
+              env["RUNNER_ENVIRONMENT"] == "github-hosted", env["RUNNER_OS"] == "macOS",
+              let temporary = env["RUNNER_TEMP"], let root = env["AITM_LAYOUT_SYNTHETIC_ROOT"],
+              root.hasPrefix(temporary + "/aitm-layout-") else {
+            throw NSError(domain: "SyntheticPickerAudit", code: 4)
+        }
+        _ = NSApplication.shared
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        var records: [[String: Any]] = []
+        for language in ["ru", "en"] {
+            for theme in ["light", "dark"] {
+                for (state, selections) in [("minimum", [1, 1, 1, 1, 3, 1]),
+                                            ("current", [7, 10, 7, 10, 5, 10]),
+                                            ("maximum", [7, 10, 30, 100, 10, 30])] {
+                    let model = PickerAuditModel()
+                    model.selections = selections
+                    let fixture = PickerAuditView(model: model, language: language, sharedTextWidth: 0, variants: [0])
+                    let rootView = fixture.environment(\.colorScheme, theme == "dark" ? .dark : .light)
+                    let host = NSHostingView(rootView: rootView)
+                    host.appearance = NSAppearance(named: theme == "dark" ? .darkAqua : .aqua)
+                    host.frame = NSRect(x: 0, y: 0, width: 560, height: 700)
+                    let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 560, height: 700),
+                                          styleMask: [.borderless], backing: .buffered, defer: false)
+                    window.isReleasedWhenClosed = false
+                    window.contentView = host
+                    window.makeKeyAndOrderFront(nil)
+                    defer { window.close() }
+                    host.layoutSubtreeIfNeeded()
+                    window.displayIfNeeded()
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.7))
+                    let reference = descendants(host).compactMap { $0 as? NSPopUpButton }.sorted {
+                        $0.convert($0.bounds, to: host).minY < $1.convert($1.bounds, to: host).minY
+                    }
+                    XCTAssertEqual(reference.count, 6, "Expected six synthetic SwiftUI-backed pickers.")
+                    guard reference.count == 6 else { continue }
+                    let appKitContainer = NSView(frame: NSRect(x: 600, y: 0, width: 1, height: 1))
+                    host.addSubview(appKitContainer)
+                    var rows: [[String: Any]] = []
+                    for row in 0..<6 {
+                        let button = NSPopUpButton(frame: .zero, pullsDown: false)
+                        button.controlSize = .large
+                        button.addItems(withTitles: fixture.ranges[row].map { fixture.label(row, $0) })
+                        button.selectItem(at: selections[row] - fixture.ranges[row].lowerBound)
+                        appKitContainer.addSubview(button)
+                        let swiftButton = reference[row]
+                        let swiftWidth = swiftButton.fittingSize.width
+                        let appKitWidth = button.fittingSize.width
+                        let expectedTitle = fixture.label(row, selections[row])
+                        XCTAssertEqual(swiftButton.selectedItem?.title, expectedTitle)
+                        XCTAssertEqual(button.selectedItem?.title, expectedTitle)
+                        XCTAssertGreaterThan(swiftWidth, 0)
+                        XCTAssertGreaterThan(appKitWidth, 0)
+                        rows.append(["row": row + 1, "selection": expectedTitle,
+                                     "swiftUIWidth": Double(swiftWidth), "appKitWidth": Double(appKitWidth),
+                                     "matchesWithinHalfPoint": abs(swiftWidth - appKitWidth) <= 0.5,
+                                     "swiftUIFont": swiftButton.font?.fontName ?? "",
+                                     "swiftUIFontSize": Double(swiftButton.font?.pointSize ?? 0),
+                                     "appKitFont": button.font?.fontName ?? "",
+                                     "appKitFontSize": Double(button.font?.pointSize ?? 0)])
+                    }
+                    records.append(["language": language, "theme": theme, "state": state, "rows": rows,
+                                    "swiftUIMax": rows.compactMap { $0["swiftUIWidth"] as? Double }.max() ?? 0,
+                                    "appKitMax": rows.compactMap { $0["appKitWidth"] as? Double }.max() ?? 0])
+                }
+            }
+        }
+        let data = try JSONSerialization.data(withJSONObject: records, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: URL(fileURLWithPath: root, isDirectory: true)
+            .appendingPathComponent("picker-appkit-measurement.json"), options: .atomic)
     }
 }
