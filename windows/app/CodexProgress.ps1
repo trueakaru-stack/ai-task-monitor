@@ -946,8 +946,8 @@ function Tr([string]$text){
          <Paragraph Margin="0"><Hyperlink x:Name="FeedbackEmailLink" Foreground="{DynamicResource Accent}">truea.k.a.ru@gmail.com</Hyperlink></Paragraph>
         </FlowDocument>
        </RichTextBox>
-       <Button x:Name="FeedbackCopyButton" Grid.Column="1" Width="28" Height="28" Margin="2,0,0,0" VerticalAlignment="Center" Cursor="Hand" Style="{StaticResource TitleButton}" FocusVisualStyle="{StaticResource KeyboardFocusStyle}" AutomationProperties.Name="Скопировать адрес">
-        <TextBlock x:Name="FeedbackCopyGlyph" Text="&#xE8C8;" Width="28" FontFamily="Segoe Fluent Icons" FontSize="13" Foreground="{DynamicResource TextSecondary}" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+       <Button x:Name="FeedbackCopyButton" Grid.Column="1" Width="28" Height="28" Margin="-5.5,0,0,0" VerticalAlignment="Center" Cursor="Hand" Style="{StaticResource TitleButton}" FocusVisualStyle="{StaticResource KeyboardFocusStyle}" AutomationProperties.Name="Скопировать адрес">
+        <TextBlock x:Name="FeedbackCopyGlyph" Text="&#xE8C8;" Width="28" FontFamily="Segoe Fluent Icons" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextAlignment="Center" HorizontalAlignment="Center" VerticalAlignment="Center"/>
        </Button>
       </Grid>
       <TextBlock x:Name="FeedbackError" Visibility="Collapsed" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextSecondary}" Text="Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com."/>
@@ -3970,7 +3970,16 @@ if ($SnapshotFile) {
   $copyPosition=$feedbackCopyButton.TranslatePoint([Windows.Point]::new(0,0),$settingsScroll)
   $emailEnd=$feedbackEmailBox.TranslatePoint([Windows.Point]::new($emailLast.Right,0),$settingsScroll)
   $glyphPosition=$feedbackCopyGlyph.TranslatePoint([Windows.Point]::new(0,0),$settingsScroll)
-  if([Math]::Abs(($glyphPosition.X-$emailEnd.X)-16) -gt 2){throw 'The feedback copy icon must be 16 pixels from the email text.'}
+  $glyphTypeface=[Windows.Media.Typeface]::new($feedbackCopyGlyph.FontFamily,$feedbackCopyGlyph.FontStyle,$feedbackCopyGlyph.FontWeight,$feedbackCopyGlyph.FontStretch)
+  $glyphMetrics=[Windows.Media.FormattedText]::new($feedbackCopyGlyph.Text,[Globalization.CultureInfo]::CurrentUICulture,[Windows.FlowDirection]::LeftToRight,$glyphTypeface,$feedbackCopyGlyph.FontSize,[Windows.Media.Brushes]::Black,[Windows.Media.VisualTreeHelper]::GetDpi($window).PixelsPerDip)
+  $glyphInk=$glyphMetrics.BuildGeometry([Windows.Point]::new(0,0)).Bounds
+  $glyphTextOffset=if($feedbackCopyGlyph.TextAlignment -eq [Windows.TextAlignment]::Center){($feedbackCopyGlyph.ActualWidth-$glyphMetrics.WidthIncludingTrailingWhitespace)/2}else{0}
+  $glyphInkLeft=$glyphPosition.X+$glyphTextOffset+$glyphInk.Left
+  $glyphInkCenter=$glyphInkLeft+$glyphInk.Width/2
+  $glyphInkCenterY=$glyphPosition.Y+$glyphInk.Top+$glyphInk.Height/2
+  if([Math]::Abs(($glyphInkLeft-$emailEnd.X)-16) -gt 2){throw 'The feedback copy icon must be 16 pixels from the email text.'}
+  if([Math]::Abs($glyphInkCenter-($copyPosition.X+$feedbackCopyButton.ActualWidth/2)) -gt 1){throw 'The feedback copy icon must be centered in its button.'}
+  if([Math]::Abs($glyphInkCenterY-($copyPosition.Y+$feedbackCopyButton.ActualHeight/2)) -gt 1){throw 'The feedback copy icon must be vertically centered in its button.'}
   if($feedbackCopyButton.ActualWidth -lt 24 -or $copyPosition.X -lt 0 -or $copyPosition.X+$feedbackCopyButton.ActualWidth -gt $settingsScroll.ViewportWidth+1){throw 'The feedback copy action is clipped.'}
   if([Windows.Automation.AutomationProperties]::GetName($feedbackCopyButton) -cne (Tr 'Скопировать адрес') -or -not $feedbackCopyButton.IsTabStop){throw 'The feedback copy action is not accessible.'}
   $script:previewClipboardText='';$script:previewClipboardFailure=$false

@@ -13,7 +13,8 @@ observers. The state store is used only on the WPF thread; it is not a
 permission boundary, and these tests do not prove real channel security.
 
 `PublishedWindow.xaml` is the WPF markup extracted from
-`windows/app/CodexProgress.ps1` at revision `1c44076`, with the PowerShell
+`windows/app/CodexProgress.ps1` at revision `1c44076`, with the later approved
+feedback-copy icon alignment applied and the PowerShell
 interpolations filled with preview values. The About version expression is
 evaluated as `0.2.6 alpha`, matching the published interface; the About view
 is not yet connected in this prototype. `Squircle.cs` ports the

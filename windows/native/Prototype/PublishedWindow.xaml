@@ -501,8 +501,8 @@
          <Paragraph Margin="0"><Hyperlink x:Name="FeedbackEmailLink" Foreground="{DynamicResource Accent}">truea.k.a.ru@gmail.com</Hyperlink></Paragraph>
         </FlowDocument>
        </RichTextBox>
-       <Button x:Name="FeedbackCopyButton" Grid.Column="1" Width="28" Height="28" Margin="2,0,0,0" VerticalAlignment="Center" Cursor="Hand" Style="{StaticResource TitleButton}" FocusVisualStyle="{StaticResource KeyboardFocusStyle}" AutomationProperties.Name="Скопировать адрес">
-        <TextBlock x:Name="FeedbackCopyGlyph" Text="&#xE8C8;" Width="28" FontFamily="Segoe Fluent Icons" FontSize="13" Foreground="{DynamicResource TextSecondary}" HorizontalAlignment="Left" VerticalAlignment="Center"/>
+       <Button x:Name="FeedbackCopyButton" Grid.Column="1" Width="28" Height="28" Margin="-5.5,0,0,0" VerticalAlignment="Center" Cursor="Hand" Style="{StaticResource TitleButton}" FocusVisualStyle="{StaticResource KeyboardFocusStyle}" AutomationProperties.Name="Скопировать адрес">
+        <TextBlock x:Name="FeedbackCopyGlyph" Text="&#xE8C8;" Width="28" FontFamily="Segoe Fluent Icons" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextAlignment="Center" HorizontalAlignment="Center" VerticalAlignment="Center"/>
        </Button>
       </Grid>
       <TextBlock x:Name="FeedbackError" Visibility="Collapsed" Margin="0,4,0,8" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextSecondary}" Text="Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com."/>
