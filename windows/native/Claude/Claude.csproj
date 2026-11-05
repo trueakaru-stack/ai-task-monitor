@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>AITaskMonitor.ClaudeChannel</AssemblyName>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
+    <Compile Include="..\..\app\ClaudeLoopChannel.cs" Link="ClaudeLoopChannel.cs" />
+    <Compile Include="..\Providers\SafeJsonDeserializer.cs" Link="SafeJsonDeserializer.cs" />
+  </ItemGroup>
+</Project>
