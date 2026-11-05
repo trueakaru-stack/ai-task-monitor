@@ -66,6 +66,8 @@ jobs:
           node integration-tests/Test-KimiUpstreamHook.mjs "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
           node integration-tests/Test-KimiUpstreamContract.mjs "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
           node integration-tests/Test-KimiUpstreamInstall.mjs "$RUNNER_TEMP/aitm-kimi-upstream.mjs"
+          npm install --prefix "$RUNNER_TEMP/aitm-kimi-full" --ignore-scripts --omit=optional --no-audit --no-fund "$RUNNER_TEMP/moonshot-ai-kimi-code-2.5.0.tgz"
+          node integration-tests/Test-KimiApprovalWeb.mjs "$RUNNER_TEMP/aitm-kimi-full"
       - name: Render native source-status previews
         working-directory: macos
         run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/ai-task-monitor-previews"
