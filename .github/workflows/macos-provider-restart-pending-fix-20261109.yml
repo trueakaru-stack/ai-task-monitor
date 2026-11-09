@@ -1,0 +1,209 @@
+name: macOS provider restart pending-action fix
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-provider-restart-pending-fix-20261109.yml"
+      - ".github/provider-audit/v2-restart-pending-fix-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[macos-provider-pending-fix]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify test inputs and overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet 0b11986e4c2a3570a46eef49b5e46b95ca56cb80 "$GITHUB_SHA" -- macos
+          INPUT="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-20261109"
+          (cd "$INPUT" && shasum -a 256 -c staged.sha256)
+          FIX="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-pending-fix-20261109"
+          (cd "$FIX" && shasum -a 256 -c staged.sha256)
+          cp -R "$INPUT/macos/." "$GITHUB_WORKSPACE/macos/"
+          cp "$FIX/RestartAcknowledgementIndependentTests.swift" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/"
+      - name: Run native provider tests without Internet
+        id: tests
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/aitm-v2-output"
+          INPUT="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-20261109"
+          mkdir -p "$OUT/logs" "$OUT/base" "$OUT/disabled" "$OUT/enabled" "$RUNNER_TEMP/aitm-v2-home" "$RUNNER_TEMP/aitm-v2-tmp" "$RUNNER_TEMP/aitm-v2-support"
+          DEVELOPER="$(xcode-select -p)"
+          NODE="$(command -v node)"
+          test "${NODE#/}" != "$NODE"
+          PROFILE='(version 1) (allow default) (deny network*) (allow network* (local unix-socket)) (allow network-outbound (remote unix-socket))'
+          cat > "$RUNNER_TEMP/aitm-v2-network-probe.py" <<'PY'
+          import errno
+          import os
+          import socket
+          import sys
+          for family, destination in ((socket.AF_INET, ("127.0.0.1", 0)), (socket.AF_INET6, ("::1", 0))):
+              try:
+                  internet = socket.socket(family, socket.SOCK_STREAM)
+              except OSError as error:
+                  if error.errno not in (errno.EPERM, errno.EACCES): raise
+              else:
+                  try:
+                      if internet.connect_ex(destination) not in (errno.EPERM, errno.EACCES): sys.exit(1)
+                  finally:
+                      internet.close()
+          path = "/private/tmp/aitm-v2-probe-" + str(os.getpid())
+          server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          try:
+              server.bind(path)
+              server.listen(1)
+              client.connect(path)
+              peer, _ = server.accept()
+              peer.close()
+          finally:
+              client.close()
+              server.close()
+              if os.path.exists(path): os.unlink(path)
+          print("Network probe: IPv4/IPv6 denied; synthetic local Unix socket allowed")
+          PY
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-v2-home" "TMPDIR=$RUNNER_TEMP/aitm-v2-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-v2-support" \
+              "AITM_TEST_NODE=$NODE" \
+              "AITM_V2_SENDER_FIXTURE=$INPUT/synthetic/mac-v2-sender-child.mjs" \
+              "AITM_V2_DEEPSEEK_FIXTURE=$INPUT/synthetic/mac-v2-deepseek-child.mjs" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-v2-network-probe.py" | tee "$OUT/logs/network.log"
+          run_isolated /usr/bin/xcrun swift --version
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox 2>&1 | tee "$OUT/logs/build-debug.log"; then exit 1; fi
+          audit_status=0
+          FIX="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-pending-fix-20261109"
+          original="$OUT/logs/original-pending-reproduction.log"
+          if run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter RestartAcknowledgementIndependentTests 2>&1 | tee "$original"; then
+            echo "The unmodified candidate unexpectedly passed both pending-action probes"
+            audit_status=1
+          fi
+          if ! /usr/bin/grep -q "An in-flight reply for a neighbour rejected the restart action" "$original" ||
+             ! /usr/bin/grep -q "The pending old frame rejected the restart action" "$original"; then
+            echo "The original candidate did not reproduce both expected failures"
+            audit_status=1
+          fi
+          cp "$FIX/ExternalProviderV2Runtime.swift" Sources/AITaskMonitor/
+          cp "$FIX/ExternalProviderV2SyntheticIPCTests.swift" Tests/AITaskMonitorTests/
+          for entry in DeepSeekNeutralBoundaryTests:6 ExternalProviderChannelTests:2 ExternalProviderQueueRaceTests:4 ExternalProviderRuntimeTests:2 ExternalProviderStateTests:7 ExternalProviderTaskMapperTests:2 ExternalProviderTaskStoreTests:3 HermesTaskStoreTests:2 HistoryUnstableFallbackTests:4 IndependentIsolationReviewTests:4 NeutralCompletedIndependentTests:3 NeutralTerminalTransitionTests:2 V1IsolationFixTests:17 V1ProtectionTests:4 V1RuntimeProtectionTests:1 ExternalProviderFilterTests:1 ExternalProviderV2BrokerTests:12 ExternalProviderV2ChannelTests:2 ExternalProviderV2GenerationTests:2 ExternalProviderV2RuntimeTests:5 ExternalProviderV2SyntheticIPCTests:1 ExternalOpenCodeLegacyReconnectTests:1 OpenCodeIntegrationTests:3 RestartAcknowledgementIndependentTests:2; do
+            suite="${entry%:*}"
+            count="${entry#*:}"
+            log="$OUT/logs/$suite.log"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | tee "$log"; then audit_status=1; fi
+            if ! /usr/bin/grep -Eq "Executed $count tests?, with 0 failures" "$log"; then
+              printf '%s\n' "Missing successful expected test count: $suite"
+              audit_status=1
+            fi
+            if /usr/bin/grep -Eq 'Test Case .* skipped ' "$log"; then audit_status=1; fi
+          done
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox --configuration release 2>&1 | tee "$OUT/logs/build-release.log"; then audit_status=1; fi
+          exit "$audit_status"
+      - name: Render synthetic source screens
+        if: ${{ always() && steps.tests.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          INPUT="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-20261109"
+          OUT="$RUNNER_TEMP/aitm-v2-output"
+          BASE="$RUNNER_TEMP/aitm-v2-baseline"
+          mkdir -p "$BASE" "$RUNNER_TEMP/aitm-v2-visual-home" "$RUNNER_TEMP/aitm-v2-visual-tmp" "$RUNNER_TEMP/aitm-v2-visual-support"
+          git archive 0b11986e4c2a3570a46eef49b5e46b95ca56cb80 macos | tar -x -C "$BASE"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*) (allow network* (local unix-socket)) (allow network-outbound (remote unix-socket))'
+          /usr/bin/python3 -I -S -B - "$RUNNER_TEMP/aitm-v2-visual-home" "$INPUT/macos/integrations" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import shutil
+          import sys
+          home, assets = map(Path, sys.argv[1:])
+          source = home / ".config/opencode"
+          folder, plugins = source / "ai-task-monitor-data", source / "plugins"
+          folder.mkdir(parents=True); plugins.mkdir(parents=True)
+          names = ("provider-events.mjs", "provider-observers.mjs", "provider-transport.mjs")
+          hashes = {}
+          for name in names:
+              data = (assets / name).read_bytes()
+              (folder / name).write_bytes(data)
+              hashes[name] = hashlib.sha256(data).hexdigest().upper()
+          shim = (assets / "opencode-entry.js").read_bytes()
+          (plugins / "ai-task-monitor.js").write_bytes(shim)
+          (folder / "manifest.json").write_text(json.dumps({"owner":"AI Task Monitor OpenCode v1", "files":hashes, "shim":hashlib.sha256(shim).hexdigest().upper()}), encoding="utf-8")
+          print("Created test-only OpenCode profile")
+          PY
+          run_visual() {
+            local directory="$1" target="$2" profile="$3" enabled="$4" output="$5"
+            (cd "$directory" && /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-v2-visual-home" "TMPDIR=$RUNNER_TEMP/aitm-v2-visual-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-v2-visual-support" \
+              "AITM_RESTART_VISUAL_ONLY=1" "AITM_RESTART_VISUAL_TARGET=$target" \
+              "AITM_RESTART_PROFILE=$profile" "AITM_RESTART_FORCE_ENABLED=$enabled" \
+              /usr/bin/sandbox-exec -p "$PROFILE" .build/debug/AITaskMonitor --render-previews "$output")
+          }
+          /usr/bin/python3 -I -S -B "$INPUT/prepare_visual.py" "$BASE/macos" baseline
+          (cd "$BASE/macos" && /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-v2-visual-home" "TMPDIR=$RUNNER_TEMP/aitm-v2-visual-tmp/" /usr/bin/sandbox-exec -p "$PROFILE" /usr/bin/xcrun swift build --disable-sandbox)
+          for scenario in opencode:connected deepseek:connected deepseek:disconnected; do
+            target="${scenario%:*}"; profile="${scenario#*:}"
+            mkdir -p "$OUT/base/$target-$profile"
+            run_visual "$BASE/macos" "$target" "$profile" 0 "$OUT/base/$target-$profile"
+          done
+          /usr/bin/python3 -I -S -B "$INPUT/prepare_visual.py" "$GITHUB_WORKSPACE/macos" candidate
+          (cd "$GITHUB_WORKSPACE/macos" && /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-v2-visual-home" "TMPDIR=$RUNNER_TEMP/aitm-v2-visual-tmp/" /usr/bin/sandbox-exec -p "$PROFILE" /usr/bin/xcrun swift build --disable-sandbox)
+          for scenario in opencode:connected deepseek:connected deepseek:disconnected; do
+            target="${scenario%:*}"; profile="${scenario#*:}"
+            mkdir -p "$OUT/disabled/$target-$profile"
+            run_visual "$GITHUB_WORKSPACE/macos" "$target" "$profile" 0 "$OUT/disabled/$target-$profile"
+            if [ "$profile" = connected ]; then
+              mkdir -p "$OUT/enabled/$target-$profile"
+              run_visual "$GITHUB_WORKSPACE/macos" "$target" "$profile" 1 "$OUT/enabled/$target-$profile"
+            fi
+          done
+          for item in base:12 disabled:12 enabled:8; do
+            name="${item%:*}"; expected="${item#*:}"
+            count="$(find "$OUT/$name" -type f -name '*.png' | wc -l | tr -d ' ')"
+            test "$count" = "$expected"
+          done
+      - name: Upload synthetic logs and screenshots
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-provider-pending-fix-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-v2-output/
+          if-no-files-found: warn
+          retention-days: 7
