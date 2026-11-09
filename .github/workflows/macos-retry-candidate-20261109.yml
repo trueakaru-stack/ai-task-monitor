@@ -105,6 +105,9 @@ jobs:
               audit_status=1
             fi
           done
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox --configuration release; then
+            audit_status=1
+          fi
           if run_isolated /usr/bin/xcrun swiftc Sources/AITaskMonitor/ReleaseScheduleFileStore.swift \
             integration-tests/release-lease-fixture/main.swift -o "$RUNNER_TEMP/aitm-retry-lease"; then
             if ! run_isolated "$RUNNER_TEMP/aitm-retry-lease"; then audit_status=1; fi
