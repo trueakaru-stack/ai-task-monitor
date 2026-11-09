@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Web.Script.Serialization;
 
@@ -12,6 +13,7 @@ namespace AITaskMonitor.Claude {
   public string status { get; set; }
   public string id { get; set; }
   public bool generated { get; set; }
+  internal string RetainedIdentity { get; set; }
  }
  public sealed class Task {
   public string Id { get; set; }
@@ -45,6 +47,8 @@ namespace AITaskMonitor.Claude {
   internal DateTimeOffset Updated, Started;
   internal readonly Dictionary<string, Step> Steps = new Dictionary<string, Step>(StringComparer.Ordinal);
   internal readonly List<string> StepOrder = new List<string>();
+  internal readonly List<Step> TitleHistory = new List<Step>();
+  internal bool TitleHistoryTruncated;
   internal readonly Dictionary<string, StepTrust> Trust = new Dictionary<string, StepTrust>(StringComparer.Ordinal);
   internal readonly Dictionary<string, int> CreateAttempts = new Dictionary<string, int>(StringComparer.Ordinal);
   internal readonly HashSet<string> UncertainCreates = new HashSet<string>(StringComparer.Ordinal);
@@ -248,10 +252,10 @@ namespace AITaskMonitor.Claude {
   }
   public static Task[] Read(string current, string legacy, DateTime utcNow, DateTime observedSinceUtc) {
    bool ignored;
-   return ReadWithSourceLoss(current, legacy, utcNow, observedSinceUtc, false, out ignored, null, null, null);
+   return ReadWithSourceLoss(current, legacy, utcNow, observedSinceUtc, false, out ignored, null, null, null, null);
   }
   internal static Task[] ReadWithSourceLoss(string current, string legacy, DateTime utcNow, DateTime observedSinceUtc, bool priorLoss, out bool observedLoss,
-                                           HashSet<string> sessionEvidence, HashSet<string> planEvidence, HashSet<string> cleanlyStopped) {
+                                           HashSet<string> sessionEvidence, HashSet<string> planEvidence, HashSet<string> cleanlyStopped, HashSet<string> nameEvidence) {
    bool sourceUncertain = priorLoss;
    List<Event> recent = Parse(current, 1, null, ref sourceUncertain);
    var ids = new HashSet<string>(recent.Where(item => item.Id.Length > 0).Select(item => item.Id), StringComparer.Ordinal);
@@ -418,7 +422,9 @@ namespace AITaskMonitor.Claude {
     // resurrect an already inactive session, but preserve an observed one.
     bool clearStop = item.Name == "Stop" && item.Phase == "stop_clear" && item.Active == false;
     bool unknownStop = (item.Name == "Stop" && !clearStop) || item.Name == "StopFailure";
-    if(item.Active == true || unknownStop || item.Phase == "session_uncertain" || item.Phase == "source_uncertain") state.ProvenStopClear = false;
+    // An ambiguous later event alone cannot undo an observed clear stop.
+    // Only subsequent observed activity can make this session active again.
+    if(item.Active == true) state.ProvenStopClear = false;
     if(unknownStop) {
      state.StopUncertain = true;
      if(state.Active) state.RetainAfterEnd = true;
@@ -465,6 +471,10 @@ namespace AITaskMonitor.Claude {
      trust = new StepTrust(); state.Trust.Add(item.TaskId, trust);
     } else trust = state.Trust[item.TaskId];
     if(item.Subject.Length > 0 && (created || stepUncertain || item.Name == "TaskCreated" || item.Name == "TaskCompleted")) {
+     if(!state.TitleHistory.Any(previous => previous.id == item.TaskId && previous.title == item.Subject)) {
+      if(state.TitleHistory.Count == 128) { state.TitleHistory.RemoveAt(0); state.TitleHistoryTruncated = true; }
+      state.TitleHistory.Add(new Step { id=item.TaskId, title=item.Subject, generated=false, status="unknown" });
+     }
      if((!step.generated && step.title != item.Subject) ||
         (trust.ObservedTitle.Length > 0 && trust.ObservedTitle != item.Subject)) planUncertain.Add(item.Id);
      step.title = item.Subject;
@@ -513,6 +523,7 @@ namespace AITaskMonitor.Claude {
     // snapshot. Otherwise retention/cleanup can silently remove the evidence.
     if(sessionEvidence != null && sessionEvidenceUncertain) sessionEvidence.Add(state.Id);
     if(planEvidence != null && planEvidenceUncertain) planEvidence.Add(state.Id);
+    if(nameEvidence != null && state.SessionUncertain) nameEvidence.Add(state.Id);
     if(!state.Active && !timeAnomaly) {
      if(cleanlyStopped != null && state.ProvenStopClear) cleanlyStopped.Add(state.Id);
      continue;
@@ -521,7 +532,18 @@ namespace AITaskMonitor.Claude {
     bool knownEvidence = state.PlanConfirmed && state.PromptSeen && !pendingCreate && !unresolved && !state.SessionUncertain && !sourceUncertain && !unconfirmed && !planUncertain.Contains(state.Id);
     int known = knownEvidence ? state.StepOrder.Count(id => state.Trust[id].Confirmed && state.Trust[id].Created) : 0;
     int done = knownEvidence ? state.StepOrder.Count(id => state.Trust[id].Confirmed && state.Trust[id].Created && state.Steps[id].status == "done") : 0;
-    result.Add(new Task { Id=state.Id, Activity=state.Activity, Updated=state.Updated.UtcDateTime, Started=state.Started.UtcDateTime, StartKey=state.StartKey, Steps=state.StepOrder.Select(id => state.Steps[id]).ToArray(), Unconfirmed=unconfirmed, PlanConfirmed=state.PlanConfirmed && state.PromptSeen && allStepsObserved && !pendingCreate && !state.SessionUncertain && !sourceUncertain && !unconfirmed && !planUncertain.Contains(state.Id), KnownStepCount=known, KnownDoneCount=done, UnknownStepCount=state.StepOrder.Count-known, SessionEvidenceUncertain=sessionEvidenceUncertain, PlanEvidenceUncertain=planEvidenceUncertain });
+    bool retainNames = sourceUncertain || state.SessionUncertain;
+    bool titlesIncomplete = retainNames && state.TitleHistoryTruncated;
+    var displayed = new List<Step>();
+    Action<Step> append = delegate(Step candidate) {
+     if(retainNames && candidate.generated && displayed.Any(existing => existing.id == candidate.id && !existing.generated)) return;
+     if(retainNames && displayed.Any(existing => existing.id == candidate.id && existing.title == candidate.title)) return;
+     if(retainNames && displayed.Count == 128) { displayed.RemoveAt(0); titlesIncomplete = true; }
+     displayed.Add(retainNames ? new Step { id=candidate.id, title=candidate.title, generated=candidate.generated, status="unknown" } : candidate);
+    };
+    if(retainNames) foreach(Step oldName in state.TitleHistory) append(oldName);
+    foreach(string id in state.StepOrder) append(state.Steps[id]);
+    result.Add(new Task { Id=state.Id, Activity=state.Activity, Updated=state.Updated.UtcDateTime, Started=state.Started.UtcDateTime, StartKey=state.StartKey, Steps=displayed.ToArray(), Unconfirmed=unconfirmed, PlanConfirmed=state.PlanConfirmed && state.PromptSeen && allStepsObserved && !pendingCreate && !state.SessionUncertain && !sourceUncertain && !unconfirmed && !planUncertain.Contains(state.Id), KnownStepCount=known, KnownDoneCount=done, UnknownStepCount=displayed.Count-known, SessionEvidenceUncertain=sessionEvidenceUncertain, PlanEvidenceUncertain=planEvidenceUncertain, RetainedPlanIncomplete=titlesIncomplete });
    }
    return result.ToArray();
   }
@@ -540,6 +562,7 @@ namespace AITaskMonitor.Claude {
   private readonly Dictionary<string, Task> retained = new Dictionary<string, Task>(StringComparer.Ordinal);
   private readonly HashSet<string> uncertainSessions = new HashSet<string>(StringComparer.Ordinal);
   private readonly HashSet<string> uncertainPlans = new HashSet<string>(StringComparer.Ordinal);
+  private readonly HashSet<string> nameHistorySessions = new HashSet<string>(StringComparer.Ordinal);
   private bool sourceLoss, overflow;
   public bool SourceUncertain { get { lock(gate) return sourceLoss; } }
   public bool RetentionOverflow { get { lock(gate) return overflow; } }
@@ -556,7 +579,7 @@ namespace AITaskMonitor.Claude {
    return title.Substring(0, count) + "\u2026";
   }
 
-  private static Task Freeze(Task item, Task previous) {
+  private static Task Freeze(Task item, Task previous, bool preserveConflictingNames) {
    bool incomplete = item.RetainedPlanIncomplete || (previous != null && previous.RetainedPlanIncomplete);
    var steps = new List<Step>();
    // Earlier titles are useful when the readable suffix contains only part of
@@ -565,11 +588,20 @@ namespace AITaskMonitor.Claude {
     if(input == null) { incomplete = true; return; }
     string id = input.id ?? "";
     bool generated = input.generated;
-    if(id.Length > MaximumRetainedStepId) { id = ""; generated = false; incomplete = true; }
+    string identity = input.RetainedIdentity;
+    if(id.Length > MaximumRetainedStepId) {
+     identity = "long:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(id)));
+     id = ""; generated = false; incomplete = true;
+    }
     string title = BoundTitle(input.title, ref incomplete);
-    var copy = new Step { id=id, title=title, generated=generated, status="unknown" };
-    if(id.Length > 0) {
-     int position = steps.FindIndex(step => String.Equals(step.id, id, StringComparison.Ordinal));
+    if(identity == null) {
+     if(id.Length == 0) { identity = "missing:" + title; incomplete = true; }
+     else identity = "id:" + id;
+    }
+    var copy = new Step { id=id, title=title, generated=generated, status="unknown", RetainedIdentity=identity };
+    if(identity.Length > 0) {
+     int position = steps.FindIndex(step => String.Equals(step.RetainedIdentity, identity, StringComparison.Ordinal) &&
+      (!preserveConflictingNames || copy.generated || step.generated || String.Equals(step.title, copy.title, StringComparison.Ordinal)));
      if(position >= 0) {
       // A status-only suffix synthesizes a label; it is not a newer
       // observation of the title and must not erase a real known name.
@@ -598,7 +630,8 @@ namespace AITaskMonitor.Claude {
     var sessionEvidence = new HashSet<string>(StringComparer.Ordinal);
     var planEvidence = new HashSet<string>(StringComparer.Ordinal);
     var cleanlyStopped = new HashSet<string>(StringComparer.Ordinal);
-    Task[] tasks = Reader.ReadWithSourceLoss(current, legacy, utcNow, observedSinceUtc, prior, out observed, sessionEvidence, planEvidence, cleanlyStopped);
+    var nameEvidence = new HashSet<string>(StringComparer.Ordinal);
+    Task[] tasks = Reader.ReadWithSourceLoss(current, legacy, utcNow, observedSinceUtc, prior, out observed, sessionEvidence, planEvidence, cleanlyStopped, nameEvidence);
     sourceLoss |= observed;
     foreach(string id in sessionEvidence) if(!uncertainSessions.Contains(id)) {
      if(uncertainSessions.Count < MaximumRetained) uncertainSessions.Add(id);
@@ -606,6 +639,10 @@ namespace AITaskMonitor.Claude {
     }
     foreach(string id in planEvidence) if(!uncertainPlans.Contains(id)) {
      if(uncertainPlans.Count < MaximumRetained) uncertainPlans.Add(id);
+     else { overflow = true; sourceLoss = true; }
+    }
+    foreach(string id in nameEvidence) if(!nameHistorySessions.Contains(id)) {
+     if(nameHistorySessions.Count < MaximumRetained) nameHistorySessions.Add(id);
      else { overflow = true; sourceLoss = true; }
     }
     foreach(Task item in tasks) if(sourceLoss || uncertainSessions.Contains(item.Id)) {
@@ -625,16 +662,16 @@ namespace AITaskMonitor.Claude {
      Task item = tasks[index];
      if(sourceLoss || uncertainSessions.Contains(item.Id) || uncertainPlans.Contains(item.Id) || item.Unconfirmed) {
       Task previous; retained.TryGetValue(item.Id, out previous);
-      Task safe = Freeze(item, previous);
+      Task safe = Freeze(item, previous, sourceLoss || nameHistorySessions.Contains(item.Id));
       safe.Unconfirmed = item.Unconfirmed;
       safe.Activity = item.Unconfirmed ? "" : item.Activity;
       tasks[index] = safe;
      }
     }
     var result = new List<Task>(tasks);
-    foreach(var entry in retained) if((prior || uncertainSessions.Contains(entry.Key)) && !visible.Contains(entry.Key)) result.Add(Freeze(entry.Value, null));
+    foreach(var entry in retained) if((prior || uncertainSessions.Contains(entry.Key)) && !visible.Contains(entry.Key)) result.Add(Freeze(entry.Value, null, sourceLoss || nameHistorySessions.Contains(entry.Key)));
     foreach(Task item in tasks) {
-     Task frozen = Freeze(item, null);
+     Task frozen = Freeze(item, null, sourceLoss || nameHistorySessions.Contains(item.Id));
      if(retained.ContainsKey(item.Id)) retained[item.Id] = frozen;
      else if(retained.Count < MaximumRetained) retained.Add(item.Id, frozen);
      else overflow = true;
