@@ -16,9 +16,10 @@ enum ClaudeHook {
 
     static func process(_ input: [String: Any], directory: URL = AppPaths.supportDirectory,
                         retentionPolicy: () -> ClaudeRetentionPolicy? = { ClaudeRetentionPolicy.load() },
-                        sendLoop: ([String: Any], URL) -> Void = { input, profile in ClaudeLoopClient.send(input, profile: profile) }) -> Int32 {
+                        sendLoop: (([String: Any], URL) -> Void)? = nil) -> Int32 {
         let record = makeRecord(from: input)
         do {
+            var writtenRecord = Data()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let events = directory.appendingPathComponent("claude-events-v2.jsonl")
             do {
@@ -34,7 +35,7 @@ enum ClaudeHook {
                 if lstat(events.path, &existing) == 0 && (existing.st_mode & S_IFMT) != S_IFREG { throw HookError.lock }
                 try markDamagedTailIfNeeded(at: events)
                 try rotateIfNeeded(at: events, policy: retentionPolicy())
-                let line = try JSONSerialization.data(withJSONObject: record) + Data([0x0A])
+                let line = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) + Data([0x0A])
                 let eventDescriptor = open(events.path, O_CREAT | O_WRONLY | O_APPEND | O_NOFOLLOW, S_IRUSR | S_IWUSR)
                 guard eventDescriptor >= 0 else { throw HookError.lock }
                 let handle = FileHandle(fileDescriptor: eventDescriptor, closeOnDealloc: true)
@@ -42,8 +43,10 @@ enum ClaudeHook {
                 var opened = stat()
                 guard fstat(eventDescriptor, &opened) == 0, (opened.st_mode & S_IFMT) == S_IFREG else { throw HookError.lock }
                 try handle.write(contentsOf: line)
+                writtenRecord = Data(line.dropLast())
             }
-            sendLoop(input, directory)
+            if let sendLoop { sendLoop(input, directory) }
+            else { ClaudeLoopClient.send(input, profile: directory, record: writtenRecord) }
             return 0
         } catch {
             return ProcessInfo.processInfo.environment["AI_TASK_MONITOR_AUDIT"] == "1" ? 1 : 0
@@ -210,7 +213,9 @@ enum ClaudeHook {
                   same(requested, returnedSubject) else {
                 return StageAssessment(signal: "uncertain")
             }
-            return StageAssessment(signal: "observed_create", taskID: returnedID, subject: returnedSubject, status: "pending")
+            // TaskCreateOutput reports the identifier and subject, not the
+            // current status. Preserve the name without inventing a state.
+            return StageAssessment(signal: "observed_create", taskID: returnedID, subject: returnedSubject)
         }
         let status = toolInput.string("status")
         guard let id = taskID, isTrueBoolean(response["success"]),

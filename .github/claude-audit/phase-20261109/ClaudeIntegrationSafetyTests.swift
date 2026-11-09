@@ -45,7 +45,7 @@ final class ClaudeIntegrationSafetyTests: XCTestCase {
         try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: copiedBinary.path)
         let hooks = try XCTUnwrap(try readObject(settings)["hooks"] as? [String: Any])
 
-        func invoke(_ event: String) throws {
+        func invoke(_ event: String, clearBackground: Bool = false) throws {
             let groups = try XCTUnwrap(hooks[event] as? [[String: Any]])
             let commands = try XCTUnwrap(groups.first?["hooks"] as? [[String: Any]])
             let command = try XCTUnwrap(commands.first?["command"] as? String)
@@ -59,8 +59,9 @@ final class ClaudeIntegrationSafetyTests: XCTestCase {
             process.standardOutput = output
             process.standardError = errors
             try process.run()
-            let payload: [String: Any] = ["hook_event_name": event, "session_id": "synthetic-session",
+            var payload: [String: Any] = ["hook_event_name": event, "session_id": "synthetic-session",
                                           "prompt": "SYNTHETIC_PROMPT_SECRET", "cwd": "/synthetic/private/path"]
+            if clearBackground { payload["background_tasks"] = [Any](); payload["session_crons"] = [Any]() }
             try input.fileHandleForWriting.write(contentsOf: JSONSerialization.data(withJSONObject: payload))
             try input.fileHandleForWriting.close()
             process.waitUntilExit()
@@ -76,13 +77,58 @@ final class ClaudeIntegrationSafetyTests: XCTestCase {
         let active = try reader.readSnapshot(observedSince: since)
         XCTAssertEqual(active.tasks.map(\.id), ["claude:synthetic-session"])
         XCTAssertEqual(active.tasks.first?.isActive, true)
+        try invoke("StopFailure")
+        let failure = try reader.readSnapshot(now: Date().addingTimeInterval(1), observedSince: since)
+        XCTAssertTrue(failure.tasks.first?.isUnconfirmed == true)
+        XCTAssertTrue(failure.terminalIDs.isEmpty)
+        XCTAssertTrue(failure.interruptedIDs.isEmpty)
         try invoke("Stop")
-        let stopped = try reader.readSnapshot(observedSince: since)
+        let unknown = try reader.readSnapshot(now: Date().addingTimeInterval(1), observedSince: since)
+        XCTAssertTrue(unknown.tasks.first?.isUnconfirmed == true)
+        XCTAssertTrue(unknown.terminalIDs.isEmpty)
+        XCTAssertTrue(unknown.neutralEndedIDs.isEmpty)
+        try invoke("Stop", clearBackground: true)
+        let stopped = try reader.readSnapshot(now: Date().addingTimeInterval(1), observedSince: since)
         XCTAssertTrue(stopped.tasks.isEmpty)
-        XCTAssertTrue(stopped.terminalIDs.contains("claude:synthetic-session"))
+        XCTAssertTrue(stopped.terminalIDs.isEmpty)
+        XCTAssertTrue(stopped.neutralEndedIDs.contains("claude:synthetic-session"))
         let saved = try String(contentsOf: eventFile, encoding: .utf8)
         XCTAssertFalse(saved.contains("SYNTHETIC_PROMPT_SECRET"))
         XCTAssertFalse(saved.contains("/synthetic/private/path"))
+    }
+
+    func testOldTenEventsArePartialUntilStopFailureIsAddedWithoutChangingOtherHooks() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settings = directory.appendingPathComponent("settings.json")
+        let executable = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: executable)
+        var root = try readObject(settings)
+        var hooks = try XCTUnwrap(root["hooks"] as? [String: Any])
+        XCTAssertEqual(ClaudeIntegration.events.count, 11)
+        let unrelated: [[String: Any]] = [["matcher": "synthetic", "hooks": [["type": "command", "command": "/synthetic/other-hook"]]]]
+        hooks["StopFailure"] = unrelated
+        root["hooks"] = hooks
+        try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]).write(to: settings)
+        XCTAssertEqual(try ClaudeIntegration.connectionState(settingsURL: settings), .partial)
+        try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: executable)
+        XCTAssertEqual(try ClaudeIntegration.connectionState(settingsURL: settings), .connected)
+        let updated = try XCTUnwrap(try readObject(settings)["hooks"] as? [String: Any])
+        let failureGroups = try XCTUnwrap(updated["StopFailure"] as? [[String: Any]])
+        XCTAssertEqual(failureGroups.count, 2)
+        XCTAssertEqual(failureGroups.first?["matcher"] as? String, "synthetic")
+        let firstCommands = try XCTUnwrap(failureGroups.first?["hooks"] as? [[String: Any]])
+        XCTAssertEqual(firstCommands.first?["command"] as? String, "/synthetic/other-hook")
+        for event in ClaudeIntegration.events where event != "StopFailure" {
+            let expected = try JSONSerialization.data(withJSONObject: XCTUnwrap(hooks[event] as? [[String: Any]]), options: [.sortedKeys])
+            let actual = try JSONSerialization.data(withJSONObject: XCTUnwrap(updated[event] as? [[String: Any]]), options: [.sortedKeys])
+            XCTAssertEqual(actual, expected, event)
+        }
+        try ClaudeIntegration.setConnected(false, settingsURL: settings, executable: executable)
+        let remaining = try XCTUnwrap(try readObject(settings)["hooks"] as? [String: Any])
+        let left = try XCTUnwrap(remaining["StopFailure"] as? [[String: Any]])
+        XCTAssertEqual(left.count, 1)
+        XCTAssertEqual((left.first?["hooks"] as? [[String: Any]])?.first?["command"] as? String, "/synthetic/other-hook")
     }
 
     func testConnectAndDisconnectPreserveUnrelatedSettingsAndPermissions() throws {

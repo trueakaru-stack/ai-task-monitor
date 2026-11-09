@@ -52,7 +52,7 @@ final class ClaudeReaderIndependentTests: XCTestCase {
     }
 
     func testCurrentOrPastStopAndInterruptedTerminalIDs() throws {
-        for name in ["Stop", "StopFailure", "SessionEnd"] {
+        for name in ["Stop", "SessionEnd"] {
             let result = try snapshot([event(-1, "UserPromptSubmit"), event(0, name, active: false)], now: 0, since: -1)
             XCTAssertTrue(result.tasks.isEmpty, name)
             if name == "Stop" {
@@ -66,6 +66,10 @@ final class ClaudeReaderIndependentTests: XCTestCase {
         }
         let tooOld = try snapshot([event(-2, "UserPromptSubmit"), event(-1, "Stop", active: false)], now: 0, since: 0)
         XCTAssertTrue(tooOld.terminalIDs.isEmpty)
+        let failure = try snapshot([event(-1, "UserPromptSubmit"), event(0, "StopFailure", active: false)], now: 0, since: -1)
+        XCTAssertTrue(failure.tasks.first?.isUnconfirmed == true)
+        XCTAssertTrue(failure.terminalIDs.isEmpty)
+        XCTAssertTrue(failure.neutralEndedIDs.isEmpty)
     }
 
     func testSameFutureStopBecomesTerminalAfterClockCatchesUp() throws {

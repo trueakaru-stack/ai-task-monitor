@@ -3,6 +3,17 @@ import Foundation
 
 @MainActor
 final class TaskStore: ObservableObject {
+    static func clearClaudePlanConfirmations(_ items: [MonitoredTask]) -> [MonitoredTask] {
+        items.map { item in
+            guard item.provider == .claude else { return item }
+            var copy = item
+            copy.planConfirmed = false
+            copy.progress = nil
+            copy.progressKind = .none
+            return copy
+        }
+    }
+
     static func clearUnconfirmedClaudePlans(_ items: [MonitoredTask]) -> [MonitoredTask] {
         items.map { item in
             guard item.provider == .claude, item.isUnconfirmed else { return item }
@@ -104,6 +115,7 @@ final class TaskStore: ObservableObject {
     private var nextJournalMaintenance = Date.distantPast
     private var loopDetectors: [String: LoopDetector] = [:]
     private var claudeLoopChannel: ClaudeLoopChannel?
+    private var claudePhaseEvidence = ClaudePhaseEvidence()
     private var claudeLoopDetectors: [String: ClaudeLoopTracker] = [:]
     private var timer: Timer?
 
@@ -753,12 +765,16 @@ final class TaskStore: ObservableObject {
             } else {
                 let complete = connection == .connected
                 claudeConnected = complete && (!claudeReader.usesExplicitFile || claudeLoopProfile != nil)
+                // Drain phase evidence before matching the file snapshot. A
+                // record whose frame is still in flight remains unconfirmed.
+                syncClaudeLoop(connected: claudeConnected, now: Date())
                 if !complete { unavailable.append(.claude) }
                 let exists = FileManager.default.fileExists(atPath: claudeReader.eventFile.path)
                 if !exists && sawClaudeEvents { throw CocoaError(.fileReadNoSuchFile) }
                 if exists {
                     sawClaudeEvents = true
-                    let snapshot = try claudeReader.readSnapshot(observedSince: monitoringStartedAt)
+                    let snapshot = try claudeReader.readSnapshot(observedSince: monitoringStartedAt,
+                                                                phaseEvidence: claudePhaseEvidence)
                     terminalIDs.formUnion(snapshot.terminalIDs)
                     interruptedIDs.formUnion(snapshot.interruptedIDs)
                     neutralEndedIDs.formUnion(snapshot.neutralEndedIDs)
@@ -788,7 +804,11 @@ final class TaskStore: ObservableObject {
             .filter { $0.isActive || $0.isUnconfirmed || $0.isWaiting }
             .sorted { $0.updatedAt > $1.updatedAt }
         let now = Date()
-        syncClaudeLoop(connected: claudeConnected, now: now)
+        let phaseChangedAfterSnapshot = syncClaudeLoop(connected: claudeConnected, now: now)
+        if phaseChangedAfterSnapshot || claudePhaseEvidence.poisoned {
+            previousClaude = Self.clearClaudePlanConfirmations(previousClaude)
+            combined = Self.clearClaudePlanConfirmations(combined)
+        }
         for id in Array(loopDetectors.keys) {
             guard var detector = loopDetectors[id] else { continue }
             detector.configure(threshold: diagnosticSettings.loopThreshold, windowMinutes: diagnosticSettings.loopWindowMinutes)
@@ -914,27 +934,48 @@ final class TaskStore: ObservableObject {
         }
     }
 
-    private func syncClaudeLoop(connected: Bool, now: Date) {
-        guard connected, diagnosticWorker != nil else {
+    @discardableResult
+    private func syncClaudeLoop(connected: Bool, now: Date) -> Bool {
+        guard connected else {
+            let changed = claudeLoopChannel != nil
+            if changed { claudePhaseEvidence.invalidate() }
             claudeLoopChannel?.stop()
             claudeLoopChannel = nil
             claudeLoopDetectors.removeAll()
             claudeLoopError = ""
-            return
+            return changed
         }
         if claudeLoopChannel == nil {
-            do { claudeLoopChannel = try ClaudeLoopChannel(profile: claudeLoopProfile ?? AppPaths.supportDirectory) }
+            do {
+                let channel = try ClaudeLoopChannel(profile: claudeLoopProfile ?? AppPaths.supportDirectory)
+                claudeLoopChannel = channel
+                if let key = channel.phaseKey() { claudePhaseEvidence.start(key: key) }
+                else { claudePhaseEvidence.invalidate() }
+            }
             catch {
+                claudePhaseEvidence.invalidate()
                 claudeLoopDetectors.removeAll()
-                claudeLoopError = tr("Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение.", "Claude Code loop warnings are unavailable. Check access or restart the app.")
-                return
+                if diagnosticWorker != nil {
+                    claudeLoopError = tr("Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение.", "Claude Code loop warnings are unavailable. Check access or restart the app.")
+                }
+                return true
             }
         }
-        guard let channel = claudeLoopChannel else { return }
+        guard let channel = claudeLoopChannel else { return true }
         claudeLoopError = ""
         let batch = channel.drain()
-        if batch.gap { claudeLoopDetectors.removeAll() }
+        var phaseChanged = batch.gap
+        if batch.gap { claudeLoopDetectors.removeAll(); claudePhaseEvidence.invalidate() }
+        if diagnosticWorker == nil { claudeLoopDetectors.removeAll() }
         for event in batch.events {
+            if event.kind == .phase {
+                phaseChanged = true
+                if let fingerprint = event.fingerprint {
+                    claudePhaseEvidence.observe(session: event.sessionID, toolID: event.toolID, fingerprint: fingerprint)
+                } else { claudePhaseEvidence.invalidate() }
+                continue
+            }
+            guard diagnosticWorker != nil else { continue }
             if claudeLoopDetectors[event.sessionID] == nil {
                 guard event.kind == .start else { continue }
                 if claudeLoopDetectors.count >= 256,
@@ -957,6 +998,7 @@ final class TaskStore: ObservableObject {
             if detector.lastSeen < now.addingTimeInterval(-1800) { claudeLoopDetectors.removeValue(forKey: id) }
             else { claudeLoopDetectors[id] = detector }
         }
+        return phaseChanged
     }
 
     func setDiagnosticSettings(_ settings: DiagnosticSettings) {

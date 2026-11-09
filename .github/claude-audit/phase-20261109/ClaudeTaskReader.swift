@@ -139,13 +139,13 @@ private func phaseOf(_ event: [String: Any]) -> ClaudePhase {
     let status = event.string("task_status")
     let previousStatus = event.string("task_from_status")
     let validStatus = ["pending", "in_progress", "completed"].contains { sameBytes(status, $0) }
-    if sameBytes(name, "PostToolUse"), safeStageID(id), validStatus {
-        if sameBytes(signal, "observed_update"), sameBytes(tool, "TaskUpdate"), title.isEmpty,
+    if sameBytes(name, "PostToolUse"), safeStageID(id) {
+        if sameBytes(signal, "observed_update"), sameBytes(tool, "TaskUpdate"), title.isEmpty, validStatus,
            ["pending", "in_progress", "completed"].contains(where: { sameBytes(previousStatus, $0) }),
            !sameBytes(previousStatus, status) {
             return ClaudePhase(kind: "observed_update", tool: tool, taskID: id, status: status, previousStatus: previousStatus)
         }
-        if sameBytes(signal, "observed_create"), sameBytes(tool, "TaskCreate"), sameBytes(status, "pending"),
+        if sameBytes(signal, "observed_create"), sameBytes(tool, "TaskCreate"), status.isEmpty,
            previousStatus.isEmpty, !title.isEmpty, Array(title.utf8.prefix(1025)).count <= 1024 {
             return ClaudePhase(kind: "observed_create", tool: tool, taskID: id, title: title, status: status)
         }
@@ -184,15 +184,19 @@ private struct ClaudePhaseNotice {
 private struct ClaudePhaseTracker {
     var createAttempts: [Data: ClaudePhaseAttempt] = [:]
     var updateAttempts: [String: ClaudePhaseAttempt] = [:]
+    var correlatedAttempts: [String: ClaudePhaseAttempt] = [:]
+    var usedCallIDs: Set<String> = []
     var createdNotices: [String: ClaudePhaseNotice] = [:]
     var completedNotices: [String: ClaudePhaseNotice] = [:]
     var seen: [ClaudeSeenObservation: UInt8] = [:]
     var lastStatuses: [String: String] = [:]
     var lastTitles: [String: Data] = [:]
+    var createdIDs: Set<String> = []
+    var unobservedStatuses: Set<String> = []
     var inconsistent = false
     var sawObservation = false
 
-    mutating func consume(_ phase: ClaudePhase, at date: Date, source: Int) {
+    mutating func consume(_ phase: ClaudePhase, at date: Date, source: Int, callID: String? = nil) {
         let bit = UInt8(1 << source)
         switch phase.kind {
         case "none": break
@@ -200,7 +204,15 @@ private struct ClaudePhaseTracker {
             let title = Data(phase.title.utf8)
             let attempt = ClaudePhaseAttempt(tool: phase.tool, taskID: phase.taskID, title: title,
                                              intentStatus: phase.intentStatus, date: date, sources: bit)
-            if sameBytes(phase.tool, "TaskCreate") {
+            if let callID {
+                if usedCallIDs.contains(callID) { inconsistent = true }
+                else if var old = correlatedAttempts[callID] {
+                    if old.date == date && sameBytes(old.tool, attempt.tool) && sameBytes(old.taskID, attempt.taskID) &&
+                       old.title == attempt.title && sameBytes(old.intentStatus, attempt.intentStatus) && (old.sources & bit) == 0 {
+                        old.sources |= bit; correlatedAttempts[callID] = old
+                    } else { inconsistent = true }
+                } else { correlatedAttempts[callID] = attempt }
+            } else if sameBytes(phase.tool, "TaskCreate") {
                 if var old = createAttempts[title] {
                     if old.date == date && (old.sources & bit) == 0 { old.sources |= bit; createAttempts[title] = old }
                     else { inconsistent = true }
@@ -237,7 +249,19 @@ private struct ClaudePhaseTracker {
                 return
             }
             seen[observation] = bit
+            if let callID {
+                if usedCallIDs.contains(callID) { inconsistent = true }
+                else if let attempt = correlatedAttempts.removeValue(forKey: callID) {
+                    if date <= attempt.date || !sameBytes(attempt.tool, phase.tool) { inconsistent = true }
+                    if phase.kind == "observed_create" && attempt.title != signature.title { inconsistent = true }
+                    if phase.kind == "observed_update" &&
+                       (!sameBytes(attempt.taskID, phase.taskID) || !sameBytes(attempt.intentStatus, phase.status)) { inconsistent = true }
+                }
+                usedCallIDs.insert(callID)
+            }
             if phase.kind == "observed_create" {
+                if !createdIDs.insert(phase.taskID).inserted || lastStatuses[phase.taskID] != nil { inconsistent = true }
+                unobservedStatuses.insert(phase.taskID)
                 if let attempt = createAttempts.removeValue(forKey: signature.title) {
                     // No raw or derived call identifier is stored. Matching
                     // fields cannot prove the response belongs to this call.
@@ -249,6 +273,7 @@ private struct ClaudePhaseTracker {
                 }
                 lastTitles[phase.taskID] = signature.title
             } else {
+                unobservedStatuses.remove(phase.taskID)
                 if let attempt = updateAttempts.removeValue(forKey: phase.taskID) {
                     // Same task/status may belong to a different invocation.
                     inconsistent = true
@@ -258,17 +283,18 @@ private struct ClaudePhaseTracker {
                     if date <= notice.date || (!notice.title.isEmpty && lastTitles[phase.taskID] != notice.title) { inconsistent = true }
                 }
             }
-            if let previous = lastStatuses[phase.taskID] {
-                if sameBytes(phase.kind, "observed_create") || !sameBytes(previous, phase.previousStatus) { inconsistent = true }
+            if phase.kind == "observed_update" {
+                if let previous = lastStatuses[phase.taskID], !sameBytes(previous, phase.previousStatus) { inconsistent = true }
+                lastStatuses[phase.taskID] = phase.status
             }
-            lastStatuses[phase.taskID] = phase.status
         default: inconsistent = true
         }
     }
 
     var isUncertain: Bool {
         inconsistent || !createAttempts.isEmpty || !updateAttempts.isEmpty ||
-            !createdNotices.isEmpty || !completedNotices.isEmpty || !sawObservation
+            !correlatedAttempts.isEmpty || !createdNotices.isEmpty || !completedNotices.isEmpty ||
+            !unobservedStatuses.isEmpty || !sawObservation
     }
 }
 
@@ -295,7 +321,8 @@ struct ClaudeTaskReader {
         (try? readSnapshot(now: now, observedSince: observedSince).tasks) ?? []
     }
 
-    func readSnapshot(now: Date = Date(), observedSince: Date? = nil) throws -> ClaudeTaskSnapshot {
+    func readSnapshot(now: Date = Date(), observedSince: Date? = nil,
+                      phaseEvidence: ClaudePhaseEvidence? = nil) throws -> ClaudeTaskSnapshot {
         let currentInput = try readClaudeRecords(eventFile)
         var current = currentInput.records
         var observedIDs = Set(current.map { $0.2 })
@@ -433,13 +460,35 @@ struct ClaudeTaskReader {
             if left.element.1 != right.element.1 { return left.element.1 < right.element.1 }
             return left.offset < right.offset
         }
+        // A fingerprint must identify at most one row per source; cross-file
+        // overlap is allowed, repeated identical rows in one file are not.
+        var phaseCounts: [[String: Int]] = [[:], [:]]
+        if let phaseEvidence, !phaseEvidence.poisoned {
+            for (source, records) in [legacy, current].enumerated() {
+                for (event, _, _) in records {
+                    let kind = phaseOf(event).kind
+                    if ["attempt", "observed_create", "observed_update"].contains(kind),
+                       let fingerprint = phaseEvidence.fingerprint(event) {
+                        phaseCounts[source][fingerprint, default: 0] += 1
+                    }
+                }
+            }
+        }
         var sessions: [String: SessionState] = [:]
         var phaseTrackers: [String: ClaudePhaseTracker] = [:]
         for entry in ordered {
             let event = entry.element.0
             let id = entry.element.2
             var tracker = phaseTrackers[id] ?? ClaudePhaseTracker()
-            tracker.consume(phaseOf(event), at: entry.element.1, source: entry.offset < legacy.count ? 0 : 1)
+            let phase = phaseOf(event)
+            let source = entry.offset < legacy.count ? 0 : 1
+            var callID: String?
+            if ["attempt", "observed_create", "observed_update"].contains(phase.kind),
+               let phaseEvidence, let fingerprint = phaseEvidence.fingerprint(event),
+               (phaseCounts[0][fingerprint] ?? 0) <= 1, (phaseCounts[1][fingerprint] ?? 0) <= 1 {
+                callID = phaseEvidence.toolID(fingerprint: fingerprint, session: id)
+            }
+            tracker.consume(phase, at: entry.element.1, source: source, callID: callID)
             phaseTrackers[id] = tracker
             var state = sessions[id] ?? SessionState(id: id)
             let isNewPrompt = event.string("event") == "UserPromptSubmit" && (event["active"] as? Bool) != false
@@ -456,6 +505,10 @@ struct ClaudeTaskReader {
             if sameBytes(state.lastEvent, "Stop") {
                 let background = phaseVersionTwo(event) ? event.string("stop_background") : "unknown"
                 state.backgroundUncertain = !sameBytes(background, "clear")
+            } else if sameBytes(state.lastEvent, "StopFailure") {
+                // Failure of the main response does not establish that
+                // background work has finished.
+                state.backgroundUncertain = true
             }
             updateSteps(event, state: &state)
             sessions[id] = state
@@ -485,7 +538,7 @@ struct ClaudeTaskReader {
             let unconfirmed = age >= 7_200 || timeAnomaly || state.backgroundUncertain
             // A step observed without any prompt boundary is not proof that
             // it belongs to the currently observed user request.
-            let planConfirmed = state.planConfirmed && !unconfirmed && !planUncertain.contains(state.id) &&
+            let planConfirmed = state.planConfirmed && !unconfirmed && phaseEvidence?.poisoned != true && !planUncertain.contains(state.id) &&
                 sessionsWithPrompt.contains(state.id) && !(phaseTrackers[state.id]?.isUncertain ?? true)
             let progress = planConfirmed ? MonitoredTask.progress(for: steps) : nil
             result.tasks.append(MonitoredTask(

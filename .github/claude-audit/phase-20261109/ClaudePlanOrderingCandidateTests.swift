@@ -21,7 +21,7 @@ final class ClaudePlanOrderingCandidateTests: XCTestCase {
         var event: [String: Any] = ["session_id": session, "timestamp": formatter.string(from: start.addingTimeInterval(seconds)),
                                     "event": "PostToolUse", "active": true, "plan_version": 2, "task_id": "x", "task_status": status]
         if let subject {
-            event["tool_name"] = "TaskCreate"; event["plan_signal"] = "observed_create"; event["task_subject"] = subject
+            event["tool_name"] = "TaskCreate"; event["plan_signal"] = "observed_create"; event["task_subject"] = subject; event["task_status"] = ""
         } else {
             event["tool_name"] = "TaskUpdate"; event["plan_signal"] = "observed_update"; event["task_from_status"] = "pending"
         }

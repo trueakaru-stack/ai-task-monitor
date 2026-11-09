@@ -31,6 +31,13 @@ final class ClaudePhaseIndependentCounterexamples: XCTestCase {
         return record(at, input)
     }
 
+    private func update(_ at: Date) -> [String: Any] {
+        record(at, ["hook_event_name": "PostToolUse", "tool_name": "TaskUpdate",
+                    "tool_input": ["taskId": "step-1", "status": "completed"],
+                    "tool_response": ["success": true, "taskId": "step-1", "updatedFields": ["status"],
+                                      "statusChange": ["from": "pending", "to": "completed"]]])
+    }
+
     private func encodeLines(_ records: [[String: Any]]) throws -> Data {
         var data = Data()
         for record in records {
@@ -88,9 +95,8 @@ final class ClaudePhaseIndependentCounterexamples: XCTestCase {
         }
     }
 
-    // User accepted progress over observed stages with a caveat. Whether the
-    // unlinked notice can be reconciled safely needs a versioned upstream
-    // contract; this test expresses the requested recovery, not proof of it.
+    // The original test had no live evidence. This adapted copy provides the
+    // in-memory channel match; the independent original remains unchanged.
     func testMatchedCreateAfterNoticeCanRecoverObservedProgress() throws {
         try withDirectory { directory in
             let now = Date(), current = directory.appendingPathComponent("current.jsonl")
@@ -99,8 +105,20 @@ final class ClaudePhaseIndependentCounterexamples: XCTestCase {
             let notice = record(now.addingTimeInterval(-2), ["hook_event_name": "TaskCreated", "task_id": "step-1", "task_subject": "Old title"])
             let post = create(now.addingTimeInterval(-1), call: "call-1")
             try encodeLines([prompt(now.addingTimeInterval(-4)), pre, notice, post]).write(to: current)
-            let task = try XCTUnwrap(ClaudeTaskReader(eventFile: current).readSnapshot(now: now).tasks.first)
-            XCTAssertTrue(task.planConfirmed, "A validated matching result should be usable if the notice is safely reconciled")
+            var evidence = ClaudePhaseEvidence()
+            evidence.start(key: Data(repeating: 0x7a, count: 32))
+            for record in [pre, post] {
+                let fingerprint = try XCTUnwrap(evidence.fingerprint(record))
+                evidence.observe(session: "synthetic", toolID: "call-1", fingerprint: fingerprint)
+            }
+            let reader = ClaudeTaskReader(eventFile: current)
+            let createdOnly = try XCTUnwrap(reader.readSnapshot(now: now, phaseEvidence: evidence).tasks.first)
+            XCTAssertFalse(createdOnly.planConfirmed, "TaskCreateOutput does not report status")
+            XCTAssertNil(createdOnly.progress)
+            try encodeLines([prompt(now.addingTimeInterval(-4)), pre, notice, post, update(now.addingTimeInterval(-0.5))]).write(to: current)
+            let task = try XCTUnwrap(reader.readSnapshot(now: now, phaseEvidence: evidence).tasks.first)
+            XCTAssertTrue(task.planConfirmed, "A validated status observation should be usable after the matching create")
+            XCTAssertEqual(task.progress, 100)
         }
     }
 
@@ -137,7 +155,7 @@ final class ClaudePhaseIndependentCounterexamples: XCTestCase {
             let marker = record(now, ["hook_event_name": "Unknown", "session_id": ""])
             let fresh = prompt(now.addingTimeInterval(2))
             let observation = create(now.addingTimeInterval(3))
-            try encodeLines([marker, fresh, observation]).write(to: current)
+            try encodeLines([marker, fresh, observation, update(now.addingTimeInterval(3.5))]).write(to: current)
             let reader = ClaudeTaskReader(eventFile: current)
             let before = try reader.readSnapshot(now: now.addingTimeInterval(4), observedSince: now.addingTimeInterval(-1))
             XCTAssertTrue(before.sourceUncertain)
@@ -150,7 +168,7 @@ final class ClaudePhaseIndependentCounterexamples: XCTestCase {
             XCTAssertFalse(recovered.sourceUncertain)
             XCTAssertEqual(recovered.tasks.count, 1)
             XCTAssertTrue(recovered.tasks.first?.planConfirmed == true)
-            XCTAssertEqual(recovered.tasks.first?.progress, 0)
+            XCTAssertEqual(recovered.tasks.first?.progress, 100)
         }
     }
 
