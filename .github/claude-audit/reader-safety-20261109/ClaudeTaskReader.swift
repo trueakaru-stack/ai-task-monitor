@@ -1,5 +1,15 @@
 import Foundation
 
+// Swift String equality merges canonically equivalent Unicode spellings.
+// Keep common ASCII IDs unchanged; escape all other IDs into disjoint ASCII
+// keys derived from their original UTF-8 bytes. IDs accepted by the existing
+// Claude loop channel are ASCII without '~', so their keys remain unchanged.
+func claudeSessionKey(_ value: String) -> String {
+    let bytes = Array(value.utf8)
+    if bytes.allSatisfy({ $0 < 128 }) && bytes.first != 0x7e { return value }
+    return "~" + bytes.map { String(format: "%02x", $0) }.joined()
+}
+
 struct ClaudeTaskSnapshot {
     var tasks: [MonitoredTask] = []
     var terminalIDs: Set<String> = []
@@ -28,17 +38,17 @@ struct ClaudeTaskReader {
                   let timestamp = FileHelpers.isoDate(event["timestamp"]) else { return nil }
             return (event, timestamp)
         }
-        let observedIDs = Set(current.map { $0.0.string("session_id") })
+        let observedIDs = Set(current.map { claudeSessionKey($0.0.string("session_id")) })
         let freshIDs = Set(current.compactMap { item -> String? in
             if let observedSince, item.1 < observedSince { return nil }
             guard item.0["active"] as? Bool == true else { return nil }
-            return item.0.string("session_id")
+            return claudeSessionKey(item.0.string("session_id"))
         })
         var legacy: [([String: Any], Date)] = []
         if let legacyFile, !observedIDs.isEmpty,
            let legacyText = try? FileHelpers.tail(of: legacyFile, maximumBytes: 4_194_304) {
             legacy = legacyText.split(whereSeparator: \.isNewline).compactMap { line in
-                guard let event = FileHelpers.jsonObject(line), observedIDs.contains(event.string("session_id")),
+                guard let event = FileHelpers.jsonObject(line), observedIDs.contains(claudeSessionKey(event.string("session_id"))),
                       let timestamp = FileHelpers.isoDate(event["timestamp"]) else { return nil }
                 return (event, timestamp)
             }
@@ -66,7 +76,7 @@ struct ClaudeTaskReader {
         var sessionsWithPrompt: Set<String> = []
         for (source, records) in [legacy, current].enumerated() {
             for (event, date) in records {
-                let id = event.string("session_id")
+                let id = claudeSessionKey(event.string("session_id"))
                 let active = event["active"] as? Bool
                 let timeKey = PlanTimeKey(session: id, date: date)
                 if let previous = latest[source][id] {
@@ -145,7 +155,7 @@ struct ClaudeTaskReader {
         var sessions: [String: SessionState] = [:]
         for entry in ordered {
             let event = entry.element.0
-            let id = event.string("session_id")
+            let id = claudeSessionKey(event.string("session_id"))
             var state = sessions[id] ?? SessionState(id: id)
             let isNewPrompt = event.string("event") == "UserPromptSubmit" && (event["active"] as? Bool) != false
             let becameActive = (event["active"] as? Bool) == true && !state.isActive

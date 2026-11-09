@@ -158,6 +158,24 @@ final class ClaudeReaderIndependentTests: XCTestCase {
         let result = try snapshot([event(0, "UserPromptSubmit", session: first),
                                    event(1, "Stop", active: false, session: second)], now: 2)
         XCTAssertEqual(result.tasks.count, 1)
-        XCTAssertEqual(result.tasks.first.map { Array($0.id.utf8) }, Array(("claude:" + first).utf8))
+        XCTAssertEqual(result.tasks.first?.id, "claude:" + claudeSessionKey(first))
+        XCTAssertFalse(result.terminalIDs.contains("claude:" + claudeSessionKey(first)))
+        XCTAssertTrue(result.terminalIDs.contains("claude:" + claudeSessionKey(second)))
+    }
+
+    func testSessionKeysPreserveDistinctBytesAndPlainLoopIDs() throws {
+        let first = "\u{00E9}"
+        let second = "e\u{0301}"
+        let reserved = "~c3a9"
+        XCTAssertNotEqual(claudeSessionKey(first), claudeSessionKey(second))
+        XCTAssertNotEqual(claudeSessionKey(first), claudeSessionKey(reserved))
+        XCTAssertEqual(claudeSessionKey("abc-123_X"), "abc-123_X")
+        let result = try snapshot([event(0, "UserPromptSubmit", session: first),
+                                   event(1, "UserPromptSubmit", session: second),
+                                   event(2, "UserPromptSubmit", session: reserved)], now: 3)
+        XCTAssertEqual(Set(result.tasks.map(\.id)), Set(["claude:" + claudeSessionKey(first),
+                                                         "claude:" + claudeSessionKey(second),
+                                                         "claude:" + claudeSessionKey(reserved)]))
+        XCTAssertTrue(result.terminalIDs.isEmpty)
     }
 }

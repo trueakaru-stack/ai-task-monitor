@@ -46,12 +46,12 @@ jobs:
           INPUT="$GITHUB_WORKSPACE/.github/claude-audit/reader-safety-20261109"
           cd "$INPUT"
           printf '%s  %s\n' \
-            'da440691d0655c845b5752d366680dbba2e46725f2a646381aa311806133f090' ClaudeTaskReader.swift \
+            '52ba689e3767aa192715240c3dd728358baa03cc7cc373ff8ef6cb3d5e0edf13' ClaudeTaskReader.swift \
             '73aec7758bc051105d37d1bd67b28ee28c9cbf8e48245accd871bee7a60ef884' ClaudeReaderSafetyCandidateTests.swift \
             '60b488c8f794fc42126c56837c0ee5a6a14c31dd84fdaac2b631e4c6659f00c8' ClaudePlanOrderingCandidateTests.swift \
             'd5bca13aed49113d68512395e214114f4d7f2ffb61a2d656aa49ea8bd9f225f1' ClaudePlanCompletenessObservationTests.swift \
             'e7ec2406acaf68be9639cc054f50eaf0fb2a35ac8036f76ffb960d47e3f74e18' ClaudeHookPhaseBlockingTests.swift \
-            'cc38c18d74c8cd6f7e7c0d19aa9ab6568ef51249d0e5639d9315d7451aef8626' ClaudeReaderIndependentTests.swift \
+            'bd47b3b11ae44f563f67e9d7dbe2fdccaa82eefc4cc4e5c1bef738760c3b7ef7' ClaudeReaderIndependentTests.swift \
             '872ef4ed0b1d488f359e4ba335775edd7e2d9e0c2d993d29e2b8998227843001' ParserTests.swift \
             | shasum -a 256 -c -
           cp "$INPUT/ClaudeTaskReader.swift" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/ClaudeTaskReader.swift"
@@ -90,7 +90,7 @@ jobs:
           }
           run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-claude-reader-network-probe.py"
           audit_status=0
-          for entry in ClaudeReaderSafetyCandidateTests:6 ClaudePlanOrderingCandidateTests:14 ParserTests:23 ClaudePlanCompletenessObservationTests:1 ClaudeHookPhaseBlockingTests:1 ClaudeReaderIndependentTests:12; do
+          for entry in ClaudeReaderSafetyCandidateTests:6 ClaudePlanOrderingCandidateTests:14 ParserTests:23 ClaudePlanCompletenessObservationTests:1 ClaudeHookPhaseBlockingTests:1 ClaudeReaderIndependentTests:13; do
             suite="${entry%:*}"
             count="${entry#*:}"
             log="$RUNNER_TEMP/aitm-claude-reader-$suite.log"

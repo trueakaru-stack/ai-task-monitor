@@ -7,6 +7,7 @@ tries to avoid treating old plans or anomalously timed events as current.
 Its stateless log reader cannot establish all event delivery or historical
 ordering, and a task may remain unconfirmed after a clock anomaly. The user
 chose progress labelled as based on observed steps when only list completeness
-is uncertain; contradictory or stale step states hide progress. Phase-safety
-and independent Unicode identity tests may fail and run without suppression.
+is uncertain; contradictory or stale step states hide progress. The candidate
+uses distinct internal keys for byte-distinct Unicode session IDs. Phase-safety
+tests are known to fail on this candidate and run without suppression.
 No claim of live Claude Desktop, cloud, or real-agent validation is made.
