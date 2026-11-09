@@ -69,6 +69,16 @@ final class CodexColdCompressedIndependentTests: XCTestCase {
         }
     }
 
+    func testRecentlyCompressedJustBeforeStartupRemainsUncertain() throws {
+        try withRoot { root in
+            try index([cold], root)
+            _ = try compressed(cold, root, age: 2)
+            let snapshot = try CodexTaskReader(codexHome: root).readSnapshot(observedSince: Date())
+            XCTAssertTrue(snapshot.isPartial)
+            XCTAssertTrue(snapshot.tasks.isEmpty)
+        }
+    }
+
     func testPreviouslyObservedColdCompressedRemainsUncertain() throws {
         try withRoot { root in
             try index([cold], root)
@@ -90,6 +100,18 @@ final class CodexColdCompressedIndependentTests: XCTestCase {
             XCTAssertFalse(snapshot.tasks.contains { $0.id == cold })
             XCTAssertFalse(snapshot.terminalIDs.contains(cold))
             XCTAssertTrue(snapshot.tasks.contains { $0.id == live && $0.isActive })
+        }
+    }
+
+    func testIdenticalPlainAndCompressedRepresentationsUsePlain() throws {
+        try withRoot { root in
+            try index([cold], root)
+            let since = Date().addingTimeInterval(-10)
+            _ = try compressed(cold, root, age: 8 * 24 * 60 * 60)
+            try start(file(cold, root))
+            let snapshot = try CodexTaskReader(codexHome: root).readSnapshot(now: Date().addingTimeInterval(3), observedSince: since)
+            XCTAssertFalse(snapshot.isPartial, "An exact plain/compressed sibling is one rollout; upstream gives the plain path precedence")
+            XCTAssertTrue(snapshot.tasks.contains { $0.id == cold && $0.isActive })
         }
     }
 

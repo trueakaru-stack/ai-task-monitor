@@ -44,7 +44,7 @@ jobs:
           printf '%s  %s\n' \
             '2480f217f7db42763ec4f43cd367b98505f6d37b96e06a6041ed6ed3f8ce785a' '.github/codex-audit/revert-safe-20261109/CodexTaskReader.swift' \
             '734187524ad64e778ffb1bdea773b350dda77d91e10a888867a1e3819a580ec2' '.github/codex-audit/revert-safe-20261109/TaskStore.swift' \
-            '0c9391a947c55e05b43896ada9603140994c8443b2b3494baa880a84ed8fc1cd' '.github/codex-audit/cold-compressed-independent-20261109/CodexColdCompressedIndependentTests.swift' \
+            '9cf23df7eda4164bcc0c1a1843f2cdad1ef45f00ef5082624378abd79f5fa830' '.github/codex-audit/cold-compressed-independent-20261109/CodexColdCompressedIndependentTests.swift' \
             | shasum -a 256 -c -
       - name: Reproduce stale compressed warning in isolated fixtures
         working-directory: macos
@@ -83,8 +83,9 @@ jobs:
           status=${PIPESTATUS[0]}
           set -e
           if [ "$status" -eq 0 ]; then echo 'Unexpected pass: update this reproduction to match the current implementation'; exit 1; fi
-          grep -Eq 'Executed 6 tests?, with 2 failures' "$RUNNER_TEMP/aitm-cold.log"
+          grep -Eq 'Executed 8 tests?, with 4 failures' "$RUNNER_TEMP/aitm-cold.log"
           grep -E "Test Case .*testOldUnobservedCompressedDoesNotSpoilLiveNeighbor.* failed " "$RUNNER_TEMP/aitm-cold.log"
           grep -E "Test Case .*testOldCompressedMaterializedAndUpdatedAfterStartupIsSeen.* failed " "$RUNNER_TEMP/aitm-cold.log"
+          grep -E "Test Case .*testIdenticalPlainAndCompressedRepresentationsUsePlain.* failed " "$RUNNER_TEMP/aitm-cold.log"
           if grep -Eq 'Test Case .* skipped ' "$RUNNER_TEMP/aitm-cold.log"; then exit 1; fi
-          echo 'Expected reproduction confirmed: two failing expectations; four safeguards passed.'
+          echo 'Expected reproduction confirmed: three failing cases; five safeguards passed.'
