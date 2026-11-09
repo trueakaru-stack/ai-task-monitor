@@ -11,3 +11,9 @@ a response callback registers its headers. A crash or failure of both storage
 copies can also lose a pending server delay. The workflow checks compilation
 and the included synthetic tests; it does not prove real network behavior,
 durable storage under all failures, or readiness for integration.
+
+`ReleaseHeaderBoundaryDiagnosticTests.swift` is observational for stalled
+responses: it records whether a header reaches a simple URLSession delegate
+and the candidate before cancellation, and separately calls the candidate's
+delegate directly. A missing stalled-response callback is reported in the log,
+not counted as proof that header delivery worked.

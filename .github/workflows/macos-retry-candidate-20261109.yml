@@ -52,11 +52,12 @@ jobs:
             'ba9026089988cefa0c5f3f9b50ee635cf5dc0a80680ae521064663bac574a20a' ReleaseRetryScheduleTests.swift \
             'e968b2a942941d02a343906258cafb3ff1a384e325eb5a56c51c7c0f69aba823' ReleaseUpdateCoordinatorTests.swift \
             'e39e2f4935d9f8f863caf10901adb5745122f5cd45d2742db48f69a48904df0b' ReleaseRequestSyntheticTests.swift \
+            'cbd477270da5a0bacd5d15df909dc678992193cd52f943c9146ec206a60a6817' ReleaseHeaderBoundaryDiagnosticTests.swift \
             | shasum -a 256 -c -
           for name in ReleaseRetrySchedule.swift ReleaseUpdateCoordinator.swift ReleaseUpdates.swift; do
             cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/$name"
           done
-          for name in ReleaseRetryScheduleTests.swift ReleaseUpdateCoordinatorTests.swift ReleaseRequestSyntheticTests.swift; do
+          for name in ReleaseRetryScheduleTests.swift ReleaseUpdateCoordinatorTests.swift ReleaseRequestSyntheticTests.swift ReleaseHeaderBoundaryDiagnosticTests.swift; do
             cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/$name"
           done
       - name: Run isolated release tests without network
@@ -92,7 +93,7 @@ jobs:
           run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-retry-network-probe.py"
           run_isolated /usr/bin/xcrun swift --version
           audit_status=0
-          for entry in ReleaseUpdatesTests:5 ReleaseRetryScheduleTests:22 ReleaseUpdateCoordinatorTests:30 ReleaseRequestSyntheticTests:10 ReleaseRedirectDiagnosticTests:3; do
+          for entry in ReleaseUpdatesTests:5 ReleaseRetryScheduleTests:22 ReleaseUpdateCoordinatorTests:30 ReleaseRequestSyntheticTests:10 ReleaseRedirectDiagnosticTests:3 ReleaseHeaderBoundaryDiagnosticTests:2; do
             suite="${entry%:*}"
             count="${entry#*:}"
             log="$RUNNER_TEMP/aitm-retry-$suite.log"
