@@ -24,6 +24,20 @@ pump is not started by the application entry point, and it does not establish a
 real Claude connection. The file-to-window tests are documented in the
 `ClaudeReader` README.
 
+The preview can also render a caller-supplied synthetic repeated-error warning
+and pass its dismissal back to that caller. It does not start the loop detector
+or hook, and the application entry point does not supply these warnings. A
+synthetic WPF test covers both layouts, languages and themes, focus retention
+and scrolling:
+
+```powershell
+dotnet run --project .\windows\native\Tests\LoopWarningUi\LoopWarningUi.Tests.csproj -c Release
+```
+
+The tests exercise programmatic WPF focus; a real active window, physical
+keyboard input, visible focus indication, and high-DPI behavior remain
+unverified. This preview does not establish feature parity or release readiness.
+
 `PublishedWindow.xaml` is the WPF markup extracted from
 `windows/app/CodexProgress.ps1` at revision `1c44076`, with the later approved
 feedback-copy icon alignment applied and the PowerShell

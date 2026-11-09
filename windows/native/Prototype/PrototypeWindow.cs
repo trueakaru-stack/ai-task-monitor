@@ -10,6 +10,9 @@ using ShapePath = System.Windows.Shapes.Path;
 
 namespace AITaskMonitor.Prototype;
 
+internal sealed record LoopWarningView(int Threshold, int WindowMinutes);
+internal sealed record WarningFocusKey(string TaskId);
+
 // This isolated preview uses synthetic data and the published WPF layout only.
 internal sealed class PrototypeWindow
 {
@@ -43,6 +46,8 @@ internal sealed class PrototypeWindow
     private bool equalProviderWidths;
     private string lastRenderedProvider = "";
     private bool claudeSourceUnavailable;
+    private Dictionary<string, LoopWarningView> loopWarnings = new(StringComparer.Ordinal);
+    private Func<string, bool>? dismissLoopWarning;
 
     public PrototypeWindow(Window window, Options options)
     {
@@ -171,6 +176,22 @@ internal sealed class PrototypeWindow
     internal string SelectedProvider => selectedProvider;
     internal IReadOnlyList<SampleTask> CurrentTasks => samples;
 
+    // Warning state is supplied by a future controller, not read by the view.
+    internal void ApplyLoopWarnings(IReadOnlyDictionary<string, LoopWarningView> warnings, Func<string, bool> dismiss)
+    {
+        if (!window.Dispatcher.CheckAccess()) throw new InvalidOperationException("UI updates must run on the window dispatcher.");
+        ArgumentNullException.ThrowIfNull(warnings);
+        ArgumentNullException.ThrowIfNull(dismiss);
+        if (warnings.Any(item => item.Value is null || item.Value.Threshold is < 3 or > 10 || item.Value.WindowMinutes is < 1 or > 30))
+            throw new ArgumentException("Invalid loop warning settings.", nameof(warnings));
+        loopWarnings = new Dictionary<string, LoopWarningView>(warnings, StringComparer.Ordinal);
+        dismissLoopWarning = dismiss;
+        Render();
+    }
+
+    private LoopWarningView? WarningFor(SampleTask task) =>
+        task.Active && loopWarnings.TryGetValue(task.Id, out LoopWarningView? warning) ? warning : null;
+
     // The caller must supply a snapshot on the WPF dispatcher. Other providers
     // already visible in the window are retained when the Claude source polls.
     internal void ApplyClaudeSource(ClaudeSourceSnapshot snapshot)
@@ -285,6 +306,7 @@ internal sealed class PrototypeWindow
     private void SetCompact(bool value)
     {
         if (compact == value) return;
+        bool restoreToggleFocus = Find<Button>(value ? "MinimizeButton" : "ExpandButton").IsKeyboardFocusWithin;
         compact = value;
         expanded.Visibility = value ? Visibility.Collapsed : Visibility.Visible;
         compactView.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
@@ -305,6 +327,7 @@ internal sealed class PrototypeWindow
             frame.Margin = new Thickness(28);
         }
         Render();
+        if (restoreToggleFocus) Find<Button>(value ? "ExpandButton" : "MinimizeButton").Focus();
     }
 
     private TextBlock Text(string value, double size, string color, bool semiBold = false) => new()
@@ -342,7 +365,11 @@ internal sealed class PrototypeWindow
     private void Render()
     {
         double oldTabOffset = tabsScroll.HorizontalOffset;
+        double oldTaskOffset = tasksScroll.VerticalOffset;
         string? focusedTab = tabs.Children.OfType<Button>().FirstOrDefault(button => button.IsKeyboardFocusWithin)?.Tag as string;
+        Button[] oldWarnings = WarningButtons().ToArray();
+        string[] oldWarningOrder = oldWarnings.Select(button => ((WarningFocusKey)button.Tag).TaskId).ToArray();
+        string? focusedWarning = oldWarnings.FirstOrDefault(button => button.IsKeyboardFocusWithin)?.Tag is WarningFocusKey key ? key.TaskId : null;
         tasks.Children.Clear(); tabs.Children.Clear(); compactTasks.Children.Clear(); dots.Children.Clear();
         string warningText = claudeSourceUnavailable
             ? options.Language == "en" ? "No data from Claude Code" : "Нет данных от Claude Code"
@@ -367,6 +394,7 @@ internal sealed class PrototypeWindow
             dots.Visibility = Visibility.Collapsed;
             compactMore.Visibility = Visibility.Collapsed;
             if (compact) window.Height = CompactHeight();
+            if (focusedWarning is not null) RestoreWarningFocus(focusedWarning, oldTaskOffset, oldWarningOrder);
             return;
         }
         if (showProviderLabels)
@@ -401,6 +429,55 @@ internal sealed class PrototypeWindow
         compactMore.Visibility = remaining > 0 ? Visibility.Visible : Visibility.Collapsed;
         compactMore.Text = remaining > 0 ? (options.Language == "en" ? $"{remaining} more tasks" : $"Ещё {remaining} задач") : "";
         if (compact) window.Height = CompactHeight();
+        if (focusedWarning is not null) RestoreWarningFocus(focusedWarning, oldTaskOffset, oldWarningOrder);
+    }
+
+    private static IEnumerable<Button> DescendantButtons(DependencyObject root)
+    {
+        if (root is Button button) yield return button;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            foreach (Button child in DescendantButtons(VisualTreeHelper.GetChild(root, i))) yield return child;
+    }
+
+    private IEnumerable<Button> WarningButtons() => DescendantButtons(compact ? compactTasks : tasks)
+        .Where(button => button.Tag is WarningFocusKey && button.IsVisible && button.IsEnabled);
+
+    private void RestoreWarningFocus(string taskId, double previousOffset, IReadOnlyList<string> oldOrder)
+    {
+        Button[] remaining = WarningButtons().ToArray();
+        Button? target = remaining.FirstOrDefault(button => ((WarningFocusKey)button.Tag).TaskId == taskId);
+        bool movedToAnotherAction = target is null;
+        if (target is null && remaining.Length > 0)
+        {
+            int oldIndex = oldOrder.ToList().IndexOf(taskId);
+            if (oldIndex >= 0)
+            {
+                IEnumerable<string> neighbors = oldOrder.Skip(oldIndex + 1).Concat(oldOrder.Take(oldIndex).Reverse());
+                foreach (string neighbor in neighbors)
+                {
+                    target = remaining.FirstOrDefault(button => ((WarningFocusKey)button.Tag).TaskId == neighbor);
+                    if (target is not null) break;
+                }
+            }
+            int removedIndex = samples.FindIndex(task => task.Id == taskId);
+            target ??= remaining.OrderBy(button =>
+            {
+                int index = samples.FindIndex(task => task.Id == ((WarningFocusKey)button.Tag).TaskId);
+                return index >= removedIndex ? index - removedIndex : samples.Count + removedIndex - index;
+            }).First();
+        }
+        if (target is null && compact && dots.Visibility == Visibility.Visible)
+        {
+            int selected = samples.Take(3).ToList().FindIndex(task => task.Id == compactSelection);
+            if (selected >= 0 && selected < dots.Children.Count) target = dots.Children[selected] as Button;
+        }
+        target ??= tabs.Children.OfType<Button>().FirstOrDefault(button => button.IsVisible && (string)button.Tag == selectedProvider);
+        Button settings = Find<Button>("SettingsFooterButton");
+        if (target is null && settings.IsVisible && settings.IsEnabled && settings.Focusable) target = settings;
+        target ??= Find<Button>(compact ? "ExpandButton" : "MinimizeButton");
+        target.Focus();
+        if (movedToAnotherAction) target.BringIntoView();
+        else if (!compact) tasksScroll.ScrollToVerticalOffset(previousOffset);
     }
 
     private void SizeTabs()
@@ -416,7 +493,8 @@ internal sealed class PrototypeWindow
         var selected = samples.FirstOrDefault(task => task.Id == compactSelection);
         return 162 + (samples.Count > 1 ? 18 : 0) + (samples.Count > 3 ? 20 : 0) +
             (samples.Select(task => task.Provider).Distinct(StringComparer.Ordinal).Skip(1).Any() ? 18 : 0) +
-            (selected is not null && PlanNote(selected).Length > 0 ? 20 : 0) + (claudeSourceUnavailable ? 20 : 0);
+            (selected is not null && PlanNote(selected).Length > 0 ? 20 : 0) + (claudeSourceUnavailable ? 20 : 0) +
+            (selected is not null && WarningFor(selected) is not null ? 72 : 0);
     }
 
     private void AddTab(string id, string label, int count)
@@ -471,7 +549,7 @@ internal sealed class PrototypeWindow
     private void AddCard(SampleTask task)
     {
         var card = new Grid { Margin = new Thickness(0, 0, 0, 12) };
-        if (task.Steps.Length > 0) card.Height = showProviderLabels ? 278 : 258;
+        if (task.Steps.Length > 0) card.Height = (showProviderLabels ? 278 : 258) + (WarningFor(task) is null ? 0 : 64);
         var shape = new ShapePath { Fill = ColorFor("Raised"), Stroke = ColorFor(task.Active ? "CardBorder" : "Border"), StrokeThickness = 1, IsHitTestVisible = false };
         card.SizeChanged += (_, _) => shape.Data = Squircle.Create(card.ActualWidth, card.ActualHeight, 12, 0.5);
         card.Children.Add(shape);
@@ -488,6 +566,7 @@ internal sealed class PrototypeWindow
         titleStack.Children.Add(title); titleStack.Children.Add(ActivityRow(task, false));
         var progress = Text(Progress(task), 16, "Primary", true); progress.Height = 22; progress.VerticalAlignment = VerticalAlignment.Top; Grid.SetColumn(progress, 1);
         header.Children.Add(titleStack); header.Children.Add(progress); stack.Children.Add(header);
+        AddLoopWarning(stack, task, false);
         if (task.Progress.HasValue && (task.Provider != "claude" || (task.PlanConfirmed && task.Status != "unknown")))
             stack.Children.Add(new ProgressBar { Maximum = 100, Value = task.Progress.Value, Margin = new Thickness(0, 14, 0, 0) });
         if (task.Steps.Length > 0)
@@ -501,6 +580,34 @@ internal sealed class PrototypeWindow
         }
         card.Children.Add(new Border { Padding = new Thickness(16, 15, 16, 14), Child = stack });
         tasks.Children.Add(card);
+    }
+
+    private void AddLoopWarning(Panel container, SampleTask task, bool compactLayout)
+    {
+        LoopWarningView? warning = WarningFor(task);
+        if (warning is null) return;
+        var row = new Grid { Margin = compactLayout ? new Thickness(12, 6, 0, 0) : new Thickness(0, 8, 0, 0) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        string message = options.Language == "en"
+            ? $"Possible loop: one command failed with the same code at least {warning.Threshold} times in {warning.WindowMinutes} min."
+            : $"Возможный цикл: одна команда завершилась с одинаковым кодом ошибки не менее {warning.Threshold} раз за {warning.WindowMinutes} мин.";
+        var label = Text(message, compactLayout ? 11.5 : 12, "Secondary");
+        label.TextWrapping = TextWrapping.Wrap;
+        label.Margin = new Thickness(0, 0, 8, 0);
+        AutomationProperties.SetName(label, message);
+        var dismiss = new Button { Content = options.Language == "en" ? "Hide" : "Скрыть", Tag = new WarningFocusKey(task.Id), Style = (Style)window.Resources["SourceActionStyle"],
+            FontSize = 11.5, VerticalAlignment = VerticalAlignment.Top, FocusVisualStyle = (Style)window.Resources["KeyboardFocusStyle"] };
+        AutomationProperties.SetName(dismiss, (options.Language == "en" ? "Hide possible loop warning for task: " : "Скрыть предупреждение о возможном цикле для задачи: ") + task.Title);
+        dismiss.Click += (_, _) =>
+        {
+            bool dismissed;
+            try { dismissed = dismissLoopWarning is not null && dismissLoopWarning(task.Id); }
+            catch (Exception) { dismissed = false; }
+            if (dismissed) { loopWarnings.Remove(task.Id); Render(); }
+        };
+        Grid.SetColumn(dismiss, 1);
+        row.Children.Add(label); row.Children.Add(dismiss); container.Children.Add(row);
     }
 
     internal static string StepCountWord(string language, int count)
@@ -556,10 +663,16 @@ internal sealed class PrototypeWindow
         header.Children.Add(title); header.Children.Add(progress); container.Children.Add(header);
         var row = ActivityRow(task, true); Grid.SetRow(row, 1); container.Children.Add(row);
         string planNote = PlanNote(task);
-        if (planNote.Length > 0)
+        if (planNote.Length > 0 || WarningFor(task) is not null)
         {
-            var note = Text(planNote, 11.5, "Muted");
-            note.Margin = new Thickness(12, 4, 0, 0); Grid.SetRow(note, 2); container.Children.Add(note);
+            var notes = new StackPanel();
+            if (planNote.Length > 0)
+            {
+                var note = Text(planNote, 11.5, "Muted");
+                note.Margin = new Thickness(12, 4, 0, 0); notes.Children.Add(note);
+            }
+            AddLoopWarning(notes, task, true);
+            Grid.SetRow(notes, 2); container.Children.Add(notes);
         }
         if (task.Progress.HasValue && (task.Provider != "claude" || (task.PlanConfirmed && task.Status != "unknown")))
         {
