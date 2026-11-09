@@ -1,0 +1,108 @@
+name: macOS Claude reader candidate synthetic tests
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-claude-reader-candidate-20261109.yml"
+      - ".github/claude-audit/reader-safety-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-tests:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[claude-reader-candidate]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify and stage test candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet cf9dce5918011a581f68193c74fdda196f23d35b "$GITHUB_SHA" -- macos
+          INPUT="$GITHUB_WORKSPACE/.github/claude-audit/reader-safety-20261109"
+          cd "$INPUT"
+          printf '%s  %s\n' \
+            'da440691d0655c845b5752d366680dbba2e46725f2a646381aa311806133f090' ClaudeTaskReader.swift \
+            '73aec7758bc051105d37d1bd67b28ee28c9cbf8e48245accd871bee7a60ef884' ClaudeReaderSafetyCandidateTests.swift \
+            '60b488c8f794fc42126c56837c0ee5a6a14c31dd84fdaac2b631e4c6659f00c8' ClaudePlanOrderingCandidateTests.swift \
+            'd5bca13aed49113d68512395e214114f4d7f2ffb61a2d656aa49ea8bd9f225f1' ClaudePlanCompletenessObservationTests.swift \
+            'e7ec2406acaf68be9639cc054f50eaf0fb2a35ac8036f76ffb960d47e3f74e18' ClaudeHookPhaseBlockingTests.swift \
+            'cc38c18d74c8cd6f7e7c0d19aa9ab6568ef51249d0e5639d9315d7451aef8626' ClaudeReaderIndependentTests.swift \
+            '872ef4ed0b1d488f359e4ba335775edd7e2d9e0c2d993d29e2b8998227843001' ParserTests.swift \
+            | shasum -a 256 -c -
+          cp "$INPUT/ClaudeTaskReader.swift" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/ClaudeTaskReader.swift"
+          for name in ClaudeReaderSafetyCandidateTests.swift ClaudePlanOrderingCandidateTests.swift ClaudePlanCompletenessObservationTests.swift ClaudeHookPhaseBlockingTests.swift ClaudeReaderIndependentTests.swift ParserTests.swift; do
+            cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/$name"
+          done
+      - name: Run synthetic tests without network
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aitm-claude-reader-home" "$RUNNER_TEMP/aitm-claude-reader-tmp" "$RUNNER_TEMP/aitm-claude-reader-support"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*)'
+          cat > "$RUNNER_TEMP/aitm-claude-reader-network-probe.py" <<'PY'
+          import errno
+          import socket
+          import sys
+
+          try:
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          except OSError as error:
+              sys.exit(0 if error.errno in (errno.EPERM, errno.EACCES) else 1)
+          try:
+              result = sock.connect_ex(("127.0.0.1", 0))
+          finally:
+              sock.close()
+          sys.exit(0 if result in (errno.EPERM, errno.EACCES) else 1)
+          PY
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-claude-reader-home" \
+              "TMPDIR=$RUNNER_TEMP/aitm-claude-reader-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-claude-reader-support" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-claude-reader-network-probe.py"
+          audit_status=0
+          for entry in ClaudeReaderSafetyCandidateTests:6 ClaudePlanOrderingCandidateTests:14 ParserTests:23 ClaudePlanCompletenessObservationTests:1 ClaudeHookPhaseBlockingTests:1 ClaudeReaderIndependentTests:12; do
+            suite="${entry%:*}"
+            count="${entry#*:}"
+            log="$RUNNER_TEMP/aitm-claude-reader-$suite.log"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | /usr/bin/tee "$log"; then
+              audit_status=1
+            fi
+            if ! /usr/bin/grep -Eq "Executed $count tests?, with 0 failures" "$log"; then
+              printf '%s\n' "Missing successful expected test count: $suite"
+              audit_status=1
+            fi
+          done
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox --configuration release; then
+            audit_status=1
+          fi
+          exit "$audit_status"
