@@ -1,0 +1,190 @@
+name: Windows visible tab counts isolated review
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [windows]
+    paths:
+      - '.github/workflows/windows-visible-tab-count-audit-20261109.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[windows-tab-count-audit]'))
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Fetch pinned public baseline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceCommit = '31f043426dc7f90cd3c1a776098ce156afe26d97'
+          $gitRoot = Join-Path $env:RUNNER_TEMP 'aitm-tab-count-git'
+          $template = Join-Path $gitRoot 'template'
+          $hooks = Join-Path $gitRoot 'hooks'
+          New-Item -ItemType Directory -Path $template, $hooks -ErrorAction Stop | Out-Null
+          $env:GIT_CONFIG_GLOBAL = Join-Path $gitRoot 'empty-gitconfig'
+          $env:GIT_CONFIG_NOSYSTEM = '1'
+          $env:GIT_TERMINAL_PROMPT = '0'
+          [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL, '', [Text.UTF8Encoding]::new($false))
+          git -c credential.helper= -c core.hooksPath="$hooks" -c init.defaultBranch=audit init --template="$template" .
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot initialize the disposable checkout.' }
+          git -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 https://github.com/trueakaru-stack/ai-task-monitor.git $sourceCommit
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch the pinned public source.' }
+          git -c credential.helper= -c core.hooksPath="$hooks" checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot select the pinned public source.' }
+          $actual = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $sourceCommit) { throw 'Unexpected baseline commit.' }
+      - name: Apply only the verified C# changes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $patchBytes = [Convert]::FromBase64String('ZGlmZiAtLWdpdCBhL3dpbmRvd3MvbmF0aXZlL1Byb3RvdHlwZS9Qcm90b3R5cGVXaW5kb3cuY3MgYi93aW5kb3dzL25hdGl2ZS9Qcm90b3R5cGUvUHJvdG90eXBlV2luZG93LmNzCmluZGV4IDkwZmM0YmU2MDZhNjI4ZDc5YWUyYTNlYjJhOTI4YjZkZTAwM2UwOGMuLmNhNjJhMzFhODcwMDg1ZTM2NzFhZDEzZGQzN2I4YjU1ZmIyY2ZiNTIgMTAwNjQ0Ci0tLSBhL3dpbmRvd3MvbmF0aXZlL1Byb3RvdHlwZS9Qcm90b3R5cGVXaW5kb3cuY3MKKysrIGIvd2luZG93cy9uYXRpdmUvUHJvdG90eXBlL1Byb3RvdHlwZVdpbmRvdy5jcwpAQCAtMzk5LDkgKzM5OSw5IEBAIGludGVybmFsIHNlYWxlZCBjbGFzcyBQcm90b3R5cGVXaW5kb3cKICAgICAgICAgfQogICAgICAgICBpZiAoc2hvd1Byb3ZpZGVyTGFiZWxzKQogICAgICAgICB7Ci0gICAgICAgICAgICBBZGRUYWIoImFsbCIsIG9wdGlvbnMuTGFuZ3VhZ2UgPT0gImVuIiA/ICJBbGwiIDogItCS0YHQtSIsIHNhbXBsZXMuQ291bnQodGFzayA9PiB0YXNrLkFjdGl2ZSkpOworICAgICAgICAgICAgQWRkVGFiKCJhbGwiLCBvcHRpb25zLkxhbmd1YWdlID09ICJlbiIgPyAiQWxsIiA6ICLQktGB0LUiLCBzYW1wbGVzLkNvdW50KTsKICAgICAgICAgICAgIGZvcmVhY2ggKHZhciBwcm92aWRlciBpbiBQcm92aWRlck9yZGVyLldoZXJlKHByb3ZpZGVyID0+IHByb3ZpZGVycy5Db250YWlucyhwcm92aWRlci5JZCkpKQotICAgICAgICAgICAgICAgIEFkZFRhYihwcm92aWRlci5JZCwgcHJvdmlkZXIuTmFtZSwgc2FtcGxlcy5Db3VudCh0YXNrID0+IHRhc2suQWN0aXZlICYmIHRhc2suUHJvdmlkZXIgPT0gcHJvdmlkZXIuSWQpKTsKKyAgICAgICAgICAgICAgICBBZGRUYWIocHJvdmlkZXIuSWQsIHByb3ZpZGVyLk5hbWUsIHNhbXBsZXMuQ291bnQodGFzayA9PiB0YXNrLlByb3ZpZGVyID09IHByb3ZpZGVyLklkKSk7CiAgICAgICAgICAgICB0YWJzLkNoaWxkcmVuW14xXS5TZXRWYWx1ZShGcmFtZXdvcmtFbGVtZW50Lk1hcmdpblByb3BlcnR5LCBuZXcgVGhpY2tuZXNzKDApKTsKICAgICAgICAgICAgIFNpemVUYWJzKCk7CiAgICAgICAgICAgICB0YWJzSG9zdC5VcGRhdGVMYXlvdXQoKTsKZGlmZiAtLWdpdCBhL3dpbmRvd3MvbmF0aXZlL1Byb3RvdHlwZS9UZXN0cy9Qcm9ncmFtLmNzIGIvd2luZG93cy9uYXRpdmUvUHJvdG90eXBlL1Rlc3RzL1Byb2dyYW0uY3MKaW5kZXggOGE1NzFjYmMxYTlkOTQwZTQwOWQyMGJkYzk2NGUzOTY0YjU1OGNkNS4uZWVhODY4NTMwOTgzNDZkMWUzNTI2ZmVlNjcxOTliMzNjZDUxMjM5ZSAxMDA2NDQKLS0tIGEvd2luZG93cy9uYXRpdmUvUHJvdG90eXBlL1Rlc3RzL1Byb2dyYW0uY3MKKysrIGIvd2luZG93cy9uYXRpdmUvUHJvdG90eXBlL1Rlc3RzL1Byb2dyYW0uY3MKQEAgLTEsNiArMSw3IEBACiB1c2luZyBTeXN0ZW0uSU87CiB1c2luZyBTeXN0ZW0uUmVmbGVjdGlvbjsKIHVzaW5nIFN5c3RlbS5XaW5kb3dzOwordXNpbmcgU3lzdGVtLldpbmRvd3MuQXV0b21hdGlvbjsKIHVzaW5nIFN5c3RlbS5XaW5kb3dzLkNvbnRyb2xzOwogdXNpbmcgU3lzdGVtLldpbmRvd3MuTWFya3VwOwogdXNpbmcgU3lzdGVtLldpbmRvd3MuTWVkaWE7CkBAIC0yOCw2ICsyOSw3IEBAIGludGVybmFsIHN0YXRpYyBjbGFzcyBQcm9ncmFtCiAgICAgICAgICAgICAgICAgewogICAgICAgICAgICAgICAgICAgICBDaGVja0NsYXVkZUZsb3cobGFuZ3VhZ2UsIHRoZW1lKTsKICAgICAgICAgICAgICAgICAgICAgQ2hlY2tDbGF1ZGVBY3RpdmVVbmNvbmZpcm1lZFBsYW4obGFuZ3VhZ2UsIHRoZW1lKTsKKyAgICAgICAgICAgICAgICAgICAgQ2hlY2tWaXNpYmxlVGFiQ291bnRzKGxhbmd1YWdlLCB0aGVtZSk7CiAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgQ2hlY2tDbGF1ZGVDb3JyZWN0aW9ucygpOwogICAgICAgICAgICAgQ2hlY2tTdGVwQ291bnRXb3JkcygpOwpAQCAtNDksNiArNTEsNjQgQEAgaW50ZXJuYWwgc3RhdGljIGNsYXNzIFByb2dyYW0KICAgICAgICAgfQogICAgIH0KIAorICAgIHByaXZhdGUgc3RhdGljIHZvaWQgQ2hlY2tWaXNpYmxlVGFiQ291bnRzKHN0cmluZyBsYW5ndWFnZSwgc3RyaW5nIHRoZW1lKQorICAgIHsKKyAgICAgICAgdmFyICh3aW5kb3csIGNvbnRyb2xsZXIpID0gT3BlbigiYWN0aXZlIiwgbGFuZ3VhZ2UsIHRoZW1lKTsKKyAgICAgICAgdHJ5CisgICAgICAgIHsKKyAgICAgICAgICAgIFNhbXBsZVRhc2sgY29kZXggPSBjb250cm9sbGVyLkN1cnJlbnRUYXNrcy5TaW5nbGUodGFzayA9PiB0YXNrLlByb3ZpZGVyID09ICJjb2RleCIpOworICAgICAgICAgICAgU2FtcGxlVGFzayBjbGF1ZGUgPSBjb250cm9sbGVyLkN1cnJlbnRUYXNrcy5TaW5nbGUodGFzayA9PiB0YXNrLlByb3ZpZGVyID09ICJjbGF1ZGUiKTsKKyAgICAgICAgICAgIHZhciB0YXNrcyA9IG5ldyBMaXN0PFNhbXBsZVRhc2s+CisgICAgICAgICAgICB7CisgICAgICAgICAgICAgICAgY29kZXggd2l0aCB7IFRpdGxlID0gIlN5bnRoZXRpYyBDb2RleCBhY3RpdmUiIH0sCisgICAgICAgICAgICAgICAgY29kZXggd2l0aCB7IElkID0gImNvZGV4OnVua25vd24iLCBUaXRsZSA9ICJTeW50aGV0aWMgQ29kZXggdW5rbm93biIsIFN0YXR1cyA9ICJ1bmtub3duIiB9LAorICAgICAgICAgICAgICAgIGNsYXVkZSB3aXRoIHsgVGl0bGUgPSAiU3ludGhldGljIENsYXVkZSB1bmtub3duIiwgU3RhdHVzID0gInVua25vd24iIH0sCisgICAgICAgICAgICAgICAgY2xhdWRlIHdpdGggeyBJZCA9ICJjbGF1ZGU6d2FpdGluZyIsIFRpdGxlID0gIlN5bnRoZXRpYyBDbGF1ZGUgd2FpdGluZyIsIFN0YXR1cyA9ICJ3YWl0aW5nIiB9CisgICAgICAgICAgICB9OworICAgICAgICAgICAgdmFyIHVwZGF0ZSA9IHR5cGVvZihQcm90b3R5cGVXaW5kb3cpLkdldE1ldGhvZCgiVXBkYXRlU2FtcGxlcyIsIEJpbmRpbmdGbGFncy5JbnN0YW5jZSB8IEJpbmRpbmdGbGFncy5Ob25QdWJsaWMpITsKKyAgICAgICAgICAgIHZhciByZW5kZXIgPSB0eXBlb2YoUHJvdG90eXBlV2luZG93KS5HZXRNZXRob2QoIlJlbmRlciIsIEJpbmRpbmdGbGFncy5JbnN0YW5jZSB8IEJpbmRpbmdGbGFncy5Ob25QdWJsaWMpITsKKyAgICAgICAgICAgIHVwZGF0ZS5JbnZva2UoY29udHJvbGxlciwgW3Rhc2tzXSk7CisgICAgICAgICAgICByZW5kZXIuSW52b2tlKGNvbnRyb2xsZXIsIG51bGwpOworICAgICAgICAgICAgd2luZG93LlVwZGF0ZUxheW91dCgpOworICAgICAgICAgICAgQXNzZXJ0VGFicyg0LCAyLCAyKTsKKyAgICAgICAgICAgIHN0cmluZz8gY2FwdHVyZURpcmVjdG9yeSA9IEVudmlyb25tZW50LkdldEVudmlyb25tZW50VmFyaWFibGUoIkFJVE1fVEFCX0NPVU5UX0NBUFRVUkVfRElSRUNUT1JZIik7CisgICAgICAgICAgICBpZiAoIXN0cmluZy5Jc051bGxPckVtcHR5KGNhcHR1cmVEaXJlY3RvcnkpKQorICAgICAgICAgICAgeworICAgICAgICAgICAgICAgIERpcmVjdG9yeS5DcmVhdGVEaXJlY3RvcnkoY2FwdHVyZURpcmVjdG9yeSk7CisgICAgICAgICAgICAgICAgU2F2ZUNhcHR1cmUod2luZG93LCBQYXRoLkNvbWJpbmUoY2FwdHVyZURpcmVjdG9yeSwgJCJ7dGhlbWV9LXtsYW5ndWFnZX0tdmlzaWJsZS1jb3VudHMtYWxsLnBuZyIpKTsKKyAgICAgICAgICAgIH0KKyAgICAgICAgICAgIENsaWNrKFRhYigiY2xhdWRlIikpOworICAgICAgICAgICAgd2luZG93LlVwZGF0ZUxheW91dCgpOworICAgICAgICAgICAgdmFyIHRleHRzID0gVmlzaWJsZTxUZXh0QmxvY2s+KHdpbmRvdykuU2VsZWN0KGl0ZW0gPT4gaXRlbS5UZXh0KS5Ub0hhc2hTZXQoU3RyaW5nQ29tcGFyZXIuT3JkaW5hbCk7CisgICAgICAgICAgICBDaGVjayh0ZXh0cy5Db250YWlucygiU3ludGhldGljIENsYXVkZSB1bmtub3duIikgJiYgdGV4dHMuQ29udGFpbnMoIlN5bnRoZXRpYyBDbGF1ZGUgd2FpdGluZyIpICYmCisgICAgICAgICAgICAgICAgICAhdGV4dHMuQ29udGFpbnMoIlN5bnRoZXRpYyBDb2RleCBhY3RpdmUiKSAmJiAhdGV4dHMuQ29udGFpbnMoIlN5bnRoZXRpYyBDb2RleCB1bmtub3duIiksCisgICAgICAgICAgICAgICAgIlRoZSBwcm92aWRlciBmaWx0ZXIgZG9lcyBub3QgbWF0Y2ggaXRzIHZpc2libGUgY291bnQuIik7CisgICAgICAgICAgICBBc3NlcnRUYWJzKDQsIDIsIDIpOworICAgICAgICAgICAgaWYgKCFzdHJpbmcuSXNOdWxsT3JFbXB0eShjYXB0dXJlRGlyZWN0b3J5KSkKKyAgICAgICAgICAgICAgICBTYXZlQ2FwdHVyZSh3aW5kb3csIFBhdGguQ29tYmluZShjYXB0dXJlRGlyZWN0b3J5LCAkInt0aGVtZX0te2xhbmd1YWdlfS12aXNpYmxlLWNvdW50cy1jbGF1ZGUucG5nIikpOworICAgICAgICAgICAgdGFza3MuUmVtb3ZlQXQoMyk7CisgICAgICAgICAgICB1cGRhdGUuSW52b2tlKGNvbnRyb2xsZXIsIFt0YXNrc10pOworICAgICAgICAgICAgcmVuZGVyLkludm9rZShjb250cm9sbGVyLCBudWxsKTsKKyAgICAgICAgICAgIHdpbmRvdy5VcGRhdGVMYXlvdXQoKTsKKyAgICAgICAgICAgIEFzc2VydFRhYnMoMywgMiwgMSk7CisKKyAgICAgICAgICAgIEJ1dHRvbiBUYWIoc3RyaW5nIGlkKSA9PiAoKFN0YWNrUGFuZWwpd2luZG93LkZpbmROYW1lKCJQcm92aWRlclRhYnNQYW5lbCIpKS5DaGlsZHJlbi5PZlR5cGU8QnV0dG9uPigpCisgICAgICAgICAgICAgICAgLlNpbmdsZShidXR0b24gPT4gKHN0cmluZylidXR0b24uVGFnID09IGlkKTsKKyAgICAgICAgICAgIHZvaWQgQXNzZXJ0VGFicyhpbnQgYWxsLCBpbnQgY29kZXhDb3VudCwgaW50IGNsYXVkZUNvdW50KQorICAgICAgICAgICAgeworICAgICAgICAgICAgICAgIHN0cmluZyBsZWFkID0gbGFuZ3VhZ2UgPT0gImVuIiA/ICJTaG93IHRhc2tzOiAiIDogItCf0L7QutCw0LfQsNGC0Ywg0LfQsNC00LDRh9C4OiAiOworICAgICAgICAgICAgICAgIGZvcmVhY2ggKHZhciBpdGVtIGluIG5ld1tdIHsgKElkOiAiYWxsIiwgTGFiZWw6IGxhbmd1YWdlID09ICJlbiIgPyAiQWxsIiA6ICLQktGB0LUiLCBDb3VudDogYWxsKSwKKyAgICAgICAgICAgICAgICAgICAgKElkOiAiY29kZXgiLCBMYWJlbDogIkNvZGV4IiwgQ291bnQ6IGNvZGV4Q291bnQpLCAoSWQ6ICJjbGF1ZGUiLCBMYWJlbDogIkNsYXVkZSBDb2RlIiwgQ291bnQ6IGNsYXVkZUNvdW50KSB9KQorICAgICAgICAgICAgICAgIHsKKyAgICAgICAgICAgICAgICAgICAgQnV0dG9uIHRhYiA9IFRhYihpdGVtLklkKTsKKyAgICAgICAgICAgICAgICAgICAgQ2hlY2soQXV0b21hdGlvblByb3BlcnRpZXMuR2V0TmFtZSh0YWIpID09ICQie2xlYWR9e2l0ZW0uTGFiZWx9LCB7aXRlbS5Db3VudH0iLCAiQWNjZXNzaWJsZSB0YWIgY291bnQgZGlmZmVycyBmcm9tIHZpc2libGUgY2FyZHMuIik7CisgICAgICAgICAgICAgICAgICAgIENoZWNrKFZpc2libGU8VGV4dEJsb2NrPih0YWIpLkFueSh0ZXh0ID0+IHRleHQuVGV4dCA9PSBpdGVtLkNvdW50LlRvU3RyaW5nKCkpLCAiRGlzcGxheWVkIHRhYiBjb3VudCBkaWZmZXJzIGZyb20gdmlzaWJsZSBjYXJkcy4iKTsKKyAgICAgICAgICAgICAgICB9CisgICAgICAgICAgICB9CisgICAgICAgIH0KKyAgICAgICAgZmluYWxseSB7IHdpbmRvdy5DbG9zZSgpOyB9CisgICAgfQorCiAgICAgcHJpdmF0ZSBzdGF0aWMgdm9pZCBDaGVja0NsYXVkZUFjdGl2ZVVuY29uZmlybWVkUGxhbihzdHJpbmcgbGFuZ3VhZ2UsIHN0cmluZyB0aGVtZSkKICAgICB7CiAgICAgICAgIERhdGVUaW1lIHN0YXJ0ID0gbmV3KDIwMjYsIDExLCA1LCAxNSwgOSwgMCwgRGF0ZVRpbWVLaW5kLlV0Yyk7CmRpZmYgLS1naXQgYS93aW5kb3dzL25hdGl2ZS9UZXN0cy9DbGF1ZGVGaWxlVWkvUHJvZ3JhbS5jcyBiL3dpbmRvd3MvbmF0aXZlL1Rlc3RzL0NsYXVkZUZpbGVVaS9Qcm9ncmFtLmNzCmluZGV4IDdlMzFiNDdjNzkzZTUzZTNjZDAxMmVlZDFiYzA0MTYyMTkzMDQyYTcuLmZiNzQ5MjYwMDQ4ZDM1MGM3NzIzYmY3MDQ3ODYzNjZiN2ExNjVlYzcgMTAwNjQ0Ci0tLSBhL3dpbmRvd3MvbmF0aXZlL1Rlc3RzL0NsYXVkZUZpbGVVaS9Qcm9ncmFtLmNzCisrKyBiL3dpbmRvd3MvbmF0aXZlL1Rlc3RzL0NsYXVkZUZpbGVVaS9Qcm9ncmFtLmNzCkBAIC0zLDYgKzMsNyBAQCB1c2luZyBTeXN0ZW0uUmVmbGVjdGlvbjsKIHVzaW5nIFN5c3RlbS5UZXh0OwogdXNpbmcgU3lzdGVtLlRleHQuSnNvbjsKIHVzaW5nIFN5c3RlbS5XaW5kb3dzOwordXNpbmcgU3lzdGVtLldpbmRvd3MuQXV0b21hdGlvbjsKIHVzaW5nIFN5c3RlbS5XaW5kb3dzLkNvbnRyb2xzOwogdXNpbmcgU3lzdGVtLldpbmRvd3MuTWFya3VwOwogdXNpbmcgU3lzdGVtLldpbmRvd3MuTWVkaWE7CkBAIC0xNjAsNiArMTYxLDcgQEAgaW50ZXJuYWwgc3RhdGljIGNsYXNzIFByb2dyYW0KICAgICAgICAgICAgIHdpbmRvdy5VcGRhdGVMYXlvdXQoKTsKICAgICAgICAgICAgIGNsYXVkZSA9IGNvbnRyb2xsZXIuQ3VycmVudFRhc2tzLlNpbmdsZSh4ID0+IHguUHJvdmlkZXIgPT0gImNsYXVkZSIpOwogICAgICAgICAgICAgQ2hlY2soY2xhdWRlLlN0YXR1cyA9PSAidW5rbm93biIgJiYgIWNsYXVkZS5QbGFuQ29uZmlybWVkICYmIGNsYXVkZS5Qcm9ncmVzcyBpcyBudWxsICYmIGNsYXVkZS5TdGVwcy5MZW5ndGggPT0gMiwgIlNvdXJjZSBsb3NzIG11c3Qga2VlcCBuYW1lcyB3aXRob3V0IGNvbmZpcm1lZCBwcm9ncmVzcyIpOworICAgICAgICAgICAgQ2hlY2tUYWJDb3VudHMod2luZG93LCBsYW5ndWFnZSwgMiwgMSwgMSk7CiAgICAgICAgICAgICBzdHJpbmcgd2FybmluZyA9IGxhbmd1YWdlID09ICJlbiIgPyAiTm8gZGF0YSBmcm9tIENsYXVkZSBDb2RlIiA6ICLQndC10YIg0LTQsNC90L3Ri9GFINC+0YIgQ2xhdWRlIENvZGUiOwogICAgICAgICAgICAgQ2hlY2soVmlzaWJsZTxUZXh0QmxvY2s+KHdpbmRvdykuQW55KHggPT4geC5UZXh0ID09IHdhcm5pbmcpLCAiU291cmNlIHdhcm5pbmcgbWlzc2luZyIpOwogICAgICAgICAgICAgQ2hlY2soVmlzaWJsZTxQcm9ncmVzc0Jhcj4od2luZG93KS5Db3VudCgpID09IDEsICJPbmx5IHRoZSB1bmFmZmVjdGVkIENvZGV4IGJhciBzaG91bGQgcmVtYWluIik7CkBAIC0xOTEsNiArMTkzLDcgQEAgaW50ZXJuYWwgc3RhdGljIGNsYXNzIFByb2dyYW0KICAgICAgICAgICAgIENoZWNrKG5ld1tdIHsgIkZpcnN0IHN0ZXAiLCAiU2Vjb25kIHN0ZXAiLCAiVGhpcmQgc3RlcCIgfS5BbGwodmlzaWJsZU5hbWVzLkNvbnRhaW5zKSAmJgogICAgICAgICAgICAgICAgICAgdmlzaWJsZU5hbWVzLkFueSh4ID0+IHguU3RhcnRzV2l0aCh1bmNvbmZpcm1lZE5vdGUsIFN0cmluZ0NvbXBhcmlzb24uT3JkaW5hbCkpLCAiRXhwYW5kZWQgdmlldyBsb3N0IGtub3duIG5hbWVzIG9yIHRoZSB1bmNvbmZpcm1lZC1wbGFuIG5vdGUiKTsKICAgICAgICAgICAgIENoZWNrKFZpc2libGU8UHJvZ3Jlc3NCYXI+KHdpbmRvdykuQ291bnQoKSA9PSAxLCAiVW5jb25maXJtZWQgQ2xhdWRlIHBsYW4gZGlzcGxheWVkIGEgcHJvZ3Jlc3MgYmFyIGFmdGVyIGEgbmV3IHByb21wdCIpOworICAgICAgICAgICAgQ2hlY2tUYWJDb3VudHMod2luZG93LCBsYW5ndWFnZSwgMiwgMSwgMSk7CiAgICAgICAgICAgICBDYXB0dXJlKHdpbmRvdywgUGF0aC5Db21iaW5lKHdvcmssIHByZWZpeCArICItbmV3LXByb21wdC1leHBhbmRlZC5wbmciKSk7CiAgICAgICAgICAgICAoKEJ1dHRvbil3aW5kb3cuRmluZE5hbWUoIk1pbmltaXplQnV0dG9uIikpLlJhaXNlRXZlbnQobmV3IFJvdXRlZEV2ZW50QXJncyhCdXR0b24uQ2xpY2tFdmVudCkpOwogICAgICAgICAgICAgd2luZG93LlVwZGF0ZUxheW91dCgpOwpAQCAtMjIxLDYgKzIyNCwyMCBAQCBpbnRlcm5hbCBzdGF0aWMgY2xhc3MgUHJvZ3JhbQogICAgICAgICBmaW5hbGx5IHsgd2luZG93LkNsb3NlKCk7IH0KICAgICB9CiAKKyAgICBwcml2YXRlIHN0YXRpYyB2b2lkIENoZWNrVGFiQ291bnRzKFdpbmRvdyB3aW5kb3csIHN0cmluZyBsYW5ndWFnZSwgaW50IHRvdGFsLCBpbnQgY29kZXgsIGludCBjbGF1ZGUpCisgICAgeworICAgICAgICB2YXIgdGFicyA9ICgoU3RhY2tQYW5lbCl3aW5kb3cuRmluZE5hbWUoIlByb3ZpZGVyVGFic1BhbmVsIikpLkNoaWxkcmVuLk9mVHlwZTxCdXR0b24+KCkKKyAgICAgICAgICAgIC5Ub0RpY3Rpb25hcnkoYnV0dG9uID0+IChzdHJpbmcpYnV0dG9uLlRhZywgU3RyaW5nQ29tcGFyZXIuT3JkaW5hbCk7CisgICAgICAgIHN0cmluZyBsZWFkID0gbGFuZ3VhZ2UgPT0gImVuIiA/ICJTaG93IHRhc2tzOiAiIDogItCf0L7QutCw0LfQsNGC0Ywg0LfQsNC00LDRh9C4OiAiOworICAgICAgICBzdHJpbmcgYWxsID0gbGFuZ3VhZ2UgPT0gImVuIiA/ICJBbGwiIDogItCS0YHQtSI7CisgICAgICAgIGZvcmVhY2ggKHZhciBpdGVtIGluIG5ld1tdIHsgKElkOiAiYWxsIiwgTGFiZWw6IGFsbCwgQ291bnQ6IHRvdGFsKSwgKElkOiAiY29kZXgiLCBMYWJlbDogIkNvZGV4IiwgQ291bnQ6IGNvZGV4KSwgKElkOiAiY2xhdWRlIiwgTGFiZWw6ICJDbGF1ZGUgQ29kZSIsIENvdW50OiBjbGF1ZGUpIH0pCisgICAgICAgIHsKKyAgICAgICAgICAgIENoZWNrKHRhYnMuVHJ5R2V0VmFsdWUoaXRlbS5JZCwgb3V0IEJ1dHRvbj8gYnV0dG9uKSwgIkEgcHJvdmlkZXIgdGFiIGlzIG1pc3NpbmciKTsKKyAgICAgICAgICAgIENoZWNrKEF1dG9tYXRpb25Qcm9wZXJ0aWVzLkdldE5hbWUoYnV0dG9uISkgPT0gJCJ7bGVhZH17aXRlbS5MYWJlbH0sIHtpdGVtLkNvdW50fSIsICJUaGUgYWNjZXNzaWJsZSB0YWIgY291bnQgZGlmZmVycyBmcm9tIHZpc2libGUgY2FyZHMiKTsKKyAgICAgICAgICAgIENoZWNrKFZpc2libGU8VGV4dEJsb2NrPihidXR0b24hKS5BbnkodGV4dCA9PiB0ZXh0LlRleHQgPT0gaXRlbS5Db3VudC5Ub1N0cmluZygpKSwgIlRoZSBkaXNwbGF5ZWQgdGFiIGNvdW50IGRpZmZlcnMgZnJvbSB2aXNpYmxlIGNhcmRzIik7CisgICAgICAgIH0KKyAgICB9CisKICAgICBwcml2YXRlIHN0YXRpYyBJRW51bWVyYWJsZTxUPiBWaXNpYmxlPFQ+KERlcGVuZGVuY3lPYmplY3Qgcm9vdCkgd2hlcmUgVCA6IEZyYW1ld29ya0VsZW1lbnQKICAgICB7CiAgICAgICAgIGlmIChyb290IGlzIEZyYW1ld29ya0VsZW1lbnQgZWxlbWVudCAmJiAhZWxlbWVudC5Jc1Zpc2libGUpIHlpZWxkIGJyZWFrOwo=')
+          $patchDigest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($patchBytes))
+          if ($patchDigest -ne 'E8A63D83BB1F41B490680107EE02F280AE8ACADBF78262043C7A68408FA8E99F') { throw 'Unexpected test patch.' }
+          $patchFile = Join-Path $env:RUNNER_TEMP 'aitm-tab-count.patch'
+          [IO.File]::WriteAllBytes($patchFile, $patchBytes)
+          git apply --check -- $patchFile
+          if ($LASTEXITCODE -ne 0) { throw 'Patch does not apply to the pinned baseline.' }
+          git apply -- $patchFile
+          if ($LASTEXITCODE -ne 0) { throw 'Patch application failed.' }
+          $expected = [ordered]@{
+            'windows/native/Prototype/PrototypeWindow.cs' = 'C394F2107E0057778BF8588A557D4D4C0A8F7F7DFA3A9F26AC2527B3D1E83ED6'
+            'windows/native/Prototype/Tests/Program.cs' = '995A268017622A015EEE27C1361A1DC7B53BF01354C1CE1687F347C319D18A1E'
+            'windows/native/Tests/ClaudeFileUi/Program.cs' = 'DF66B534F6E8C30F03C076935CCF596446C9393C24FCE7088AF4A17F685CF33C'
+          }
+          foreach ($path in $expected.Keys) {
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash -ne $expected[$path]) { throw "Unexpected candidate bytes: $path" }
+          }
+          $changed = @(git diff --name-only HEAD)
+          if ($LASTEXITCODE -ne 0 -or $changed.Count -ne 3) { throw 'Unexpected changed-file count.' }
+          foreach ($path in $changed) {
+            if (-not $expected.Contains($path)) { throw "Unexpected changed file: $path" }
+          }
+          $root = Join-Path $env:RUNNER_TEMP 'aitm-tab-count-audit'
+          foreach ($item in @('profile','profile\AppData\Roaming','profile\AppData\Local','sdk','temp','nuget','before-red','before-visual','after','frames','frames\before','frames\after','saved')) {
+            New-Item -ItemType Directory -Path (Join-Path $root $item) -Force | Out-Null
+          }
+          $config = Join-Path $root 'NuGet.Config'
+          [IO.File]::WriteAllText($config, '<configuration><packageSources><clear /></packageSources></configuration>', [Text.UTF8Encoding]::new($false))
+          Copy-Item -LiteralPath 'windows/native/Prototype/PrototypeWindow.cs' -Destination (Join-Path $root 'saved/PrototypeWindow.cs')
+          Copy-Item -LiteralPath 'windows/native/Prototype/Tests/Program.cs' -Destination (Join-Path $root 'saved/PrototypeTests.cs')
+          @(
+            "AITM_TEST_ROOT=$root", "AITM_NUGET_CONFIG=$config",
+            "USERPROFILE=$root\profile", "APPDATA=$root\profile\AppData\Roaming", "LOCALAPPDATA=$root\profile\AppData\Local",
+            "TEMP=$root\temp", "TMP=$root\temp", "DOTNET_CLI_HOME=$root\sdk", "NUGET_PACKAGES=$root\nuget",
+            "GIT_CONFIG_GLOBAL=$env:RUNNER_TEMP\aitm-tab-count-git\empty-gitconfig",
+            "AITM_EMPTY_HOOKS=$env:RUNNER_TEMP\aitm-tab-count-git\hooks",
+            'GIT_CONFIG_NOSYSTEM=1', 'GIT_TERMINAL_PROMPT=0',
+            'DOTNET_CLI_TELEMETRY_OPTOUT=1', 'DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1',
+            'DOTNET_GENERATE_ASPNET_CERTIFICATE=0', 'DOTNET_NOLOGO=1'
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Confirm exact installed SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdks = @(dotnet --list-sdks)
+          if ($LASTEXITCODE -ne 0 -or -not ($sdks | Where-Object { $_ -match '^10\.0\.403\s' })) { throw 'SDK 10.0.403 is unavailable.' }
+          if (Test-Path -LiteralPath 'global.json') { throw 'Unexpected global.json.' }
+          [IO.File]::WriteAllText((Join-Path (Get-Location).Path 'global.json'), '{"sdk":{"version":"10.0.403","rollForward":"disable"}}', [Text.UTF8Encoding]::new($false))
+          $selected = dotnet --version
+          if ($LASTEXITCODE -ne 0 -or $selected -ne '10.0.403') { throw 'Exact SDK was not selected.' }
+      - name: Reproduce the prior count and capture its reference
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $windowPath = 'windows/native/Prototype/PrototypeWindow.cs'
+          $testPath = 'windows/native/Prototype/Tests/Program.cs'
+          git -c credential.helper= -c core.hooksPath="$env:AITM_EMPTY_HOOKS" checkout HEAD -- $windowPath
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot restore baseline window in the synthetic checkout.' }
+          Remove-Item Env:AITM_TAB_COUNT_CAPTURE_DIRECTORY -ErrorAction SilentlyContinue
+          dotnet build 'windows/native/Prototype/Tests/Prototype.Tests.csproj' -c Release --configfile $env:AITM_NUGET_CONFIG --artifacts-path "$env:AITM_TEST_ROOT\before-red" -p:NuGetAudit=false --nologo --verbosity quiet
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline negative test build failed.' }
+          $dll = Join-Path $env:AITM_TEST_ROOT 'before-red\bin\Prototype.Tests\release\AITaskMonitor.Prototype.Tests.dll'
+          $start = [Diagnostics.ProcessStartInfo]::new((Get-Command dotnet).Source)
+          $start.UseShellExecute = $false
+          $start.CreateNoWindow = $true
+          $start.RedirectStandardOutput = $true
+          $start.RedirectStandardError = $true
+          [void]$start.ArgumentList.Add($dll)
+          $proc = [Diagnostics.Process]::Start($start)
+          try {
+            $output = $proc.StandardOutput.ReadToEndAsync()
+            $errors = $proc.StandardError.ReadToEndAsync()
+            if (-not $proc.WaitForExit(180000)) { $proc.Kill($true); throw 'Baseline negative test timed out.' }
+            $combined = $output.GetAwaiter().GetResult() + $errors.GetAwaiter().GetResult()
+            if ($proc.ExitCode -eq 0 -or -not $combined.Contains('Accessible tab count differs from visible cards.')) { throw 'Prior count defect was not reproduced.' }
+            Write-Output 'Expected prior count assertion failed.'
+          } finally { $proc.Dispose() }
+          $text = [IO.File]::ReadAllText((Resolve-Path $testPath))
+          $oldTwo = '            AssertTabs(4, 2, 2);'
+          $oldOne = '            AssertTabs(3, 2, 1);'
+          if ([regex]::Matches($text, [regex]::Escape($oldTwo)).Count -ne 2 -or [regex]::Matches($text, [regex]::Escape($oldOne)).Count -ne 1) { throw 'Expected test fixture was not found exactly.' }
+          $text = $text.Replace($oldTwo, '            AssertTabs(1, 1, 0);').Replace($oldOne, '            AssertTabs(1, 1, 0);')
+          [IO.File]::WriteAllText((Resolve-Path $testPath), $text, [Text.UTF8Encoding]::new($false))
+          $env:AITM_TAB_COUNT_CAPTURE_DIRECTORY = Join-Path $env:AITM_TEST_ROOT 'frames/before'
+          dotnet build 'windows/native/Prototype/Tests/Prototype.Tests.csproj' -c Release --configfile $env:AITM_NUGET_CONFIG --artifacts-path "$env:AITM_TEST_ROOT\before-visual" -p:NuGetAudit=false --nologo --verbosity quiet
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline capture build failed.' }
+          dotnet "$env:AITM_TEST_ROOT\before-visual\bin\Prototype.Tests\release\AITaskMonitor.Prototype.Tests.dll"
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline capture test failed.' }
+      - name: Run candidate tests and capture updated frames
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Copy-Item -LiteralPath (Join-Path $env:AITM_TEST_ROOT 'saved/PrototypeWindow.cs') -Destination 'windows/native/Prototype/PrototypeWindow.cs' -Force
+          Copy-Item -LiteralPath (Join-Path $env:AITM_TEST_ROOT 'saved/PrototypeTests.cs') -Destination 'windows/native/Prototype/Tests/Program.cs' -Force
+          $expected = [ordered]@{
+            'windows/native/Prototype/PrototypeWindow.cs' = 'C394F2107E0057778BF8588A557D4D4C0A8F7F7DFA3A9F26AC2527B3D1E83ED6'
+            'windows/native/Prototype/Tests/Program.cs' = '995A268017622A015EEE27C1361A1DC7B53BF01354C1CE1687F347C319D18A1E'
+            'windows/native/Tests/ClaudeFileUi/Program.cs' = 'DF66B534F6E8C30F03C076935CCF596446C9393C24FCE7088AF4A17F685CF33C'
+          }
+          foreach ($path in $expected.Keys) {
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash -ne $expected[$path]) { throw "Restored candidate differs: $path" }
+          }
+          $env:AITM_TAB_COUNT_CAPTURE_DIRECTORY = Join-Path $env:AITM_TEST_ROOT 'frames/after'
+          $tests = @(
+            @{ Project='windows/native/Prototype/Tests/Prototype.Tests.csproj'; Dll='Prototype.Tests\release\AITaskMonitor.Prototype.Tests.dll' },
+            @{ Project='windows/native/Tests/ClaudeFileUi/ClaudeFileUi.Tests.csproj'; Dll='ClaudeFileUi.Tests\release\AITaskMonitor.Prototype.Tests.dll' }
+          )
+          foreach ($test in $tests) {
+            dotnet build $test.Project -c Release --configfile $env:AITM_NUGET_CONFIG --artifacts-path "$env:AITM_TEST_ROOT\after" -p:NuGetAudit=false --nologo --verbosity quiet
+            if ($LASTEXITCODE -ne 0) { throw "Candidate build failed: $($test.Project)" }
+            dotnet (Join-Path "$env:AITM_TEST_ROOT\after\bin" $test.Dll)
+            if ($LASTEXITCODE -ne 0) { throw "Candidate test failed: $($test.Project)" }
+          }
+      - name: Verify and record captured frames
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName PresentationCore
+          $records = [Collections.Generic.List[object]]::new()
+          foreach ($version in @('before','after')) {
+            foreach ($language in @('ru','en')) {
+              foreach ($theme in @('dark','light')) {
+                foreach ($selection in @('all','claude')) {
+                  $relative = "$version/$theme-$language-visible-counts-$selection.png"
+                  $path = Join-Path (Join-Path $env:AITM_TEST_ROOT 'frames') $relative
+                  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing frame: $relative" }
+                  $stream = [IO.File]::OpenRead($path)
+                  try {
+                    $image = [Windows.Media.Imaging.BitmapDecoder]::Create($stream, [Windows.Media.Imaging.BitmapCreateOptions]::None, [Windows.Media.Imaging.BitmapCacheOption]::OnLoad).Frames[0]
+                    if ($image.PixelWidth -ne 590 -or $image.PixelHeight -ne 760) { throw "Unexpected frame dimensions: $relative" }
+                  } finally { $stream.Dispose() }
+                  $records.Add([pscustomobject]@{path=$relative;width=$image.PixelWidth;height=$image.PixelHeight;sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash})
+                }
+              }
+            }
+          }
+          if ($records.Count -ne 16) { throw 'Unexpected number of frames.' }
+          $records | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $env:AITM_TEST_ROOT 'frames/manifest.json') -Encoding utf8
+      - name: Save synthetic comparison frames
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-tab-count-review-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/aitm-tab-count-audit/frames
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 3
