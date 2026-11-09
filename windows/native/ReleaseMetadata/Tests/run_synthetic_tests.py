@@ -88,7 +88,7 @@ for directory in protected:
     if work == directory or work.is_relative_to(directory):
         raise SystemExit('The work directory must be outside the current profile and application data.')
 reference_data = REFERENCE.read_bytes().replace(b'\r\n', b'\n')
-if hashlib.sha256(reference_data).hexdigest() != '3d88d1a3a08b61f19f00d3beff882702bbef2d21389f35cbabe8008976f21341':
+if hashlib.sha256(reference_data).hexdigest() != '7c65674005bd80bf0d6d896a632552a96c31996f1908f68f7c5cc07d227e454c':
     raise SystemExit('Pinned reference changed.')
 work.mkdir(parents=True, exist_ok=True)
 run = work / ('release-metadata-' + uuid.uuid4().hex)

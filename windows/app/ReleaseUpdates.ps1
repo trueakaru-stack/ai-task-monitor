@@ -193,13 +193,11 @@ function Get-UpdateRetryDelay([int]$failures,[string[]]$retryAfter,[string[]]$ra
  return $delay
 }
 function Set-UpdateRetryResult($state,[bool]$success,$result,[long]$now,[DateTimeOffset]$utcNow) {
- if($success){$state.Failures=0;$delay=[TimeSpan]::FromHours(24)}
- else{
-  $state.Failures=[Math]::Min(6,[int]$state.Failures+1)
-  $after=@();$reset=@();$date=@()
-  if($null -ne $result){$after=@($result.RetryAfter);$reset=@($result.RateLimitReset);$date=@($result.ServerDate)}
-  $delay=Get-UpdateRetryDelay $state.Failures $after $reset $date $utcNow
- }
+ $after=@();$reset=@();$date=@()
+ if($null -ne $result){$after=@($result.RetryAfter);$reset=@($result.RateLimitReset);$date=@($result.ServerDate)}
+ if($success){$state.Failures=0;$step=6}
+ else{$state.Failures=[Math]::Min(6,[int]$state.Failures+1);$step=$state.Failures}
+ $delay=Get-UpdateRetryDelay $step $after $reset $date $utcNow
  $state.HasSchedule=$true;$state.ScheduledAt=$now;$state.Frequency=[long][Diagnostics.Stopwatch]::Frequency;$state.DelayTicks=$delay.Ticks
 }
 

@@ -83,6 +83,18 @@ public sealed class SyntheticSlowDisposeHandler : HttpMessageHandler {
 '@
 $script:assertions=0
 function Assert([bool]$condition,[string]$message){$script:assertions++;if(-not $condition){throw $message}}
+# Check the real controller, including every failure path: wall time must be
+# captured before the monotonic timestamp used as the start of the delay.
+$recordCalls=@($ast.FindAll({param($item) $item -is [Management.Automation.Language.CommandAst] -and $item.GetCommandName() -eq 'Set-UpdateRetryResult'},$true))
+Assert ($recordCalls.Count -eq 4) 'Unexpected update scheduling call count.'
+foreach($call in $recordCalls){
+ $statement=$call.Parent;$block=$statement.Parent
+ $position=[Array]::IndexOf([object[]]$block.Statements,[object]$statement)
+ Assert ($position -ge 2 -and $block.Statements[$position-2].Extent.Text -ceq '$updateWall=[DateTimeOffset]::UtcNow' -and
+  $block.Statements[$position-1].Extent.Text -ceq '$updateTick=[Diagnostics.Stopwatch]::GetTimestamp()' -and
+  $call.CommandElements[$call.CommandElements.Count-2].Extent.Text -ceq '$updateTick' -and
+  $call.CommandElements[$call.CommandElements.Count-1].Extent.Text -ceq '$updateWall') 'A scheduling path captured clocks in the wrong order.'
+}
 function Await-Task($task,[int]$milliseconds=5000){
  if(-not $task.Wait($milliseconds)){throw 'A synthetic asynchronous task timed out.'}
  return $task.GetAwaiter().GetResult()
@@ -146,6 +158,12 @@ foreach($hours in @(1,2,4,8,16,24,24)){
 }
 Set-UpdateRetryResult $state $true $null 100 $now
 Assert ($state.Failures -eq 0 -and [TimeSpan]::FromTicks($state.DelayTicks) -eq [TimeSpan]::FromHours(24)) 'Success did not reset the daily schedule.'
+$successHint=[PSCustomObject]@{RetryAfter=@('172800');RateLimitReset=@();ServerDate=@($server)}
+Set-UpdateRetryResult $state $true $successHint 100 $now
+Assert ($state.Failures -eq 0 -and [TimeSpan]::FromTicks($state.DelayTicks) -eq [TimeSpan]::FromHours(48)) 'A successful response shortened its server delay.'
+$successHint.RetryAfter=@('18446744073709551616')
+Set-UpdateRetryResult $state $true $successHint 100 $now
+Assert ($state.DelayTicks -eq [long]::MaxValue -and -not (Test-UpdateRetryDue $state ([long]::MaxValue))) 'A successful response discarded an unrepresentable delay.'
 Set-UpdateRetryResult $state $false $null 100 $now
 Assert ([TimeSpan]::FromTicks($state.DelayTicks) -eq [TimeSpan]::FromHours(1)) 'Failure after success did not restart backoff.'
 $state.Frequency=10;$state.ScheduledAt=100;$state.DelayTicks=[TimeSpan]::FromHours(1).Ticks
@@ -183,6 +201,11 @@ $delay=Get-UpdateRetryDelay 1 @($now.AddHours(3).ToString('r',[Globalization.Cul
 Assert ($delay -eq [TimeSpan]::FromHours(24)) 'Missing server Date did not use the conservative fallback.'
 $delay=Get-UpdateRetryDelay 1 @($now.AddHours(48).ToString('r',[Globalization.CultureInfo]::InvariantCulture)) @() @() $now
 Assert ($delay -eq [TimeSpan]::FromHours(48)) 'A future absolute hint without server Date was shortened.'
+$simulated=[PSCustomObject]@{RetryAfter=@($now.AddHours(48).ToString('r',[Globalization.CultureInfo]::InvariantCulture));RateLimitReset=@();ServerDate=@()}
+$simulatedState=New-UpdateRetryState
+Set-UpdateRetryResult $simulatedState $false $simulated 36000 $now
+$simulatedState.Frequency=1
+Assert (-not (Test-UpdateRetryDue $simulatedState (36000+172800-1)) -and (Test-UpdateRetryDue $simulatedState (36000+172800))) 'A pause between wall and monotonic clock reads shortened the server delay.'
 $delayA=Get-UpdateRetryDelay 1 @($absolute) @($reset) @($server) $now.AddYears(-5)
 $delayB=Get-UpdateRetryDelay 1 @($absolute) @($reset) @($server) $now.AddYears(5)
 Assert ($delayA -eq $delayB -and $delayA -eq [TimeSpan]::FromHours(72)) 'The wall clock changed a server-dated deadline.'
@@ -224,6 +247,18 @@ Reset-Controller
 $script:handler=[SyntheticUpdateHandler]::new();$script:handler.Reply.SetResult((New-Response 200 '[]'))
 Invoke-UpdateCheckTick;Pump-UntilScheduled
 Assert ($script:shown -eq 0 -and [TimeSpan]::FromTicks($script:updateRetry.DelayTicks) -eq [TimeSpan]::FromHours(24)) 'An empty release array did not finish successfully.'
+
+Reset-Controller
+$script:handler=[SyntheticUpdateHandler]::new();$successResponse=New-Response 200 '[]'
+Add-Header $successResponse 'Retry-After' '172800'
+$script:handler.Reply.SetResult($successResponse);Invoke-UpdateCheckTick;Pump-UntilScheduled
+Assert ($script:updateRetry.Failures -eq 0 -and [TimeSpan]::FromTicks($script:updateRetry.DelayTicks) -eq [TimeSpan]::FromHours(48)) 'A successful HTTP response lost its longer delay.'
+
+Reset-Controller
+$script:handler=[SyntheticUpdateHandler]::new();$successResponse=New-Response 200 '[]'
+Add-Header $successResponse 'Retry-After' '18446744073709551616'
+$script:handler.Reply.SetResult($successResponse);Invoke-UpdateCheckTick;Pump-UntilScheduled
+Assert ($script:updateRetry.Failures -eq 0 -and $script:updateRetry.DelayTicks -eq [long]::MaxValue) 'A successful HTTP response lost its unrepresentable delay.'
 
 Reset-Controller
 $untrusted='[{"tag_name":"v9.0.0","draft":false,"assets":[{"name":"setup.exe","browser_download_url":"https://evil.example/setup.exe"}]}]'

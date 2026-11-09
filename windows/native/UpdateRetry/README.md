@@ -5,8 +5,9 @@ delays from caller-supplied HTTP header values and keeps an in-memory monotonic
 schedule. It does not make network requests, read or write settings, open
 downloads, start PowerShell, or connect to the application.
 
-Successful checks schedule the next check after 24 hours. Failed checks use a
-bounded exponential retry and respect `Retry-After` and rate limit hints.
+Successful checks schedule the next check no sooner than 24 hours. Failed
+checks use a bounded exponential retry. Both respect `Retry-After` and rate
+limit hints.
 Numeric hints that cannot be represented, and values beyond the 64 KiB input
 limit, disable automatic retries for the lifetime of the in-memory schedule.
 Where an absolute hint has no valid server `Date`, the policy

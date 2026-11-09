@@ -3171,7 +3171,9 @@ function Invoke-UpdateCheckTick {
   }catch{}finally{
    try{$script:updateParser.Dispose()}catch{};$script:updateParser=$null;$script:updateParserRequest=$null
   }
-  Set-UpdateRetryResult $script:updateRetry $valid $script:updateTransportResult ([Diagnostics.Stopwatch]::GetTimestamp()) ([DateTimeOffset]::UtcNow)
+  $updateWall=[DateTimeOffset]::UtcNow
+  $updateTick=[Diagnostics.Stopwatch]::GetTimestamp()
+  Set-UpdateRetryResult $script:updateRetry $valid $script:updateTransportResult $updateTick $updateWall
   $script:updateTransportResult=$null
   if($valid -and $null -ne $parsed.Update){try{$script:availableUpdate=$parsed.Update;Show-PendingUpdate}catch{}}
   return
@@ -3186,7 +3188,9 @@ function Invoke-UpdateCheckTick {
    if($null -ne $script:updateCancellation){$script:updateCancellation.Dispose();$script:updateCancellation=$null}
   }
   if($null -eq $result -or -not $result.Success){
-   Set-UpdateRetryResult $script:updateRetry $false $result ([Diagnostics.Stopwatch]::GetTimestamp()) ([DateTimeOffset]::UtcNow)
+   $updateWall=[DateTimeOffset]::UtcNow
+   $updateTick=[Diagnostics.Stopwatch]::GetTimestamp()
+   Set-UpdateRetryResult $script:updateRetry $false $result $updateTick $updateWall
    return
   }
   try{
@@ -3202,7 +3206,9 @@ function Invoke-UpdateCheckTick {
   }catch{
    if($null -ne $script:updateParser){try{$script:updateParser.Dispose()}catch{};$script:updateParser=$null}
    $script:updateParserRequest=$null;$script:updateTransportResult=$null
-   Set-UpdateRetryResult $script:updateRetry $false $result ([Diagnostics.Stopwatch]::GetTimestamp()) ([DateTimeOffset]::UtcNow)
+   $updateWall=[DateTimeOffset]::UtcNow
+   $updateTick=[Diagnostics.Stopwatch]::GetTimestamp()
+   Set-UpdateRetryResult $script:updateRetry $false $result $updateTick $updateWall
   }
   return
  }
@@ -3213,7 +3219,9 @@ function Invoke-UpdateCheckTick {
  }catch{
   $script:updateRequest=$null
   if($null -ne $script:updateCancellation){$script:updateCancellation.Dispose();$script:updateCancellation=$null}
-  Set-UpdateRetryResult $script:updateRetry $false $null ([Diagnostics.Stopwatch]::GetTimestamp()) ([DateTimeOffset]::UtcNow)
+  $updateWall=[DateTimeOffset]::UtcNow
+  $updateTick=[Diagnostics.Stopwatch]::GetTimestamp()
+  Set-UpdateRetryResult $script:updateRetry $false $null $updateTick $updateWall
  }
 }
 function Stop-UpdateCheck {

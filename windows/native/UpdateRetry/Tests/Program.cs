@@ -28,6 +28,14 @@ var unrepresentable = new UpdateRetrySchedule();
 if (!unrepresentable.Record(false, 0, 1, wall, new string?[] { "18446744073709551616" }) ||
     unrepresentable.Delay != TimeSpan.MaxValue || unrepresentable.Due(long.MaxValue))
     throw new Exception("An unrepresentable server delay allowed automatic retry.");
+var successfulHint = new UpdateRetrySchedule();
+if (!successfulHint.Record(true, 0, 1, wall, new string?[] { "172800" }) ||
+    successfulHint.Delay != TimeSpan.FromHours(48) || successfulHint.Due(86400) || !successfulHint.Due(172800))
+    throw new Exception("A successful response shortened its server delay.");
+var successfulHugeHint = new UpdateRetrySchedule();
+if (!successfulHugeHint.Record(true, 0, 1, wall, new string?[] { "18446744073709551616" }) ||
+    successfulHugeHint.Delay != TimeSpan.MaxValue || successfulHugeHint.Due(long.MaxValue))
+    throw new Exception("A successful response discarded an unrepresentable delay.");
 var paddedAtLimit = new string('0', 65530) + "172800";
 if (UpdateRetryPolicy.FailureDelay(1, new[] { paddedAtLimit }, null, null, wall) != TimeSpan.FromHours(48) ||
     UpdateRetryPolicy.FailureDelay(1, new[] { new string('0', 65536) }, null, null, wall) != TimeSpan.FromHours(1) ||

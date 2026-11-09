@@ -84,7 +84,8 @@ public sealed class UpdateRetrySchedule
         if (frequency <= 0) throw new ArgumentOutOfRangeException(nameof(frequency));
         if (HasSchedule && !Due(now)) return false;
         Failures = success ? 0 : Math.Min(6, Failures + 1);
-        Delay = success ? TimeSpan.FromHours(24) : UpdateRetryPolicy.FailureDelay(Failures, retryAfter, reset, dates, wallNow);
+        // A successful response still may request a delay longer than a day.
+        Delay = UpdateRetryPolicy.FailureDelay(success ? 6 : Failures, retryAfter, reset, dates, wallNow);
         ScheduledAt = now;
         Frequency = frequency;
         HasSchedule = true;
