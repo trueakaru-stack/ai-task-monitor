@@ -79,6 +79,18 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
         return nil
     }
 
+    var stepCountLabel: String {
+        let count = steps.count
+        let lastHundred = count % 100
+        let lastDigit = count % 10
+        let russian: String
+        if (11...14).contains(lastHundred) { russian = "этапов" }
+        else if lastDigit == 1 { russian = "этап" }
+        else if (2...4).contains(lastDigit) { russian = "этапа" }
+        else { russian = "этапов" }
+        return tr("\(count) \(russian)", "\(count) \(count == 1 ? "step" : "steps")")
+    }
+
     var progressLabel: String? {
         var basis = progressBasis ?? (steps.isEmpty ? .task : .steps)
         if (progress == nil || progressKind == .none) && !steps.isEmpty { basis = .steps }

@@ -58,9 +58,9 @@ struct TaskCardView: View {
                 }
                 .frame(height: 116)
                 .padding(.top, 16)
-                Text("\(task.planStatusNote ?? tr("План задачи", "Task plan")) · \(task.steps.count) \(tr("этапов", "steps"))")
+                Text("\(task.planStatusNote ?? tr("План задачи", "Task plan")) · \(task.stepCountLabel)")
                     .font(.system(size: 11))
-                    .foregroundStyle(task.planConfirmed && !hidesClaudePlanStatus ? MonitorTheme.muted : MonitorTheme.secondary)
+                    .foregroundStyle(task.planStatusNote == nil ? MonitorTheme.muted : MonitorTheme.secondary)
                     .padding(.top, 14)
             }
         }

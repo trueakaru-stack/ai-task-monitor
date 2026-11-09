@@ -5,7 +5,8 @@ candidate suppresses a Claude plan's bar and colored step marks when its state
 is unconfirmed, preserving step titles. When observed steps have a usable order,
 both views label progress as potentially incomplete. The snapshot renderer creates
 confirmed, plan-unconfirmed, and stale-task synthetic examples in both languages,
-themes, and window modes. These files have not been
+themes, and window modes. The two synthetic tests also check note selection and
+step-count language forms. These files have not been
 integrated into the application or an installer.
 
 The workflow renders both the unchanged card and the candidate on the same

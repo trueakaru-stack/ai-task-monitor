@@ -45,10 +45,11 @@ jobs:
           git diff --quiet cf9dce5918011a581f68193c74fdda196f23d35b "$GITHUB_SHA" -- macos
           cd "$GITHUB_WORKSPACE/.github/claude-audit/plan-visual-20261109"
           printf '%s  %s\n' \
-            'adff0cc43d78e1cf01bfd5bf1a43ec00ff46ac3fc949ff82c7355c14529eca21' TaskCardView.swift \
+            '6dbd67c184c552a3fa547f858c81e96bb04884f761008e1012cc5a6d07eaebb7' TaskCardView.swift \
             '9332bf7142fead0bdad1bdf8f9adf067bee585d5a3135b3ed6f7a245af45b76c' SnapshotRenderer.swift \
             'acee42947c2936ca92ecb13b7be3e0c154ed6802f30d9034567a767cf9a9bb8b' RootView.swift \
-            '38f7cf66e2ccf1d5121821a5714c233f83335606174f34512ccbc6dfb78df4df' Models.swift \
+            '54219cf61c1deb4a9e344f1665aec93e12f21e521950c0dc218e6b170e596832' Models.swift \
+            '8462d208aa6b11c03c5f0effb232e2a64d94215f3fb1618cfca89bbd8fdd68d3' ClaudePlanLabelTests.swift \
             | shasum -a 256 -c -
       - name: Render both variants without network
         shell: bash
@@ -91,6 +92,9 @@ jobs:
           for name in TaskCardView.swift RootView.swift Models.swift; do
             cp "$INPUT/$name" "Sources/AITaskMonitor/$name"
           done
+          cp "$INPUT/ClaudePlanLabelTests.swift" Tests/AITaskMonitorTests/ClaudePlanLabelTests.swift
+          run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter ClaudePlanLabelTests 2>&1 | /usr/bin/tee "$RUNNER_TEMP/aitm-claude-plan-label-tests.log"
+          /usr/bin/grep -Eq 'Executed 2 tests?, with 0 failures' "$RUNNER_TEMP/aitm-claude-plan-label-tests.log"
           run_isolated /usr/bin/xcrun swift build --disable-sandbox
           run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-claude-plan/candidate"
           for variant in base candidate; do
