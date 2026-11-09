@@ -1,0 +1,82 @@
+name: macOS Claude close writers policy audit
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/claude-close-writers-policy-audit-20261109.yml"
+      - ".github/limited-audit/claude-close-writers-policy-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  warning-and-preview:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/macos' && contains(github.event.head_commit.message, '[claude-close-writers-policy-audit-20261109]')
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - name: Require disposable hosted macOS runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          for tool in /bin/bash /usr/bin/env /usr/bin/git /usr/bin/tar /usr/bin/python3 /usr/bin/shasum /usr/bin/xcrun /usr/bin/sandbox-exec; do
+            test -x "$tool"
+            /usr/bin/shasum -a 256 "$tool"
+          done
+      - name: Fetch exact public commits without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'trueakaru-stack/ai-task-monitor'
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test -d "$GITHUB_WORKSPACE"
+          test -z "$(ls -A "$GITHUB_WORKSPACE")"
+          run_git() {
+            /usr/bin/env -i 'PATH=/usr/bin:/bin' 'GIT_CONFIG_NOSYSTEM=1' 'GIT_CONFIG_GLOBAL=/dev/null' \
+              'GIT_TERMINAL_PROMPT=0' /usr/bin/git -c credential.helper= -c core.autocrlf=false "$@"
+          }
+          run_git init "$GITHUB_WORKSPACE"
+          for commit in "$GITHUB_SHA" 8ebef09327339711bc5a4519c62eb565203b31d4 bbef0654fdb2789c62c8d8511576f05b75a289ca; do
+            run_git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 https://github.com/trueakaru-stack/ai-task-monitor.git "$commit"
+          done
+          run_git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
+          test "$(run_git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Verify every audit input
+        shell: bash
+        run: |
+          set -euo pipefail
+          input="$GITHUB_WORKSPACE/.github/limited-audit/claude-close-writers-policy-20261109"
+          test -d "$input"
+          test -z "$(find "$input" -type l -print)"
+          test "$(find "$input" -type f | wc -l | tr -d ' ')" = 7
+          printf '%s  %s\n' 4bdc83af0f3169a311720fcb73a40011c7813cd20d7bcf6cfe7e43b88f765215 "$input/staged.sha256" | /usr/bin/shasum -a 256 -c -
+          (cd "$input" && /usr/bin/shasum -a 256 -c staged.sha256)
+      - name: Select and record Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test "${{ matrix.runner }}" = macos-15; then developer=/Applications/Xcode_16.1.app/Contents/Developer; else developer="$(/usr/bin/xcode-select -p)"; fi
+          test -d "$developer"
+          printf 'DEVELOPER_DIR=%s\n' "$developer" >> "$GITHUB_ENV"
+          /usr/bin/env -i 'PATH=/usr/bin:/bin' "DEVELOPER_DIR=$developer" /usr/bin/xcodebuild -version
+          /usr/bin/shasum -a 256 "$developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
+      - name: Verify warning and render synthetic settings
+        id: audit
+        shell: bash
+        run: /bin/bash "$GITHUB_WORKSPACE/.github/limited-audit/claude-close-writers-policy-20261109/run-audit.sh"
+      - name: Upload exactly the checked frames
+        if: ${{ success() && steps.audit.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: claude-close-writers-policy-frames-${{ matrix.runner }}
+          path: ${{ steps.audit.outputs.frames }}
+          if-no-files-found: error
+          retention-days: 7
