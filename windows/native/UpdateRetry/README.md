@@ -24,6 +24,9 @@ If the monotonic counter resets while an admitted request is in flight, its
 result can also be rejected as early. The controller must detect and handle
 that reset without discarding the result or a longer server hint; simply
 ignoring a false return can shorten the requested delay.
+The constructor accepting a previous failure count allows a controller to
+retain a streak when it resets a schedule after detecting a clock reset. It
+accepts only counts from zero through six; it does not restore a prior deadline.
 The caller must also bound the number of supplied headers and handle transport
 errors, cancellation and shutdown. No UI responsiveness or real network
 behavior is established by this library.

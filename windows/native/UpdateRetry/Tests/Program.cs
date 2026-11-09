@@ -24,6 +24,14 @@ var guarded = new UpdateRetrySchedule();
 if (!guarded.Record(false, 0, 10, wall, new string?[] { "86400" })) throw new Exception("Initial hint rejected.");
 if (guarded.Record(false, 10, 10, wall) || guarded.Delay != TimeSpan.FromDays(1) || guarded.Due(72010) || !guarded.Due(864000))
     throw new Exception("Early result shortened the requested server delay.");
+var recovered = new UpdateRetrySchedule(5);
+if (!recovered.Record(false, 0, 1, wall) || recovered.Failures != 6 || recovered.Delay != TimeSpan.FromHours(24))
+    throw new Exception("Restoring a failure streak shortened the retry delay.");
+foreach (int invalidFailures in new[] { -1, 7 })
+{
+    try { _ = new UpdateRetrySchedule(invalidFailures); throw new Exception("An invalid failure streak was accepted."); }
+    catch (ArgumentOutOfRangeException) { }
+}
 var unrepresentable = new UpdateRetrySchedule();
 if (!unrepresentable.Record(false, 0, 1, wall, new string?[] { "18446744073709551616" }) ||
     unrepresentable.Delay != TimeSpan.MaxValue || unrepresentable.Due(long.MaxValue))

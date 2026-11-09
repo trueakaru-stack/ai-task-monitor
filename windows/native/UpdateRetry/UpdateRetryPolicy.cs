@@ -78,6 +78,16 @@ public sealed class UpdateRetrySchedule
     public long Frequency { get; private set; }
     public TimeSpan Delay { get; private set; }
 
+    public UpdateRetrySchedule() { }
+
+    // Used by a controller that must preserve the failure streak when its
+    // monotonic clock resets during an admitted request.
+    public UpdateRetrySchedule(int previousFailures)
+    {
+        if (previousFailures is < 0 or > 6) throw new ArgumentOutOfRangeException(nameof(previousFailures));
+        Failures = previousFailures;
+    }
+
     public bool Record(bool success, long now, long frequency, DateTimeOffset wallNow,
         IReadOnlyList<string?>? retryAfter = null, IReadOnlyList<string?>? reset = null, IReadOnlyList<string?>? dates = null)
     {
