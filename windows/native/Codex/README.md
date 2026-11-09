@@ -24,6 +24,18 @@ not establish protection from delayed or duplicate lifecycle records. It also
 does not implement discovery, long-history recovery, plans, activity text,
 manual overrides, presentation, source permissions, or real agent monitoring.
 
+Turn identifiers are matched exactly. A case-only mismatch is treated as a
+source error because the identifier contract does not guarantee that the two
+spellings identify the same turn. When the source is present, a turn ID with a control character, Unicode formatting character or
+invalid UTF-16 rejects the whole batch as a source error, including a malformed
+start or cached ID. When the source is absent, its events are ignored and an
+unknown snapshot is returned instead. This
+conservatively differs from the legacy invariant-culture comparison, which may ignore such characters
+and affect a different turn. The caller must not turn this error into a
+confirmed result. A valid full-history replay can replace a malformed cached
+ID; an incremental batch cannot. This does not validate every possible future
+Codex identifier or authenticate the source.
+
 The differential test runs the published PowerShell lifecycle functions using
 in-memory fake sessions and lock states, and compares their outputs with this
 library. Explicit expected results and separate C# state checks supplement that
@@ -38,4 +50,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows\native\Codex\T
 
 Each run uses a new isolated home, temporary and package directory, disables
 telemetry and first-run certificate generation, and clears NuGet sources. The
-PowerShell executable is a test driver only; the library does not depend on it.
+work directory must be outside the current profile, application data, and any
+configured HOME or CODEX_HOME directories; neither variable is assigned by the
+child test processes. The PowerShell executable is a test driver only; the
+library does not depend on it.

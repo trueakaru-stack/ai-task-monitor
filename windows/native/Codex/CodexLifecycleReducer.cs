@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace AITaskMonitor.CodexState;
 
 // These values are supplied by a caller; this library does not read agent data.
@@ -64,6 +66,8 @@ public static class CodexLifecycleReducer
 
         if (!Enum.IsDefined(observation.BatchKind)) throw new ArgumentOutOfRangeException(nameof(observation));
         if (!Enum.IsDefined(observation.Lock)) throw new ArgumentOutOfRangeException(nameof(observation));
+        if (observation.BatchKind == EventBatchKind.Incremental &&
+            (state.TurnId is null || HasInvalidTurnCharacters(state.TurnId))) return new Reduction(state, null, true);
 
         LifecycleState current = observation.BatchKind == EventBatchKind.FullHistory
             ? LifecycleState.Empty with { Observed = state.Observed }
@@ -74,6 +78,15 @@ public static class CodexLifecycleReducer
             if (!Enum.IsDefined(item.Kind)) throw new ArgumentOutOfRangeException(nameof(observation));
 
             string turn = item.TurnId ?? "";
+            // Discard the complete batch on a malformed identifier. In
+            // particular a malformed start must not publish an active turn.
+            if (HasInvalidTurnCharacters(turn)) return new Reduction(state, null, true);
+            // Resolve case-only ambiguity before a Started event replaces the
+            // current turn; otherwise it could confirm a different turn.
+            if (current.TurnId.Length != 0 && turn.Length != 0 &&
+                !string.Equals(current.TurnId, turn, StringComparison.Ordinal) &&
+                string.Equals(current.TurnId, turn, StringComparison.OrdinalIgnoreCase))
+                return new Reduction(state, null, true);
             DateTimeOffset timestamp = item.Timestamp?.ToUniversalTime() ?? DateTimeOffset.MinValue;
             if (item.Kind == LifecycleEventKind.Started)
             {
@@ -93,10 +106,8 @@ public static class CodexLifecycleReducer
                 continue;
             }
 
-            // PowerShell's string comparison in the published reader is
-            // invariant-culture and case-insensitive.
             if (current.TurnId.Length != 0 && turn.Length != 0 &&
-                !string.Equals(current.TurnId, turn, StringComparison.InvariantCultureIgnoreCase)) continue;
+                !string.Equals(current.TurnId, turn, StringComparison.Ordinal)) continue;
 
             if (item.Kind is LifecycleEventKind.Completed or LifecycleEventKind.Aborted)
             {
@@ -119,6 +130,27 @@ public static class CodexLifecycleReducer
             _ => ThreadStatus.Unknown
         };
         return Finish(current, status, hasStart, observation.UpdatedUtc.ToUniversalTime(), current.StartKey, current.StartedUtc, monitorStartedUtc);
+    }
+
+    private static bool HasInvalidTurnCharacters(string turn)
+    {
+        for (int i = 0; i < turn.Length; i++)
+        {
+            char value = turn[i];
+            UnicodeCategory category;
+            if (char.IsHighSurrogate(value))
+            {
+                if (i + 1 >= turn.Length || !char.IsLowSurrogate(turn[i + 1])) return true;
+                category = CharUnicodeInfo.GetUnicodeCategory(turn, i++);
+            }
+            else
+            {
+                if (char.IsLowSurrogate(value)) return true;
+                category = char.GetUnicodeCategory(value);
+            }
+            if (category is UnicodeCategory.Control or UnicodeCategory.Format) return true;
+        }
+        return false;
     }
 
     private static Reduction Finish(LifecycleState state, ThreadStatus status, bool hasStart,

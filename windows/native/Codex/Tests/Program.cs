@@ -85,6 +85,54 @@ Equal(true, failed.SourceUnavailable, "unavailable lock signals error");
 Equal<ThreadSnapshot?>(null, failed.Snapshot, "unavailable lock has no successful snapshot");
 Equal(true, failed.State.Observed, "source error preserves observation");
 
+// A different turn must not become equal because linguistic comparison ignores
+// embedded control or formatting characters. A bad identifier invalidates the
+// whole batch, including a malformed start, instead of publishing partial state.
+foreach (string badId in new[] { "first\u0000", "first\u00ad", "first\u200b", "first\U000e0001", "first\ud800", "first\udc00" })
+{
+    foreach (LifecycleEventKind kind in new[] { LifecycleEventKind.Started, LifecycleEventKind.Activity,
+                 LifecycleEventKind.Completed, LifecycleEventKind.Aborted })
+    {
+        Reduction invalid = CodexLifecycleReducer.Reduce(a.State,
+            NewObservation(new LifecycleEvent(kind, badId, start.AddMinutes(1))), start);
+        Equal(true, invalid.SourceUnavailable, "malformed turn is a source error");
+        Equal<ThreadSnapshot?>(null, invalid.Snapshot, "malformed turn has no successful snapshot");
+        Equal(a.State, invalid.State, "malformed turn does not publish partial state");
+    }
+}
+Reduction different = CodexLifecycleReducer.Reduce(a.State,
+    NewObservation(new LifecycleEvent(LifecycleEventKind.Completed, "another")), start);
+Equal(LifecycleMarker.Started, different.State.Marker, "foreign turn does not close the current turn");
+foreach (LifecycleEventKind kind in new[] { LifecycleEventKind.Started, LifecycleEventKind.Activity,
+             LifecycleEventKind.Completed, LifecycleEventKind.Aborted })
+{
+    Reduction caseOnly = CodexLifecycleReducer.Reduce(a.State,
+        NewObservation(new LifecycleEvent(kind, "FIRST")), start);
+    Equal(true, caseOnly.SourceUnavailable, "case-only turn ID differences are ambiguous");
+    Equal<ThreadSnapshot?>(null, caseOnly.Snapshot, "case-only turn IDs do not confirm a status");
+    Equal(a.State, caseOnly.State, "case-only ambiguity does not publish partial state");
+}
+Reduction exactAscii = CodexLifecycleReducer.Reduce(a.State,
+    NewObservation(new LifecycleEvent(LifecycleEventKind.Completed, "first")), start);
+Equal(LifecycleMarker.Completed, exactAscii.State.Marker, "identical turn IDs still match");
+Reduction supplementary = CodexLifecycleReducer.Reduce(LifecycleState.Empty,
+    NewObservation(new LifecycleEvent(LifecycleEventKind.Started, "turn-\U0001f680", start.AddSeconds(1))), start);
+Equal(ThreadStatus.Active, supplementary.Snapshot!.Status, "valid supplementary characters are not rejected");
+Reduction partial = CodexLifecycleReducer.Reduce(a.State, NewObservation(
+    new LifecycleEvent(LifecycleEventKind.Completed, "first"),
+    new LifecycleEvent(LifecycleEventKind.Started, "second\u200b")), start);
+Equal(true, partial.SourceUnavailable, "a later malformed event rejects the batch");
+Equal(a.State, partial.State, "a rejected batch keeps the original state");
+var badState = a.State with { TurnId = "first\u200b" };
+Reduction invalidState = CodexLifecycleReducer.Reduce(badState, NewObservation(), start);
+Equal(true, invalidState.SourceUnavailable, "a malformed cached turn is a source error");
+Equal<ThreadSnapshot?>(null, invalidState.Snapshot, "a malformed cached turn is not confirmed");
+var repaired = new ThreadObservation(true, start.AddSeconds(3), LockObservation.Held,
+    EventBatchKind.FullHistory, new[] { new LifecycleEvent(LifecycleEventKind.Started, "clean", start.AddSeconds(2)) });
+Reduction recoveredState = CodexLifecycleReducer.Reduce(badState, repaired, start);
+Equal(false, recoveredState.SourceUnavailable, "a valid full replay recovers a malformed cached turn");
+Equal("clean", recoveredState.State.TurnId, "the full replay replaces the malformed cached turn");
+
 Console.WriteLine($"Codex lifecycle: {fixtures.Count} reference sequences, {steps} polls, {checks} comparisons and independent assertions passed.");
 
 sealed class FixtureCase

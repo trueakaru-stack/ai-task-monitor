@@ -115,8 +115,8 @@ Step -Name 'matching new activity and held lock' -Events @((Event agent_reasonin
 Start-Case 'turn changes and terminal markers'
 Step -Name 'new start' -Events @((Event task_started TURN-A '2026-01-01T00:00:01Z')) -Expected active
 Step -Name 'other turn completion ignored' -Events @((Event task_complete turn-b)) -Expected active
-Step -Name 'same turn abortion ignores case' -Events @((Event turn_aborted turn-a)) -Expected interrupted
-Step -Name 'activity after interruption ignored' -Events @((Event item_completed turn-a '2026-01-01T00:00:05Z')) -Expected interrupted
+Step -Name 'same turn abortion' -Events @((Event turn_aborted TURN-A)) -Expected interrupted
+Step -Name 'activity after interruption ignored' -Events @((Event item_completed TURN-A '2026-01-01T00:00:05Z')) -Expected interrupted
 Step -Name 'new turn resumes' -Events @((Event turn_started turn-c '2026-01-01T00:00:06Z')) -Expected active
 Step -Name 'terminal without turn ends current turn' -Events @((Event turn_complete)) -Expected completed
 Step -Name 'repeat start same turn follows published behavior' -Events @((Event task_started turn-c '2026-01-01T00:00:07Z')) -Expected active

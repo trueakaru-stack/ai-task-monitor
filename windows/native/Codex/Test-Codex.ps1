@@ -6,12 +6,18 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-function FullPath([string]$path) { return [IO.Path]::GetFullPath($path).TrimEnd('\','/') }
+function FullPath([string]$path) {
+    $full = [IO.Path]::GetFullPath($path)
+    $root = [IO.Path]::GetPathRoot($full)
+    if ($full.Length -le $root.Length) { return $root }
+    return $full.TrimEnd('\','/')
+}
 function IsWithin([string]$path, [string]$root) {
     if ([string]::IsNullOrWhiteSpace($root)) { return $false }
     $path = FullPath $path; $root = FullPath $root
+    $prefix = if ($root.EndsWith('\') -or $root.EndsWith('/')) { $root } else { $root + [IO.Path]::DirectorySeparatorChar }
     return $path.Equals($root,[StringComparison]::OrdinalIgnoreCase) -or
-        $path.StartsWith($root + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)
+        $path.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)
 }
 
 $sdk = FullPath $SdkRoot
@@ -22,8 +28,23 @@ $framework = [IO.Path]::GetFullPath($WindowsPowerShell)
 foreach ($path in @($dotnet,$reference,$framework)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'A required SDK, reference source or PowerShell executable is missing.' }
 }
-foreach ($profile in @($env:USERPROFILE,$env:APPDATA,$env:LOCALAPPDATA)) {
-    if (IsWithin $work $profile) { throw 'The work directory must be outside the user profile and application data.' }
+function ProtectedDirectory([string]$name, [bool]$required) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        if ($required) { throw 'A required protected directory is unavailable.' }
+        return $null
+    }
+    if ($value -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)' -or
+        $value.StartsWith('\\?\') -or $value.StartsWith('\\.\')) {
+        throw 'A protected directory is not absolute.'
+    }
+    $resolved = FullPath $value
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { throw 'A protected directory is unavailable.' }
+    return $resolved
+}
+foreach ($name in @('USERPROFILE','APPDATA','LOCALAPPDATA','HOME','CODEX_HOME')) {
+    $profilePath = ProtectedDirectory $name ($name -in @('USERPROFILE','APPDATA','LOCALAPPDATA'))
+    if ($profilePath -and (IsWithin $work $profilePath)) { throw 'The work directory must be outside protected directories.' }
 }
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../..'))
 if (IsWithin $work $repository) { throw 'The work directory must be outside the repository.' }
@@ -58,9 +79,9 @@ function Invoke-Isolated([string]$executable,[string[]]$arguments,[string]$input
         DOTNET_ROOT=$sdk; DOTNET_MULTILEVEL_LOOKUP='0'; DOTNET_CLI_HOME=(Join-Path $run 'home')
         DOTNET_CLI_TELEMETRY_OPTOUT='1'; DOTNET_NOLOGO='1'; DOTNET_GENERATE_ASPNET_CERTIFICATE='0'
         DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE='1'; DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'
-        NUGET_PACKAGES=(Join-Path $run 'nuget'); USERPROFILE=(Join-Path $run 'home'); HOME=(Join-Path $run 'home')
+        NUGET_PACKAGES=(Join-Path $run 'nuget'); USERPROFILE=(Join-Path $run 'home')
         APPDATA=(Join-Path $run 'appdata'); LOCALAPPDATA=(Join-Path $run 'localappdata')
-        CODEX_HOME=(Join-Path $run 'home/codex-fixture'); TEMP=(Join-Path $run 'temp'); TMP=(Join-Path $run 'temp')
+        TEMP=(Join-Path $run 'temp'); TMP=(Join-Path $run 'temp')
         PSModuleAnalysisCachePath=(Join-Path $run 'cache/ModuleAnalysisCache')
         PSModulePath=(Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/Modules')
     }
