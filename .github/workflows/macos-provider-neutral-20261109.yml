@@ -1,0 +1,135 @@
+name: macOS provider neutral candidate synthetic tests
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-provider-neutral-20261109.yml"
+      - ".github/provider-audit/v1-neutral-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-tests:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[macos-provider-neutral]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Check disposable runner
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify and stage isolated candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet 96f6ab5f88c60a528f39f93ade610830893d7d13 "$GITHUB_SHA" -- macos
+          INPUT="$GITHUB_WORKSPACE/.github/provider-audit/v1-neutral-20261109"
+          cd "$INPUT"
+          printf '%s  %s\n' \
+            'eca945e759d4b9899b877132f001a613cf59747730496e12d9a08ea8e857454c' Sources/DeepSeekIntegration.swift \
+            '8896c88dc6bc97d51e5744697b193442fcc4fe4b0265e08a87be6f2aec3c8c21' Sources/ExternalProviderChannel.swift \
+            'b83c0741b09b6da671ad184ae1fc7ccc7437fae0ec4bba12c43ed029e7ad712a' Sources/ExternalProviderRuntime.swift \
+            'c1a98d3fbc072b54a96cc141a7d311f27810900cc25ad366f989482d9809e731' Sources/ExternalProviderState.swift \
+            'c277362a1d1ad0729c3e35c70a7053e155f3dbd745bc98d1d2a1096a5e5b7f83' Sources/ExternalProviderTaskMapper.swift \
+            '1b26a656515742658516d0286d8d481d44adf35c2329f8c9e3716b8803ef4727' Sources/ProviderScopeHistory.swift \
+            '64281d35bddce64d58f0ff505d7d2e2f205eaad436d902ac9b2b967972197e30' Sources/TaskStore.swift \
+            'e491f2d702b0fd08ffcdfed1363e0376e52108ba0997fea89dacecfdaff7efce' Tests/DeepSeekNeutralBoundaryTests.swift \
+            '066c7f26a278839cdfcd28e0e08d01261af8c39a0f204df7e376e1c789725666' Tests/ExternalProviderChannelTests.swift \
+            'ffd46a230a2ea6ff971dd6c9af764f980ce6fa7051199e6d2d35fac29f04baae' Tests/ExternalProviderQueueRaceTests.swift \
+            '45f1808f76a704bfcbc10bbeb78976a6dc71cf8902e3b02f2a24d8ba9c888051' Tests/ExternalProviderRuntimeTests.swift \
+            '197ebc348e46a683b90f43c5e1a35b0a554ec3fc48db88b8dfc644b8f0291f3a' Tests/ExternalProviderStateTests.swift \
+            '692a2e397b820539688a61ca0b06d2d6eff69425d719a691fc0bc8f330e2b8f1' Tests/ExternalProviderTaskMapperTests.swift \
+            'a3272cce621732216fa0c785ecd984e1cdeb0a2cacef936197f6f18f6c5444f2' Tests/ExternalProviderTaskStoreTests.swift \
+            'e898fcce82155a6ccc20a396a016e70a3f6d767063f4a9ace147bf9d5cd400ea' Tests/HermesTaskStoreTests.swift \
+            'ec36ef6f1ae8e861913deb7773abaf141f5bac2f0fbe1461a6e580a8af54788d' Tests/HistoryUnstableFallbackTests.swift \
+            '12a0105f7b5a9f02306dfb284310e8e49c337ad9944e7e04b6a18b11af41a819' Tests/IndependentIsolationReviewTests.swift \
+            '687fd837b4e63eaa90710225730e0920eab2499ff80c89713e23398bc3596dca' Tests/V1IsolationFixTests.swift \
+            '739cf66460e41fe730ae57a56d3c751fd09f51001d294b22dfce5507fdd96570' Tests/V1ProtectionTests.swift \
+            'bb64166fb84b8b88aa33540533988edf3f2ebad7324cfa10964602c65b4ee207' Tests/V1RuntimeProtectionTests.swift \
+            | shasum -a 256 -c -
+          cp "$INPUT"/Sources/*.swift "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/"
+          cp "$INPUT"/Tests/*.swift "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/"
+      - name: Run isolated provider tests
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aitm-v1-home" "$RUNNER_TEMP/aitm-v1-tmp" "$RUNNER_TEMP/aitm-v1-support"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*) (allow network* (local unix-socket)) (allow network-outbound (remote unix-socket))'
+          cat > "$RUNNER_TEMP/aitm-v1-network-probe.py" <<'PY'
+          import errno
+          import os
+          import socket
+          import sys
+
+          for family, destination in ((socket.AF_INET, ("127.0.0.1", 0)), (socket.AF_INET6, ("::1", 0))):
+              try:
+                  internet = socket.socket(family, socket.SOCK_STREAM)
+              except OSError as error:
+                  if error.errno not in (errno.EPERM, errno.EACCES): raise
+              else:
+                  try:
+                      if internet.connect_ex(destination) not in (errno.EPERM, errno.EACCES): sys.exit(1)
+                  finally:
+                      internet.close()
+          path = "/private/tmp/aitm-v1-probe-" + str(os.getpid())
+          server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          try:
+              server.bind(path)
+              server.listen(1)
+              client.connect(path)
+              peer, _ = server.accept()
+              peer.close()
+          finally:
+              client.close()
+              server.close()
+              if os.path.exists(path): os.unlink(path)
+          print("Network probe: IPv4/IPv6 denied; synthetic local Unix socket allowed")
+          PY
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-v1-home" \
+              "TMPDIR=$RUNNER_TEMP/aitm-v1-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-v1-support" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-v1-network-probe.py"
+          run_isolated /usr/bin/xcrun swift --version
+          audit_status=0
+          for entry in DeepSeekNeutralBoundaryTests:6 ExternalProviderChannelTests:2 ExternalProviderQueueRaceTests:4 ExternalProviderRuntimeTests:2 ExternalProviderStateTests:7 ExternalProviderTaskMapperTests:2 ExternalProviderTaskStoreTests:3 HermesTaskStoreTests:2 HistoryUnstableFallbackTests:4 IndependentIsolationReviewTests:4 V1IsolationFixTests:17 V1ProtectionTests:4 V1RuntimeProtectionTests:1 ExternalProviderFilterTests:1; do
+            suite="${entry%:*}"
+            count="${entry#*:}"
+            log="$RUNNER_TEMP/aitm-v1-$suite.log"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | /usr/bin/tee "$log"; then
+              audit_status=1
+            fi
+            if ! /usr/bin/grep -Eq "Executed $count tests?, with 0 failures" "$log"; then
+              printf '%s\n' "Missing successful expected test count: $suite"
+              audit_status=1
+            fi
+          done
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox --configuration release; then
+            audit_status=1
+          fi
+          exit "$audit_status"
