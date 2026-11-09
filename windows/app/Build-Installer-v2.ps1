@@ -1,4 +1,4 @@
-param([string]$OutputDirectory="",[string]$BuildTempDirectory="")
+﻿param([string]$OutputDirectory="",[string]$BuildTempDirectory="")
 
 $ErrorActionPreference = "Stop"
 $source = $PSScriptRoot
@@ -18,6 +18,19 @@ New-Item -ItemType Directory -Path $buildTemp -Force | Out-Null
 $env:TEMP = $buildTemp
 $env:TMP = $buildTemp
 
+$stageHelper = Join-Path $buildTemp "ClaudeStageObservation.dll"
+$stageArguments = @(
+    "/nologo",
+    "/target:library",
+    "/platform:anycpu",
+    "/optimize+",
+    "/reference:System.Web.Extensions.dll",
+    "/out:$stageHelper",
+    (Join-Path $source "ClaudeStageObservation.cs")
+)
+& $compiler $stageArguments
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $stageHelper -PathType Leaf)) { throw "Claude stage helper compilation failed (exit $LASTEXITCODE)" }
+
 $launcher = Join-Path $buildTemp "AI task monitor.exe"
 $launcherArguments = @(
     "/nologo",
@@ -25,7 +38,8 @@ $launcherArguments = @(
     "/optimize+",
     "/out:$launcher",
     "/win32icon:$(Join-Path $source 'assets\app-icon.ico')",
-    (Join-Path $source "CodexTasksLauncher.cs")
+    (Join-Path $source "CodexTasksLauncher.cs"),
+    (Join-Path $source "VersionInfo.cs")
 )
 & $compiler $launcherArguments
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $launcher)) { throw "Launcher compilation failed" }
@@ -40,6 +54,7 @@ $arguments = @(
     "/resource:$(Join-Path $source 'CodexProgress.ps1'),CodexProgress.ps1",
     "/resource:$(Join-Path $source 'Uninstall-CodexProgress.ps1'),Uninstall-CodexProgress.ps1",
     "/resource:$(Join-Path $source 'Uninstall-CodexProgress.cmd'),Uninstall-CodexProgress.cmd",
+    "/resource:$stageHelper,ClaudeStageObservation.dll",
     "/resource:$(Join-Path $source 'ClaudeTaskHook.ps1'),ClaudeTaskHook.ps1",
     "/resource:$(Join-Path $source 'ClaudeLoopClient.ps1'),ClaudeLoopClient.ps1",
     "/resource:$(Join-Path $source 'ClaudeLoopDetection.ps1'),ClaudeLoopDetection.ps1",
@@ -93,7 +108,8 @@ $arguments = @(
     "/resource:$(Join-Path $source 'ReleaseUpdates.ps1'),ReleaseUpdates.ps1",
     "/resource:$launcher,AI task monitor.exe",
     "/resource:$(Join-Path $source 'assets\app-icon.ico'),app-icon.ico",
-    (Join-Path $source "CodexProgressInstaller.cs")
+    (Join-Path $source "CodexProgressInstaller.cs"),
+    (Join-Path $source "VersionInfo.cs")
 )
 
 & $compiler $arguments

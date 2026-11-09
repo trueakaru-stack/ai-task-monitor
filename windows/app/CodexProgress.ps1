@@ -240,7 +240,7 @@ try{
  $script:codexCloudController=New-CodexCloudController
  $script:codexCloudModulesAvailable=$true
 }catch{}
-$script:currentVersion='0.2.6-alpha'
+$script:currentVersion='0.2.7-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateRequest=$null
@@ -283,7 +283,7 @@ $script:translations=@{
  'Не удалось сохранить настройку. Облако может включиться после перезапуска.'='Could not save the setting. Cloud monitoring may resume after restart.'
  'Проверка'='Checking'
  'Облако: '='Cloud: '
- 'Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии.'='The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Desktop or Claude Code after connecting. Only local sessions are monitored for now.'
+ 'Перед подключением обновите все используемые копии Claude Code, в том числе в Claude Desktop, до версии 2.1.101 или новее. Перед подключением или отключением закройте Claude Code, Claude Desktop и другие программы, которые могут изменять настройки Claude Code, включая их фоновые процессы. Приложение не проверяет версии и закрытие программ автоматически. Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии.'='Before connecting, update every copy of Claude Code you use, including in Claude Desktop, to version 2.1.101 or later. Before connecting or disconnecting, close Claude Code, Claude Desktop and other programs that may change Claude Code settings, including their background processes. The app does not automatically check versions or whether these programs are closed. The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Desktop or Claude Code after connecting. Only local sessions are monitored for now.'
  'Приложение добавит локальный плагин OpenCode. Поддерживаются совместимые версии 1 начиная с 1.18.29 и версия 2. После подключения перезапустите OpenCode.'='The app adds a local OpenCode plugin. Compatible versions 1.18.29 and later within version 1, and version 2, are supported. Restart OpenCode after connecting.'
  'Не удалось подтвердить установку или совместимость OpenCode'='Could not confirm the OpenCode installation or compatibility'
  'Не удалось прочитать подключение OpenCode'='Could not read the OpenCode connection'
@@ -407,6 +407,8 @@ $script:translations=@{
  'Завершён этап: '='Step completed: '
  'План задачи'='Task plan'
  'План не подтверждён'='Plan unconfirmed'
+ 'План не подтверждён; список может быть неполным'='Plan unconfirmed; the list may be incomplete'
+ 'По известным этапам, возможна неточность'='Based on observed steps; may be inaccurate'
  ' этапов'=' steps'
  'Приблизительная оценка'='Approximate estimate'
  'Скрыть'='Hide'
@@ -812,7 +814,7 @@ function Tr([string]$text){
          <TextBlock x:Name="ClaudeSourceStatus" Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
          <Button x:Name="ClaudeSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
         </Grid>
-        <TextBlock Margin="0,0,0,12" Text="Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+        <TextBlock Margin="0,0,0,12" Text="Перед подключением обновите все используемые копии Claude Code, в том числе в Claude Desktop, до версии 2.1.101 или новее. Перед подключением или отключением закройте Claude Code, Claude Desktop и другие программы, которые могут изменять настройки Claude Code, включая их фоновые процессы. Приложение не проверяет версии и закрытие программ автоматически. Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
         <Border Height="1" Background="{DynamicResource Divider}"/>
         <Grid Height="50">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -1529,7 +1531,7 @@ function Claude-ConnectionState {
  $hooksProperty=$settings.PSObject.Properties["hooks"]
  if($null -eq $hooksProperty){return "disconnected"}
  if($hooksProperty.Value -isnot [PSCustomObject]){throw "Claude Code hooks are not a JSON object."}
- $knownEvents=@("UserPromptSubmit","PreToolUse","PostToolUse","PostToolUseFailure","TaskCreated","TaskCompleted","SubagentStart","SubagentStop","Stop","SessionEnd")
+ $knownEvents=@("UserPromptSubmit","PreToolUse","PostToolUse","PostToolUseFailure","TaskCreated","TaskCompleted","SubagentStart","SubagentStop","Stop","StopFailure","SessionEnd")
  $connectedEvents=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
  foreach($eventProperty in $hooksProperty.Value.PSObject.Properties){
   if($eventProperty.Name -notin $knownEvents){continue}
@@ -2485,31 +2487,98 @@ function Codex-Tasks {
 }
 
 function Claude-Tasks {
- try{$attributes=[IO.File]::GetAttributes($claudeEventPath)}
- catch [IO.FileNotFoundException]{if($script:lastClaudeTasks.Count -gt 0){throw};return @()}
- catch [IO.DirectoryNotFoundException]{if($script:lastClaudeTasks.Count -gt 0){throw};return @()}
- if(($attributes -band [IO.FileAttributes]::Directory) -ne 0){throw "Claude event source is not a file."}
- $tail=Read-TailText $claudeEventPath 4194304 $true
- $legacyTail=""
- if($claudeLegacyEventPath){
+ # A bounded digest records continuity, not task content. It is held in memory only.
+ $readSource={
+  param([string]$path,$prior)
+  $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
   try{
-   if(Test-Path -LiteralPath $claudeLegacyEventPath -PathType Leaf -ErrorAction Stop){
-    $legacyTail=Read-TailText $claudeLegacyEventPath 4194304 $true
+   $digest={
+    param([IO.Stream]$inputStream,[long]$end)
+    $count=[int][Math]::Min([long]4194304,$end);$data=[byte[]]::new($count)
+    [void]$inputStream.Seek($end-$count,[IO.SeekOrigin]::Begin);$read=0
+    while($read -lt $count){$n=$inputStream.Read($data,$read,$count-$read);if($n -le 0){throw 'Unable to verify Claude journal continuity.'};$read+=$n}
+    $sha=[Security.Cryptography.SHA256]::Create()
+    try{return [Convert]::ToBase64String($sha.ComputeHash($data))}finally{$sha.Dispose()}
    }
-  }catch{}
+   $length=[long]$stream.Length;$discontinuity=$false
+   if($null -ne $prior){
+    if($length -lt [long]$prior.Length){$discontinuity=$true}
+    elseif((& $digest $stream ([long]$prior.Length)) -cne [string]$prior.EndDigest){$discontinuity=$true}
+   }
+   $endDigest=& $digest $stream $length
+   $count=[int][Math]::Min([long]4194304,$length);$data=[byte[]]::new($count)
+   $offset=$length-$count;$startsAtBoundary=$true
+   if($offset -gt 0){[void]$stream.Seek($offset-1,[IO.SeekOrigin]::Begin);$startsAtBoundary=$stream.ReadByte() -eq 10}
+   [void]$stream.Seek($offset,[IO.SeekOrigin]::Begin);$read=0
+   while($read -lt $count){$n=$stream.Read($data,$read,$count-$read);if($n -le 0){throw 'Unable to read Claude journal.'};$read+=$n}
+   if($stream.Length -lt $length -or (& $digest $stream $length) -cne $endDigest){throw 'Claude journal changed during reading.'}
+   # Only completed records are parsed. A writer can be interrupted mid-record.
+   $start=0
+   if($length -gt 4194304){
+    $discontinuity=$true
+    if(-not $startsAtBoundary){
+     while($start -lt $count -and $data[$start] -ne 10){$start++}
+     if($start -lt $count){$start++}
+    }
+   }
+   $end=$count;$pending=$count -gt 0 -and $data[$count-1] -ne 10
+   if($pending){while($end -gt $start -and $data[$end-1] -ne 10){$end--}}
+   $value=''
+   if($end -gt $start){
+    $encoding=[Text.UTF8Encoding]::new($false,$true)
+    $value=$encoding.GetString($data,$start,$end-$start)
+    if($length -le 4194304){$value=$value.TrimStart([char]0xFEFF)}
+   }
+   return [PSCustomObject]@{Text=$value;HasPartialLine=$pending;Discontinuity=$discontinuity;Cursor=[PSCustomObject]@{Length=$length;EndDigest=$endDigest}}
+  }finally{$stream.Dispose()}
  }
  if(-not ("AITaskMonitor.Claude.Reader" -as [type])){throw "Claude event reader is unavailable."}
- $sessions=@([AITaskMonitor.Claude.Reader]::Read($tail,$legacyTail,[DateTime]::UtcNow,$script:monitorStartedUtc))
+ if($null -eq (Get-Variable -Scope Script -Name claudeReaderSession -ErrorAction SilentlyContinue) -or $null -eq $script:claudeReaderSession){$script:claudeReaderSession=[AITaskMonitor.Claude.SessionReader]::new()}
+ if($null -eq (Get-Variable -Scope Script -Name claudeLegacySourceSeen -ErrorAction SilentlyContinue)){$script:claudeLegacySourceSeen=$false}
+ if($null -eq (Get-Variable -Scope Script -Name claudeCurrentSourceSeen -ErrorAction SilentlyContinue)){$script:claudeCurrentSourceSeen=$false}
+ if($null -eq (Get-Variable -Scope Script -Name claudeCurrentSourceCursor -ErrorAction SilentlyContinue)){$script:claudeCurrentSourceCursor=$null}
+ if($null -eq (Get-Variable -Scope Script -Name claudeLegacySourceCursor -ErrorAction SilentlyContinue)){$script:claudeLegacySourceCursor=$null}
+ try{$attributes=[IO.File]::GetAttributes($claudeEventPath)}
+ catch [IO.FileNotFoundException]{if($script:claudeCurrentSourceSeen -or $script:lastClaudeTasks.Count -gt 0){throw};return @()}
+ catch [IO.DirectoryNotFoundException]{if($script:claudeCurrentSourceSeen -or $script:lastClaudeTasks.Count -gt 0){throw};return @()}
+ if(($attributes -band [IO.FileAttributes]::Directory) -ne 0){throw "Claude event source is not a file."}
+ $currentRead=& $readSource $claudeEventPath $script:claudeCurrentSourceCursor
+ if($currentRead.Discontinuity){$script:claudeReaderSession.MarkSourceLoss()}
+ $script:claudeCurrentSourceCursor=$currentRead.Cursor
+ $tail=$currentRead.Text
+ $transientUncertain=[bool]$currentRead.HasPartialLine
+ $script:claudeCurrentSourceSeen=$true
+ $legacyTail=""
+ if($claudeLegacyEventPath){
+  $legacyAttributes=$null
+  try{$legacyAttributes=[IO.File]::GetAttributes($claudeLegacyEventPath)}
+  catch [IO.FileNotFoundException]{if($script:claudeLegacySourceSeen){$script:claudeReaderSession.MarkSourceLoss();throw}}
+  catch [IO.DirectoryNotFoundException]{if($script:claudeLegacySourceSeen){$script:claudeReaderSession.MarkSourceLoss();throw}}
+  catch{$script:claudeReaderSession.MarkSourceLoss();throw}
+  if($null -ne $legacyAttributes){
+   if(($legacyAttributes -band [IO.FileAttributes]::Directory) -ne 0){$script:claudeReaderSession.MarkSourceLoss();throw "Claude legacy event source is not a file."}
+   $script:claudeLegacySourceSeen=$true
+   try{
+    $legacyRead=& $readSource $claudeLegacyEventPath $script:claudeLegacySourceCursor
+    if($legacyRead.Discontinuity){$script:claudeReaderSession.MarkSourceLoss()}
+    $script:claudeLegacySourceCursor=$legacyRead.Cursor
+    $legacyTail=$legacyRead.Text
+    $transientUncertain=$transientUncertain -or [bool]$legacyRead.HasPartialLine
+   }catch{$script:claudeReaderSession.MarkSourceLoss();throw}
+  }
+ }
+ $sessions=@($script:claudeReaderSession.Read($tail,$legacyTail,[DateTime]::UtcNow,$script:monitorStartedUtc))
  $items=New-Object Collections.Generic.List[object]
  foreach($state in $sessions){
   $steps=@($state.Steps)
   $progress=$null;$kind="none"
-  if($steps.Count -gt 0){$progress=Plan-Progress $steps 0;$kind="exact"}
+  $planConfirmed=[bool]$state.PlanConfirmed -and -not $transientUncertain -and -not [bool]$state.RetainedPlanIncomplete
+  if($steps.Count -gt 0 -and $planConfirmed){$progress=Plan-Progress $steps 0;$kind="exact"}
   $title="Задача Claude Code"
-  $unconfirmed=[bool]$state.Unconfirmed
+  $unconfirmed=[bool]$state.Unconfirmed -or $transientUncertain
   $activity=if($unconfirmed){"Статус не подтверждён"}else{$state.Activity}
   $status=if($unconfirmed){"Статус не подтверждён"}else{"В работе"}
-  $items.Add([PSCustomObject]@{Id="claude:"+$state.Id;Title=$title;Activity=$activity;Active=(-not $unconfirmed);Paused=$false;Progress=$progress;ProgressKind=$kind;ProgressBasis=$(if($steps.Count -gt 0){"steps"}else{"task"});Provider="claude";ProviderName="Claude Code";Status=$status;Updated=$state.Updated.ToLocalTime();Started=$state.Started;StartKey=$state.StartKey;Steps=$steps;Source="Claude Code";PlanConfirmed=$true})
+  $items.Add([PSCustomObject]@{Id="claude:"+$state.Id;Title=$title;Activity=$activity;Active=(-not $unconfirmed);Paused=$false;Progress=$progress;ProgressKind=$kind;ProgressBasis=$(if($steps.Count -gt 0){"steps"}else{"task"});Provider="claude";ProviderName="Claude Code";Status=$status;Updated=$state.Updated.ToLocalTime();Started=$state.Started;StartKey=$state.StartKey;Steps=$steps;Source="Claude Code";PlanConfirmed=$planConfirmed;KnownStepCount=$(if($planConfirmed){[int]$state.KnownStepCount}else{0});KnownDoneCount=$(if($planConfirmed){[int]$state.KnownDoneCount}else{0});UnknownStepCount=$(if($planConfirmed){[int]$state.UnknownStepCount}else{$steps.Count});RetainedPlanIncomplete=[bool]$state.RetainedPlanIncomplete})
  }
  return @($items|Sort-Object Updated -Descending)
 }
@@ -2522,7 +2591,11 @@ function Source-Snapshot {
   if($connectionState -eq "connected"){$claude=@(Claude-Tasks);$script:lastClaudeTasks=$claude}
   elseif($connectionState -eq "partial"){$claude=@(Unconfirmed-Tasks @(Claude-Tasks));$script:lastClaudeTasks=$claude;[void]$unavailable.Add("Claude Code")}
   else{$script:lastClaudeTasks=@()}
- }catch{[void]$unavailable.Add("Claude Code");$claude=@(Unconfirmed-Tasks $script:lastClaudeTasks)}
+  if($null -ne (Get-Variable -Scope Script -Name claudeReaderSession -ErrorAction SilentlyContinue) -and $null -ne $script:claudeReaderSession -and $script:claudeReaderSession.RetentionOverflow){[void]$unavailable.Add("Claude Code")}
+ }catch{
+  if($null -ne (Get-Variable -Scope Script -Name claudeReaderSession -ErrorAction SilentlyContinue) -and $null -ne $script:claudeReaderSession){$script:claudeReaderSession.MarkSourceLoss()}
+  [void]$unavailable.Add("Claude Code");$claude=@(Unconfirmed-Tasks $script:lastClaudeTasks)
+ }
  if($script:codexCloudModulesAvailable -and $script:codexCloudController.Enabled){
   try{Update-CodexCloudController $script:codexCloudController}catch{$script:codexCloudController.LastError='unavailable'}
   try{$cloud=@(ConvertTo-CodexCloudMonitorTasks $script:codexCloudController.Tasks (Tr 'Облако: ') (Tr 'Задача Codex') 'Статус не подтверждён')}
@@ -2657,6 +2730,14 @@ function Unconfirmed-Tasks($tasks) {
   if(-not $task.Active -and [string](Prop $task "Status" "") -ne "Статус не подтверждён"){continue}
   $copy=$task.PSObject.Copy()
   $copy.Active=$false; $copy.Status="Статус не подтверждён"; $copy.Activity="Статус не подтверждён"
+  if([string](Prop $copy 'Provider' '') -eq 'claude'){
+   if($null -ne $copy.PSObject.Properties['PlanConfirmed']){$copy.PlanConfirmed=$false}
+   if($null -ne $copy.PSObject.Properties['Progress']){$copy.Progress=$null}
+   if($null -ne $copy.PSObject.Properties['ProgressKind']){$copy.ProgressKind='none'}
+   if($null -ne $copy.PSObject.Properties['KnownStepCount']){$copy.KnownStepCount=0}
+   if($null -ne $copy.PSObject.Properties['KnownDoneCount']){$copy.KnownDoneCount=0}
+   if($null -ne $copy.PSObject.Properties['UnknownStepCount']){$copy.UnknownStepCount=@($copy.Steps).Count}
+  }
   if($null -eq $copy.PSObject.Properties['ActivityGenerated']){$copy|Add-Member -MemberType NoteProperty -Name ActivityGenerated -Value $true}else{$copy.ActivityGenerated=$true}
   $copy
  }
@@ -2782,6 +2863,24 @@ function Progress-Label($task) {
  return $prefix+([int]$value).ToString()+"%"
 }
 
+function Plan-StatusNote($task) {
+ if(@(Prop $task 'Steps' @()).Count -eq 0){return ''}
+ if([bool](Prop $task 'RetainedPlanIncomplete' $false)){return (Tr 'План не подтверждён; список может быть неполным')}
+ if(-not [bool](Prop $task 'PlanConfirmed' $true) -or
+    ([string](Prop $task 'Provider' '') -eq 'claude' -and [string](Prop $task 'Status' '') -eq 'Статус не подтверждён')){return (Tr 'План не подтверждён')}
+ if([string](Prop $task 'Provider' '') -eq 'claude'){return (Tr 'По известным этапам, возможна неточность')}
+ return ''
+}
+
+function Plan-StepCount([int]$count) {
+ if($script:resolvedLanguage -eq 'en'){$word=if($count -eq 1){'step'}else{'steps'}}
+ else{
+  $lastHundred=$count % 100;$lastDigit=$count % 10
+  $word=if($lastHundred -ge 11 -and $lastHundred -le 14){'этапов'}elseif($lastDigit -eq 1){'этап'}elseif($lastDigit -ge 2 -and $lastDigit -le 4){'этапа'}else{'этапов'}
+ }
+ return "$count $word"
+}
+
 function Localized-TaskTitle($task) {
  $title=[string](Prop $task 'Title' '')
  if([string](Prop $task 'Provider' '') -eq 'claude' -and $title -ceq 'Задача Claude Code'){return (Tr $title)}
@@ -2853,7 +2952,7 @@ function Add-LoopWarning($container,$task,[bool]$compact) {
  $container.Children.Add($row)|Out-Null
 }
 
-function Add-Steps($container, $steps) {
+function Add-Steps($container, $steps, [bool]$hidePlanState=$false) {
  $all = @($steps)
  if($all.Count -eq 0){
   $empty = Text (Tr "План ещё не опубликован этой задачей") 12.5 $script:palette.Activity
@@ -2871,6 +2970,7 @@ function Add-Steps($container, $steps) {
   $state=[string](Prop $step "status" "pending")
   if($state -eq "active" -and $activeIndex -lt 0){$activeIndex=$stepIndex}
   if($state -eq "pending" -and $pendingIndex -lt 0){$pendingIndex=$stepIndex}
+  if($hidePlanState){$state="pending"}
   $marker=New-Object Windows.Controls.Border; $marker.Width=14; $marker.Height=14; $marker.CornerRadius=New-Object Windows.CornerRadius(7); $marker.HorizontalAlignment="Center"; $marker.VerticalAlignment="Top"; $marker.Margin=New-Object Windows.Thickness(0,2,0,0)
   if($state -eq "done"){
    $marker.Background=Brush $script:palette.Raised
@@ -2931,6 +3031,7 @@ function New-ActivityIndicator([bool]$active) {
 
 function Add-Card($task) {
  $stepCount=@($task.Steps).Count
+ $hideClaudePlanState=([string]$task.Provider -eq "claude" -and (-not [bool](Prop $task "PlanConfirmed" $true) -or [string](Prop $task "Status" "") -eq "Статус не подтверждён"))
  $hasLoopWarning=$null -ne (Get-LoopWarning $task)
  $card=New-Object Windows.Controls.Grid; if($stepCount -gt 0){$card.Height=$(if($script:showProviderLabels){278}else{258})+$(if($hasLoopWarning){64}else{0})}; $card.Margin=New-Object Windows.Thickness(0,0,0,12)
  $cardShape=New-Object Windows.Shapes.Path; $cardShape.Fill=Brush $script:palette.Raised; $cardShape.Stroke=Brush $(if($task.Active){$script:palette.CardBorder}else{$script:palette.Border}); $cardShape.StrokeThickness=1; $cardShape.IsHitTestVisible=$false
@@ -2955,10 +3056,11 @@ function Add-Card($task) {
  $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.Height=22; $percent.VerticalAlignment="Top"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip=Tr "Приблизительная оценка"}; [Windows.Controls.Grid]::SetColumn($percent,1)
  $header.Children.Add($titleStack)|Out-Null; $header.Children.Add($percent)|Out-Null; $stack.Children.Add($header)|Out-Null
  Add-LoopWarning $stack $task $false
- if($task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Margin=New-Object Windows.Thickness(0,14,0,0); $stack.Children.Add($bar)|Out-Null}
+ if(-not $hideClaudePlanState -and $task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Margin=New-Object Windows.Thickness(0,14,0,0); $stack.Children.Add($bar)|Out-Null}
  if($stepCount -gt 0){
-  Add-Steps $stack $task.Steps
-  $metaText=(Tr $(if([bool](Prop $task "PlanConfirmed" $true)){"План задачи"}else{"План не подтверждён"}))+" · $stepCount"+(Tr " этапов")
+  Add-Steps $stack $task.Steps $hideClaudePlanState
+  $planNote=Plan-StatusNote $task
+  $metaText=$(if($planNote){$planNote}else{Tr 'План задачи'})+' · '+(Plan-StepCount $stepCount)
   if($task.Updated -ne [DateTime]::MinValue){$metaText += " · "+$task.Updated.ToString("HH:mm")}
   $meta=Text $metaText 11.5 $script:palette.Muted; $meta.Margin=New-Object Windows.Thickness(0,11,0,0); $stack.Children.Add($meta)|Out-Null
  }
@@ -2996,9 +3098,11 @@ function Add-CompactTask($task) {
  if($CompactMode -and $PreviewActiveTasks -ge 0 -and $null -eq $script:previewHintTarget){$script:previewHintTarget=$activity}
  [Windows.Controls.Grid]::SetRow($activityRow,1); $container.Children.Add($activityRow)|Out-Null
  $warningPanel=New-Object Windows.Controls.StackPanel
- if(@($task.Steps).Count -gt 0 -and -not [bool](Prop $task "PlanConfirmed" $true)){$planNote=Text (Tr "План не подтверждён") 11.5 $script:palette.Muted;$planNote.Margin=New-Object Windows.Thickness(12,4,0,0);$warningPanel.Children.Add($planNote)|Out-Null}
+ $planNoteText=Plan-StatusNote $task
+ if($planNoteText){$planNote=Text $planNoteText 11.5 $script:palette.Muted;$planNote.Margin=New-Object Windows.Thickness(12,4,0,0);$warningPanel.Children.Add($planNote)|Out-Null}
  Add-LoopWarning $warningPanel $task $true; [Windows.Controls.Grid]::SetRow($warningPanel,2); $container.Children.Add($warningPanel)|Out-Null
- if($task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Height=2; $bar.Margin=New-Object Windows.Thickness(12,7,0,0); [Windows.Controls.Grid]::SetRow($bar,3); $container.Children.Add($bar)|Out-Null}
+ $hideClaudePlanState=([string]$task.Provider -eq 'claude' -and (-not [bool](Prop $task 'PlanConfirmed' $true) -or [string](Prop $task 'Status' '') -eq 'Статус не подтверждён'))
+ if(-not $hideClaudePlanState -and $task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Height=2; $bar.Margin=New-Object Windows.Thickness(12,7,0,0); [Windows.Controls.Grid]::SetRow($bar,3); $container.Children.Add($bar)|Out-Null}
  $compactTasksPanel.Children.Add($container)|Out-Null
 }
 
@@ -3086,7 +3190,7 @@ function Render-CompactTasks($tasks) {
  $compactMoreText.Visibility=$(if($hiddenCount -gt 0){"Visible"}else{"Collapsed"})
  $compactMoreText.Text=$(if($hiddenCount -gt 0){if($script:resolvedLanguage -eq 'en'){"$hiddenCount more tasks"}else{"Ещё $hiddenCount задач"}}else{""})
  $hasLoopWarning=$visibleTasks.Count -gt 0 -and $null -ne (Get-LoopWarning $selected[0])
- $hasUnconfirmedPlan=$visibleTasks.Count -gt 0 -and @($selected[0].Steps).Count -gt 0 -and -not [bool](Prop $selected[0] "PlanConfirmed" $true)
+ $hasUnconfirmedPlan=$visibleTasks.Count -gt 0 -and [bool](Plan-StatusNote $selected[0])
  if($script:isCompact){$window.Height=Compact-Height $compactTasks.Count ($unavailable.Count -gt 0) $hasLoopWarning $hasUnconfirmedPlan; Move-CompactWindow}
 }
 
@@ -3118,7 +3222,7 @@ function Set-CompactMode([bool]$compact) {
   $compactCount=@(Compact-VisibleTasks $script:lastAllTasks).Count
   $selectedTask=@($script:lastAllTasks|Where-Object {[string]$_.Id -eq $script:compactTaskId}|Select-Object -First 1)
   $hasLoopWarning=$selectedTask.Count -gt 0 -and $null -ne (Get-LoopWarning $selectedTask[0])
-  $hasUnconfirmedPlan=$selectedTask.Count -gt 0 -and @($selectedTask[0].Steps).Count -gt 0 -and -not [bool](Prop $selectedTask[0] "PlanConfirmed" $true)
+  $hasUnconfirmedPlan=$selectedTask.Count -gt 0 -and [bool](Plan-StatusNote $selectedTask[0])
   $window.Height=Compact-Height $compactCount ($script:sourceErrors.Count -gt 0) $hasLoopWarning $hasUnconfirmedPlan
   $windowFrame.Margin=New-Object Windows.Thickness(16)
   $script:isCompact=$true; $window.Topmost=$true; Move-CompactWindow
@@ -3612,7 +3716,7 @@ function Render-ProviderTabs($tasks){
  if($providers.Count -lt 2){$providerTabsHost.Visibility="Collapsed";$script:selectedProvider="all";$script:providerTabsFingerprint="";return}
  if($script:selectedProvider -ne "all" -and $script:selectedProvider -notin $providers){$script:selectedProvider="all"}
  $definitions=@(@("codex","Codex"),@("claude","Claude Code"),@("kimi","Kimi Code"),@("deepseek","DeepSeek Harness"),@("hermes","Hermes Agent"),@("opencode","OpenCode"))
- $tabState=($definitions|ForEach-Object{if($_[0] -in $providers){$id=$_[0];"${id}:$(@($tasks|Where-Object {$_.Active -and $_.Provider -eq $id}).Count)"}})-join '|'
+ $tabState=($definitions|ForEach-Object{if($_[0] -in $providers){$id=$_[0];"${id}:$(@($tasks|Where-Object {$_.Provider -eq $id}).Count)"}})-join '|'
  $tabFingerprint="$script:selectedProvider|$script:resolvedLanguage|$($script:palette.Surface)|$($script:palette.Primary)|$($script:palette.Hover)|$tabState"
  $providerTabsHost.Visibility="Visible"
  $oldOffset=$providerTabsScroll.HorizontalOffset
@@ -3623,8 +3727,8 @@ function Render-ProviderTabs($tasks){
  $providerTabsPanel.Children.Clear()
  $script:providerTabsFingerprint=$tabFingerprint
  $script:providerLastSelected=$script:selectedProvider
- Add-ProviderTab "all" (Tr "Все") @($tasks|Where-Object Active).Count
- foreach($definition in $definitions){$id=$definition[0];if($id -in $providers){Add-ProviderTab $id $definition[1] @($tasks|Where-Object {$_.Active -and $_.Provider -eq $id}).Count}}
+ Add-ProviderTab "all" (Tr "Все") @($tasks).Count
+ foreach($definition in $definitions){$id=$definition[0];if($id -in $providers){Add-ProviderTab $id $definition[1] @($tasks|Where-Object {$_.Provider -eq $id}).Count}}
  if($providerTabsPanel.Children.Count -gt 0){$providerTabsPanel.Children[$providerTabsPanel.Children.Count-1].Margin=New-Object Windows.Thickness(0)}
  Update-ProviderTabSizing
  $providerTabsHost.UpdateLayout()
@@ -3715,7 +3819,7 @@ function Update-View {
   Render-ProviderTabs $allTasks
   $tasks=@(Filtered-Tasks $allTasks)
   $script:lastTasks=$tasks
-  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
+  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
   if($next -ne $script:fingerprint){
    $script:fingerprint=$next; $tasksPanel.Children.Clear()
    if($script:sourceErrors.Count -gt 0){$warning=Text ((Tr "Нет данных от ")+($script:sourceErrors -join ", ")) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
@@ -3956,6 +4060,9 @@ if ($SnapshotFile) {
   Write-Output 'Provider tabs: overflow, selection and scroll preservation verified.'
  }
  if($PreviewPlanUiTest){
+  if($script:resolvedLanguage -eq 'en'){
+   if((Plan-StepCount 1) -cne '1 step' -or (Plan-StepCount 2) -cne '2 steps'){throw 'English step-count forms differ.'}
+  }elseif((Plan-StepCount 1) -cne '1 этап' -or (Plan-StepCount 2) -cne '2 этапа' -or (Plan-StepCount 11) -cne '11 этапов' -or (Plan-StepCount 21) -cne '21 этап'){throw 'Russian step-count forms differ.'}
   function Find-PlanText($parent,[string]$expected){
    if($parent -is [Windows.Controls.TextBlock] -and $parent.Text -ceq $expected -and $parent.IsVisible){return $true}
    for($index=0;$index -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$index++){

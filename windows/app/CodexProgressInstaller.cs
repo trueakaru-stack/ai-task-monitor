@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -14,11 +15,13 @@ internal static class CodexProgressInstaller
             string installDirectory = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "AITaskMonitor");
+            EnsureInstallationFilesAvailable(installDirectory);
             Directory.CreateDirectory(installDirectory);
 
             Extract("CodexProgress.ps1", Path.Combine(installDirectory, "CodexProgress.ps1"));
             Extract("Uninstall-CodexProgress.ps1", Path.Combine(installDirectory, "Uninstall-CodexProgress.ps1"));
             Extract("Uninstall-CodexProgress.cmd", Path.Combine(installDirectory, "Uninstall-CodexProgress.cmd"));
+            Extract("ClaudeStageObservation.dll", Path.Combine(installDirectory, "ClaudeStageObservation.dll"));
             Extract("ClaudeTaskHook.ps1", Path.Combine(installDirectory, "ClaudeTaskHook.ps1"));
             Extract("ClaudeLoopClient.ps1", Path.Combine(installDirectory, "ClaudeLoopClient.ps1"));
             Extract("ClaudeLoopDetection.ps1", Path.Combine(installDirectory, "ClaudeLoopDetection.ps1"));
@@ -59,7 +62,7 @@ internal static class CodexProgressInstaller
             if (Directory.Exists(claudeDirectory))
             {
                 DialogResult answer = MessageBox.Show(
-                    "Подключить Claude Code? AI task monitor добавит локальные hooks в настройки Claude. Существующие hooks сохранятся.",
+                    "Перед подключением обновите все используемые копии Claude Code, включая Claude Desktop, до версии 2.1.101 или новее. Закройте Claude Code, Claude Desktop и другие программы, которые могут изменять настройки Claude Code, включая их фоновые процессы. Приложение не проверяет версии и закрытие программ автоматически.\n\nПодключить Claude Code? AI task monitor добавит локальные hooks в настройки Claude. Существующие hooks сохранятся.",
                     "AI task monitor",
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Question);
@@ -90,6 +93,43 @@ internal static class CodexProgressInstaller
         {
             MessageBox.Show(error.Message, "AI task monitor", MessageBoxButtons.OK, MessageBoxIcon.Error);
             Environment.ExitCode = 1;
+        }
+    }
+
+    private static void EnsureInstallationFilesAvailable(string installDirectory)
+    {
+        var opened = new List<FileStream>();
+        try
+        {
+            foreach (string resource in Assembly.GetExecutingAssembly().GetManifestResourceNames())
+            {
+                string destination;
+                const string kimiPrefix = "integrations.kimi-plugin.";
+                const string integrationsPrefix = "integrations.";
+                if (resource.StartsWith(kimiPrefix, StringComparison.Ordinal))
+                    destination = Path.Combine(installDirectory, "integrations", "kimi-plugin", resource.Substring(kimiPrefix.Length));
+                else if (resource.StartsWith(integrationsPrefix, StringComparison.Ordinal))
+                    destination = Path.Combine(installDirectory, "integrations", resource.Substring(integrationsPrefix.Length));
+                else if (resource == "app-icon.ico")
+                    destination = Path.Combine(installDirectory, "assets", "app-icon.ico");
+                else destination = Path.Combine(installDirectory, resource);
+
+                FileAttributes attributes;
+                try { attributes = File.GetAttributes(destination); }
+                catch (FileNotFoundException) { continue; }
+                catch (DirectoryNotFoundException) { continue; }
+                if ((attributes & FileAttributes.Directory) != 0)
+                    throw new IOException("An installation file path is a directory.");
+                opened.Add(new FileStream(destination, FileMode.Open, FileAccess.ReadWrite, FileShare.None));
+            }
+        }
+        catch (Exception error)
+        {
+            throw new InvalidOperationException("Не удалось подготовить обновление: файлы заняты или недоступны. Закройте AI task monitor, Claude Code, Claude Desktop и другие агенты, затем повторите попытку. Проверьте права доступа.", error);
+        }
+        finally
+        {
+            foreach (FileStream stream in opened) stream.Dispose();
         }
     }
 
