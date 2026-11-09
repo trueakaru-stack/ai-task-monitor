@@ -1,0 +1,139 @@
+name: macOS provider profile width visual variant
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-provider-profile-width-variant-20261109.yml"
+      - ".github/provider-audit/v2-restart-profile-width-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[macos-provider-profile-width]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify test inputs and overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet 0b11986e4c2a3570a46eef49b5e46b95ca56cb80 d28b5315644b048532c7e41e689f3317ca025594 -- macos
+          mv "$GITHUB_WORKSPACE/macos" "$RUNNER_TEMP/aitm-product-as-checked-out"
+          git archive 0b11986e4c2a3570a46eef49b5e46b95ca56cb80 macos | tar -x -C "$GITHUB_WORKSPACE"
+          INPUT="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-20261109"
+          (cd "$INPUT" && shasum -a 256 -c staged.sha256)
+          FIX="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-pending-fix-20261109"
+          (cd "$FIX" && shasum -a 256 -c staged.sha256)
+          VISUAL="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-visual-warmup-20261109"
+          (cd "$VISUAL" && shasum -a 256 -c staged.sha256)
+          VARIANT="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-profile-width-20261109"
+          (cd "$VARIANT" && shasum -a 256 -c staged.sha256)
+          cp -R "$INPUT/macos/." "$GITHUB_WORKSPACE/macos/"
+          cp "$FIX/RestartAcknowledgementIndependentTests.swift" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/"
+          cp "$FIX/ExternalProviderV2Runtime.swift" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/"
+          cp "$VARIANT/SettingsView.swift" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/"
+      - name: Render synthetic source screens
+        shell: bash
+        run: |
+          set -euo pipefail
+          INPUT="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-20261109"
+          OUT="$RUNNER_TEMP/aitm-v2-output"
+          VISUAL="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-visual-warmup-20261109"
+          VARIANT="$GITHUB_WORKSPACE/.github/provider-audit/v2-restart-profile-width-20261109"
+          BASE="$RUNNER_TEMP/aitm-v2-baseline"
+          mkdir -p "$BASE" "$RUNNER_TEMP/aitm-v2-visual-home" "$RUNNER_TEMP/aitm-v2-visual-tmp" "$RUNNER_TEMP/aitm-v2-visual-support"
+          git archive 0b11986e4c2a3570a46eef49b5e46b95ca56cb80 macos | tar -x -C "$BASE"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*) (allow network* (local unix-socket)) (allow network-outbound (remote unix-socket))'
+          /usr/bin/python3 -I -S -B - "$RUNNER_TEMP/aitm-v2-visual-home" "$INPUT/macos/integrations" <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import shutil
+          import sys
+          home, assets = map(Path, sys.argv[1:])
+          source = home / ".config/opencode"
+          folder, plugins = source / "ai-task-monitor-data", source / "plugins"
+          folder.mkdir(parents=True); plugins.mkdir(parents=True)
+          names = ("provider-events.mjs", "provider-observers.mjs", "provider-transport.mjs")
+          hashes = {}
+          for name in names:
+              data = (assets / name).read_bytes()
+              (folder / name).write_bytes(data)
+              hashes[name] = hashlib.sha256(data).hexdigest().upper()
+          shim = (assets / "opencode-entry.js").read_bytes()
+          (plugins / "ai-task-monitor.js").write_bytes(shim)
+          (folder / "manifest.json").write_text(json.dumps({"owner":"AI Task Monitor OpenCode v1", "files":hashes, "shim":hashlib.sha256(shim).hexdigest().upper()}), encoding="utf-8")
+          print("Created test-only OpenCode profile")
+          PY
+          run_visual() {
+            local directory="$1" target="$2" profile="$3" enabled="$4" output="$5"
+            (cd "$directory" && /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-v2-visual-home" "TMPDIR=$RUNNER_TEMP/aitm-v2-visual-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-v2-visual-support" \
+              "AITM_RESTART_VISUAL_ONLY=1" "AITM_RESTART_VISUAL_TARGET=$target" \
+              "AITM_RESTART_PROFILE=$profile" "AITM_RESTART_FORCE_ENABLED=$enabled" \
+              /usr/bin/sandbox-exec -p "$PROFILE" .build/debug/AITaskMonitor --render-previews "$output")
+          }
+          /usr/bin/python3 -I -S -B "$VISUAL/prepare_visual_warmup.py" "$BASE/macos" baseline
+          (cd "$BASE/macos" && /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-v2-visual-home" "TMPDIR=$RUNNER_TEMP/aitm-v2-visual-tmp/" /usr/bin/sandbox-exec -p "$PROFILE" /usr/bin/xcrun swift build --disable-sandbox)
+          for scenario in opencode:connected deepseek:connected deepseek:disconnected; do
+            target="${scenario%:*}"; profile="${scenario#*:}"
+            mkdir -p "$OUT/base/$target-$profile"
+            run_visual "$BASE/macos" "$target" "$profile" 0 "$OUT/base/$target-$profile"
+          done
+          /usr/bin/python3 -I -S -B "$VISUAL/prepare_visual_warmup.py" "$GITHUB_WORKSPACE/macos" candidate
+          /usr/bin/python3 -I -S -B "$VARIANT/prepare_long_profile.py" "$GITHUB_WORKSPACE/macos"
+          (cd "$GITHUB_WORKSPACE/macos" && /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-v2-visual-home" "TMPDIR=$RUNNER_TEMP/aitm-v2-visual-tmp/" /usr/bin/sandbox-exec -p "$PROFILE" /usr/bin/xcrun swift build --disable-sandbox)
+          for scenario in opencode:connected deepseek:connected deepseek:disconnected; do
+            target="${scenario%:*}"; profile="${scenario#*:}"
+            mkdir -p "$OUT/disabled/$target-$profile"
+            run_visual "$GITHUB_WORKSPACE/macos" "$target" "$profile" 0 "$OUT/disabled/$target-$profile"
+            if [ "$profile" = connected ]; then
+              mkdir -p "$OUT/enabled/$target-$profile"
+              run_visual "$GITHUB_WORKSPACE/macos" "$target" "$profile" 1 "$OUT/enabled/$target-$profile"
+            fi
+          done
+          mkdir -p "$OUT/enabled/deepseek-long"
+          run_visual "$GITHUB_WORKSPACE/macos" deepseek long 1 "$OUT/enabled/deepseek-long"
+          for item in base:12 disabled:12 enabled:12; do
+            name="${item%:*}"; expected="${item#*:}"
+            count="$(find "$OUT/$name" -type f -name '*.png' | wc -l | tr -d ' ')"
+            test "$count" = "$expected"
+          done
+      - name: Upload synthetic logs and screenshots
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-provider-profile-width-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-v2-output/
+          if-no-files-found: warn
+          retention-days: 7
