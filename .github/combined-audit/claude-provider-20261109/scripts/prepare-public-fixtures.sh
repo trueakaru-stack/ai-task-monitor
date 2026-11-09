@@ -7,6 +7,12 @@ NODE="$(command -v node)"
 NPM="$(command -v npm)"
 NODEBIN="$(dirname "$NODE")"
 mkdir -p "$OUT/logs" "$RUNNER_TEMP/aitm-npm-cache" "$RUNNER_TEMP/aitm-downloads"
+NPM_USER_CONFIG="$RUNNER_TEMP/aitm-npm-user.conf"
+NPM_GLOBAL_CONFIG="$RUNNER_TEMP/aitm-npm-global.conf"
+test ! -e "$NPM_USER_CONFIG" && test ! -e "$NPM_GLOBAL_CONFIG"
+umask 077
+: > "$NPM_USER_CONFIG"
+: > "$NPM_GLOBAL_CONFIG"
 for package in deepseek kimi; do
   if [ "$package" = deepseek ]; then target="$RUNNER_TEMP/aitm-dsh-upstream"; else target="$RUNNER_TEMP/aitm-kimi-upstream"; fi
   test ! -e "$target"
@@ -15,8 +21,8 @@ for package in deepseek kimi; do
   args=(ci --ignore-scripts --no-audit --no-fund)
   if [ "$package" = kimi ]; then args+=(--omit=optional); fi
   (cd "$target" && /usr/bin/env -i "PATH=$NODEBIN:/usr/bin:/bin" "TMPDIR=$RUNNER_TEMP/" \
-    "npm_config_cache=$RUNNER_TEMP/aitm-npm-cache" "npm_config_userconfig=/dev/null" \
-    "npm_config_globalconfig=/dev/null" "npm_config_update_notifier=false" "$NPM" "${args[@]}")
+    "npm_config_cache=$RUNNER_TEMP/aitm-npm-cache" "npm_config_userconfig=$NPM_USER_CONFIG" \
+    "npm_config_globalconfig=$NPM_GLOBAL_CONFIG" "npm_config_update_notifier=false" "$NPM" "${args[@]}")
 done
 kimi="$RUNNER_TEMP/aitm-kimi-upstream/node_modules/@moonshot-ai/kimi-code/dist/main.mjs"
 printf '%s  %s\n' 'acd6894e2e2db50d37c449eefe9d3549a0177bd2d12cf17a8e1da94c60eb359f' "$kimi" | shasum -a 256 -c -
