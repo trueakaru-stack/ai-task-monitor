@@ -74,7 +74,7 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
             return tr("План не подтверждён", "Plan unconfirmed")
         }
         if provider == .claude {
-            return tr("По известным этапам · возможна неточность", "Based on observed steps; may be inaccurate")
+            return tr("По известным этапам, возможна неточность", "Based on observed steps; may be inaccurate")
         }
         return nil
     }

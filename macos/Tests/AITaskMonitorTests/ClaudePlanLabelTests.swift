@@ -26,6 +26,8 @@ final class ClaudePlanLabelTests: XCTestCase {
 
     func testPlanNotesMatchObservedAndUnconfirmedStates() {
         defer { AppLanguage.previewOverride = nil }
+        AppLanguage.previewOverride = .ru
+        XCTAssertEqual(task().planStatusNote, "По известным этапам, возможна неточность")
         AppLanguage.previewOverride = .en
         XCTAssertEqual(task().planStatusNote, "Based on observed steps; may be inaccurate")
         XCTAssertEqual(task(planConfirmed: false).planStatusNote, "Plan unconfirmed")
