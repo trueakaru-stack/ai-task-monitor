@@ -80,8 +80,8 @@ private final class SyntheticReleaseURLProtocol: URLProtocol {
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         if url.path == "/hold-hint" || url.path == "/hold-reset" {
-            // Supply the first body byte, but deliberately never finish the response.
-            client?.urlProtocol(self, didLoad: Data([0x20]))
+            // Supply a partial body, but deliberately never finish the response.
+            client?.urlProtocol(self, didLoad: Data(repeating: 0x20, count: 1024))
         }
         Self.lock.lock(); let responseObserver = Self.responseObserver; Self.lock.unlock()
         responseObserver?(url.path)
@@ -173,7 +173,7 @@ final class ReleaseRequestSyntheticTests: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SyntheticReleaseURLProtocol.self]
         let started = expectation(description: "synthetic hold-hint started")
-        let emitted = expectation(description: "synthetic hold-hint response and first byte emitted")
+        let emitted = expectation(description: "synthetic hold-hint response and partial body emitted")
         let received = expectation(description: "synthetic header observed")
         let completed = expectation(description: "synthetic cancellation completed")
         SyntheticReleaseURLProtocol.observeStart { if $0 == "/hold-hint" { started.fulfill() } }

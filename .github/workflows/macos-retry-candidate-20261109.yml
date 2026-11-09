@@ -51,7 +51,7 @@ jobs:
             'f810f34c3480d09bdac70da4a43b26cd9ef4297931a573ab8f88bc03981d21c8' ReleaseUpdates.swift \
             'ba9026089988cefa0c5f3f9b50ee635cf5dc0a80680ae521064663bac574a20a' ReleaseRetryScheduleTests.swift \
             'e968b2a942941d02a343906258cafb3ff1a384e325eb5a56c51c7c0f69aba823' ReleaseUpdateCoordinatorTests.swift \
-            'e39e2f4935d9f8f863caf10901adb5745122f5cd45d2742db48f69a48904df0b' ReleaseRequestSyntheticTests.swift \
+            'ab0e4ce2168d1baa65edf2f8fc22efe2d412a1a75329fc2e50e83ec1f3b26ed0' ReleaseRequestSyntheticTests.swift \
             'cbd477270da5a0bacd5d15df909dc678992193cd52f943c9146ec206a60a6817' ReleaseHeaderBoundaryDiagnosticTests.swift \
             | shasum -a 256 -c -
           for name in ReleaseRetrySchedule.swift ReleaseUpdateCoordinator.swift ReleaseUpdates.swift; do
