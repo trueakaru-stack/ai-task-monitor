@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+rm -rf dist
+mkdir -p "dist/AI Task Monitor.app/Contents/MacOS" "dist/AI Task Monitor.app/Contents/Resources"
+
+swift build -c release --arch arm64 --arch x86_64
+cp ".build/apple/Products/Release/AITaskMonitor" "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
+cp "Info.plist" "dist/AI Task Monitor.app/Contents/Info.plist"
+chmod 755 "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
+mkdir -p "dist/AI Task Monitor.app/Contents/Resources/integrations"
+for file in opencode-entry.js provider-events.mjs provider-observers.mjs provider-transport.mjs provider-v2-sender.mjs deepseek-integration.mjs deepseek-setup.mjs deepseek-plugin.js kimi-integration.mjs kimi-setup.mjs package.json cordis.patch.yml hermes-setup.py hermes-manager.py ruamel.yaml-0.18.16-py3-none-any.whl ruamel.yaml-LICENSE.txt provider_bundle.py hermes-entry.py hermes-plugin.yaml hermes_observer.py provider_hooks.py provider_sender.py provider_transport.py; do
+    cp "integrations/$file" "dist/AI Task Monitor.app/Contents/Resources/integrations/$file"
+done
+mkdir -p "dist/AI Task Monitor.app/Contents/Resources/integrations/kimi-plugin"
+for file in kimi.plugin.json kimi-hook.mjs kimi-observer.mjs provider-transport.mjs; do
+    cp "integrations/kimi-plugin/$file" "dist/AI Task Monitor.app/Contents/Resources/integrations/kimi-plugin/$file"
+done
+
+# Each image comes from the corresponding size-specific Figma frame.
+ICON_TEMP="$(mktemp -d)"
+trap 'rm -rf "$ICON_TEMP"' EXIT
+ICONSET="$ICON_TEMP/AppIcon.iconset"
+mkdir -p "$ICONSET"
+cp "assets/app-icon/icon-16.png" "$ICONSET/icon_16x16.png"
+cp "assets/app-icon/icon-32.png" "$ICONSET/icon_16x16@2x.png"
+cp "assets/app-icon/icon-32.png" "$ICONSET/icon_32x32.png"
+cp "assets/app-icon/icon-64.png" "$ICONSET/icon_32x32@2x.png"
+cp "assets/app-icon/icon-128.png" "$ICONSET/icon_128x128.png"
+cp "assets/app-icon/icon-256.png" "$ICONSET/icon_128x128@2x.png"
+cp "assets/app-icon/icon-256.png" "$ICONSET/icon_256x256.png"
+cp "assets/app-icon/icon-512.png" "$ICONSET/icon_256x256@2x.png"
+cp "assets/app-icon/icon-512.png" "$ICONSET/icon_512x512.png"
+cp "assets/app-icon/icon-1024.png" "$ICONSET/icon_512x512@2x.png"
+iconutil -c icns "$ICONSET" -o "dist/AI Task Monitor.app/Contents/Resources/AppIcon.icns"
+codesign --force --deep --sign - "dist/AI Task Monitor.app"
+codesign --verify --deep --strict --verbose=2 "dist/AI Task Monitor.app"
+plutil -lint "dist/AI Task Monitor.app/Contents/Info.plist"
+file "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"

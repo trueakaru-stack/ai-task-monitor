@@ -1,0 +1,20 @@
+{
+  "base": "bbef0654fdb2789c62c8d8511576f05b75a289ca",
+  "ancestor": "0b11986e4c2a3570a46eef49b5e46b95ca56cb80",
+  "claudeCommit": "74d17d5a1cb265c164dd702adb5f9971815321bf",
+  "providerCommit": "d62e206d6f624c4065f92a3e48c9367cc17e6bbf",
+  "widthCommit": "279e16bf097409bf86f7b6959a3c45c551eadf75",
+  "providerEntries": 60,
+  "claudeEntries": 42,
+  "overrides": [
+    "ExternalProviderV2Runtime.swift",
+    "ExternalProviderV2SyntheticIPCTests.swift",
+    "RestartAcknowledgementIndependentTests.swift"
+  ],
+  "width": "83779df4c23eb8c77fcf4a323e77c3926db54b89448ff87fa1989193657b91d2",
+  "claudePriorCommit": "2d87a8263ad41f65bd779e63b882c114640d2d06",
+  "claudeReader": "8ab1f9c4aa7032e35c3b8e88b8e4088b4852eb52c5e5b2ca27c663bae9f3f528",
+  "claudeTaskStore": "e71068d1174d296ffa8c0ef3151834376c1ea76c1994f65923e62783a66f8fb3",
+  "mergedTaskStore": "0cd8395602e1d7d12da2824f03d581a10b2edb927ebce65b12d3d64d33b228c2",
+  "crossProviderTest": "56d435f39eb0e068aa1a03836590d4b71de62e22198d154dd5667838a52201e3"
+}
