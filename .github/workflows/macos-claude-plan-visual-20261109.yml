@@ -45,8 +45,10 @@ jobs:
           git diff --quiet cf9dce5918011a581f68193c74fdda196f23d35b "$GITHUB_SHA" -- macos
           cd "$GITHUB_WORKSPACE/.github/claude-audit/plan-visual-20261109"
           printf '%s  %s\n' \
-            '0e5abf7358e7ea38137d6616ff2617dbcffcf27cd42ee5ae526158a0d11e963e' TaskCardView.swift \
-            '6aa3be2fe1b523a160fe82be53474865ef3dea85655795ee3f1348018e356eb5' SnapshotRenderer.swift \
+            'adff0cc43d78e1cf01bfd5bf1a43ec00ff46ac3fc949ff82c7355c14529eca21' TaskCardView.swift \
+            '9332bf7142fead0bdad1bdf8f9adf067bee585d5a3135b3ed6f7a245af45b76c' SnapshotRenderer.swift \
+            'acee42947c2936ca92ecb13b7be3e0c154ed6802f30d9034567a767cf9a9bb8b' RootView.swift \
+            '38f7cf66e2ccf1d5121821a5714c233f83335606174f34512ccbc6dfb78df4df' Models.swift \
             | shasum -a 256 -c -
       - name: Render both variants without network
         shell: bash
@@ -86,7 +88,9 @@ jobs:
           cp "$INPUT/SnapshotRenderer.swift" Sources/AITaskMonitor/SnapshotRenderer.swift
           run_isolated /usr/bin/xcrun swift build --disable-sandbox
           run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-claude-plan/base"
-          cp "$INPUT/TaskCardView.swift" Sources/AITaskMonitor/TaskCardView.swift
+          for name in TaskCardView.swift RootView.swift Models.swift; do
+            cp "$INPUT/$name" "Sources/AITaskMonitor/$name"
+          done
           run_isolated /usr/bin/xcrun swift build --disable-sandbox
           run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-claude-plan/candidate"
           for variant in base candidate; do

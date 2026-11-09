@@ -157,7 +157,7 @@ enum SnapshotRenderer {
         store.showsJournal = journal
         store.showsAbout = about
         if update { store.setPreviewUpdate() }
-        let compactHeight: CGFloat = 182 + (unavailableSources.isEmpty ? 0 : 24) + (loopWarning ? 64 : 0) + (planUnconfirmed ? 22 : 0)
+        let compactHeight: CGFloat = 182 + (unavailableSources.isEmpty ? 0 : 24) + (loopWarning ? 64 : 0) + ((planUnconfirmed || claudePlanFixture) ? 22 : 0)
         let size = compact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)
         let scheme: ColorScheme = mode == .dark ? .dark : .light
         let view = RootView()
