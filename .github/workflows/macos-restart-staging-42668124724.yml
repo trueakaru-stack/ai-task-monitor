@@ -1,0 +1,139 @@
+name: macOS original restart gate with corrected staging
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-restart-staging-42668124724.yml"
+
+permissions: {}
+
+jobs:
+  restart-gate:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/macos' && contains(github.event.head_commit.message, '[macos-restart-staging-42668124724]')
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Stage pinned inputs and run only the original restart group
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$GITHUB_REPOSITORY" = 'trueakaru-stack/ai-task-monitor'
+          case "$RUNNER_ARCH" in ARM64) arch=arm64 ;; X64) arch=x64 ;; *) exit 1 ;; esac
+          NODE="$RUNNER_TOOL_CACHE/node/24.22.2/$arch/bin/node"
+          test -x "$NODE"
+          test -x /usr/bin/git
+          test -x /usr/bin/python3
+          test -x /usr/bin/sandbox-exec
+          WORK="$RUNNER_TEMP/aitm-restart-stage"
+          test ! -e "$WORK"
+          mkdir -p "$WORK/synthetic-home" "$WORK/temp" "$WORK/provenance" "$WORK/scripts" \
+            "$WORK/synthetic/integrations" "$WORK/macos/integrations"
+          run_git() {
+            /usr/bin/env -i 'PATH=/usr/bin:/bin' 'GIT_CONFIG_NOSYSTEM=1' \
+              'GIT_CONFIG_GLOBAL=/dev/null' 'GIT_TERMINAL_PROMPT=0' \
+              /usr/bin/git -c credential.helper= -c core.autocrlf=false "$@"
+          }
+          SOURCE=8ebef09327339711bc5a4519c62eb565203b31d4
+          BASE=bbef0654fdb2789c62c8d8511576f05b75a289ca
+          REPO=https://github.com/trueakaru-stack/ai-task-monitor.git
+          INPUT=.github/limited-audit/combined-counts-v2-20261109
+          run_git init -q "$WORK/source"
+          run_git -C "$WORK/source" fetch -q --no-tags --depth=1 --no-recurse-submodules "$REPO" "$SOURCE"
+          run_git -C "$WORK/source" fetch -q --no-tags --depth=1 --no-recurse-submodules "$REPO" "$BASE"
+          test "$(run_git -C "$WORK/source" rev-parse "$SOURCE^{commit}")" = "$SOURCE"
+          test "$(run_git -C "$WORK/source" rev-parse "$BASE^{commit}")" = "$BASE"
+          run_git -C "$WORK/source" show "$SOURCE:$INPUT/candidate.sha256" > "$WORK/provenance/candidate.sha256"
+          run_git -C "$WORK/source" show "$SOURCE:$INPUT/staged.sha256" > "$WORK/provenance/v2-staged.sha256"
+          for name in restart-v2-gate.mjs restart-v2-gate.test.mjs opencode-v2-subscription.test.mjs; do
+            run_git -C "$WORK/source" show "$SOURCE:$INPUT/synthetic/$name" > "$WORK/synthetic/$name"
+          done
+          run_git -C "$WORK/source" show "$SOURCE:$INPUT/scripts/network-probe.py" > "$WORK/scripts/network-probe.py"
+          run_git -C "$WORK/source" show "$SOURCE:$INPUT/overlay/macos/integrations/provider-observers.mjs" \
+            > "$WORK/macos/integrations/provider-observers.mjs"
+          for name in provider-events.mjs provider-transport.mjs; do
+            run_git -C "$WORK/source" show "$BASE:macos/integrations/$name" > "$WORK/macos/integrations/$name"
+          done
+          for name in provider-events.mjs provider-observers.mjs provider-transport.mjs; do
+            cp "$WORK/macos/integrations/$name" "$WORK/synthetic/integrations/$name"
+          done
+          cat > "$WORK/stage.sha256" <<'PINNED'
+          2806821366bbce3a5e24dd6f3207fcb52ab7bd8bc5cd9e23f50e75bf0b855d21  provenance/candidate.sha256
+          c7fd3fcdf40ac3f82a64a886c567dcdba42c689163127d6be6f38863617f43cf  provenance/v2-staged.sha256
+          bb94bd568d708dec26e66b00f8e1e579639a72fc924b883ef1317b255191e7d0  macos/integrations/provider-events.mjs
+          f1fd02ae1f0abcce3848f5291de58b3f2c1c301f874d92c3de93d564b8a40399  macos/integrations/provider-observers.mjs
+          6430a06f27f9abe1eb6780d45e7a0a79e75c2220d3c27340abbcd6cd9e5c90d2  macos/integrations/provider-transport.mjs
+          bb94bd568d708dec26e66b00f8e1e579639a72fc924b883ef1317b255191e7d0  synthetic/integrations/provider-events.mjs
+          f1fd02ae1f0abcce3848f5291de58b3f2c1c301f874d92c3de93d564b8a40399  synthetic/integrations/provider-observers.mjs
+          6430a06f27f9abe1eb6780d45e7a0a79e75c2220d3c27340abbcd6cd9e5c90d2  synthetic/integrations/provider-transport.mjs
+          0b35f7a5ebd45ff77e86d1975872c541a47c8df397005fff5d01e7d388f77872  synthetic/restart-v2-gate.mjs
+          062f5d012e0d26ca78235bbf5a36494277ff482143d830f0f63f16cf60e01624  synthetic/restart-v2-gate.test.mjs
+          bdab9116cfbeda63a7ae6869633af78517140718203f238f1a703da2ef8d86c8  synthetic/opencode-v2-subscription.test.mjs
+          3cbf34520bd744c40730e88533d9cdbc011d488ef8855099f5654219ebd47954  scripts/network-probe.py
+          PINNED
+          (cd "$WORK" && /usr/bin/shasum -a 256 -c stage.sha256)
+          STRICT_PROFILE='(version 1) (allow default) (deny network*) (allow network* (local unix-socket)) (allow network-outbound (remote unix-socket))'
+          run_strict() {
+            /usr/bin/env -i 'PATH=/usr/bin:/bin' "CFFIXED_USER_HOME=$WORK/synthetic-home" "TMPDIR=$WORK/temp/" \
+              'GITHUB_ACTIONS=true' 'CI=true' 'RUNNER_ENVIRONMENT=github-hosted' 'RUNNER_OS=macOS' \
+              /usr/bin/sandbox-exec -p "$STRICT_PROFILE" "$@"
+          }
+          test "$(run_strict "$NODE" --version)" = 'v24.22.2'
+          /usr/bin/shasum -a 256 "$NODE"
+          run_strict /usr/bin/python3 -I -S -B - "$WORK" <<'VERIFY'
+          import hashlib, re, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          def manifest(path):
+              result = {}
+              for line in path.read_text(encoding="utf-8").splitlines():
+                  check, name = line.split("  ", 1)
+                  if not re.fullmatch("[0-9a-f]{64}", check) or name in result:
+                      raise SystemExit("Invalid pinned manifest")
+                  result[name] = check
+              return result
+          candidate = manifest(root / "provenance/candidate.sha256")
+          prior = manifest(root / "provenance/v2-staged.sha256")
+          if prior["candidate.sha256"] != digest(root / "provenance/candidate.sha256"):
+              raise SystemExit("Candidate manifest provenance mismatch")
+          for name in ("provider-events.mjs", "provider-observers.mjs", "provider-transport.mjs"):
+              mac = root / "macos/integrations" / name
+              synthetic = root / "synthetic/integrations" / name
+              if candidate["macos/integrations/" + name] != digest(mac) or digest(mac) != digest(synthetic):
+                  raise SystemExit("Candidate module mismatch: " + name)
+          for name in ("restart-v2-gate.mjs", "restart-v2-gate.test.mjs", "opencode-v2-subscription.test.mjs"):
+              if prior["synthetic/" + name] != digest(root / "synthetic" / name):
+                  raise SystemExit("Original test fixture mismatch: " + name)
+          if prior["scripts/network-probe.py"] != digest(root / "scripts/network-probe.py"):
+              raise SystemExit("Network probe mismatch")
+          gate = (root / "synthetic/restart-v2-gate.test.mjs").read_bytes()
+          subscription = (root / "synthetic/opencode-v2-subscription.test.mjs").read_bytes()
+          if gate.count(b"'./integrations/provider-observers.mjs'") != 1:
+              raise SystemExit("Unexpected original gate import")
+          if subscription.count(b"'../macos/integrations/provider-observers.mjs'") != 1:
+              raise SystemExit("Unexpected original subscription import")
+          if len(re.findall(rb"(?m)^test\(", gate)) != 8 or len(re.findall(rb"(?m)^test\(", subscription)) != 1:
+              raise SystemExit("Unexpected original test count")
+          print("Pinned provenance, unchanged tests and both module locations verified")
+          VERIFY
+          run_strict /usr/bin/python3 -I -S -B "$WORK/scripts/network-probe.py" strict
+          (
+            cd "$WORK"
+            run_strict "$NODE" --test --test-reporter=tap \
+              "$WORK/synthetic/restart-v2-gate.test.mjs" \
+              "$WORK/synthetic/opencode-v2-subscription.test.mjs"
+          ) 2>&1 | /usr/bin/tee "$WORK/node-tests.log"
+          for expected in '# tests 9' '# pass 9' '# fail 0' '# cancelled 0' '# skipped 0' '# todo 0'; do
+            /usr/bin/grep -Fxq "$expected" "$WORK/node-tests.log" || { echo "Missing expected summary: $expected"; exit 1; }
+          done
+          (cd "$WORK" && /usr/bin/shasum -a 256 -c stage.sha256)
+          echo 'The original restart-gate group passed; no XCTest, UI, live agent, or installer was run.'
