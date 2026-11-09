@@ -1,0 +1,116 @@
+name: macOS final build candidate
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-final-build-20261109.yml"
+      - ".github/macos-final-build-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-package:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/macos' && contains(github.event.head_commit.message, '[macos-final-build-20261109]')
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          for tool in /bin/bash /usr/bin/env /usr/bin/git /usr/bin/tar /usr/bin/python3 /usr/bin/shasum /usr/bin/xcrun /usr/bin/sandbox-exec; do
+            test -x "$tool"
+            /usr/bin/shasum -a 256 "$tool"
+          done
+      - name: Check out exact public sources without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'trueakaru-stack/ai-task-monitor'
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test -d "$GITHUB_WORKSPACE"
+          test -z "$(ls -A "$GITHUB_WORKSPACE")"
+          run_git() {
+            /usr/bin/env -i 'PATH=/usr/bin:/bin' 'GIT_CONFIG_NOSYSTEM=1' \
+              'GIT_CONFIG_GLOBAL=/dev/null' 'GIT_TERMINAL_PROMPT=0' \
+              /usr/bin/git -c credential.helper= -c core.autocrlf=false "$@"
+          }
+          run_git init "$GITHUB_WORKSPACE"
+          run_git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 https://github.com/trueakaru-stack/ai-task-monitor.git "$GITHUB_SHA"
+          for commit in 8ebef09327339711bc5a4519c62eb565203b31d4 bbef0654fdb2789c62c8d8511576f05b75a289ca 3457773aeec8c5ac0e22c42a31cde44aaecc4160; do
+            run_git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 https://github.com/trueakaru-stack/ai-task-monitor.git "$commit"
+          done
+          run_git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
+          test "$(run_git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Verify exact workflow inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          input="$GITHUB_WORKSPACE/.github/macos-final-build-20261109"
+          test -d "$input"
+          test ! -L "$input"
+          printf '%s  %s\n' '838ac3c444be47a9f2a3b1d3faef53f2d0ccd8413b68c6cc0ab6776b56c118e6' "$input/staged.sha256" | /usr/bin/shasum -a 256 -c -
+          (cd "$input" && /usr/bin/shasum -a 256 -c staged.sha256)
+          /usr/bin/env -i 'PATH=/usr/bin:/bin' /usr/bin/python3 -I -S -B - "$input" <<'PY'
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          entries = (root / 'staged.sha256').read_text(encoding='ascii').splitlines()
+          expected = {line.split('  ', 1)[1] for line in entries} | {'staged.sha256'}
+          if len(entries) != 18 or len(expected) != 19:
+              raise SystemExit('Unexpected staged manifest size')
+          actual = set()
+          for path in root.rglob('*'):
+              if path.is_symlink():
+                  raise SystemExit('Symlink in staged inputs')
+              if path.is_file():
+                  actual.add(path.relative_to(root).as_posix())
+          if actual != expected:
+              raise SystemExit('Unexpected staged input files')
+          print('Verified exact staged input file set')
+          PY
+      - name: Select and record Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          developer=/Applications/Xcode_16.1.app/Contents/Developer
+          test -d "$developer"
+          printf '%s\n' "DEVELOPER_DIR=$developer" >> "$GITHUB_ENV"
+          /usr/bin/env -i 'PATH=/usr/bin:/bin' "DEVELOPER_DIR=$developer" /usr/bin/xcodebuild -version
+          executable="$(/usr/bin/env -i 'PATH=/usr/bin:/bin' "DEVELOPER_DIR=$developer" /usr/bin/xcrun --find swift)"
+          test -x "$executable"
+          /usr/bin/shasum -a 256 "$executable"
+      - name: Build and inspect exact app and disk image
+        id: package_checks
+        shell: bash
+        run: /bin/bash "$GITHUB_WORKSPACE/.github/macos-final-build-20261109/build-and-inspect.sh"
+      - name: Upload checked build candidate
+        if: ${{ success() && steps.package_checks.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-final-build-candidate-0.3.8-alpha
+          path: |
+            ${{ runner.temp }}/aitm-package-output/AITaskMonitor-macOS-0.3.8-alpha.dmg
+            ${{ runner.temp }}/aitm-package-output/SHA256SUMS-macOS.txt
+            ${{ runner.temp }}/aitm-package-output/candidate.sha256
+            ${{ runner.temp }}/aitm-package-output/candidate-modes.json
+            ${{ runner.temp }}/aitm-package-output/bundle-resources.sha256
+            ${{ runner.temp }}/aitm-package-output/bundle.json
+            ${{ runner.temp }}/aitm-package-output/architectures.log
+            ${{ runner.temp }}/aitm-package-output/signature.log
+            ${{ runner.temp }}/aitm-package-output/source-final.log
+            ${{ runner.temp }}/aitm-package-output/source-published.log
+            ${{ runner.temp }}/aitm-package-output/source-after-build.log
+            ${{ runner.temp }}/aitm-package-output/dmg-contents.log
+            ${{ runner.temp }}/aitm-package-output/mounted-bundle.json
+            ${{ runner.temp }}/aitm-package-output/mounted-signature.log
+            ${{ runner.temp }}/aitm-package-output/dmg-checksum.log
+            ${{ runner.temp }}/aitm-package-output/startup-process.log
+            ${{ runner.temp }}/aitm-package-output/NOT-A-RELEASE.txt
+          if-no-files-found: error
+          retention-days: 7
