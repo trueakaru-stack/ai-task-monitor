@@ -12,8 +12,10 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="Tests\**\*.cs" />
+    <Compile Remove="FileUiTests\**\*.cs" />
     <EmbeddedResource Include="PublishedWindow.xaml" />
     <Resource Include="Assets\app-icon.ico" />
     <ProjectReference Include="..\Providers\Providers.csproj" />
+    <ProjectReference Include="..\ClaudeReader\ClaudeReader.csproj" />
   </ItemGroup>
 </Project>

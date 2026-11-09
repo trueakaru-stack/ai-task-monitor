@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using AITaskMonitor.Claude;
 using ShapePath = System.Windows.Shapes.Path;
 
 namespace AITaskMonitor.Prototype;
@@ -34,12 +35,14 @@ internal sealed class PrototypeWindow
     private string compactSelection = "";
     private bool compact;
     private readonly SyntheticProviderScenarios? scenario;
+    private readonly SyntheticClaudeScenario? claudeScenario;
     private List<SampleTask> samples = [];
     private readonly Dictionary<string, long> taskPriority = new(StringComparer.Ordinal);
     private long taskPriorityCounter;
     private bool showProviderLabels;
     private bool equalProviderWidths;
     private string lastRenderedProvider = "";
+    private bool claudeSourceUnavailable;
 
     public PrototypeWindow(Window window, Options options)
     {
@@ -98,6 +101,11 @@ internal sealed class PrototypeWindow
         {
             samples = LegacySamples(options.Language);
             compactSelection = samples[0].Id;
+        }
+        else if (options.Scene == "claude-synthetic")
+        {
+            claudeScenario = new SyntheticClaudeScenario();
+            UpdateSamples(claudeScenario.Snapshot(options.Language));
         }
         else if (options.Scene != "empty")
         {
@@ -163,11 +171,32 @@ internal sealed class PrototypeWindow
     internal string SelectedProvider => selectedProvider;
     internal IReadOnlyList<SampleTask> CurrentTasks => samples;
 
+    // The caller must supply a snapshot on the WPF dispatcher. Other providers
+    // already visible in the window are retained when the Claude source polls.
+    internal void ApplyClaudeSource(ClaudeSourceSnapshot snapshot)
+    {
+        if (!window.Dispatcher.CheckAccess()) throw new InvalidOperationException("UI updates must run on the window dispatcher.");
+        ArgumentNullException.ThrowIfNull(snapshot);
+        claudeSourceUnavailable = snapshot.Unavailable;
+        var combined = samples.Where(task => task.Provider != "claude").ToList();
+        combined.AddRange(snapshot.Tasks.Select(task => ClaudePresentation.Map(task, options.Language)));
+        UpdateSamples(combined);
+        Render();
+    }
+
     internal void AdvanceMultiForTest()
     {
         if (scenario is null) throw new InvalidOperationException("A synthetic scenario is required.");
         scenario.AdvanceMulti();
         UpdateSamples(scenario.Snapshot().Select(state => ProviderPresentation.Map(state, options.Language)).ToList());
+        Render();
+    }
+
+    internal void AdvanceClaudeForTest()
+    {
+        if (claudeScenario is null) throw new InvalidOperationException("A synthetic Claude scenario is required.");
+        claudeScenario.Advance();
+        UpdateSamples(claudeScenario.Snapshot(options.Language));
         Render();
     }
 
@@ -294,6 +323,18 @@ internal sealed class PrototypeWindow
         return options.Language == "en" ? $"Done {done} of {task.Steps.Length}" : $"Готово {done} из {task.Steps.Length}";
     }
 
+    private string PlanNote(SampleTask task)
+    {
+        if (task.Provider == "claude" && task.RetainedPlanIncomplete)
+            return options.Language == "en" ? "Plan unconfirmed; retained plan is incomplete" : "План не подтверждён, сохранён не полностью";
+        if (task.Steps.Length == 0) return "";
+        if (!task.PlanConfirmed || (task.Provider == "claude" && task.Status == "unknown"))
+            return options.Language == "en" ? "Plan unconfirmed" : "План не подтверждён";
+        return task.Provider == "claude"
+            ? options.Language == "en" ? "Based on observed steps; may be inaccurate" : "По известным этапам, возможна неточность"
+            : "";
+    }
+
     private static readonly (string Id, string Name)[] ProviderOrder =
     [ ("codex", "Codex"), ("claude", "Claude Code"), ("kimi", "Kimi Code"),
       ("deepseek", "DeepSeek Harness"), ("hermes", "Hermes Agent"), ("opencode", "OpenCode") ];
@@ -303,6 +344,15 @@ internal sealed class PrototypeWindow
         double oldTabOffset = tabsScroll.HorizontalOffset;
         string? focusedTab = tabs.Children.OfType<Button>().FirstOrDefault(button => button.IsKeyboardFocusWithin)?.Tag as string;
         tasks.Children.Clear(); tabs.Children.Clear(); compactTasks.Children.Clear(); dots.Children.Clear();
+        string warningText = claudeSourceUnavailable
+            ? options.Language == "en" ? "No data from Claude Code" : "Нет данных от Claude Code"
+            : "";
+        if (warningText.Length != 0)
+        {
+            var warning = Text(warningText, 14, "Secondary");
+            warning.Margin = new Thickness(4, 0, 0, 12);
+            tasks.Children.Add(warning);
+        }
         var providers = samples.Select(task => task.Provider).Distinct(StringComparer.Ordinal).ToHashSet(StringComparer.Ordinal);
         showProviderLabels = providers.Count >= 2;
         equalProviderWidths = providers.Count == 2;
@@ -312,8 +362,8 @@ internal sealed class PrototypeWindow
         if (samples.Count == 0)
         {
             string text = options.Language == "en" ? "No active tasks" : "Активных задач сейчас нет";
-            var empty = Text(text, 14, "Secondary"); empty.Margin = new Thickness(4, 24, 0, 0); tasks.Children.Add(empty);
-            var compactEmpty = Text(text, 12.5, "Activity"); compactEmpty.Margin = new Thickness(0, 5, 0, 5); compactTasks.Children.Add(compactEmpty);
+            if (warningText.Length == 0) { var empty = Text(text, 14, "Secondary"); empty.Margin = new Thickness(4, 24, 0, 0); tasks.Children.Add(empty); }
+            var compactEmpty = Text(warningText.Length != 0 ? warningText : text, 12.5, "Activity"); compactEmpty.Margin = new Thickness(0, 5, 0, 5); compactTasks.Children.Add(compactEmpty);
             dots.Visibility = Visibility.Collapsed;
             compactMore.Visibility = Visibility.Collapsed;
             if (compact) window.Height = CompactHeight();
@@ -339,6 +389,12 @@ internal sealed class PrototypeWindow
         SampleTask[] visible = samples.Take(3).ToArray();
         if (!visible.Any(task => task.Id == compactSelection)) compactSelection = visible[0].Id;
         AddCompactTask(visible.First(task => task.Id == compactSelection));
+        if (warningText.Length != 0)
+        {
+            var warning = Text(warningText, 11.5, "Muted");
+            warning.Margin = new Thickness(12, 0, 0, 6);
+            compactTasks.Children.Add(warning);
+        }
         dots.Visibility = visible.Length > 1 ? Visibility.Visible : Visibility.Collapsed;
         if (visible.Length > 1) for (int i = 0; i < visible.Length; i++) AddDot(i, visible[i]);
         int remaining = Math.Max(0, samples.Count - 3);
@@ -360,7 +416,7 @@ internal sealed class PrototypeWindow
         var selected = samples.FirstOrDefault(task => task.Id == compactSelection);
         return 162 + (samples.Count > 1 ? 18 : 0) + (samples.Count > 3 ? 20 : 0) +
             (samples.Select(task => task.Provider).Distinct(StringComparer.Ordinal).Skip(1).Any() ? 18 : 0) +
-            (selected is not null && selected.Steps.Length > 0 && !selected.PlanConfirmed ? 20 : 0);
+            (selected is not null && PlanNote(selected).Length > 0 ? 20 : 0) + (claudeSourceUnavailable ? 20 : 0);
     }
 
     private void AddTab(string id, string label, int count)
@@ -432,17 +488,27 @@ internal sealed class PrototypeWindow
         titleStack.Children.Add(title); titleStack.Children.Add(ActivityRow(task, false));
         var progress = Text(Progress(task), 16, "Primary", true); progress.Height = 22; progress.VerticalAlignment = VerticalAlignment.Top; Grid.SetColumn(progress, 1);
         header.Children.Add(titleStack); header.Children.Add(progress); stack.Children.Add(header);
-        if (task.Progress.HasValue) stack.Children.Add(new ProgressBar { Maximum = 100, Value = task.Progress.Value, Margin = new Thickness(0, 14, 0, 0) });
+        if (task.Progress.HasValue && (task.Provider != "claude" || (task.PlanConfirmed && task.Status != "unknown")))
+            stack.Children.Add(new ProgressBar { Maximum = 100, Value = task.Progress.Value, Margin = new Thickness(0, 14, 0, 0) });
         if (task.Steps.Length > 0)
         {
             AddSteps(stack, task);
-            string label = options.Language == "en" ? (task.PlanConfirmed ? "Task plan" : "Plan unconfirmed") : (task.PlanConfirmed ? "План задачи" : "План не подтверждён");
-            string meta = options.Language == "en" ? $"{label} · {task.Steps.Length} steps" : $"{label} · {task.Steps.Length} этапов";
+            string label = PlanNote(task);
+            if (label.Length == 0) label = options.Language == "en" ? "Task plan" : "План задачи";
+            string meta = $"{label} · {task.Steps.Length} {StepCountWord(options.Language, task.Steps.Length)}";
             if (!string.IsNullOrEmpty(task.UpdatedText)) meta += " · " + task.UpdatedText;
             var footer = Text(meta, 11.5, "Muted"); footer.Margin = new Thickness(0, 11, 0, 0); stack.Children.Add(footer);
         }
         card.Children.Add(new Border { Padding = new Thickness(16, 15, 16, 14), Child = stack });
         tasks.Children.Add(card);
+    }
+
+    internal static string StepCountWord(string language, int count)
+    {
+        if (language == "en") return count == 1 ? "step" : "steps";
+        int lastHundred = Math.Abs(count % 100), lastDigit = Math.Abs(count % 10);
+        if (lastHundred is >= 11 and <= 14) return "этапов";
+        return lastDigit == 1 ? "этап" : lastDigit is >= 2 and <= 4 ? "этапа" : "этапов";
     }
 
     private void AddSteps(Panel container, SampleTask task)
@@ -455,7 +521,8 @@ internal sealed class PrototypeWindow
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(22) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var marker = new Border { Width = 14, Height = 14, CornerRadius = new CornerRadius(7), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 2, 0, 0) };
-            bool done = task.Steps[i].Status == "done", current = task.Steps[i].Status == "active";
+            bool showStatus = task.Provider != "claude" || task.PlanConfirmed;
+            bool done = showStatus && task.Steps[i].Status == "done", current = showStatus && task.Steps[i].Status == "active";
             if (done)
             {
                 marker.Background = ColorFor("Raised");
@@ -488,12 +555,13 @@ internal sealed class PrototypeWindow
         var progress = Text(Progress(task), 16, "Primary", true); progress.VerticalAlignment = VerticalAlignment.Center; Grid.SetColumn(progress, 2);
         header.Children.Add(title); header.Children.Add(progress); container.Children.Add(header);
         var row = ActivityRow(task, true); Grid.SetRow(row, 1); container.Children.Add(row);
-        if (task.Steps.Length > 0 && !task.PlanConfirmed)
+        string planNote = PlanNote(task);
+        if (planNote.Length > 0)
         {
-            var note = Text(options.Language == "en" ? "Plan unconfirmed" : "План не подтверждён", 11.5, "Muted");
+            var note = Text(planNote, 11.5, "Muted");
             note.Margin = new Thickness(12, 4, 0, 0); Grid.SetRow(note, 2); container.Children.Add(note);
         }
-        if (task.Progress.HasValue)
+        if (task.Progress.HasValue && (task.Provider != "claude" || (task.PlanConfirmed && task.Status != "unknown")))
         {
             var bar = new ProgressBar { Maximum = 100, Value = task.Progress.Value, Height = 2, Margin = new Thickness(12, 7, 0, 0) }; Grid.SetRow(bar, 3); container.Children.Add(bar);
         }

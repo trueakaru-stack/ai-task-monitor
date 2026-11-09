@@ -12,6 +12,18 @@ do not accept event JSON or input paths and do not start agents, channels or
 observers. The state store is used only on the WPF thread; it is not a
 permission boundary, and these tests do not prove real channel security.
 
+The `claude-synthetic` scene runs a built-in event sequence through the Claude
+reader and WPF presentation. It labels progress as based on observed steps and
+shows an unconfirmed plan without a progress bar or colored step marks. This is
+only a preview: the native application does not read a real Claude event file,
+and event-order and hook-result validation are still under review.
+
+`ClaudeSourcePump` and `ApplyClaudeSource` can pass an explicitly supplied
+synthetic file source into a test window without blocking the WPF thread. The
+pump is not started by the application entry point, and it does not establish a
+real Claude connection. The file-to-window tests are documented in the
+`ClaudeReader` README.
+
 `PublishedWindow.xaml` is the WPF markup extracted from
 `windows/app/CodexProgress.ps1` at revision `1c44076`, with the later approved
 feedback-copy icon alignment applied and the PowerShell
@@ -62,7 +74,7 @@ differences and checks those semantics separately; it does not establish visual
 equivalence inside masked regions or in hover, focus and high-DPI states.
 
 Options are `--theme dark|light`, `--language ru|en`, `--scene` followed by
-`empty`, `active`, `state-kimi`, `state-plan`, `state-wait`, `state-unknown`,
+`empty`, `active`, `claude-synthetic`, `state-kimi`, `state-plan`, `state-wait`, `state-unknown`,
 `state-gap`, `state-old-plan`, `state-end`, `state-multi`, `state-hermes`,
 `state-hermes-wait` or `state-hermes-unknown`, plus `--compact`,
 `--offscreen`, `--snapshot <absolute-path>`, `--ready-file <absolute-path>` and

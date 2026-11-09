@@ -92,7 +92,7 @@ internal sealed record Options(string Theme, string Language, string Scene, bool
             }
         }
         if (theme is not ("dark" or "light") || language is not ("ru" or "en") ||
-            (scene is not ("empty" or "active") && !SyntheticProviderScenarios.Names.Contains(scene, StringComparer.Ordinal)) || (exit && snapshot is null) ||
+            (scene is not ("empty" or "active" or "claude-synthetic") && !SyntheticProviderScenarios.Names.Contains(scene, StringComparer.Ordinal)) || (exit && snapshot is null) ||
             (snapshot is not null && !Path.IsPathFullyQualified(snapshot)) ||
             (ready is not null && !Path.IsPathFullyQualified(ready)))
         {
