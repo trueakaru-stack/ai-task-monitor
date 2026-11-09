@@ -49,6 +49,7 @@ jobs:
             '734187524ad64e778ffb1bdea773b350dda77d91e10a888867a1e3819a580ec2' TaskStore.swift \
             'a804b8dd29db27c82276eb32203634f4e75a7d531a89a8d30c29222d37e87ac1' CodexRevertSafetyTests.swift \
             'fcf1bdf1f6166701c3403d3bcd6e43fc16a0f5581a18d20641535b7e6f507a9a' SnapshotRenderer.swift \
+            'e338137c8b33c3be653ebe7b30d46ffbeb62c914d022b5b9bff3a8b8eb81a82f' RootView.swift \
             '2612566bf9ce50fd2c8f201f58ac19042ac07e54f1a6ff26c3480057a47a2410' CodexCloudStoreTests.swift \
             'ed181937cf1e926576b55bfec13c754b693aa0bbe24cbb331e89d703a1d49429' CodexLongTurnTests.swift \
             '8accf33c2b8fcc90c721b331a15a9fceb95abc84b76e52919bd26b32ede288dc' CodexSourceStalePlanTests.swift \
@@ -60,7 +61,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/aitm-revert-user" "$RUNNER_TEMP/aitm-revert-tmp" "$RUNNER_TEMP/aitm-revert-support" \
-            "$RUNNER_TEMP/aitm-revert/base" "$RUNNER_TEMP/aitm-revert/candidate"
+            "$RUNNER_TEMP/aitm-revert/base" "$RUNNER_TEMP/aitm-revert/candidate" "$RUNNER_TEMP/aitm-revert/fixed"
           DEVELOPER="$(xcode-select -p)"
           PROFILE='(version 1) (allow default) (deny network*)'
           cat > "$RUNNER_TEMP/aitm-revert-network-probe.py" <<'PY'
@@ -109,6 +110,9 @@ jobs:
           for name in CodexRevertSafetyTests.swift CodexCloudStoreTests.swift CodexLongTurnTests.swift CodexSourceStalePlanTests.swift ParserTests.swift; do
             cp "$INPUT/$name" "Tests/AITaskMonitorTests/$name"
           done
+          run_isolated /usr/bin/xcrun swift build --disable-sandbox
+          run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-revert/candidate"
+          cp "$INPUT/RootView.swift" Sources/AITaskMonitor/RootView.swift
           audit_status=0
           for entry in CodexRevertSafetyTests:13 CodexCloudStoreTests:1 CodexLongTurnTests:3 CodexSourceStalePlanTests:1 ParserTests:23 TaskFocusTests:4 ClaudePlanLabelTests:2 ExternalProviderStateTests:7 UnconfirmedPlanModelTests:3; do
             suite="${entry%:*}"
@@ -123,8 +127,8 @@ jobs:
           done
           if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox --configuration release; then audit_status=1; fi
           if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox; then audit_status=1; fi
-          if ! run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-revert/candidate"; then audit_status=1; fi
-          for variant in base candidate; do
+          if ! run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-revert/fixed"; then audit_status=1; fi
+          for variant in base candidate fixed; do
             count="$(find "$RUNNER_TEMP/aitm-revert/$variant" -name '*.png' -type f | wc -l | tr -d ' ')"
             if [ "$count" != 24 ]; then printf 'Unexpected %s frame count: %s\n' "$variant" "$count"; audit_status=1; fi
           done
