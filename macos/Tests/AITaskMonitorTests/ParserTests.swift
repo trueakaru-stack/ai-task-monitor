@@ -43,8 +43,8 @@ final class ParserTests: XCTestCase {
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let index = directory.appendingPathComponent("session_index.jsonl")
-        let session = sessions.appendingPathComponent("rollout-test-session.jsonl")
-        try #"{"id":"test-session","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
+        let session = sessions.appendingPathComponent("rollout-2026-11-09T10-00-00-019127f4-35ae-7c73-9e72-a10123456001.jsonl")
+        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
         let now = Date()
         let since = now.addingTimeInterval(-2)
         let formatter = ISO8601DateFormatter()
@@ -57,12 +57,12 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(reader.readTasks(now: now, observedSince: since).map(\.title), ["Synthetic task"])
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-20)], ofItemAtPath: session.path)
         XCTAssertTrue(reader.readTasks(now: now, observedSince: since).isEmpty)
-        XCTAssertEqual(try reader.readSnapshot(now: now, observedSince: since, previouslyObserved: ["test-session"]).tasks.count, 1)
+        XCTAssertEqual(try reader.readSnapshot(now: now, observedSince: since, previouslyObserved: ["019127f4-35ae-7c73-9e72-a10123456001"]).tasks.count, 1)
         let terminal = #"{"timestamp":"\#(formatter.string(from: now.addingTimeInterval(1)))","type":"event_msg","payload":{"type":"task_complete"}}"#
         try (oldStart + "\n" + newEvent + "\n" + terminal + "\n").write(to: session, atomically: true, encoding: .utf8)
         let snapshot = try reader.readSnapshot(now: now, observedSince: since)
         XCTAssertTrue(snapshot.tasks.isEmpty)
-        XCTAssertTrue(snapshot.terminalIDs.contains("test-session"))
+        XCTAssertTrue(snapshot.terminalIDs.contains("019127f4-35ae-7c73-9e72-a10123456001"))
     }
 
     func testCodexReaderKeepsObservedQuietTaskAsUnconfirmed() throws {
@@ -71,12 +71,12 @@ final class ParserTests: XCTestCase {
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let index = directory.appendingPathComponent("session_index.jsonl")
-        let session = sessions.appendingPathComponent("rollout-test-session.jsonl")
+        let session = sessions.appendingPathComponent("rollout-2026-11-09T10-00-00-019127f4-35ae-7c73-9e72-a10123456001.jsonl")
         let now = Date()
         let eventTime = now.addingTimeInterval(-8_000)
         let formatter = ISO8601DateFormatter()
         let start = #"{"timestamp":"\#(formatter.string(from: eventTime))","type":"event_msg","payload":{"type":"task_started"}}"#
-        try #"{"id":"test-session","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
+        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
         try (start + "\n").write(to: session, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.modificationDate: eventTime], ofItemAtPath: session.path)
         let reader = CodexTaskReader(codexHome: directory)
@@ -346,9 +346,9 @@ final class ParserTests: XCTestCase {
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let index = codexHome.appendingPathComponent("session_index.jsonl")
-        let session = sessions.appendingPathComponent("rollout-test-session.jsonl")
+        let session = sessions.appendingPathComponent("rollout-2026-11-09T10-00-00-019127f4-35ae-7c73-9e72-a10123456001.jsonl")
         let claude = directory.appendingPathComponent("claude-events.jsonl")
-        try #"{"id":"test-session","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
+        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
         try "".write(to: session, atomically: true, encoding: .utf8)
         let journal = DiagnosticJournal(directory: directory.appendingPathComponent("diagnostics", isDirectory: true))
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: codexHome), claudeReader: ClaudeTaskReader(eventFile: claude), journal: journal)
@@ -366,7 +366,7 @@ final class ParserTests: XCTestCase {
         try (lines.joined(separator: "\n") + "\n").write(to: session, atomically: true, encoding: .utf8)
         store.refresh()
         XCTAssertEqual(store.tasks.first?.loopWarning, LoopWarning(threshold: 5, windowMinutes: 10))
-        store.dismissLoop(for: "test-session")
+        store.dismissLoop(for: "019127f4-35ae-7c73-9e72-a10123456001")
         XCTAssertNil(store.tasks.first?.loopWarning)
         lines.append(try item("first-5", "CommandExecution", 7))
         try (lines.joined(separator: "\n") + "\n").write(to: session, atomically: true, encoding: .utf8)
@@ -398,9 +398,9 @@ final class ParserTests: XCTestCase {
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let index = codexHome.appendingPathComponent("session_index.jsonl")
-        let session = sessions.appendingPathComponent("rollout-test-session.jsonl")
+        let session = sessions.appendingPathComponent("rollout-2026-11-09T10-00-00-019127f4-35ae-7c73-9e72-a10123456001.jsonl")
         let claude = directory.appendingPathComponent("claude-events.jsonl")
-        let indexLine = #"{"id":"test-session","thread_name":"Synthetic task"}"#
+        let indexLine = #"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task"}"#
         try (indexLine + "\n").write(to: index, atomically: true, encoding: .utf8)
         try "".write(to: session, atomically: true, encoding: .utf8)
         let journal = DiagnosticJournal(directory: directory.appendingPathComponent("diagnostics", isDirectory: true))

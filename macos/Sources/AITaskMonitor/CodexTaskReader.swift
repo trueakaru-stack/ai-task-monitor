@@ -5,6 +5,7 @@ struct CodexTaskSnapshot {
     var terminalIDs: Set<String> = []
     var interruptedIDs: Set<String> = []
     var toolEvents: [String: [CodexToolEvent]] = [:]
+    var isPartial = false
 }
 
 struct CodexTaskReader {
@@ -33,8 +34,11 @@ struct CodexTaskReader {
         if !fileManager.fileExists(atPath: codexHome.path) { return CodexTaskSnapshot() }
         let sessions = try indexCache.read(from: index)
 
-        let files = try sessionFiles(for: Set(sessions.keys))
+        let discovered = try sessionFiles(for: Set(sessions.keys), now: now, observedSince: observedSince,
+                                          previouslyObserved: previouslyObserved)
+        let files = discovered.files
         var result = CodexTaskSnapshot()
+        result.isPartial = discovered.isPartial
         for session in sessions.values {
             let id = session.string("id")
             let title = session.string("thread_name")
@@ -162,25 +166,128 @@ struct CodexTaskReader {
         return FileHelpers.normalized(latestSummary.isEmpty ? latestCommentary : latestSummary, limit: 600)
     }
 
-    private func sessionFiles(for ids: Set<String>) throws -> [String: URL] {
-        guard !ids.isEmpty else { return [:] }
+    // A supported timestamped basename is exactly the form emitted by the
+    // pinned upstream writer. Parsing the whole basename prevents a short ID
+    // from claiming a longer identifier merely because their suffixes match.
+    private static func canonicalOwner(in stem: String) -> String? {
+        let bytes = Array(stem.utf8)
+        let prefix = Array("rollout-".utf8)
+        guard bytes.starts(with: prefix), bytes.count >= prefix.count + 20 else { return nil }
+        let stamp = Array(bytes[prefix.count..<(prefix.count + 19)])
+        let separators: [Int: UInt8] = [4: 45, 7: 45, 10: 84, 13: 45, 16: 45]
+        for index in 0..<19 {
+            if let separator = separators[index] {
+                guard stamp[index] == separator else { return nil }
+            } else {
+                guard (48...57).contains(stamp[index]) else { return nil }
+            }
+        }
+        guard bytes[prefix.count + 19] == 45 else { return nil }
+        func value(_ range: Range<Int>) -> Int {
+            stamp[range].reduce(0) { $0 * 10 + Int($1 - 48) }
+        }
+        let year = value(0..<4), month = value(5..<7), day = value(8..<10)
+        let hour = value(11..<13), minute = value(14..<16), second = value(17..<19)
+        guard year >= 1, (1...12).contains(month), hour <= 23, minute <= 59, second <= 59 else { return nil }
+        let leap = year % 400 == 0 || (year % 4 == 0 && year % 100 != 0)
+        let days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        guard day >= 1 && day <= days[month - 1] else { return nil }
+        let encoded = String(decoding: bytes[(prefix.count + 20)...], as: UTF8.self)
+        let parts = encoded.split(separator: "_", omittingEmptySubsequences: false)
+        guard (parts.count == 1 || parts.count == 2), parts.allSatisfy({ part in
+            part.utf8.count == 36 && UUID(uuidString: String(part)) != nil
+        }) else { return nil }
+        return String(parts[0])
+    }
+
+    private func sessionFiles(for ids: Set<String>, now: Date, observedSince: Date?,
+                              previouslyObserved: Set<String>) throws -> (files: [String: URL], isPartial: Bool) {
+        guard !ids.isEmpty else { return ([:], false) }
         let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
         var enumerationError: Error?
         guard let enumerator = fileManager.enumerator(at: sessions, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles], errorHandler: { _, error in
             enumerationError = error
             return false
         }) else { throw CocoaError(.fileReadNoSuchFile) }
-        let nonUUIDs = ids.filter { UUID(uuidString: $0) == nil }
+        let uuidIDs = ids.filter { $0.utf8.count == 36 && UUID(uuidString: $0) != nil }
         var files: [String: URL] = [:]
-        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            let stem = url.deletingPathExtension().lastPathComponent
-            let candidate = String(stem.suffix(36))
-            if ids.contains(candidate) { files[candidate] = url; continue }
-            for id in nonUUIDs where stem == id || stem.hasSuffix("-" + id) { files[id] = url }
+        var candidates: [String: [URL]] = [:]
+        var variants: [String: [String]] = [:]
+        for id in uuidIDs { variants[id.lowercased(), default: []].append(id) }
+        var ambiguous = Set(variants.values.filter { $0.count > 1 }.flatMap { $0 })
+        for case let url as URL in enumerator {
+            let file = url.lastPathComponent
+            let compressed = file.hasSuffix(".jsonl.zst")
+            let suffix = compressed ? ".jsonl.zst" : ".jsonl"
+            guard file.hasSuffix(suffix) else { continue }
+            let stem = String(file.dropLast(suffix.count))
+            guard let owner = Self.canonicalOwner(in: stem) else {
+                // An unrecognised name that might contain a known UUID must
+                // not leave an older file eligible for a confirmed result.
+                let lowerStem = stem.lowercased()
+                for id in uuidIDs {
+                    let lowerID = id.lowercased()
+                    if lowerStem == lowerID || lowerStem.hasSuffix("-" + lowerID) || lowerStem.contains("-" + lowerID + "_") {
+                        files.removeValue(forKey: id)
+                        ambiguous.insert(id)
+                    }
+                }
+                continue
+            }
+            guard let matching = variants[owner.lowercased()] else { continue }
+            guard matching.count == 1 && matching[0] == owner else {
+                for id in matching {
+                    files.removeValue(forKey: id)
+                    ambiguous.insert(id)
+                }
+                continue
+            }
+            candidates[owner, default: []].append(url)
         }
         if let enumerationError { throw enumerationError }
-        return files
+        for (owner, variantsForOwner) in candidates {
+            if ambiguous.contains(owner) { continue }
+            let plainPaths = Set(variantsForOwner.filter { !$0.lastPathComponent.hasSuffix(".zst") }
+                .map { $0.standardizedFileURL.path })
+            // Upstream prefers a plain file to its exact .zst sibling. Compare
+            // full paths so equal basenames in different folders remain distinct.
+            let distinct = variantsForOwner.filter { url in
+                guard url.lastPathComponent.hasSuffix(".jsonl.zst") else { return true }
+                let path = url.standardizedFileURL.path
+                return !plainPaths.contains(String(path.dropLast(4)))
+            }
+            func predatesObservation(_ url: URL) -> Bool {
+                guard let observedSince, !previouslyObserved.contains(owner),
+                      let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+                      let modified = attributes[.modificationDate] as? Date,
+                      modified < observedSince else { return false }
+                if url.lastPathComponent.hasSuffix(".jsonl.zst") {
+                    return now.timeIntervalSince(modified) >= 7 * 24 * 60 * 60
+                }
+                return true
+            }
+            guard distinct.count == 1, let chosen = distinct.first else {
+                // Entirely old histories that have never been observed do not
+                // imply an active ambiguity. Check every variant first.
+                if !distinct.isEmpty && distinct.allSatisfy(predatesObservation) { continue }
+                ambiguous.insert(owner)
+                continue
+            }
+            if chosen.lastPathComponent.hasSuffix(".jsonl.zst") {
+                // A single old compressed history predating observation is not
+                // a live task. Fresh, observed or unreadable histories remain
+                // visibly uncertain until a plain rollout is available.
+                guard predatesObservation(chosen) else {
+                    ambiguous.insert(owner)
+                    continue
+                }
+                continue
+            }
+            files[owner] = chosen
+        }
+        return (files, !ambiguous.isEmpty || uuidIDs.count != ids.count)
     }
+
 }
 
 /// Reads each complete index line without limiting discovery to a fixed tail.
@@ -229,7 +336,13 @@ final class CodexSessionIndexCache {
             if oversized { throw CocoaError(.fileReadTooLarge) }
             if !oversized, let item = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] {
                 let id = item.string("id")
-                if !id.isEmpty { sessions[id] = item }
+                if !id.isEmpty {
+                    // Local Codex IDs must never occupy a provider-prefixed
+                    // namespace used by Claude, cloud or external sources.
+                    // Validate before inserting into Swift's String-keyed cache.
+                    guard Self.supportsSessionID(id) else { throw CocoaError(.fileReadUnknown) }
+                    sessions[id] = item
+                }
             }
             line.removeAll(keepingCapacity: true)
             oversized = false
@@ -249,5 +362,12 @@ final class CodexSessionIndexCache {
         cached = sessions
         lock.unlock()
         return sessions
+    }
+
+    private static func supportsSessionID(_ id: String) -> Bool {
+        let bytes = id.utf8
+        guard !bytes.isEmpty, bytes.count <= 128 else { return false }
+        return bytes.allSatisfy { (48...57).contains($0) || (65...90).contains($0) ||
+                                   (97...122).contains($0) || $0 == 45 || $0 == 95 }
     }
 }

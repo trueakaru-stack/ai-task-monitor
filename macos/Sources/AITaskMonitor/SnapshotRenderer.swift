@@ -16,6 +16,40 @@ enum SnapshotRenderer {
         do {
             try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
             NSApplication.shared.setActivationPolicy(.prohibited)
+            if ProcessInfo.processInfo.environment["AITM_CODEX_PARTIAL_PREVIEW_ONLY"] == "1" {
+                for language in [AppLanguage.ru, .en] {
+                    AppLanguage.previewOverride = language
+                    for mode in [AppearanceMode.dark, .light] {
+                        for compact in [false, true] {
+                            for state in ["empty", "neighbor", "mixed"] {
+                                let name = "partial-\(language.rawValue)-\(mode.rawValue)-\(compact ? "compact" : "expanded")-\(state)"
+                                try render(name: name, mode: mode, compact: compact, settings: false,
+                                           outputDirectory: outputDirectory,
+                                           unavailableSources: state == "mixed" ? [.claude] : [],
+                                           emptyTasks: state == "empty", codexPlanFixture: state == "neighbor",
+                                           partialCodex: true)
+                            }
+                        }
+                    }
+                }
+                return 0
+            }
+            if ProcessInfo.processInfo.environment["AITM_CLAUDE_PLAN_PREVIEW_ONLY"] == "1" {
+                for language in [AppLanguage.ru, .en] {
+                    AppLanguage.previewOverride = language
+                    for mode in [AppearanceMode.dark, .light] {
+                        for compact in [false, true] {
+                            for provider in [TaskProvider.claude, .codex] {
+                                for state in ["confirmed", "unconfirmed", "stale", "overall"] {
+                                    let name = "\(provider.rawValue)-plan-\(language.rawValue)-\(mode.rawValue)-\(compact ? "compact" : "expanded")-\(state)"
+                                    try render(name: name, mode: mode, compact: compact, settings: false, outputDirectory: outputDirectory, planUnconfirmed: state == "unconfirmed" || state == "overall", claudePlanFixture: provider == .claude, codexPlanFixture: provider == .codex, taskUnconfirmed: state == "stale", overallProgress: state == "overall")
+                                }
+                            }
+                        }
+                    }
+                }
+                return 0
+            }
             try render(name: "expanded-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory)
             try render(name: "expanded-light", mode: .light, compact: false, settings: false, outputDirectory: outputDirectory)
             try render(name: "many-providers-dark", mode: .dark, compact: false, settings: false, outputDirectory: outputDirectory, manyProviders: true)
@@ -108,10 +142,23 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, desktopProfile: Bool = false, claudePreview: SettingsPreviewClaude? = nil, cloudPreview: SettingsPreviewCloud? = nil, kimiPreview: SettingsPreviewKimi? = nil, hermesPreview: SettingsPreviewHermes? = nil, cloudTask: Bool = false, kimiTask: Bool = false, manyProviders: Bool = false, tasksEnd: Bool = false, tabsEnd: Bool = false, emptyTasks: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, desktopProfile: Bool = false, claudePreview: SettingsPreviewClaude? = nil, cloudPreview: SettingsPreviewCloud? = nil, kimiPreview: SettingsPreviewKimi? = nil, hermesPreview: SettingsPreviewHermes? = nil, cloudTask: Bool = false, kimiTask: Bool = false, manyProviders: Bool = false, tasksEnd: Bool = false, tabsEnd: Bool = false, emptyTasks: Bool = false, claudePlanFixture: Bool = false, codexPlanFixture: Bool = false, taskUnconfirmed: Bool = false, overallProgress: Bool = false, partialCodex: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
         let store: TaskStore
-        if emptyTasks {
+        if claudePlanFixture || codexPlanFixture {
+            let fixture = MonitoredTask(
+                id: claudePlanFixture ? "claude:synthetic" : "codex-synthetic", provider: claudePlanFixture ? .claude : .codex,
+                title: claudePlanFixture ? tr("Задача Claude Code", "Claude Code task") : tr("Задача Codex", "Codex task"),
+                activity: taskUnconfirmed ? tr("Статус не подтверждён", "Status unconfirmed") : tr("Выполняет действие", "Performing an action"),
+                isActive: !taskUnconfirmed, progress: 33, progressKind: .exact,
+                steps: [
+                    TaskStep(id: "one", title: tr("Первый этап", "First step"), status: .done),
+                    TaskStep(id: "two", title: tr("Второй этап", "Second step"), status: .active),
+                    TaskStep(id: "three", title: tr("Третий этап", "Third step"), status: .pending)
+                ], updatedAt: Date(), isUnconfirmed: taskUnconfirmed, planConfirmed: !planUnconfirmed,
+                progressBasis: overallProgress ? .task : nil)
+            store = TaskStore(previewTasks: [fixture])
+        } else if emptyTasks {
             store = TaskStore(previewTasks: [])
         } else if kimiTask {
             let state = ExternalProviderStateStore()
@@ -124,6 +171,7 @@ enum SnapshotRenderer {
         } else {
             store = manyProviders ? TaskStore.manySourcesPreview() : (journal ? TaskStore.journalPreview() : (loopWarning ? TaskStore.loopPreview(unavailableSources: unavailableSources, provider: loopProvider, showsError: loopError) : TaskStore.preview(unavailableSources: unavailableSources, planUnconfirmed: planUnconfirmed)))
         }
+        if partialCodex { store.setPreviewCodexPartial() }
         if settingsSources { store.setPreviewDeepSeekProfiles(desktop: desktopProfile) }
         if let hermesPreview { store.setPreviewHermesProfile(hermesPreview.rawValue) }
         store.isCompact = compact
@@ -131,7 +179,7 @@ enum SnapshotRenderer {
         store.showsJournal = journal
         store.showsAbout = about
         if update { store.setPreviewUpdate() }
-        let compactHeight: CGFloat = 182 + (unavailableSources.isEmpty ? 0 : 24) + (loopWarning ? 64 : 0) + (planUnconfirmed ? 22 : 0)
+        let compactHeight: CGFloat = 182 + (unavailableSources.isEmpty && !partialCodex ? 0 : 24) + (loopWarning ? 64 : 0) + ((planUnconfirmed || claudePlanFixture || codexPlanFixture) ? 22 : 0)
         let size = compact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)
         let scheme: ColorScheme = mode == .dark ? .dark : .light
         let view = RootView()

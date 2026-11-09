@@ -14,7 +14,7 @@ final class CodexSourceStalePlanTests: XCTestCase {
         let sessions = codex.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         let index = codex.appendingPathComponent("session_index.jsonl")
-        try Data(#"{"id":"safe-session","thread_name":"Synthetic"}"#.utf8).write(to: index, options: .atomic)
+        try Data(#"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic"}"#.utf8).write(to: index, options: .atomic)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let timestamp = formatter.string(from: Date().addingTimeInterval(2))
@@ -22,7 +22,7 @@ final class CodexSourceStalePlanTests: XCTestCase {
         let arguments = #"{"plan":[{"step":"Synthetic step","status":"in_progress"}]}"#
         let plan = ["type": "response_item", "payload": ["type": "function_call", "name": "update_plan", "arguments": arguments]] as [String: Any]
         let planBytes = try JSONSerialization.data(withJSONObject: plan)
-        let file = sessions.appendingPathComponent("rollout-safe-session.jsonl")
+        let file = sessions.appendingPathComponent("rollout-2026-11-09T10-00-00-019127f4-35ae-7c73-9e72-a10123456001.jsonl")
         var content = Data(start.utf8)
         content.append(planBytes)
         content.append(0x0a)
@@ -33,7 +33,7 @@ final class CodexSourceStalePlanTests: XCTestCase {
             claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("unused")),
             journal: DiagnosticJournal(directory: root.appendingPathComponent("diagnostics")))
         store.refresh()
-        let original = try XCTUnwrap(store.tasks.first { $0.id == "safe-session" })
+        let original = try XCTUnwrap(store.tasks.first { $0.id == "019127f4-35ae-7c73-9e72-a10123456001" })
         XCTAssertTrue(original.isActive)
         XCTAssertTrue(original.planConfirmed)
         XCTAssertNotNil(original.progress)
@@ -42,7 +42,7 @@ final class CodexSourceStalePlanTests: XCTestCase {
         try FileManager.default.removeItem(at: index)
         store.refresh()
         XCTAssertTrue(store.unavailableSources.contains(.codex))
-        let retained = try XCTUnwrap(store.tasks.first { $0.id == "safe-session" })
+        let retained = try XCTUnwrap(store.tasks.first { $0.id == "019127f4-35ae-7c73-9e72-a10123456001" })
         XCTAssertTrue(retained.isUnconfirmed)
         XCTAssertFalse(retained.isActive)
         XCTAssertFalse(retained.planConfirmed, "A retained plan is not confirmed after source loss")

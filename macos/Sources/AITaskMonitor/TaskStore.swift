@@ -33,6 +33,7 @@ final class TaskStore: ObservableObject {
     @Published private(set) var codexCloudFailed = false
     @Published private(set) var codexCloudPartial = false
     @Published private(set) var unavailableSources: [TaskProvider] = []
+    @Published private(set) var codexPartiallyUnavailable = false
     @Published var showsJournal = false
     @Published private(set) var diagnosticSettings = DiagnosticSettings()
     @Published private(set) var journalEvents: [DiagnosticEvent] = []
@@ -527,6 +528,10 @@ final class TaskStore: ObservableObject {
         updateCoordinator?.check()
     }
 
+    func setPreviewCodexPartial() {
+        codexPartiallyUnavailable = true
+    }
+
     func setPreviewUpdate() {
         availableUpdate = AvailableUpdate(version: "0.4.0-alpha", url: URL(string: "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.4.0-alpha/app.dmg")!)
     }
@@ -639,8 +644,14 @@ final class TaskStore: ObservableObject {
         ProviderFilter.allCases.filter { filter in filter == .all || filter.provider.map { providers.contains($0) } == true }
     }
     var unavailableMessage: String {
-        guard !unavailableSources.isEmpty else { return "" }
-        return tr("Нет данных от ", "No data from ") + unavailableSources.map(\.displayName).joined(separator: ", ")
+        var messages: [String] = []
+        if !unavailableSources.isEmpty {
+            messages.append(tr("Нет данных от ", "No data from ") + unavailableSources.map(\.displayName).joined(separator: ", "))
+        }
+        if codexPartiallyUnavailable && !unavailableSources.contains(.codex) {
+            messages.append(tr("Часть данных Codex недоступна", "Some Codex data is unavailable"))
+        }
+        return messages.joined(separator: ". ")
     }
     var filteredTasks: [MonitoredTask] {
         guard let provider = selectedProvider.provider else { return tasks }
@@ -714,6 +725,7 @@ final class TaskStore: ObservableObject {
         let previousTasks = tasks
         let previousUnavailable = unavailableSources
         var unavailable: [TaskProvider] = []
+        var codexPartial = false
         var terminalIDs: Set<String> = []
         var interruptedIDs: Set<String> = []
         var codexToolEvents: [String: [CodexToolEvent]] = [:]
@@ -723,6 +735,7 @@ final class TaskStore: ObservableObject {
             if !exists && sawCodexHome { throw CocoaError(.fileReadNoSuchFile) }
             if exists { sawCodexHome = true }
             let snapshot = try codexReader.readSnapshot(observedSince: monitoringStartedAt, previouslyObserved: Set(previousCodex.map(\.id)))
+            codexPartial = snapshot.isPartial
             terminalIDs.formUnion(snapshot.terminalIDs)
             interruptedIDs.formUnion(snapshot.interruptedIDs)
             codexToolEvents = snapshot.toolEvents
@@ -762,6 +775,7 @@ final class TaskStore: ObservableObject {
         }
         if externalProvidersEnabled { scheduleKimiScan(); scheduleDeepSeekScan(); scheduleHermesScan(); refreshExternalProviders(unavailable: &unavailable) }
         scheduleCodexCloudScan()
+        codexPartiallyUnavailable = codexPartial
         unavailableSources = unavailable
         var combined = (previousCodex + previousClaude + previousExternal + codexCloudTasks)
             .filter { $0.isActive || $0.isUnconfirmed || $0.isWaiting }

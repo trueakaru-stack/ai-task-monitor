@@ -111,6 +111,7 @@ struct RootView: View {
             .padding(.bottom, 16)
             .accessibilityHint(tr("Открыть настройки приложения", "Open app settings"))
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var providerTabs: some View {

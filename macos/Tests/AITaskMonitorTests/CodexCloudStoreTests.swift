@@ -12,14 +12,14 @@ final class CodexCloudStoreTests: XCTestCase {
         let suite = "aitm-cloud-test-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root) }
-        try #"{"id":"local-task","thread_name":"Local fixture"}"#.appending("\n").write(to: codexHome.appendingPathComponent("session_index.jsonl"), atomically: true, encoding: .utf8)
-        let rollout = sessions.appendingPathComponent("rollout-local-task.jsonl")
+        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456009","thread_name":"Local fixture"}"#.appending("\n").write(to: codexHome.appendingPathComponent("session_index.jsonl"), atomically: true, encoding: .utf8)
+        let rollout = sessions.appendingPathComponent("rollout-2026-11-09T10-00-00-019127f4-35ae-7c73-9e72-a10123456009.jsonl")
         try "".write(to: rollout, atomically: true, encoding: .utf8)
         let executable = root.appendingPathComponent("fake-codex")
         let script = #"""
         #!/bin/sh
-        mode=$(cat "$HOME/mode")
-        printf x > "$HOME/started"
+        mode=$(cat "$AITM_FIXTURE_DIR/mode")
+        printf x > "$AITM_FIXTURE_DIR/started"
         case "$mode" in
           failure) exit 1 ;;
           slow) while :; do :; done ;;
@@ -40,13 +40,13 @@ final class CodexCloudStoreTests: XCTestCase {
                               claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("claude.jsonl")),
                               journal: DiagnosticJournal(directory: root.appendingPathComponent("journal")),
                               enableCodexCloud: true, codexCloudDefaults: defaults, codexCloudInterval: 0.15,
-                              makeCodexCloudClient: { CodexCloudClient(executable: executable, environment: ["PATH": "/usr/bin:/bin", "HOME": root.path]) })
+                              makeCodexCloudClient: { CodexCloudClient(executable: executable, environment: ["PATH": "/usr/bin:/bin", "AITM_FIXTURE_DIR": root.path]) })
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let timestamp = formatter.string(from: Date().addingTimeInterval(1))
         try "{\"timestamp\":\"\(timestamp)\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n".write(to: rollout, atomically: true, encoding: .utf8)
         store.refresh()
-        XCTAssertTrue(store.tasks.contains { $0.id == "local-task" && $0.isActive })
+        XCTAssertTrue(store.tasks.contains { $0.id == "019127f4-35ae-7c73-9e72-a10123456009" && $0.isActive })
         XCTAssertFalse(FileManager.default.fileExists(atPath: started.path))
 
         func waitFor(_ condition: () -> Bool) {
@@ -69,13 +69,13 @@ final class CodexCloudStoreTests: XCTestCase {
         try "failure".write(to: mode, atomically: true, encoding: .utf8)
         waitFor { store.codexCloudFailed }
         XCTAssertTrue(store.tasks.contains { $0.id == cloud.id && $0.isUnconfirmed })
-        XCTAssertTrue(store.tasks.contains { $0.id == "local-task" && $0.isActive })
+        XCTAssertTrue(store.tasks.contains { $0.id == "019127f4-35ae-7c73-9e72-a10123456009" && $0.isActive })
         try "partial".write(to: mode, atomically: true, encoding: .utf8)
         waitFor { store.codexCloudPartial && !store.codexCloudFailed }
         XCTAssertTrue(store.tasks.contains { $0.id == cloud.id && $0.isUnconfirmed })
         try "terminal".write(to: mode, atomically: true, encoding: .utf8)
         waitFor { !store.codexCloudPartial && !store.codexCloudFailed && !store.tasks.contains { $0.id.hasPrefix("codex-cloud:") } }
-        XCTAssertTrue(store.tasks.contains { $0.id == "local-task" && $0.isActive })
+        XCTAssertTrue(store.tasks.contains { $0.id == "019127f4-35ae-7c73-9e72-a10123456009" && $0.isActive })
 
         try "slow".write(to: mode, atomically: true, encoding: .utf8)
         try? FileManager.default.removeItem(at: started)
@@ -85,6 +85,6 @@ final class CodexCloudStoreTests: XCTestCase {
         XCTAssertFalse(defaults.bool(forKey: "codexCloudEnabled"))
         XCTAssertFalse(store.codexCloudEnabled)
         XCTAssertFalse(store.tasks.contains { $0.id.hasPrefix("codex-cloud:") })
-        XCTAssertTrue(store.tasks.contains { $0.id == "local-task" && $0.isActive })
+        XCTAssertTrue(store.tasks.contains { $0.id == "019127f4-35ae-7c73-9e72-a10123456009" && $0.isActive })
     }
 }
