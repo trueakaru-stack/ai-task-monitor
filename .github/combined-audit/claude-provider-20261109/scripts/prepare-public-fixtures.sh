@@ -47,7 +47,10 @@ printf '%s  %s\n' 'b36f1fef9334a5588b4166f8bcd26a14e521f2b55e6b9de3aaa80d3ff7a37
   '42269a8a5b3fd54ffa6f3d84b18abed50064717576b4ecf03dc4a55d8aa04fdc' "$dotenv" | shasum -a 256 -c -
 ruamel="$WORK/macos/integrations/ruamel.yaml-0.18.16-py3-none-any.whl"
 printf '%s  %s\n' '048f26d64245bae57a4f9ef6feb5b552a386830ef7a826f235ffb804c59efbba' "$ruamel" | shasum -a 256 -c -
-/usr/bin/python3 -m venv "$RUNNER_TEMP/aitm-hermes-python"
+PYTHON="$(command -v python3)"
+test "${PYTHON#/}" != "$PYTHON"
+"$PYTHON" -I -c 'import sys; assert sys.version_info[:3] == (3, 12, 10), sys.version'
+"$PYTHON" -I -m venv "$RUNNER_TEMP/aitm-hermes-python"
 /usr/bin/env -i "PATH=/usr/bin:/bin" "TMPDIR=$RUNNER_TEMP/" "$RUNNER_TEMP/aitm-hermes-python/bin/python" -m pip install \
   --isolated --no-index --no-deps --disable-pip-version-check "$ruamel" "$packaging" "$dotenv"
 echo 'Prepared public, pinned synthetic fixtures.'

@@ -30,6 +30,7 @@ new      macos/Tests/AITaskMonitorTests/ClaudeIntegrationPreservationIndependent
 modified macos/Tests/AITaskMonitorTests/ClaudeIntegrationSafetyTests.swift
 new      macos/Tests/AITaskMonitorTests/ClaudePhaseChannelTests.swift
 new      macos/Tests/AITaskMonitorTests/ClaudePhaseIdentityIsolationIndependentTests.swift
+new      macos/Tests/AITaskMonitorTests/ClaudePhaseIndependentCounterexamples.swift
 new      macos/Tests/AITaskMonitorTests/ClaudePhaseIntegrationTests.swift
 new      macos/Tests/AITaskMonitorTests/ClaudePhaseIsolationRaceTests.swift
 new      macos/Tests/AITaskMonitorTests/ClaudePhaseUnresolvedTests.swift

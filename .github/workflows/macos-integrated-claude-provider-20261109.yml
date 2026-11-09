@@ -35,6 +35,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
       - name: Select Xcode on macOS 15
         if: ${{ matrix.runner == 'macos-15' }}
         run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
