@@ -51,7 +51,7 @@ jobs:
             'f810f34c3480d09bdac70da4a43b26cd9ef4297931a573ab8f88bc03981d21c8' ReleaseUpdates.swift \
             'ba9026089988cefa0c5f3f9b50ee635cf5dc0a80680ae521064663bac574a20a' ReleaseRetryScheduleTests.swift \
             'e968b2a942941d02a343906258cafb3ff1a384e325eb5a56c51c7c0f69aba823' ReleaseUpdateCoordinatorTests.swift \
-            '6d7d49dbb896ee166b582b1dbc4244633b28f8c046bae34d3be19490f4b2414e' ReleaseRequestSyntheticTests.swift \
+            'e39e2f4935d9f8f863caf10901adb5745122f5cd45d2742db48f69a48904df0b' ReleaseRequestSyntheticTests.swift \
             | shasum -a 256 -c -
           for name in ReleaseRetrySchedule.swift ReleaseUpdateCoordinator.swift ReleaseUpdates.swift; do
             cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/$name"

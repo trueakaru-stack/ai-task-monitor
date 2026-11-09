@@ -8,16 +8,22 @@ private final class SyntheticReleaseURLProtocol: URLProtocol {
     private static var recordedPaths: [String] = []
     private static var sensitiveHeadersSeen = false
     private static var startObserver: ((String) -> Void)?
+    private static var responseObserver: ((String) -> Void)?
 
     static func reset() {
         lock.lock(); defer { lock.unlock() }
         recordedPaths = []
         sensitiveHeadersSeen = false
         startObserver = nil
+        responseObserver = nil
     }
     static func observeStart(_ observer: @escaping (String) -> Void) {
         lock.lock(); defer { lock.unlock() }
         startObserver = observer
+    }
+    static func observeResponse(_ observer: @escaping (String) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        responseObserver = observer
     }
     static func snapshot() -> (paths: [String], sensitiveHeaders: Bool) {
         lock.lock(); defer { lock.unlock() }
@@ -73,6 +79,12 @@ private final class SyntheticReleaseURLProtocol: URLProtocol {
         if url.path == "/declared-oversized" || url.path == "/oversized-hint" { headers["Content-Length"] = String(ReleaseSelector.maximumBytes + 1) }
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        if url.path == "/hold-hint" || url.path == "/hold-reset" {
+            // Supply the first body byte, but deliberately never finish the response.
+            client?.urlProtocol(self, didLoad: Data([0x20]))
+        }
+        Self.lock.lock(); let responseObserver = Self.responseObserver; Self.lock.unlock()
+        responseObserver?(url.path)
         if url.path == "/hold-hint" || url.path == "/hold-reset" { return }
         if url.path == "/stream-oversized" {
             client?.urlProtocol(self, didLoad: Data(repeating: 0x41, count: ReleaseSelector.maximumBytes + 1))
@@ -160,20 +172,28 @@ final class ReleaseRequestSyntheticTests: XCTestCase {
         SyntheticReleaseURLProtocol.reset()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [SyntheticReleaseURLProtocol.self]
+        let started = expectation(description: "synthetic hold-hint started")
+        let emitted = expectation(description: "synthetic hold-hint response and first byte emitted")
         let received = expectation(description: "synthetic header observed")
         let completed = expectation(description: "synthetic cancellation completed")
+        SyntheticReleaseURLProtocol.observeStart { if $0 == "/hold-hint" { started.fulfill() } }
+        SyntheticReleaseURLProtocol.observeResponse { if $0 == "/hold-hint" { emitted.fulfill() } }
         let collector = ReleaseResponseCollector { _ in received.fulfill() }
+        let guardLock = NSLock()
         var outcome: ReleaseRequestOutcome?
         let request = ReleaseRequest(testURL: URL(string: "aitm-update-test://fixture/hold-hint")!, configuration: configuration) {
-            outcome = $0
+            guardLock.lock(); outcome = $0; guardLock.unlock()
             completed.fulfill()
         }
         request.attachResponseCollector(collector)
         try request.start()
-        wait(for: [received], timeout: 5)
+        wait(for: [started, emitted, received], timeout: 5)
+        guardLock.lock(); let outcomeBeforeCancellation = outcome; guardLock.unlock()
+        XCTAssertNil(outcomeBeforeCancellation, "The incomplete response must not complete before cancellation.")
         request.cancel()
         wait(for: [completed], timeout: 5)
-        guard case .cancelled = try XCTUnwrap(outcome) else { return XCTFail("Expected cancellation.") }
+        guardLock.lock(); let result = outcome; guardLock.unlock()
+        guard case .cancelled = try XCTUnwrap(result) else { return XCTFail("Expected cancellation.") }
         var captured: [ReleaseHTTPResponse] = []
         collector.seal { captured = $0 }
         XCTAssertEqual(captured.first?.retryAfter, "172800")
@@ -205,8 +225,12 @@ final class ReleaseRequestSyntheticTests: XCTestCase {
             SyntheticReleaseURLProtocol.reset()
             let configuration = URLSessionConfiguration.ephemeral
             configuration.protocolClasses = [SyntheticReleaseURLProtocol.self]
+            let started = expectation(description: "synthetic reset protocol started \(path)")
+            let emitted = expectation(description: "synthetic reset response emitted \(path)")
             let received = expectation(description: "synthetic reset observed \(path)")
             let completed = expectation(description: "synthetic response completed \(path)")
+            SyntheticReleaseURLProtocol.observeStart { if $0 == path { started.fulfill() } }
+            SyntheticReleaseURLProtocol.observeResponse { if $0 == path { emitted.fulfill() } }
             let guardLock = NSLock()
             var hint: ReleaseHTTPResponse?
             var outcome: ReleaseRequestOutcome?
@@ -220,8 +244,12 @@ final class ReleaseRequestSyntheticTests: XCTestCase {
             }
             request.attachResponseCollector(collector)
             try request.start()
-            wait(for: [received], timeout: 5)
-            if path == "/hold-reset" { request.cancel() }
+            wait(for: [started, emitted, received], timeout: 5)
+            if path == "/hold-reset" {
+                guardLock.lock(); let outcomeBeforeCancellation = outcome; guardLock.unlock()
+                XCTAssertNil(outcomeBeforeCancellation, "The incomplete response must not complete before cancellation.")
+                request.cancel()
+            }
             wait(for: [completed], timeout: 5)
             guardLock.lock(); let captured = hint; let result = outcome; guardLock.unlock()
             let header = try XCTUnwrap(captured)
