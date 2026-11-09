@@ -45,8 +45,8 @@ jobs:
           git diff --quiet cf9dce5918011a581f68193c74fdda196f23d35b "$GITHUB_SHA" -- macos
           cd "$GITHUB_WORKSPACE/.github/claude-audit/plan-visual-20261109"
           printf '%s  %s\n' \
-            '111ebfc1e07307ce07069e773527532b3444533444bc6e0b52cf19bc30610348' TaskCardView.swift \
-            '2b3bc704cd6ea91232db672dbe078c09d1b62d5f375798a2c46bf4c6da37f6fd' SnapshotRenderer.swift \
+            '0e5abf7358e7ea38137d6616ff2617dbcffcf27cd42ee5ae526158a0d11e963e' TaskCardView.swift \
+            '6aa3be2fe1b523a160fe82be53474865ef3dea85655795ee3f1348018e356eb5' SnapshotRenderer.swift \
             | shasum -a 256 -c -
       - name: Render both variants without network
         shell: bash
@@ -91,7 +91,7 @@ jobs:
           run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-claude-plan/candidate"
           for variant in base candidate; do
             count="$(find "$RUNNER_TEMP/aitm-claude-plan/$variant" -name '*.png' -type f | wc -l | tr -d ' ')"
-            test "$count" = 16
+            test "$count" = 24
           done
       - name: Upload synthetic comparisons
         uses: actions/upload-artifact@v4

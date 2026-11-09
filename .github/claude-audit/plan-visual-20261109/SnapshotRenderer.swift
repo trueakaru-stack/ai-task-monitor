@@ -21,9 +21,9 @@ enum SnapshotRenderer {
                     AppLanguage.previewOverride = language
                     for mode in [AppearanceMode.dark, .light] {
                         for compact in [false, true] {
-                            for unconfirmed in [false, true] {
-                                let name = "claude-plan-\(language.rawValue)-\(mode.rawValue)-\(compact ? "compact" : "expanded")-\(unconfirmed ? "unconfirmed" : "confirmed")"
-                                try render(name: name, mode: mode, compact: compact, settings: false, outputDirectory: outputDirectory, planUnconfirmed: unconfirmed, claudePlanFixture: true)
+                            for state in ["confirmed", "unconfirmed", "stale"] {
+                                let name = "claude-plan-\(language.rawValue)-\(mode.rawValue)-\(compact ? "compact" : "expanded")-\(state)"
+                                try render(name: name, mode: mode, compact: compact, settings: false, outputDirectory: outputDirectory, planUnconfirmed: state == "unconfirmed", claudePlanFixture: true, taskUnconfirmed: state == "stale")
                             }
                         }
                     }
@@ -122,20 +122,20 @@ enum SnapshotRenderer {
         try png.write(to: outputDirectory.appendingPathComponent("\(name).png"), options: .atomic)
     }
 
-    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, desktopProfile: Bool = false, claudePreview: SettingsPreviewClaude? = nil, cloudPreview: SettingsPreviewCloud? = nil, kimiPreview: SettingsPreviewKimi? = nil, hermesPreview: SettingsPreviewHermes? = nil, cloudTask: Bool = false, kimiTask: Bool = false, manyProviders: Bool = false, tasksEnd: Bool = false, tabsEnd: Bool = false, emptyTasks: Bool = false, claudePlanFixture: Bool = false) throws {
+    private static func render(name: String, mode: AppearanceMode, compact: Bool, settings: Bool, outputDirectory: URL, unavailableSources: [TaskProvider] = [], journal: Bool = false, loopWarning: Bool = false, loopProvider: TaskProvider = .codex, loopError: Bool = false, about: Bool = false, update: Bool = false, planUnconfirmed: Bool = false, settingsEnd: Bool = false, settingsSources: Bool = false, desktopProfile: Bool = false, claudePreview: SettingsPreviewClaude? = nil, cloudPreview: SettingsPreviewCloud? = nil, kimiPreview: SettingsPreviewKimi? = nil, hermesPreview: SettingsPreviewHermes? = nil, cloudTask: Bool = false, kimiTask: Bool = false, manyProviders: Bool = false, tasksEnd: Bool = false, tabsEnd: Bool = false, emptyTasks: Bool = false, claudePlanFixture: Bool = false, taskUnconfirmed: Bool = false) throws {
         UserDefaults.standard.set(mode.rawValue, forKey: "appearanceMode")
         let store: TaskStore
         if claudePlanFixture {
             let fixture = MonitoredTask(
                 id: "claude:synthetic", provider: .claude,
                 title: tr("Задача Claude Code", "Claude Code task"),
-                activity: tr("Выполняет действие", "Performing an action"),
-                isActive: true, progress: 33, progressKind: .exact,
+                activity: taskUnconfirmed ? tr("Статус не подтверждён", "Status unconfirmed") : tr("Выполняет действие", "Performing an action"),
+                isActive: !taskUnconfirmed, progress: 33, progressKind: .exact,
                 steps: [
                     TaskStep(id: "one", title: tr("Первый этап", "First step"), status: .done),
                     TaskStep(id: "two", title: tr("Второй этап", "Second step"), status: .active),
                     TaskStep(id: "three", title: tr("Третий этап", "Third step"), status: .pending)
-                ], updatedAt: Date(), planConfirmed: !planUnconfirmed)
+                ], updatedAt: Date(), isUnconfirmed: taskUnconfirmed, planConfirmed: !planUnconfirmed)
             store = TaskStore(previewTasks: [fixture])
         } else if emptyTasks {
             store = TaskStore(previewTasks: [])

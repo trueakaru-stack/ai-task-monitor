@@ -58,9 +58,9 @@ struct TaskCardView: View {
                 }
                 .frame(height: 116)
                 .padding(.top, 16)
-                Text("\(task.planConfirmed ? tr("План задачи", "Task plan") : tr("План не подтверждён", "Plan unconfirmed")) · \(task.steps.count) \(tr("этапов", "steps"))")
+                Text("\(task.planConfirmed && !hidesClaudePlanStatus ? tr("План задачи", "Task plan") : tr("План не подтверждён", "Plan unconfirmed")) · \(task.steps.count) \(tr("этапов", "steps"))")
                     .font(.system(size: 11))
-                    .foregroundStyle(task.planConfirmed ? MonitorTheme.muted : MonitorTheme.secondary)
+                    .foregroundStyle(task.planConfirmed && !hidesClaudePlanStatus ? MonitorTheme.muted : MonitorTheme.secondary)
                     .padding(.top, 14)
             }
         }
