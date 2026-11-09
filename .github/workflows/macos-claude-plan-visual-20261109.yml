@@ -95,6 +95,10 @@ jobs:
           cp "$INPUT/ClaudePlanLabelTests.swift" Tests/AITaskMonitorTests/ClaudePlanLabelTests.swift
           run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter ClaudePlanLabelTests 2>&1 | /usr/bin/tee "$RUNNER_TEMP/aitm-claude-plan-label-tests.log"
           /usr/bin/grep -Eq 'Executed 2 tests?, with 0 failures' "$RUNNER_TEMP/aitm-claude-plan-label-tests.log"
+          for suite in ParserTests ExternalProviderStateTests; do
+            run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | /usr/bin/tee "$RUNNER_TEMP/aitm-claude-plan-$suite.log"
+            /usr/bin/grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$RUNNER_TEMP/aitm-claude-plan-$suite.log"
+          done
           run_isolated /usr/bin/xcrun swift build --disable-sandbox
           run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-claude-plan/candidate"
           for variant in base candidate; do
