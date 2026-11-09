@@ -38,6 +38,39 @@ private enum ReleaseScheduleOutcome {
     case succeeded, failed(ReleaseHTTPResponse?), abandoned
 }
 
+/// Retains the canceled request and its pending finalizer until the task's
+/// terminal callback. If it never arrives, the lease is deliberately retained.
+private final class ReleaseTerminalGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var terminal = false
+    private var waiting: (() -> Void)?
+    private var retainedRequest: (any ReleaseRequesting)?
+    private var retainSelf: ReleaseTerminalGate?
+
+    func afterTerminal(retaining request: any ReleaseRequesting, _ action: @escaping () -> Void) {
+        lock.lock()
+        if terminal { lock.unlock(); action(); return }
+        precondition(waiting == nil)
+        waiting = action
+        retainedRequest = request
+        retainSelf = self
+        lock.unlock()
+    }
+
+    func signalTerminal() {
+        lock.lock()
+        guard !terminal else { lock.unlock(); return }
+        terminal = true
+        let action = waiting
+        let request = retainedRequest
+        waiting = nil
+        retainedRequest = nil
+        retainSelf = nil
+        lock.unlock()
+        withExtendedLifetime(request) { action?() }
+    }
+}
+
 // These closures are created outside the main actor: receipt callbacks can
 // arrive on the URLSession delegate queue. Storage remains on its serial queue.
 private func makeResponseCollector(schedule: ReleaseRetrySchedule,
@@ -72,6 +105,7 @@ final class ReleaseUpdateCoordinator {
     private let scheduleDeadline: ReleaseDeadlineScheduler
     private let executeStorage: ReleaseStorageExecutor
     private var request: (any ReleaseRequesting)?
+    private var terminalGate: ReleaseTerminalGate?
     private var cancelDeadline: (() -> Void)?
     private var preparation: ReleasePreparationToken?
     private var parsing: ReleasePreparationToken?
@@ -126,15 +160,35 @@ final class ReleaseUpdateCoordinator {
         }
     }
 
+    private func finishAfterTerminal(_ outcome: ReleaseScheduleOutcome, generation expected: UInt64,
+                                     request pending: any ReleaseRequesting, gate: ReleaseTerminalGate) {
+        guard !finalizing else { return }
+        finalizing = true
+        operationPending = true
+        let collector = responseCollector
+        responseCollector = nil
+        let schedule = self.schedule, executor = executeStorage
+        let onMain: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            self.finalizing = false
+            guard !self.stopped, self.generation == expected else { return }
+            self.operationPending = false
+        }
+        gate.afterTerminal(retaining: pending) {
+            persistCapturedOutcome(outcome, collector: collector, schedule: schedule, execute: executor, onMain: onMain)
+        }
+    }
+
     private func deadlineExpired(_ expected: UInt64) {
-        guard !stopped, generation == expected, let pending = request else { return }
+        guard !stopped, generation == expected, let pending = request, let gate = terminalGate else { return }
         generation &+= 1
         let newGeneration = generation
         operationPending = true
         request = nil
+        terminalGate = nil
         clearDeadline()
+        finishAfterTerminal(.failed(nil), generation: newGeneration, request: pending, gate: gate)
         pending.cancel()
-        finish(.failed(nil), generation: newGeneration)
     }
 
     private func parserDeadlineExpired(_ expected: UInt64) {
@@ -211,13 +265,16 @@ final class ReleaseUpdateCoordinator {
     private func startRequest(generation currentGeneration: UInt64) {
         let collector = makeResponseCollector(schedule: schedule, execute: executeStorage)
         responseCollector = collector
+        let gate = ReleaseTerminalGate()
         do {
             let nextRequest = try makeRequest { [weak self] outcome in
+                gate.signalTerminal()
                 DispatchQueue.main.async {
                     guard let self, !self.stopped, self.generation == currentGeneration,
                           self.request != nil else { return }
                     self.operationPending = true
                     self.request = nil
+                    self.terminalGate = nil
                     self.clearDeadline()
                     let result: ReleaseScheduleOutcome
                     switch outcome {
@@ -233,6 +290,7 @@ final class ReleaseUpdateCoordinator {
             }
             nextRequest.attachResponseCollector(collector)
             request = nextRequest
+            terminalGate = gate
             cancelDeadline = scheduleDeadline { [weak self] in
                 DispatchQueue.main.async { self?.deadlineExpired(currentGeneration) }
             }
@@ -241,6 +299,7 @@ final class ReleaseUpdateCoordinator {
         } catch {
             let failedRequest = request
             request = nil
+            terminalGate = nil
             generation &+= 1
             let newGeneration = generation
             clearDeadline()
@@ -259,17 +318,26 @@ final class ReleaseUpdateCoordinator {
         parsing = nil
         let pending = request
         request = nil
+        let gate = terminalGate
+        terminalGate = nil
         clearDeadline()
-        pending?.cancel()
-        if !finalizing { finish(.abandoned, generation: generation) }
+        if let pending, let gate {
+            finishAfterTerminal(.abandoned, generation: generation, request: pending, gate: gate)
+            pending.cancel()
+        } else if !finalizing { finish(.abandoned, generation: generation) }
     }
 
     deinit {
         preparation?.cancel()
         parsing?.cancel()
         cancelDeadline?()
-        request?.cancel()
-        if !finalizing {
+        if let pending = request, let gate = terminalGate, !finalizing {
+            let collector = responseCollector, schedule = self.schedule, executor = executeStorage
+            gate.afterTerminal(retaining: pending) {
+                persistCapturedOutcome(.abandoned, collector: collector, schedule: schedule, execute: executor, onMain: {})
+            }
+            pending.cancel()
+        } else if !finalizing {
             persistCapturedOutcome(.abandoned, collector: responseCollector,
                                    schedule: schedule, execute: executeStorage, onMain: {})
         }

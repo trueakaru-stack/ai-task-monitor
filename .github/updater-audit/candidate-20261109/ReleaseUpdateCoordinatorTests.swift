@@ -24,11 +24,15 @@ private final class UpdateFixtureRequest: ReleaseRequesting {
     var didStart = false
     var didCancel = false
     var failStart = false
+    var completeOnCancel = true
     var startObserver: (() -> Void)?
     init(_ completion: @escaping (ReleaseRequestOutcome) -> Void) { self.completion = completion }
     func attachResponseCollector(_ collector: ReleaseResponseCollector) { self.collector = collector }
     func start() throws { didStart = true; startObserver?(); if failStart { throw UpdateFixtureFailure.start } }
-    func cancel() { didCancel = true }
+    func cancel() {
+        didCancel = true
+        if completeOnCancel && !failStart { completion(.cancelled) }
+    }
     func emit(_ outcome: ReleaseRequestOutcome) { completion(outcome) }
     func beginHint() -> Bool { collector?.beginCapture() == true }
     func finishHint(_ hint: ReleaseHTTPResponse) { collector?.finishCapture(hint) }
@@ -791,6 +795,94 @@ final class ReleaseUpdateCoordinatorTests: XCTestCase {
             coordinator.check(); drainMainQueue()
             XCTAssertEqual(transport.requests.count, 1)
         }
+    }
+
+    func testTimeoutBeforeCaptureKeepsCollectorOpenUntilTerminal() throws {
+        try withFixture { schedule, clock, transport in
+            let deadlines = UpdateFixtureDeadlines()
+            var deliveries = 0
+            let coordinator = ReleaseUpdateCoordinator(schedule: schedule, makeRequest: transport.make,
+                                                        scheduleDeadline: deadlines.schedule, executeStorage: { $0() },
+                                                        executeParser: { $0() }) { _ in deliveries += 1 }
+            coordinator.check(); drainMainQueue()
+            let request = try XCTUnwrap(transport.requests.first)
+            request.completeOnCancel = false
+            deadlines.tickets[0].fire(); drainMainQueue()
+            XCTAssertTrue(request.didCancel)
+            clock.advance(3_601)
+            coordinator.check(); drainMainQueue()
+            XCTAssertEqual(transport.requests.count, 1, "No retry while task termination is missing.")
+            XCTAssertTrue(request.beginHint(), "A callback that entered before cancellation may register afterward.")
+            request.finishHint(ReleaseHTTPResponse(status: 200, retryAfter: "172800"))
+            XCTAssertGreaterThanOrEqual(schedule.delay, 172_800)
+            request.emit(.cancelled); drainMainQueue()
+            XCTAssertEqual(deliveries, 0)
+            clock.advance(86_400); coordinator.check(); drainMainQueue()
+            XCTAssertEqual(transport.requests.count, 1)
+            clock.advance(86_401); coordinator.check(); drainMainQueue()
+            XCTAssertEqual(transport.requests.count, 2)
+        }
+    }
+
+    func testStopWaitsForTerminalAndPersistsLateHeaderAfterDeallocation() throws {
+        let suite = "AITaskMonitor.synthetic-drain-stop." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("release-drain-stop-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let clock = UpdateFixtureClock(), transport = UpdateFixtureTransport()
+        let schedule = ReleaseRetrySchedule(defaults: defaults, clock: clock.sharedClock,
+                                            fileStore: ReleaseScheduleFileStore(directory: dir))
+        var deliveries = 0
+        var coordinator: ReleaseUpdateCoordinator? = ReleaseUpdateCoordinator(schedule: schedule, makeRequest: transport.make,
+                                                                                executeStorage: { $0() }, executeParser: { $0() }) { _ in deliveries += 1 }
+        coordinator?.check(); drainMainQueue()
+        let request = try XCTUnwrap(transport.requests.first)
+        request.completeOnCancel = false
+        coordinator?.stop()
+        weak var weakCoordinator = coordinator
+        coordinator = nil
+        XCTAssertNil(weakCoordinator)
+        XCTAssertTrue(request.didCancel)
+        clock.advance(3_601)
+        let other = ReleaseRetrySchedule(defaults: defaults, clock: clock.sharedClock,
+                                         fileStore: ReleaseScheduleFileStore(directory: dir))
+        XCTAssertFalse(other.beginIfDue(), "Lease stays held after coordinator deallocation until terminal callback.")
+        XCTAssertTrue(request.beginHint())
+        request.finishHint(ReleaseHTTPResponse(status: 200, retryAfter: "172800"))
+        request.emit(.cancelled); drainMainQueue()
+        XCTAssertEqual(deliveries, 0)
+        XCTAssertFalse(other.beginIfDue(), "Persisted header remains in force after the lease is released.")
+        clock.advance(172_801)
+        XCTAssertTrue(other.beginIfDue())
+        other.abandon()
+    }
+
+    func testDeinitWithoutTerminalRetainsLeaseUntilCallback() throws {
+        let suite = "AITaskMonitor.synthetic-drain-deinit." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("release-drain-deinit-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let clock = UpdateFixtureClock(), transport = UpdateFixtureTransport()
+        let schedule = ReleaseRetrySchedule(defaults: defaults, clock: clock.sharedClock,
+                                            fileStore: ReleaseScheduleFileStore(directory: dir))
+        var coordinator: ReleaseUpdateCoordinator? = ReleaseUpdateCoordinator(schedule: schedule, makeRequest: transport.make,
+                                                                                executeStorage: { $0() }, executeParser: { $0() }) { _ in }
+        coordinator?.check(); drainMainQueue()
+        let request = try XCTUnwrap(transport.requests.first)
+        request.completeOnCancel = false
+        weak var weakCoordinator = coordinator
+        coordinator = nil
+        XCTAssertNil(weakCoordinator)
+        XCTAssertTrue(request.didCancel)
+        clock.advance(7_200)
+        let other = ReleaseRetrySchedule(defaults: defaults, clock: clock.sharedClock,
+                                         fileStore: ReleaseScheduleFileStore(directory: dir))
+        XCTAssertFalse(other.beginIfDue(), "No callback means the previous lease is still held.")
+        request.emit(.cancelled); drainMainQueue()
+        XCTAssertTrue(other.beginIfDue(), "Terminal completion finally releases the lease.")
+        other.abandon()
     }
 
     func testStopWhileHeaderCaptureIsPendingKeepsHintAndRejectsLateOutcome() throws {

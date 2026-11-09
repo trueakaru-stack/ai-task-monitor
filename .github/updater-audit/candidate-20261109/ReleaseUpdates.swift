@@ -174,10 +174,14 @@ final class ReleaseResponseCollector: @unchecked Sendable {
 
 protocol ReleaseRequesting: AnyObject {
     func attachResponseCollector(_ collector: ReleaseResponseCollector)
+    // A thrown start must mean no task was started and no callback can follow.
+    // Once start returns, completion denotes the task's terminal callback.
     func start() throws
     func cancel()
 }
 
+// Factory construction must not start a task; a thrown factory/start has no
+// later callback. After a successful start, completion is the terminal callback.
 typealias ReleaseRequestFactory = (@escaping (ReleaseRequestOutcome) -> Void) throws -> any ReleaseRequesting
 
 enum ReleaseRequestStartError: Error {
@@ -196,21 +200,34 @@ final class ReleaseRequest: NSObject, URLSessionDataDelegate, ReleaseRequesting,
     private var httpFailure: ReleaseHTTPResponse?
     private var responseCollector: ReleaseResponseCollector?
     private var session: URLSession?
+    private var task: URLSessionDataTask?
     private let endpoint: URL
     private let makeConfiguration: () -> URLSessionConfiguration
     private let completion: (ReleaseRequestOutcome) -> Void
+    #if DEBUG
+    private let beforeCaptureHook: (() -> Void)?
+    private let cancelHook: (() -> Void)?
+    #endif
 
     init(completion: @escaping (ReleaseRequestOutcome) -> Void) {
         endpoint = URL(string: "https://api.github.com/repos/trueakaru-stack/ai-task-monitor/releases?per_page=100")!
         makeConfiguration = { .ephemeral }
         self.completion = completion
+        #if DEBUG
+        beforeCaptureHook = nil
+        cancelHook = nil
+        #endif
     }
 
     #if DEBUG
-    init(testURL: URL, configuration: URLSessionConfiguration, completion: @escaping (ReleaseRequestOutcome) -> Void) {
+    init(testURL: URL, configuration: URLSessionConfiguration,
+         beforeCapture: (() -> Void)? = nil, didCancel: (() -> Void)? = nil,
+         completion: @escaping (ReleaseRequestOutcome) -> Void) {
         endpoint = testURL
         makeConfiguration = { configuration }
         self.completion = completion
+        beforeCaptureHook = beforeCapture
+        cancelHook = didCancel
     }
     #endif
 
@@ -221,6 +238,9 @@ final class ReleaseRequest: NSObject, URLSessionDataDelegate, ReleaseRequesting,
     }
 
     private func capture(_ response: HTTPURLResponse) -> ReleaseHTTPResponse {
+        #if DEBUG
+        beforeCaptureHook?()
+        #endif
         lock.lock()
         let collector = responseCollector
         let accepted = collector?.beginCapture() == true
@@ -256,6 +276,7 @@ final class ReleaseRequest: NSObject, URLSessionDataDelegate, ReleaseRequesting,
         request.setValue("AI-Task-Monitor/0.3", forHTTPHeaderField: "User-Agent")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         let task = session.dataTask(with: request)
+        self.task = task
         lock.unlock()
         task.resume()
     }
@@ -321,6 +342,7 @@ final class ReleaseRequest: NSObject, URLSessionDataDelegate, ReleaseRequesting,
         else { result = .success(data) }
         let oldSession = self.session
         self.session = nil
+        self.task = nil
         data.removeAll()
         lock.unlock()
         completion(result)
@@ -328,7 +350,12 @@ final class ReleaseRequest: NSObject, URLSessionDataDelegate, ReleaseRequesting,
     }
 
     func cancel() {
-        lock.lock(); cancelled = true; let active = session; lock.unlock()
-        active?.invalidateAndCancel()
+        // Keep the delegate/session alive until this task reaches its terminal
+        // callback; callbacks already in flight may contain retry headers.
+        lock.lock(); cancelled = true; let active = task; lock.unlock()
+        active?.cancel()
+        #if DEBUG
+        if active != nil { cancelHook?() }
+        #endif
     }
 }

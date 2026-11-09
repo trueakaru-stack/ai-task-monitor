@@ -47,11 +47,11 @@ jobs:
           cd "$INPUT"
           printf '%s  %s\n' \
             '14366b8627baa63f6b23289764fd75df91a2ee16ff4ec0d174aa9548affcf167' ReleaseRetrySchedule.swift \
-            '1dcbbe3c51fa49e14352599b3777d5699aecbe83f86d119f846b82f87b918179' ReleaseUpdateCoordinator.swift \
-            'f810f34c3480d09bdac70da4a43b26cd9ef4297931a573ab8f88bc03981d21c8' ReleaseUpdates.swift \
+            'df1c1f9a72cb34e8bd502239cf83f526088423f82d6b76b89b8721bd9f62c545' ReleaseUpdateCoordinator.swift \
+            '35c28a2106575bede6f37d2e46275512a83a88dd0e2648cc6dddd4de656df374' ReleaseUpdates.swift \
             'ba9026089988cefa0c5f3f9b50ee635cf5dc0a80680ae521064663bac574a20a' ReleaseRetryScheduleTests.swift \
-            'e968b2a942941d02a343906258cafb3ff1a384e325eb5a56c51c7c0f69aba823' ReleaseUpdateCoordinatorTests.swift \
-            'ab0e4ce2168d1baa65edf2f8fc22efe2d412a1a75329fc2e50e83ec1f3b26ed0' ReleaseRequestSyntheticTests.swift \
+            '026b262142f5011829c1c36847f0b547f596d8b789ac40bc2df36641c46923ce' ReleaseUpdateCoordinatorTests.swift \
+            '7529c0c87f4dc5a73f1eb669e4ed7af553153d395082d358409d13ad25deac7c' ReleaseRequestSyntheticTests.swift \
             'cbd477270da5a0bacd5d15df909dc678992193cd52f943c9146ec206a60a6817' ReleaseHeaderBoundaryDiagnosticTests.swift \
             | shasum -a 256 -c -
           for name in ReleaseRetrySchedule.swift ReleaseUpdateCoordinator.swift ReleaseUpdates.swift; do
@@ -93,7 +93,7 @@ jobs:
           run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-retry-network-probe.py"
           run_isolated /usr/bin/xcrun swift --version
           audit_status=0
-          for entry in ReleaseUpdatesTests:5 ReleaseRetryScheduleTests:22 ReleaseUpdateCoordinatorTests:30 ReleaseRequestSyntheticTests:10 ReleaseRedirectDiagnosticTests:3 ReleaseHeaderBoundaryDiagnosticTests:2; do
+          for entry in ReleaseUpdatesTests:5 ReleaseRetryScheduleTests:22 ReleaseUpdateCoordinatorTests:33 ReleaseRequestSyntheticTests:11 ReleaseRedirectDiagnosticTests:3 ReleaseHeaderBoundaryDiagnosticTests:2; do
             suite="${entry%:*}"
             count="${entry#*:}"
             log="$RUNNER_TEMP/aitm-retry-$suite.log"

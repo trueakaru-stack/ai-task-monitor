@@ -96,6 +96,12 @@ private final class SyntheticReleaseURLProtocol: URLProtocol {
     override func stopLoading() { } // This fixture owns no external resources.
 }
 
+private final class SyntheticDrainClock {
+    var wall = Date(timeIntervalSince1970: 0)
+    var monotonic: TimeInterval = 0
+    var clock: ReleaseRetryClock { ReleaseRetryClock(wall: { self.wall }, monotonic: { self.monotonic }) }
+}
+
 final class ReleaseRequestSyntheticTests: XCTestCase {
     private func run(_ path: String) throws -> ReleaseRequestOutcome {
         SyntheticReleaseURLProtocol.reset()
@@ -197,6 +203,48 @@ final class ReleaseRequestSyntheticTests: XCTestCase {
         var captured: [ReleaseHTTPResponse] = []
         collector.seal { captured = $0 }
         XCTAssertEqual(captured.first?.retryAfter, "172800")
+    }
+
+    @MainActor func testTimeoutBeforeRealDelegateCaptureWaitsForTerminal() throws {
+        SyntheticReleaseURLProtocol.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SyntheticReleaseURLProtocol.self]
+        let entered = expectation(description: "response callback entered before capture")
+        let cancelled = expectation(description: "task cancellation invoked")
+        let terminal = expectation(description: "task terminal callback delivered")
+        let unblock = DispatchSemaphore(value: 0)
+        defer { unblock.signal() }
+        let suite = "AITaskMonitor.synthetic-delegate-drain." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let clock = SyntheticDrainClock()
+        let schedule = ReleaseRetrySchedule(defaults: defaults, clock: clock.clock)
+        var fireDeadline: (() -> Void)?
+        var starts = 0, deliveries = 0
+        let coordinator = ReleaseUpdateCoordinator(schedule: schedule, makeRequest: { completion in
+            starts += 1
+            return ReleaseRequest(testURL: URL(string: "aitm-update-test://fixture/hold-hint")!, configuration: configuration,
+                                  beforeCapture: { entered.fulfill(); _ = unblock.wait(timeout: .now() + 20) },
+                                  didCancel: { cancelled.fulfill() }) { outcome in
+                completion(outcome)
+                terminal.fulfill()
+            }
+        }, scheduleDeadline: { fire in fireDeadline = fire; return {} }, executeStorage: { $0() },
+           executeParser: { $0() }) { _ in deliveries += 1 }
+        coordinator.check()
+        wait(for: [entered], timeout: 5)
+        try XCTUnwrap(fireDeadline)()
+        wait(for: [cancelled], timeout: 5)
+        clock.monotonic = 3_601
+        clock.wall = Date(timeIntervalSince1970: 3_601)
+        coordinator.check()
+        XCTAssertEqual(starts, 1, "The unacknowledged cancellation must prevent a retry.")
+        unblock.signal()
+        wait(for: [terminal], timeout: 5)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        XCTAssertGreaterThanOrEqual(schedule.delay, 172_800, "The response that entered before cancellation must be saved.")
+        XCTAssertEqual(deliveries, 0)
+        coordinator.stop()
     }
 
     func testOversizedBodyStillReportsHeader() throws {
