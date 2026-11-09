@@ -1,0 +1,133 @@
+name: macOS Claude phase candidate synthetic tests
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-claude-phase-candidate-20261109.yml"
+      - ".github/claude-audit/phase-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-tests:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[claude-phase-candidate]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify and stage synthetic candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet 96f6ab5f88c60a528f39f93ade610830893d7d13 "$GITHUB_SHA" -- macos
+          INPUT="$GITHUB_WORKSPACE/.github/claude-audit/phase-20261109"
+          cd "$INPUT"
+          printf '%s  %s\n' \
+            '1e9c87ba739e57de22df5ef1f5c853e43ae1327ebd64e8fdebf22be22567a1a9' ClaudeHook.swift \
+            '6074db67e1ed3e8ac5937aea6f504e2de8e481662a3c66d0563316fe75da687c' ClaudeJSONValidation.swift \
+            'a839bd7eb5f2a0dc41414964bcb32c0f15606a093a320ffdfb2c3d380349c2fe' ClaudeTaskReader.swift \
+            '9a7c76cd93d1dac151856d628dfd0b83ae2ea0d2c834c0131f2e89fa11fb4b7c' TaskStore.swift \
+            '8f7417fc739cedd5d61692f8f1cadff2a0eaccd5ce16fd96f987769b0fc97ab4' ClaudePhaseIntegrationTests.swift \
+            '61143d15e9efbebec4c2d9db66989879929d517acbd226f29a0b28111daaeb02' ClaudeIdentityInvalidUTF8Tests.swift \
+            '9a359fcefcefd9b46a42f7b888c7f5a6ea96e39abb797e2049302891557fc674' ClaudeHookPhaseBlockingTests.swift \
+            '4ab9880e242c9458698704f058ab2c9e014acd741ef286414385b8282b56573e' ClaudeReaderIndependentTests.swift \
+            '48965d3eab07d0b4136d61ff2b61b90e03fdfe4d4bab6a41c6684de3fe498bc5' ClaudeReaderSafetyCandidateTests.swift \
+            '7e1e3ebe97ed119bde9d9839964c5720d8ba9e18e36ec4cde600ae34d3810592' ClaudePlanOrderingCandidateTests.swift \
+            '02db1cd6b0a82123cfbf0b12a6f495089792d633c044d6618eb794a67de8403c' ParserTests.swift \
+            '8d1b38442643ed0de90823eb3edc6373479fc735ac6606202755c2e7f118ed14' ClaudeIntegrationSafetyTests.swift \
+            | shasum -a 256 -c -
+          for name in ClaudeHook.swift ClaudeJSONValidation.swift ClaudeTaskReader.swift TaskStore.swift; do
+            cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/$name"
+          done
+          for name in ClaudePhaseIntegrationTests.swift ClaudeIdentityInvalidUTF8Tests.swift ClaudeHookPhaseBlockingTests.swift ClaudeReaderIndependentTests.swift ClaudeReaderSafetyCandidateTests.swift ClaudePlanOrderingCandidateTests.swift ParserTests.swift ClaudeIntegrationSafetyTests.swift; do
+            cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/$name"
+          done
+      - name: Run synthetic suites with IP denied
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aitm-phase-home" "$RUNNER_TEMP/aitm-phase-tmp" "$RUNNER_TEMP/aitm-phase-support"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*) (allow network* (local unix-socket)) (allow network-outbound (remote unix-socket))'
+          cat > "$RUNNER_TEMP/aitm-phase-network-probe.py" <<'PY'
+          import errno
+          import os
+          import socket
+          import sys
+
+          for family, destination in ((socket.AF_INET, ("127.0.0.1", 0)), (socket.AF_INET6, ("::1", 0))):
+              try:
+                  internet = socket.socket(family, socket.SOCK_STREAM)
+              except OSError as error:
+                  if error.errno not in (errno.EPERM, errno.EACCES): raise
+              else:
+                  try:
+                      if internet.connect_ex(destination) not in (errno.EPERM, errno.EACCES): sys.exit(1)
+                  finally:
+                      internet.close()
+          path = "/private/tmp/aitm-phase-probe-" + str(os.getpid())
+          server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          try:
+              server.bind(path)
+              server.listen(1)
+              client.connect(path)
+              peer, _ = server.accept()
+              peer.close()
+          finally:
+              client.close()
+              server.close()
+              if os.path.exists(path): os.unlink(path)
+          print("Network probe: IPv4/IPv6 denied; synthetic local Unix socket allowed")
+          PY
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-phase-home" \
+              "TMPDIR=$RUNNER_TEMP/aitm-phase-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-phase-support" \
+              "AITM_CLAUDE_TEST_EXECUTABLE=$GITHUB_WORKSPACE/macos/.build/debug/AITaskMonitor" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-phase-network-probe.py"
+          run_isolated /usr/bin/xcrun swift build --disable-sandbox
+          audit_status=0
+          for entry in ClaudePhaseIntegrationTests:17 ClaudeIdentityInvalidUTF8Tests:4 ClaudeHookPhaseBlockingTests:1 ClaudeReaderIndependentTests:13 ClaudeReaderSafetyCandidateTests:6 ClaudePlanOrderingCandidateTests:14 ParserTests:23 ClaudeHookLockTests:1 ClaudeLoopChannelTests:9 ClaudeLoopDetectionTests:7 ClaudeRetentionTests:3 ClaudeIntegrationSafetyTests:10 ClaudePlanLabelTests:2; do
+            suite="${entry%:*}"
+            count="${entry#*:}"
+            log="$RUNNER_TEMP/aitm-phase-$suite.log"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | /usr/bin/tee "$log"; then
+              audit_status=1
+            fi
+            if ! /usr/bin/grep -Eq "Executed $count tests?, with 0 failures" "$log"; then
+              printf '%s\n' "Missing successful expected test count: $suite"
+              audit_status=1
+            fi
+          done
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox --configuration release; then
+            audit_status=1
+          fi
+          exit "$audit_status"
