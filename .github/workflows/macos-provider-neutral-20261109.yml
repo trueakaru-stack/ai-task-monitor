@@ -59,7 +59,7 @@ jobs:
             '197ebc348e46a683b90f43c5e1a35b0a554ec3fc48db88b8dfc644b8f0291f3a' Tests/ExternalProviderStateTests.swift \
             '692a2e397b820539688a61ca0b06d2d6eff69425d719a691fc0bc8f330e2b8f1' Tests/ExternalProviderTaskMapperTests.swift \
             'a3272cce621732216fa0c785ecd984e1cdeb0a2cacef936197f6f18f6c5444f2' Tests/ExternalProviderTaskStoreTests.swift \
-            '6b74be917b8a60a08a1b4f67d02e78927dda2582d4fa063a73237ce3855c9d92' Tests/HermesTaskStoreTests.swift \
+            'ddedafb4374398282cb6a79a4054418e68ae4c1a85a7f5e1ca54e3b45eddc89f' Tests/HermesTaskStoreTests.swift \
             'ec36ef6f1ae8e861913deb7773abaf141f5bac2f0fbe1461a6e580a8af54788d' Tests/HistoryUnstableFallbackTests.swift \
             '12a0105f7b5a9f02306dfb284310e8e49c337ad9944e7e04b6a18b11af41a819' Tests/IndependentIsolationReviewTests.swift \
             '63d724baad9e69ce50a1e807d63e5e790034c23ca8c06eb7be957ea5e61b033a' Tests/NeutralCompletedIndependentTests.swift \

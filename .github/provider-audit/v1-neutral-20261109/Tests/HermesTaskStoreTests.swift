@@ -80,7 +80,7 @@ final class HermesTaskStoreTests: XCTestCase {
             }
             XCTAssertTrue(condition(), message)
         }
-        func send(_ session: String, epoch: UInt64) throws {
+        func send(_ session: String, epoch: UInt64, expectAcknowledgement: Bool = true) throws {
             let descriptor = try XCTUnwrap(ClaudeLoopSocket.connect(path: socketDirectory + "/events.sock"))
             defer { Darwin.close(descriptor) }
             let tick = DispatchTime.now().uptimeNanoseconds
@@ -89,7 +89,12 @@ final class HermesTaskStoreTests: XCTestCase {
             let count = body.count
             let header = Data([UInt8(count & 255), UInt8((count >> 8) & 255), UInt8((count >> 16) & 255), UInt8((count >> 24) & 255)])
             XCTAssertTrue(ClaudeLoopSocket.write(descriptor, data: header + body))
-            XCTAssertEqual(ClaudeLoopSocket.read(descriptor, count: 1), Data([0x06]), "Synthetic session: \(session)")
+            let acknowledgement = ClaudeLoopSocket.read(descriptor, count: 1)
+            if expectAcknowledgement {
+                XCTAssertEqual(acknowledgement, Data([0x06]), "Synthetic session: \(session)")
+            } else {
+                XCTAssertNil(acknowledgement, "Disabled Hermes must not acknowledge: \(session)")
+            }
         }
         wait("Profiles did not load") { store.hermesProfiles.count == 2 && runtime != nil }
         var epoch = DispatchTime.now().uptimeNanoseconds
@@ -124,7 +129,7 @@ final class HermesTaskStoreTests: XCTestCase {
         XCTAssertNotNil(store.hermesEnableCommand)
         XCTAssertNotNil(store.hermesDisableCommand)
         XCTAssertFalse(store.tasks.contains { $0.provider == .hermes }, "Preparation alone is not an agent event")
-        try send(rootScope + "_before-enable", epoch: epoch)
+        try send(rootScope + "_before-enable", epoch: epoch, expectAcknowledgement: false)
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         store.refresh()
         XCTAssertFalse(store.tasks.contains { $0.provider == .hermes }, "A prepared but disabled profile must be ignored")
@@ -140,7 +145,7 @@ final class HermesTaskStoreTests: XCTestCase {
         wait("Disabling the plugin left a task visible") {
             store.hermesSelectedProfile?.enabled == false && !store.tasks.contains { $0.provider == .hermes }
         }
-        try send(rootScope + "_after-disable", epoch: epoch)
+        try send(rootScope + "_after-disable", epoch: epoch, expectAcknowledgement: false)
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
         store.refresh()
         XCTAssertFalse(store.tasks.contains { $0.provider == .hermes }, "Disabled profile events must be discarded")
