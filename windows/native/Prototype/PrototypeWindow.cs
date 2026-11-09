@@ -399,9 +399,9 @@ internal sealed class PrototypeWindow
         }
         if (showProviderLabels)
         {
-            AddTab("all", options.Language == "en" ? "All" : "Все", samples.Count(task => task.Active));
+            AddTab("all", options.Language == "en" ? "All" : "Все", samples.Count);
             foreach (var provider in ProviderOrder.Where(provider => providers.Contains(provider.Id)))
-                AddTab(provider.Id, provider.Name, samples.Count(task => task.Active && task.Provider == provider.Id));
+                AddTab(provider.Id, provider.Name, samples.Count(task => task.Provider == provider.Id));
             tabs.Children[^1].SetValue(FrameworkElement.MarginProperty, new Thickness(0));
             SizeTabs();
             tabsHost.UpdateLayout();
@@ -628,7 +628,7 @@ internal sealed class PrototypeWindow
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(22) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var marker = new Border { Width = 14, Height = 14, CornerRadius = new CornerRadius(7), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 2, 0, 0) };
-            bool showStatus = task.Provider != "claude" || task.PlanConfirmed;
+            bool showStatus = task.Provider != "claude" || (task.PlanConfirmed && task.Status != "unknown");
             bool done = showStatus && task.Steps[i].Status == "done", current = showStatus && task.Steps[i].Status == "active";
             if (done)
             {

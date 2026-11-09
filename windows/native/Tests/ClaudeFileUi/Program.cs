@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Markup;
 using System.Windows.Media;
@@ -160,6 +161,7 @@ internal static class Program
             window.UpdateLayout();
             claude = controller.CurrentTasks.Single(x => x.Provider == "claude");
             Check(claude.Status == "unknown" && !claude.PlanConfirmed && claude.Progress is null && claude.Steps.Length == 2, "Source loss must keep names without confirmed progress");
+            CheckTabCounts(window, language, 2, 1, 1);
             string warning = language == "en" ? "No data from Claude Code" : "Нет данных от Claude Code";
             Check(Visible<TextBlock>(window).Any(x => x.Text == warning), "Source warning missing");
             Check(Visible<ProgressBar>(window).Count() == 1, "Only the unaffected Codex bar should remain");
@@ -191,6 +193,7 @@ internal static class Program
             Check(new[] { "First step", "Second step", "Third step" }.All(visibleNames.Contains) &&
                   visibleNames.Any(x => x.StartsWith(unconfirmedNote, StringComparison.Ordinal)), "Expanded view lost known names or the unconfirmed-plan note");
             Check(Visible<ProgressBar>(window).Count() == 1, "Unconfirmed Claude plan displayed a progress bar after a new prompt");
+            CheckTabCounts(window, language, 2, 1, 1);
             Capture(window, Path.Combine(work, prefix + "-new-prompt-expanded.png"));
             ((Button)window.FindName("MinimizeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             window.UpdateLayout();
@@ -219,6 +222,20 @@ internal static class Program
             Capture(window, Path.Combine(work, prefix + "-bounded-expanded.png"));
         }
         finally { window.Close(); }
+    }
+
+    private static void CheckTabCounts(Window window, string language, int total, int codex, int claude)
+    {
+        var tabs = ((StackPanel)window.FindName("ProviderTabsPanel")).Children.OfType<Button>()
+            .ToDictionary(button => (string)button.Tag, StringComparer.Ordinal);
+        string lead = language == "en" ? "Show tasks: " : "Показать задачи: ";
+        string all = language == "en" ? "All" : "Все";
+        foreach (var item in new[] { (Id: "all", Label: all, Count: total), (Id: "codex", Label: "Codex", Count: codex), (Id: "claude", Label: "Claude Code", Count: claude) })
+        {
+            Check(tabs.TryGetValue(item.Id, out Button? button), "A provider tab is missing");
+            Check(AutomationProperties.GetName(button!) == $"{lead}{item.Label}, {item.Count}", "The accessible tab count differs from visible cards");
+            Check(Visible<TextBlock>(button!).Any(text => text.Text == item.Count.ToString()), "The displayed tab count differs from visible cards");
+        }
     }
 
     private static IEnumerable<T> Visible<T>(DependencyObject root) where T : FrameworkElement

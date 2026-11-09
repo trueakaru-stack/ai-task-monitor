@@ -1,6 +1,7 @@
 using System.IO;
 using System.Reflection;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Markup;
 using System.Windows.Media;
@@ -28,6 +29,8 @@ internal static class Program
                 {
                     CheckClaudeFlow(language, theme);
                     CheckClaudeActiveUnconfirmedPlan(language, theme);
+                    CheckVisibleTabCounts(language, theme);
+                    CheckClaudeContradictoryState(language, theme);
                 }
             CheckClaudeCorrections();
             CheckStepCountWords();
@@ -47,6 +50,136 @@ internal static class Program
             Console.Error.WriteLine(ex.Message);
             return 1;
         }
+    }
+
+    private static void CheckClaudeContradictoryState(string language, string theme)
+    {
+        var (window, controller) = Open("active", language, theme);
+        try
+        {
+            SampleTask confirmed = controller.CurrentTasks.Single(item => item.Provider == "claude");
+            SampleTask codex = controller.CurrentTasks.Single(item => item.Provider == "codex");
+            var update = typeof(PrototypeWindow).GetMethod("UpdateSamples", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var render = typeof(PrototypeWindow).GetMethod("Render", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            foreach (SampleTask control in new[] { confirmed, codex })
+            {
+                update.Invoke(controller, [new List<SampleTask> { control }]);
+                render.Invoke(controller, null);
+                window.UpdateLayout();
+                Check(Visible<ProgressBar>(window).Any() && Visible<Border>(window).Any(border =>
+                    border.Width == 14 && border.Height == 14 && border.Child is not null),
+                    "A confirmed task lost its progress or completed-step marker.");
+            }
+            SampleTask task = confirmed with
+            {
+                Status = "unknown",
+                PlanConfirmed = true,
+                Activity = language == "en" ? "Status unconfirmed" : "Статус не подтверждён"
+            };
+            update.Invoke(controller, [new List<SampleTask> { task }]);
+            render.Invoke(controller, null);
+            window.UpdateLayout();
+            string note = language == "en" ? "Plan unconfirmed" : "План не подтверждён";
+            Check(Visible<TextBlock>(window).Any(text => text.Text.StartsWith(note, StringComparison.Ordinal)), "Unconfirmed Claude plan note is missing.");
+            var texts = Visible<TextBlock>(window).Select(text => text.Text).ToHashSet(StringComparer.Ordinal);
+            Check(task.Steps.All(step => texts.Contains(step.Title)), "Unconfirmed Claude plan lost a known step name.");
+            Check(!Visible<ProgressBar>(window).Any(), "Unconfirmed Claude task showed a progress bar.");
+            var markers = Visible<Border>(window).Where(border => border.Width == 14 && border.Height == 14).ToArray();
+            Check(markers.Length > 0 && markers.All(marker => marker.Child is null && marker.BorderThickness.Left == 1),
+                "Unconfirmed Claude task displayed confirmed step markers.");
+            Click((Button)window.FindName("MinimizeButton"));
+            window.UpdateLayout();
+            Check(Visible<TextBlock>(window).Any(text => text.Text == note) && !Visible<ProgressBar>(window).Any(),
+                "Compact unconfirmed Claude state differs.");
+        }
+        finally { window.Close(); }
+    }
+
+    private static void CheckVisibleTabCounts(string language, string theme)
+    {
+        var (window, controller) = Open("active", language, theme);
+        try
+        {
+            SampleTask codex = controller.CurrentTasks.Single(task => task.Provider == "codex");
+            SampleTask claude = controller.CurrentTasks.Single(task => task.Provider == "claude");
+            bool english = language == "en";
+            string codexActive = english ? "Example Codex task" : "Пример задачи Codex";
+            string codexUnknown = english ? "Unconfirmed Codex task" : "Неподтверждённая задача Codex";
+            string claudeUnknown = english ? "Unconfirmed Claude task" : "Неподтверждённая задача Claude";
+            string claudeOther = english ? "Another Claude task" : "Другая задача Claude";
+            string waitingTitle = english ? "DeepSeek task awaiting confirmation" : "Задача DeepSeek ожидает подтверждения";
+            string unconfirmed = english ? "Status unconfirmed" : "Статус не подтверждён";
+            string waiting = english ? "Waiting for confirmation" : "Ожидает подтверждения";
+            var tasks = new List<SampleTask>
+            {
+                codex with { Title = codexActive },
+                codex with { Id = "codex:unknown", Title = codexUnknown, Activity = unconfirmed, Status = "unknown", Progress = null,
+                    PlanConfirmed = false, Steps = codex.Steps.Select(step => step with { Status = "unknown" }).ToArray() },
+                claude with { Title = claudeUnknown, Activity = unconfirmed, Status = "unknown", Progress = null,
+                    PlanConfirmed = false, Steps = claude.Steps.Select(step => step with { Status = "unknown" }).ToArray() },
+                claude with { Id = "claude:second", Title = claudeOther, Activity = unconfirmed, Status = "unknown", Progress = null,
+                    PlanConfirmed = false, Steps = claude.Steps.Select(step => step with { Status = "unknown" }).ToArray() }
+            };
+            var update = typeof(PrototypeWindow).GetMethod("UpdateSamples", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var render = typeof(PrototypeWindow).GetMethod("Render", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            update.Invoke(controller, [tasks]);
+            render.Invoke(controller, null);
+            window.UpdateLayout();
+            AssertTabs(4, 2, 2);
+            string? captureDirectory = Environment.GetEnvironmentVariable("AITM_TAB_COUNT_CAPTURE_DIRECTORY");
+            if (!string.IsNullOrEmpty(captureDirectory))
+            {
+                Directory.CreateDirectory(captureDirectory);
+                SaveCapture(window, Path.Combine(captureDirectory, $"{theme}-{language}-visible-counts-all.png"));
+            }
+            Click(Tab("claude"));
+            window.UpdateLayout();
+            var texts = Visible<TextBlock>(window).Select(item => item.Text).ToHashSet(StringComparer.Ordinal);
+            Check(texts.Contains(claudeUnknown) && texts.Contains(claudeOther) &&
+                  !texts.Contains(codexActive) && !texts.Contains(codexUnknown),
+                "The provider filter does not match its visible count.");
+            AssertTabs(4, 2, 2);
+            if (!string.IsNullOrEmpty(captureDirectory))
+                SaveCapture(window, Path.Combine(captureDirectory, $"{theme}-{language}-visible-counts-claude.png"));
+            tasks.RemoveAt(3);
+            update.Invoke(controller, [tasks]);
+            render.Invoke(controller, null);
+            window.UpdateLayout();
+            AssertTabs(3, 2, 1);
+            tasks.Add(codex with { Id = "deepseek:waiting", Provider = "deepseek", ProviderName = "DeepSeek Harness",
+                Title = waitingTitle, Activity = waiting, Status = "waiting", Progress = null, PlanConfirmed = false, Steps = [] });
+            update.Invoke(controller, [tasks]);
+            render.Invoke(controller, null);
+            window.UpdateLayout();
+            AssertTabs(4, 2, 1, 1);
+            Click(Tab("deepseek"));
+            window.UpdateLayout();
+            Check(Visible<TextBlock>(window).Any(text => text.Text == waitingTitle), "Waiting task is missing from its provider filter.");
+            if (!string.IsNullOrEmpty(captureDirectory))
+                SaveCapture(window, Path.Combine(captureDirectory, $"{theme}-{language}-visible-counts-deepseek.png"));
+
+            Button Tab(string id) => ((StackPanel)window.FindName("ProviderTabsPanel")).Children.OfType<Button>()
+                .Single(button => (string)button.Tag == id);
+            void AssertTabs(int all, int codexCount, int claudeCount, int? deepSeekCount = null)
+            {
+                string lead = language == "en" ? "Show tasks: " : "Показать задачи: ";
+                foreach (var item in new[] { (Id: "all", Label: language == "en" ? "All" : "Все", Count: all),
+                    (Id: "codex", Label: "Codex", Count: codexCount), (Id: "claude", Label: "Claude Code", Count: claudeCount) })
+                {
+                    Button tab = Tab(item.Id);
+                    Check(AutomationProperties.GetName(tab) == $"{lead}{item.Label}, {item.Count}", "Accessible tab count differs from visible cards.");
+                    Check(Visible<TextBlock>(tab).Any(text => text.Text == item.Count.ToString()), "Displayed tab count differs from visible cards.");
+                }
+                if (deepSeekCount.HasValue)
+                {
+                    Button deepSeek = Tab("deepseek");
+                    Check(AutomationProperties.GetName(deepSeek) == $"{lead}DeepSeek Harness, {deepSeekCount.Value}" &&
+                          Visible<TextBlock>(deepSeek).Any(text => text.Text == deepSeekCount.Value.ToString()),
+                        "A waiting task was omitted from its provider count.");
+                }
+            }
+        }
+        finally { window.Close(); }
     }
 
     private static void CheckClaudeActiveUnconfirmedPlan(string language, string theme)
