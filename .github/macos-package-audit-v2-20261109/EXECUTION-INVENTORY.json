@@ -1,0 +1,52 @@
+{
+  "scope": "Test-only packaging audit v2 with restricted SwiftPM wrapper and separate synthetic old-selector test; not a release.",
+  "sourceProductBase": "bbef0654fdb2789c62c8d8511576f05b75a289ca",
+  "sourceOverlayCommit": "8ebef09327339711bc5a4519c62eb565203b31d4",
+  "v2InputManifestSha256": "c7fd3fcdf40ac3f82a64a886c567dcdba42c689163127d6be6f38863617f43cf",
+  "originalCandidateManifestSha256": "2806821366bbce3a5e24dd6f3207fcb52ab7bd8bc5cd9e23f50e75bf0b855d21",
+  "testVersionManifestSha256": "3518f3b2fcf030034ef3ad344b9b2864bf7dad08fa014e844577c3b1133c2390",
+  "testVersion": "0.3.8-ci.1",
+  "testBuildNumber": "11",
+  "resourcesManifestSha256": "43ecc4a14501423eaf91946bdef279474b1759fe9ac0c43ebaddb55be40d628f",
+  "oldReleaseCommit": "c034eef660922c9a06ee601e6ab9f8eac22b7889",
+  "oldReleaseSelectorSha256": "531dee18ce0a17314e41869b8ef7e3caf5eb79ae7f1a69e34e78eb0728aba669",
+  "workflowSha256": "8ba9b4c2dfb7bf4e986533c4c9e84d3b85ac1661ad561fe3493f1cae7c2bd777",
+  "startupBoundary": "Fresh hosted runner; profile and CLI preflight; empty app environment; no network and deny process-fork. Dynamic probes require denial of TCP loopback, Unix bind and Unix connect to our own synthetic listener, fork and posix_spawn. A Python Popen owner observes and reaps exactly one child; KILL occurs only after a timed-out TERM wait. App and hook use distinct initially empty synthetic working directories. Five-second process liveness only, not interactive UI acceptance. Filesystem isolation is not complete.",
+  "networkBoundary": "Build and legacy test profiles deny IP network and allow Unix sockets; probe checks TCP loopback IPv4/IPv6 and a synthetic AF_UNIX socket. UDP and external IP not dynamically checked.",
+  "dmgBoundary": "Runs pinned original scripts in a fresh source copy; original build script deletes only an initially absent dist path. Unique runner-temp read-only non-browsable mount; root item names/types reported; built and mounted binary execute bits and access checked. Before attach and before detach, hdiutil info -plist confirms the synthetic image and mount; a unique whole-disk entry handles a partial attach. Ambiguous ownership fails closed. Forced runner termination or an asynchronous partial attach after inspection can prevent cleanup. Only an allowlist of files is uploaded, and only following successful checks. No installation or public release.",
+  "signature": "Original build script uses ad-hoc codesign; notarization and Apple Developer ID are not configured.",
+  "oldUpdateBoundary": "Compiles old tag selector without changes against synthetic metadata; tests selection only, not the installed binary, network schedule, UI notification, release publication or update installation.",
+  "externalRuntimeDependencies": [
+    "OpenCode CLI",
+    "Kimi CLI and Node",
+    "DeepSeek CLI, Node and pnpm",
+    "Hermes installation and Python environment"
+  ],
+  "knownLimitations": [
+    "Python DeepSeek bundle schema omits V2 sender, although current Mac installation uses JS path.",
+    "Hermes liveness guard is not wired into the manager or packaged.",
+    "No live agent, user profile, account or token is used.",
+    "Final version and final release commit require separate checks.",
+    "GitHub Actions artifacts are test-only and not GitHub Releases."
+  ],
+  "trigger": "push to macos when at least one changed path matches the unique v2 workflow/input path and v2 head-commit marker is present; verify entire staged commit and all other workflow filters separately.",
+  "inputs": {
+    "build-and-inspect.sh": "3338e0c291f046c0c54e59c7ee4a7c6004a1aaeca5122b3f76c01c85aa01abcb",
+    "bundle-resources.sha256": "43ecc4a14501423eaf91946bdef279474b1759fe9ac0c43ebaddb55be40d628f",
+    "candidate-test-version.sha256": "3518f3b2fcf030034ef3ad344b9b2864bf7dad08fa014e844577c3b1133c2390",
+    "dmg-owner.py": "6cbcfaed69a7a2c65bf75ed625d0b83535c1667fec3088acf90746bc71dd39f8",
+    "legacy-update-check.sh": "90c63baa147fa58e19e84356256fd85364da06d8b33a6c6b7d528cdca4d0ce32",
+    "legacy-update-main.swift": "b431220f047388af355ca90c02a352a564213e29c0b2c51e5c4053818808c0de",
+    "network-probe.py": "3cbf34520bd744c40730e88533d9cdbc011d488ef8855099f5654219ebd47954",
+    "prepare-test-version.py": "457ee39bf5f63762a74d1113cd925630d657f6e03cf8237a964523a37a515247",
+    "startup-guard.py": "47ab717a59e26a7fc684ca839cb646cc09ed9b01f96852a8b2c8d5d7b9ef8274",
+    "startup-owner.py": "468ba6782d6e2ab98777fcce816cf60a9ac3c352acd4d6a5904b8fa651c2013c",
+    "startup-sandbox-probe.py": "28b65d9af6372f1a7d1886f762edeef7567f948639c8c05d7f2aa7da6090dde3",
+    "swift-wrapper.py": "e5c6559be96bd5d9a9c41b2d39735fff3d65e9c02d513673041f6dc9747e0830",
+    "SyntheticNetworkPackage.swift": "05a754e4ee7e0c9623e2b2f0a18ccac98d1b4123c3232bb22ca2ea09d60941ed",
+    "unix-connect-probe.py": "a63839a250038ecea9c474046e8a4b51bffd410ccdf973de4aee9fb69284d138",
+    "verify-app-bundle.py": "af12194adc68df8fab7f10cf482c3725a150d0baf30833d76d71b36aba1ae586",
+    "verify-dmg-contents.py": "2d807f871f393c3e700d8a549145cf4778254608a25ab3c701dfe50c3a5fb5e4"
+  },
+  "swiftWrapperBoundary": "Only the exact command swift build -c release --arch arm64 --arch x86_64 is accepted, once, in the checked synthetic source directory. The wrapper checks xcrun selects the exact Xcode toolchain swift and execs it with --disable-sandbox, retaining the outer sandbox and a clean environment. PATH is reset for the toolchain. Its own Python network probe must pass before exec. A separate uncached synthetic SwiftPM manifest must observe EPERM/EACCES on IPv4 and IPv6 loopback connections under the same outer profile. The selected toolchain must advertise --disable-sandbox and --manifest-cache. SwiftPM's internal filesystem sandbox is disabled; the outer policy permits default filesystem access and is not complete file isolation. The product script and source bytes remain untouched. Actual Mac behavior is unverified until CI."
+}
