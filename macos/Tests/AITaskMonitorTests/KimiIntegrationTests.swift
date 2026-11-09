@@ -94,7 +94,7 @@ final class KimiIntegrationTests: XCTestCase {
         XCTAssertEqual(discovered.assets.path, assets.path)
         XCTAssertNil(KimiIntegration.discover(home: root, environment: ["PATH": bin.path, "KIMI_CODE_HOME": "relative"], resources: resources))
         let context = KimiIntegration.Context(node: URL(fileURLWithPath: node), home: home, assets: assets, installAnchor: anchor,
-                                              environment: ["HOME": root.path, "PATH": "/usr/bin:/bin", "TMPDIR": root.path])
+                                              environment: ["PATH": "/usr/bin:/bin", "TMPDIR": root.path])
         XCTAssertTrue(assets.path.hasPrefix("/private/tmp/"), "The plugin path must resolve macOS's /tmp link")
         XCTAssertEqual(try KimiIntegration.inspect(context).state, "disconnected")
         let nvmBin = root.appendingPathComponent(".nvm/versions/node/v22.19.0/bin", isDirectory: true)
@@ -103,7 +103,7 @@ final class KimiIntegrationTests: XCTestCase {
         try manager.createSymbolicLink(at: nvmBin.appendingPathComponent("kimi"), withDestinationURL: executable)
         var nvmContext = try XCTUnwrap(KimiIntegration.discover(home: root,
             environment: ["PATH": "", "KIMI_CODE_HOME": linkedHome], resources: resources, systemPaths: []))
-        nvmContext.environment = ["HOME": root.path, "PATH": "/usr/bin:/bin", "TMPDIR": root.path]
+        nvmContext.environment = ["PATH": "/usr/bin:/bin", "TMPDIR": root.path]
         XCTAssertEqual(try KimiIntegration.inspect(nvmContext).state, "disconnected")
         let plugins = home.appendingPathComponent("plugins", isDirectory: true)
         let managed = plugins.appendingPathComponent("managed/ai-task-monitor", isDirectory: true)

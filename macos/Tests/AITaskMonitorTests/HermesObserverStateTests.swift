@@ -239,8 +239,10 @@ final class HermesObserverStateTests: XCTestCase {
     func testPythonAndSwiftUseTheSameMonotonicClock() throws {
         let before = DispatchTime.now().uptimeNanoseconds
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["python3", "-I", "-B", "-c", "import time; print(time.monotonic_ns())"]
+        let python = try XCTUnwrap(ProcessInfo.processInfo.environment["AITM_HERMES_PYTHON"])
+        XCTAssertTrue(python.hasPrefix("/"))
+        process.executableURL = URL(fileURLWithPath: python)
+        process.arguments = ["-I", "-B", "-c", "import sys, time; assert (3, 11) <= sys.version_info[:2] < (3, 15); print(time.monotonic_ns())"]
         let output = Pipe()
         process.standardOutput = output
         try process.run()

@@ -42,6 +42,8 @@ struct ExternalProviderTask: Equatable {
     var planConfirmed: Bool
     var activity: String = ""
     var longRunning: Bool = false
+    // Ownership cannot be reconstructed from a v1 event after ambiguity.
+    var deepSeekUnassigned = false
     fileprivate var turn: String
     fileprivate var calls: [ExternalProviderCall] = []
     fileprivate var lastHeartbeat: Date?
@@ -128,9 +130,22 @@ final class ExternalProviderStateStore {
     private var sequence: UInt64 = 0
     private var hermesBarrier: Int64 = 0
     private var hermesAllowed = false
+    private var providerRosterInitialized = false
+    private var openCodeAllowed = false
+    private var openCodeUnconfirmed = false
+    private var deepSeekAllowed = false
+    private var deepSeekScopesInitialized = false
+    private var deepSeekScopeOverflow = false
+    private var deepSeekScopes: Set<String> = []
+    // Only the initial verified roster can retain legacy confidence. Once a
+    // scope is affected, removing it is permanent for this store lifetime.
+    private var deepSeekInitiallyTrustedScopes: Set<String> = []
+    private var deepSeekUnassignedScopes: Set<String> = []
+    private var deepSeekOwnershipOverflow = false
     private var hermesScopeBarriers: [String: Int64] = [:]
     private var hermesScopes: Set<String> = []
     private var hermesUncertainScopes: Set<String> = []
+    private(set) var capacityLimitedProviders: Set<String> = []
     private let maximumSessions = 256
     private let staleAfter: TimeInterval = 1_800
     private let heartbeatLifetime: TimeInterval = 180
@@ -154,10 +169,31 @@ final class ExternalProviderStateStore {
                 markHermesScopeGap(scope)
                 return true
             }
+            // A v1 DeepSeek callback is not evidence about other profiles.
+            if event.provider == "deepseek" {
+                if scope.utf8.count == 32,
+                   scope.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) {
+                    markSessionScopesGap(provider: "deepseek", scopes: [scope])
+                }
+                return true
+            }
             markGap(provider: event.provider)
             return true
         }
         let key = event.provider + ":" + event.session
+        if event.provider == "deepseek", isDeepSeekUnassigned(event.session) {
+            return applyUnassignedDeepSeek(event, now: now)
+        }
+        let unconfirmedV1 = (event.provider == "opencode" && openCodeUnconfirmed) ||
+            (event.provider == "deepseek" && (!Self.validDeepSeekScope(scope) || deepSeekScopeOverflow || !deepSeekInitiallyTrustedScopes.contains(scope)))
+        // A late terminal or heartbeat cannot create or remove an unconfirmed card.
+        if unconfirmedV1 && ["idle", "completed", "failed", "interrupted", "heartbeat"].contains(event.kind) {
+            if var state = states[key] {
+                markUnconfirmedV1(&state)
+                states[key] = state
+            }
+            return true
+        }
         // A heartbeat alone never creates or revives a task.
         if event.kind == "heartbeat" {
             if var state = states[key] {
@@ -170,9 +206,15 @@ final class ExternalProviderStateStore {
         let created = states[key] == nil
         if created {
             if states.count >= maximumSessions {
-                let removable = states.filter { $0.value.status != "active" && $0.value.status != "waiting" }
-                    .min { $0.value.updatedAt < $1.value.updatedAt }
-                guard let oldest = removable?.key else { markGap(); return false }
+                // A stale v1 card is evidence, and cannot be displaced by another source.
+                if event.provider == "opencode" || event.provider == "deepseek" {
+                    return rejectAtCapacity(provider: event.provider, scope: scope)
+                }
+                let removable = states.filter { _, value in
+                    value.status != "active" && value.status != "waiting" &&
+                    !(value.status == "unknown" && (value.provider == "opencode" || value.provider == "deepseek"))
+                }.min { $0.value.updatedAt < $1.value.updatedAt }
+                guard let oldest = removable?.key else { return rejectAtCapacity(provider: event.provider, scope: scope) }
                 if states[oldest]?.provider == "hermes" { markGap(provider: "hermes") }
                 states.removeValue(forKey: oldest)
             }
@@ -186,6 +228,17 @@ final class ExternalProviderStateStore {
             let result = applyHermes(event, state: &state, now: now, created: created)
             states[key] = state
             return result
+        }
+        if unconfirmedV1 {
+            if Self.isTerminalV1(state.status), ["started", "active", "waiting", "tool_started"].contains(event.kind) {
+                state.status = "unknown"
+            }
+            if state.startKey.isEmpty { start(&state, now: now, turn: event.turn) }
+            if state.provider != "opencode", event.kind == "plan", let steps = event.steps, !steps.isEmpty { state.steps = steps }
+            markUnconfirmedV1(&state)
+            state.updatedAt = now
+            states[key] = state
+            return true
         }
         if event.provider == "kimi" {
             // Kimi's passive hooks can be delayed or lost and do not reliably
@@ -241,10 +294,144 @@ final class ExternalProviderStateStore {
         return true
     }
 
+    private func rejectAtCapacity(provider: String, scope: String) -> Bool {
+        capacityLimitedProviders.insert(provider)
+        if provider == "deepseek" && Self.validDeepSeekScope(scope) {
+            markSessionScopesGap(provider: provider, scopes: [scope])
+        } else if provider == "hermes" && Self.validDeepSeekScope(scope) {
+            markHermesScopeGap(scope)
+        } else {
+            markGap(provider: provider)
+        }
+        return false
+    }
+
+    private func markUnconfirmedV1(_ state: inout ExternalProviderTask) {
+        // A loss of ownership is not evidence that an already finished task
+        // restarted. Preserve terminal state until a later activity signal.
+        if !Self.isTerminalV1(state.status) { state.status = "unknown" }
+        state.planConfirmed = false
+        if state.provider == "opencode" || state.deepSeekUnassigned { state.steps = [] }
+        state.calls.removeAll()
+        state.lastHeartbeat = nil
+    }
+
+    private static func isTerminalV1(_ status: String) -> Bool {
+        ["idle", "completed", "failed", "interrupted"].contains(status)
+    }
+
+    // Accept only minimal evidence from an unowned v1 event. In particular,
+    // terminal and heartbeat records cannot create or dismiss a neutral card.
+    @discardableResult
+    func applyUnassignedDeepSeek(_ event: ExternalProviderEvent, now: Date) -> Bool {
+        guard event.provider == "deepseek" else { return false }
+        let scope = Self.sessionScope(event.session)
+        if Self.validDeepSeekScope(scope) {
+            rememberUnassignedDeepSeekScope(scope)
+            markSessionScopesGap(provider: "deepseek", scopes: [scope])
+        }
+        let key = event.provider + ":" + event.session
+        if ["gap", "idle", "completed", "failed", "interrupted", "heartbeat", "tool_finished"].contains(event.kind) {
+            if var state = states[key] {
+                state.deepSeekUnassigned = true
+                markUnconfirmedV1(&state)
+                states[key] = state
+            }
+            return true
+        }
+        if states[key] == nil {
+            guard states.count < maximumSessions else { return rejectAtCapacity(provider: "deepseek", scope: scope) }
+            states[key] = ExternalProviderTask(provider: event.provider, session: event.session, status: "unknown",
+                startKey: "", startedAt: .distantPast, updatedAt: now, steps: [], planConfirmed: false, turn: "")
+        }
+        guard var state = states[key] else { return false }
+        if Self.isTerminalV1(state.status), ["started", "active", "waiting", "tool_started"].contains(event.kind) {
+            state.status = "unknown"
+        }
+        state.deepSeekUnassigned = true
+        markUnconfirmedV1(&state)
+        state.updatedAt = now
+        states[key] = state
+        return true
+    }
+
+    // Mark only scopes whose ownership is ambiguous; a continuously verified
+    // neighbour must retain its own state.
+    func markDeepSeekOwnershipUnknown(allowed: Set<String>, ambiguous: Set<String>,
+                                      historyLost: Bool, disabled: Set<String>) {
+        var affected: Set<String> = []
+        for key in Array(states.keys) {
+            guard var state = states[key], state.provider == "deepseek" else { continue }
+            let scope = Self.sessionScope(state.session)
+            let unknown = ambiguous.contains(scope) ||
+                (historyLost && !allowed.contains(scope) && !disabled.contains(scope))
+            guard unknown else { continue }
+            state.deepSeekUnassigned = true
+            markUnconfirmedV1(&state)
+            states[key] = state
+            if Self.validDeepSeekScope(scope) { affected.insert(scope) }
+        }
+        for scope in affected { rememberUnassignedDeepSeekScope(scope) }
+        markSessionScopesGap(provider: "deepseek", scopes: affected)
+    }
+
+    func isDeepSeekUnassigned(_ session: String) -> Bool {
+        let scope = Self.sessionScope(session)
+        return deepSeekOwnershipOverflow || deepSeekUnassignedScopes.contains(scope) ||
+            states["deepseek:" + session]?.deepSeekUnassigned == true
+    }
+
+    private func rememberUnassignedDeepSeekScope(_ scope: String) {
+        guard !deepSeekOwnershipOverflow, Self.validDeepSeekScope(scope),
+              !deepSeekUnassignedScopes.contains(scope) else { return }
+        guard deepSeekUnassignedScopes.count < maximumSessions else {
+            deepSeekOwnershipOverflow = true
+            deepSeekUnassignedScopes.removeAll()
+            deepSeekInitiallyTrustedScopes.removeAll()
+            capacityLimitedProviders.insert("deepseek")
+            for key in Array(states.keys) where states[key]?.provider == "deepseek" {
+                if var state = states[key] {
+                    state.deepSeekUnassigned = true
+                    markUnconfirmedV1(&state)
+                    states[key] = state
+                }
+            }
+            return
+        }
+        deepSeekUnassignedScopes.insert(scope)
+        for key in Array(states.keys) {
+            guard var state = states[key], state.provider == "deepseek",
+                  Self.sessionScope(state.session) == scope else { continue }
+            state.deepSeekUnassigned = true
+            markUnconfirmedV1(&state)
+            states[key] = state
+        }
+    }
+
+    private static func validDeepSeekScope(_ scope: String) -> Bool {
+        scope.utf8.count == 32 && scope.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+    }
+
+    private func markDeepSeekScopesUnconfirmed(_ scopes: Set<String>) {
+        for scope in scopes where Self.validDeepSeekScope(scope) {
+            deepSeekInitiallyTrustedScopes.remove(scope)
+        }
+    }
+
     func markGap(provider: String? = nil) {
+        if provider == nil || provider == "opencode" { openCodeUnconfirmed = true }
+        if provider == nil || provider == "deepseek" {
+            deepSeekScopesInitialized = true
+            let observed = Set(states.values.filter { $0.provider == "deepseek" }.map { Self.sessionScope($0.session) })
+            markDeepSeekScopesUnconfirmed(deepSeekScopes.union(observed))
+        }
         if provider == nil || provider == "hermes" { hermesBarrier = max(hermesBarrier, Self.monotonicNanoseconds()) }
         for key in Array(states.keys) {
             if let provider, states[key]?.provider != provider { continue }
+            if states[key]?.provider == "opencode" || states[key]?.provider == "deepseek" {
+                if var state = states[key] { markUnconfirmedV1(&state); states[key] = state }
+                continue
+            }
             if states[key]?.provider == "hermes" {
                 states[key]?.hermesUncertain = true
                 states[key]?.hermesRequests.removeAll()
@@ -259,6 +446,17 @@ final class ExternalProviderStateStore {
     }
 
     func retainProviders(_ allowed: Set<String>) {
+        capacityLimitedProviders.formIntersection(allowed)
+        let nextOpenCodeAllowed = allowed.contains("opencode"), nextDeepSeekAllowed = allowed.contains("deepseek")
+        if !providerRosterInitialized && !nextDeepSeekAllowed { deepSeekScopesInitialized = true }
+        if providerRosterInitialized && nextOpenCodeAllowed != openCodeAllowed { openCodeUnconfirmed = true }
+        if providerRosterInitialized && deepSeekAllowed && !nextDeepSeekAllowed {
+            let observed = Set(states.values.filter { $0.provider == "deepseek" }.map { Self.sessionScope($0.session) })
+            markDeepSeekScopesUnconfirmed(deepSeekScopes.union(observed))
+        }
+        providerRosterInitialized = true
+        openCodeAllowed = nextOpenCodeAllowed
+        deepSeekAllowed = nextDeepSeekAllowed
         let nowAllowed = allowed.contains("hermes")
         if nowAllowed != hermesAllowed {
             hermesBarrier = max(hermesBarrier, Self.monotonicNanoseconds())
@@ -269,7 +467,12 @@ final class ExternalProviderStateStore {
             hermesUncertainScopes.removeAll()
         }
         hermesAllowed = nowAllowed
-        states = states.filter { allowed.contains($0.value.provider) }
+        for key in Array(states.keys) {
+            guard var state = states[key], !allowed.contains(state.provider) else { continue }
+            if state.provider == "opencode" || state.provider == "deepseek" {
+                markUnconfirmedV1(&state); states[key] = state
+            } else { states.removeValue(forKey: key) }
+        }
     }
 
     private static func monotonicNanoseconds() -> Int64 {
@@ -412,14 +615,39 @@ final class ExternalProviderStateStore {
     }
 
     func retainSessionScopes(provider: String, scopes: Set<String>) {
+        if provider == "deepseek" {
+            var valid = Set(scopes.filter(Self.validDeepSeekScope))
+            if valid.count > maximumSessions {
+                deepSeekScopeOverflow = true
+                deepSeekInitiallyTrustedScopes.removeAll()
+                for key in Array(states.keys) where states[key]?.provider == "deepseek" {
+                    if var state = states[key] { markUnconfirmedV1(&state); states[key] = state }
+                }
+                valid.removeAll()
+            }
+            if !deepSeekScopesInitialized && !deepSeekScopeOverflow {
+                deepSeekInitiallyTrustedScopes.formUnion(valid)
+            } else if deepSeekScopesInitialized {
+                markSessionScopesGap(provider: "deepseek", scopes: deepSeekScopes.symmetricDifference(scopes))
+            }
+            deepSeekScopes = valid
+            deepSeekScopesInitialized = true
+        }
         if provider == "hermes" {
             updateHermesScopeBarriers(hermesScopes.symmetricDifference(scopes))
             hermesScopes = scopes
         }
-        states = states.filter { $0.value.provider != provider || scopes.contains(Self.sessionScope($0.value.session)) }
+        for key in Array(states.keys) {
+            guard let state = states[key], state.provider == provider,
+                  !scopes.contains(Self.sessionScope(state.session)) else { continue }
+            if provider == "deepseek" {
+                var copy = state; markUnconfirmedV1(&copy); states[key] = copy
+            } else { states.removeValue(forKey: key) }
+        }
     }
 
     func markSessionScopesGap(provider: String, scopes: Set<String>) {
+        if provider == "deepseek" && !scopes.isEmpty { deepSeekScopesInitialized = true; markDeepSeekScopesUnconfirmed(scopes) }
         if provider == "hermes" {
             updateHermesScopeBarriers(hermesUncertainScopes.symmetricDifference(scopes))
             hermesUncertainScopes = scopes
@@ -427,6 +655,10 @@ final class ExternalProviderStateStore {
         for key in Array(states.keys) {
             guard let state = states[key], state.provider == provider,
                   scopes.contains(Self.sessionScope(state.session)) else { continue }
+            if provider == "deepseek" {
+                var copy = state; markUnconfirmedV1(&copy); states[key] = copy
+                continue
+            }
             if provider == "hermes" {
                 states[key]?.hermesUncertain = true
                 states[key]?.hermesRequests.removeAll()

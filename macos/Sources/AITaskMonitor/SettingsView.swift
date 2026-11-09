@@ -28,6 +28,38 @@ private struct SettingsMenuWidth: ViewModifier {
     }
 }
 
+private struct SourceProfileMenuWidth: ViewModifier {
+    let width: CGFloat
+
+    @ViewBuilder func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            content.buttonSizing(.flexible).frame(maxWidth: width)
+        } else {
+            content.frame(maxWidth: .infinity)
+        }
+        #else
+        content.frame(maxWidth: .infinity)
+        #endif
+    }
+}
+
+private struct SourceProfileActionWidths: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+    }
+}
+
+private struct SourceProfileActionWidth: ViewModifier {
+    let source: String
+    func body(content: Content) -> some View {
+        content.background(GeometryReader { proxy in
+            Color.clear.preference(key: SourceProfileActionWidths.self, value: [source: proxy.size.width])
+        })
+    }
+}
+
 extension EnvironmentValues {
     var settingsPreviewEnd: Bool {
         get { self[SettingsPreviewEndKey.self] }
@@ -64,6 +96,8 @@ struct SettingsView: View {
     @State private var feedbackCopyError = false
     @State private var kimiCopyError = false
     @State private var settingsMenuWidth: CGFloat = 120
+    @State private var sourceProfileMenuWidth: CGFloat = 120
+    @State private var sourceProfileActionWidths: [String: CGFloat] = [:]
     @Environment(\.settingsPreviewEnd) private var settingsPreviewEnd
     @Environment(\.settingsPreviewSources) private var settingsPreviewSources
     @Environment(\.settingsPreviewClaude) private var settingsPreviewClaude
@@ -136,6 +170,14 @@ struct SettingsView: View {
                                 Text("OpenCode").font(.system(size: 13, weight: .medium))
                                 Text(tr("Приложение добавит локальный плагин OpenCode. Поддерживаются совместимые версии 1 начиная с 1.18.29 и версия 2. После подключения перезапустите OpenCode.", "The app adds a local OpenCode plugin. Compatible versions 1.18.29 and later within version 1, and version 2, are supported. Restart OpenCode after connecting."))
                                     .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                if openCodeState == .connected {
+                                    Text(tr("После запуска монитора полностью перезапустите OpenCode и нажмите «Агент перезапущен». Статусы пока остаются неподтверждёнными. Если кнопка недоступна, переподключите источник.", "After starting the monitor, fully restart OpenCode and select ‘Agent restarted’. Statuses remain unconfirmed for now. If the button is unavailable, reconnect the source."))
+                                        .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                    if store.externalV2Failed {
+                                        Text(tr("Канал недоступен. Перезапустите монитор и агент.", "Channel unavailable. Restart the monitor and the agent."))
+                                            .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
                                 if openCodeState == nil {
                                     Text(tr("Не удалось прочитать подключение OpenCode", "Could not read the OpenCode connection"))
                                         .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
@@ -145,10 +187,16 @@ struct SettingsView: View {
                                 }
                             }
                             Spacer(minLength: 20)
-                            Button(openCodeState == .connected || openCodeState == .partial ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
-                                store.setOpenCodeConnected(openCodeState == .disconnected)
+                            VStack(alignment: .trailing, spacing: 5) {
+                                Button(openCodeState == .connected || openCodeState == .partial ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
+                                    store.setOpenCodeConnected(openCodeState == .disconnected)
+                                }
+                                .disabled(openCodeState == nil || store.openCodeSetupInProgress || (!openCodePresent && openCodeState == .disconnected))
+                                if openCodeState == .connected {
+                                    Button(tr("Агент перезапущен", "Agent restarted")) { store.acknowledgeOpenCodeRestart() }
+                                        .disabled(!store.openCodeRestartAvailable)
+                                }
                             }
-                            .disabled(openCodeState == nil || store.openCodeSetupInProgress || (!openCodePresent && openCodeState == .disconnected))
                         }
                         if !store.openCodeMessage.isEmpty {
                             Text(store.openCodeMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
@@ -174,12 +222,36 @@ struct SettingsView: View {
                             .accessibilityLabel(tr("Скопировать путь Kimi Code", "Copy Kimi Code path"))
                         }
                         .id("settings-kimi")
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("DeepSeek Harness").font(.system(size: 13, weight: .medium))
-                                Text(tr("Подключение проверено с DeepSeek Harness 0.2.1-rc.5 и pnpm 11.25.0. Приложение добавит локальный плагин в выбранный профиль. После подключения перезапустите DeepSeek Harness.", "Connection has been tested with DeepSeek Harness 0.2.1-rc.5 and pnpm 11.25.0. The app adds a local plugin to the selected profile. Restart DeepSeek Harness after connecting."))
-                                    .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
-                                Text(store.deepSeekStatusMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("DeepSeek Harness").font(.system(size: 13, weight: .medium))
+                                    Text(tr("Подключение проверено с DeepSeek Harness 0.2.1-rc.5 и pnpm 11.25.0. Приложение добавит локальный плагин в выбранный профиль. После подключения перезапустите DeepSeek Harness.", "Connection has been tested with DeepSeek Harness 0.2.1-rc.5 and pnpm 11.25.0. The app adds a local plugin to the selected profile. Restart DeepSeek Harness after connecting."))
+                                        .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                    if store.deepSeekSelectedProfile?.state == "connected" {
+                                        Text(tr("После запуска монитора полностью перезапустите выбранный профиль и нажмите «Агент перезапущен». Если кнопка недоступна, переподключите профиль.", "After starting the monitor, fully restart the selected profile and select ‘Agent restarted’. If the button is unavailable, reconnect the profile."))
+                                            .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                        if store.externalV2Failed {
+                                            Text(tr("Канал недоступен. Перезапустите монитор и агент.", "Channel unavailable. Restart the monitor and the agent."))
+                                                .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                        }
+                                    }
+                                    Text(store.deepSeekStatusMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                                }
+                                Spacer(minLength: 20)
+                                VStack(alignment: .trailing, spacing: 5) {
+                                    Button(["connected", "partial"].contains(store.deepSeekSelectedProfile?.state ?? "") ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
+                                        store.setDeepSeekConnected(store.deepSeekSelectedProfile?.state == "disconnected")
+                                    }
+                                    .modifier(SourceProfileActionWidth(source: "deepSeek"))
+                                    .disabled(!store.deepSeekCanChange && !(settingsPreviewSources && store.deepSeekSelectedProfile?.state != "error"))
+                                    if store.deepSeekSelectedProfile?.state == "connected" {
+                                        Button(tr("Агент перезапущен", "Agent restarted")) { store.acknowledgeDeepSeekRestart() }
+                                            .disabled(!store.deepSeekRestartAvailable)
+                                    }
+                                }
+                            }
+                            sourceProfileRow {
                                 Picker(tr("Профиль", "Profile"), selection: $store.selectedDeepSeekProfile) {
                                     Text(tr("Выберите профиль", "Select a profile")).tag("")
                                     ForEach(store.deepSeekProfiles) { profile in Text(profile.name).tag(profile.name) }
@@ -187,21 +259,27 @@ struct SettingsView: View {
                                 .disabled(store.deepSeekProfiles.isEmpty || store.deepSeekSetupInProgress)
                                 .accessibilityLabel(tr("Профиль DeepSeek Harness", "DeepSeek Harness profile"))
                             }
-                            Spacer(minLength: 20)
-                            Button(["connected", "partial"].contains(store.deepSeekSelectedProfile?.state ?? "") ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
-                                store.setDeepSeekConnected(store.deepSeekSelectedProfile?.state == "disconnected")
-                            }
-                            .disabled(!store.deepSeekCanChange && !(settingsPreviewSources && store.deepSeekSelectedProfile?.state != "error"))
                         }
                         if !store.deepSeekMessage.isEmpty {
                             Text(store.deepSeekMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
                         }
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("Hermes Agent").font(.system(size: 13, weight: .medium))
-                                Text(tr("Проверено с исходной установкой Hermes Agent v0.22.7. Выберите профиль и подготовьте плагин. Полностью закройте Hermes и его фоновые службы, затем выполните команду включения в терминале. Перед запуском менеджера команда локально проверяет файлы .env, которые могут содержать ключи; сама проверка не сохраняет, не выводит и не передаёт их. После запуска монитора или повторного подключения источника дождитесь статуса «Плагин включён в локальных настройках», затем запустите или перезапустите Hermes. Прежние задачи не показываются. Для отключения снова закройте Hermes и его фоновые службы и выполните команду отключения.", "Tested with a source installation of Hermes Agent v0.22.7. Select a profile and prepare the plugin. Fully close Hermes and its background services, then run the enable command in Terminal. Before starting the manager, the command checks local .env files that may contain keys; the check itself does not save, display or transmit them. After starting the monitor or reconnecting the source, wait for ‘Plugin enabled in local settings’, then start or restart Hermes. Previous tasks are not shown. To disable, close Hermes and its background services again, then run the disable command."))
-                                    .font(.system(size: 11.5)).foregroundStyle(colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
-                                Text(store.hermesStatusMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("Hermes Agent").font(.system(size: 13, weight: .medium))
+                                    Text(tr("Проверено с исходной установкой Hermes Agent v0.22.7. Выберите профиль и подготовьте плагин. Полностью закройте Hermes и его фоновые службы, затем выполните команду включения в терминале. Перед запуском менеджера команда локально проверяет файлы .env, которые могут содержать ключи; сама проверка не сохраняет, не выводит и не передаёт их. После запуска монитора или повторного подключения источника дождитесь статуса «Плагин включён в локальных настройках», затем запустите или перезапустите Hermes. Прежние задачи не показываются. Для отключения снова закройте Hermes и его фоновые службы и выполните команду отключения.", "Tested with a source installation of Hermes Agent v0.22.7. Select a profile and prepare the plugin. Fully close Hermes and its background services, then run the enable command in Terminal. Before starting the manager, the command checks local .env files that may contain keys; the check itself does not save, display or transmit them. After starting the monitor or reconnecting the source, wait for ‘Plugin enabled in local settings’, then start or restart Hermes. Previous tasks are not shown. To disable, close Hermes and its background services again, then run the disable command."))
+                                        .font(.system(size: 11.5)).foregroundStyle(colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                    Text(store.hermesStatusMessage).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary).fixedSize(horizontal: false, vertical: true)
+                                }
+                                Spacer(minLength: 20)
+                                Button(tr("Подготовить", "Prepare")) {
+                                    if settingsPreviewHermes == nil { store.prepareHermes() }
+                                }
+                                .modifier(SourceProfileActionWidth(source: "hermes"))
+                                .disabled(!store.hermesCanPrepare)
+                                .accessibilityLabel(tr("Подготовить плагин Hermes Agent", "Prepare Hermes Agent plugin"))
+                            }
+                            sourceProfileRow {
                                 Picker(tr("Профиль", "Profile"), selection: $store.selectedHermesProfile) {
                                     Text(tr("Выберите профиль", "Select a profile")).tag("")
                                     ForEach(store.hermesProfiles) { profile in
@@ -210,21 +288,21 @@ struct SettingsView: View {
                                 }
                                 .disabled(store.hermesProfiles.isEmpty || store.hermesSetupInProgress || store.hermesScanInProgress)
                                 .accessibilityLabel(tr("Профиль Hermes Agent", "Hermes Agent profile"))
-                                if let enable = store.hermesEnableCommand, let disable = store.hermesDisableCommand {
-                                    Text(tr("Включение:", "Enable:"))
-                                        .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
-                                    Text(enable).font(.system(size: 11.5)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                                    Text(tr("Отключение:", "Disable:"))
-                                        .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
-                                    Text(disable).font(.system(size: 11.5)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                            }
+                            if let enable = store.hermesEnableCommand, let disable = store.hermesDisableCommand {
+                                HStack(spacing: 0) {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(tr("Включение:", "Enable:"))
+                                            .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                                        Text(enable).font(.system(size: 11.5)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                        Text(tr("Отключение:", "Disable:"))
+                                            .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                                        Text(disable).font(.system(size: 11.5)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    Spacer().frame(width: (sourceProfileActionWidths["hermes"] ?? 0) + 20)
                                 }
                             }
-                            Spacer(minLength: 20)
-                            Button(tr("Подготовить", "Prepare")) {
-                                if settingsPreviewHermes == nil { store.prepareHermes() }
-                            }
-                            .disabled(!store.hermesCanPrepare)
-                            .accessibilityLabel(tr("Подготовить плагин Hermes Agent", "Prepare Hermes Agent plugin"))
                         }
                         .id("settings-hermes")
                         if !store.hermesMessage.isEmpty {
@@ -361,22 +439,88 @@ struct SettingsView: View {
             }
         }
         .controlSize(.large)
-        .onAppear { refreshSettingsMenuWidth() }
+        .background(alignment: .topLeading) {
+            HStack(spacing: 0) {
+                Button(tr("Подключить", "Connect")) { }
+                    .modifier(SourceProfileActionWidth(source: "deepSeekConnectMeasurement"))
+                Button(tr("Отключить", "Disconnect")) { }
+                    .modifier(SourceProfileActionWidth(source: "deepSeekDisconnectMeasurement"))
+            }
+            .fixedSize()
+            .hidden()
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .controlSize(.large)
+        }
+        .onAppear { refreshSettingsMenuWidth(); refreshSourceProfileMenuWidth() }
+        .onPreferenceChange(SourceProfileActionWidths.self) { sourceProfileActionWidths = $0 }
+        .onChange(of: store.deepSeekProfiles.map(\.name)) { _ in refreshSourceProfileMenuWidth() }
+        .onChange(of: store.hermesProfiles.map { $0.id + "|" + $0.name }) { _ in refreshSourceProfileMenuWidth() }
         .onChange(of: languageRaw) { _ in
             refreshSettingsMenuWidth()
+            refreshSourceProfileMenuWidth()
             store.refresh()
         }
     }
 
-    private var sourceDescription: String {
-        if claudeConnection == nil { return tr("Не удалось прочитать настройки Claude Code.", "Could not read Claude Code settings.") }
-        if claudeConnection == .partial { return tr("Claude Code подключён частично. Нажмите «Подключить», чтобы восстановить недостающие hooks.", "Claude Code is partially connected. Select Connect to restore missing hooks.") }
-        if claudeConnection == .disconnected && claudeInstallation != .available {
-            if claudeInstallation == .unconfirmed { return tr("Команда Claude Code не найдена. Для локальных сессий нажмите «Подключить» и перезапустите Claude Desktop или Claude Code.", "The Claude Code command was not found. For local sessions, select Connect and restart Claude Desktop or Claude Code.") }
-            return tr("Claude Code не найден. Установите его, затем вернитесь в настройки.", "Claude Code was not found. Install it, then return to Settings.")
+    private func sourceProfileRow<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 0) {
+            Text(tr("Профиль", "Profile")).font(.system(size: 13))
+            Spacer().frame(width: 8)
+            content()
+                .labelsHidden()
+                .modifier(SourceProfileMenuWidth(width: sourceProfileMenuWidth))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer().frame(width: (sourceProfileActionWidths.values.min() ?? 0) + 20)
         }
-        if store.unavailableSources.contains(.claude) { return tr("Нет данных от Claude Code. Проверьте доступ к настройкам и журналу источника.", "No data from Claude Code. Check access to its settings and event log.") }
-        return tr("Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии.", "The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Desktop or Claude Code after connecting. Only local sessions are monitored for now.")
+    }
+
+    private func refreshSourceProfileMenuWidth() {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            let placeholder = tr("Выберите профиль", "Select a profile")
+            let deepSeek = [placeholder] + store.deepSeekProfiles.map(\.name)
+            let hermes = [placeholder] + store.hermesProfiles.map { $0.id == "root" ? tr("По умолчанию", "Default") : $0.name }
+            let widest = [deepSeek, hermes].map { titles -> CGFloat in
+                let control = NSPopUpButton(frame: .zero, pullsDown: false)
+                control.controlSize = .large
+                control.addItems(withTitles: titles)
+                return control.fittingSize.width
+            }.max() ?? 0
+            if widest.isFinite && widest > 0 { sourceProfileMenuWidth = widest }
+        }
+        #endif
+    }
+
+    private var sourceDescription: String {
+        Self.claudeSourceDescription(connection: claudeConnection, installation: claudeInstallation,
+                                     sourceUnavailable: store.unavailableSources.contains(.claude))
+    }
+
+    static func claudeSourceDescription(connection: ClaudeIntegration.ConnectionState?,
+                                        installation: ClaudeIntegration.InstallationState,
+                                        sourceUnavailable: Bool) -> String {
+        let requirement = tr(
+            "Перед подключением или отключением закройте Claude Code, Claude Desktop и другие программы, которые меняют настройки Claude. Обновите все используемые копии Claude Code, в том числе в Claude Desktop, до версии 2.1.101 или новее. Приложение не проверяет закрытие программ и версии автоматически.",
+            "Before connecting or disconnecting, close Claude Code, Claude Desktop, and any other apps that modify Claude settings. Update all copies of Claude Code you use, including those in Claude Desktop, to version 2.1.101 or later. The app does not automatically check whether apps are closed or versions are up to date."
+        )
+        let details: String
+        if connection == nil {
+            details = tr("Не удалось прочитать настройки Claude Code.", "Could not read Claude Code settings.")
+        } else if connection == .partial {
+            details = tr("Claude Code подключён частично. Нажмите «Подключить», чтобы восстановить недостающие hooks.", "Claude Code is partially connected. Select Connect to restore missing hooks.")
+        } else if connection == .disconnected && installation != .available {
+            if installation == .unconfirmed {
+                details = tr("Команда Claude Code не найдена. Для локальных сессий нажмите «Подключить» и перезапустите Claude Desktop или Claude Code.", "The Claude Code command was not found. For local sessions, select Connect and restart Claude Desktop or Claude Code.")
+            } else {
+                details = tr("Claude Code не найден. Установите его, затем вернитесь в настройки.", "Claude Code was not found. Install it, then return to Settings.")
+            }
+        } else if sourceUnavailable {
+            details = tr("Нет данных от Claude Code. Проверьте доступ к настройкам и журналу источника.", "No data from Claude Code. Check access to its settings and event log.")
+        } else {
+            details = tr("Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии.", "The app adds local hooks to Claude Code settings. No administrator rights, tokens or sign-in are needed. Restart Claude Desktop or Claude Code after connecting. Only local sessions are monitored for now.")
+        }
+        return requirement + " " + details
     }
 
     private var cloudEnabled: Bool {

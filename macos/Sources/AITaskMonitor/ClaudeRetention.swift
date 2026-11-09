@@ -1,4 +1,5 @@
 import CryptoKit
+import CoreFoundation
 import Darwin
 import Foundation
 
@@ -53,13 +54,14 @@ enum ClaudeRetention {
         let source: Int
         let order: Int
         let time: Date
-        let line: Data
+        var line: Data
         var bytes: Int { line.count + 1 }
     }
     private struct Source {
         let url: URL
         let digest: SHA256.Digest
         let count: Int
+        var needsRewrite: Bool
     }
     typealias Commit = (@escaping () throws -> Void) throws -> Void
 
@@ -87,6 +89,8 @@ enum ClaudeRetention {
         var sources: [Source] = []
         var total = 0
         var changed = false
+        var lossMarkers: [Entry] = []
+        var scopeIncomplete = false
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let fallback = ISO8601DateFormatter()
@@ -97,24 +101,77 @@ enum ClaudeRetention {
             try ordinary(url, directory: false)
             let sourceIndex = sources.count
             var count = 0
+            var marker: Entry?
+            var needsRewrite = false
             let digest = try readLines(url) { line in
-                let value = try JSONSerialization.jsonObject(with: line)
-                guard let object = value as? [String: Any], let stamp = object["timestamp"] as? String,
+                guard let object = ClaudeJSONValidation.object(line), let stamp = object["timestamp"] as? String,
                       let date = formatter.date(from: stamp) ?? fallback.date(from: stamp) else { throw Failure.invalidRecord }
                 count += 1
+                if let markerInfo = sourceLossMarker(object) {
+                    // Keep only fixed, non-content metadata. One marker per
+                    // source survives age and size cleanup until a trustworthy
+                    // recovery protocol is available.
+                    var normalized: [String: Any] = ["timestamp": stamp, "provider": "claude", "session_id": "",
+                        "event": markerInfo.event, "plan_version": 2, "plan_signal": "source_uncertain"]
+                    if markerInfo.scopeIncomplete { normalized["scope_incomplete"] = true; scopeIncomplete = true }
+                    let bytes = try JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys])
+                    if bytes != line || marker != nil { needsRewrite = true; changed = true }
+                    marker = Entry(source: sourceIndex, order: count, time: date, line: bytes)
+                    return
+                }
+                if let session = object["session_id"] as? String, session.isEmpty {
+                    // Never make an unsupported empty-session record vanish
+                    // before the reader has surfaced source uncertainty.
+                    throw Failure.invalidRecord
+                }
                 guard date >= cutoff else { changed = true; return }
                 let item = Entry(source: sourceIndex, order: count, time: date, line: line)
                 push(item, into: &entries); total += item.bytes
                 while total > maximum, let removed = pop(&entries) { total -= removed.bytes; changed = true }
             }
-            sources.append(Source(url: url, digest: digest, count: count))
+            if let marker { lossMarkers.append(marker) }
+            sources.append(Source(url: url, digest: digest, count: count, needsRewrite: needsRewrite))
         }
+        var reserved = lossMarkers.reduce(0) { $0 + $1.bytes }
+        guard reserved <= maximum else { throw Failure.tooLarge }
+        while total > maximum - reserved, let removed = pop(&entries) { total -= removed.bytes; changed = true }
+        if !lossMarkers.isEmpty {
+            for (index, source) in sources.enumerated() {
+                let retained = entries.filter { $0.source == index }.count + lossMarkers.filter { $0.source == index }.count
+                if retained < source.count { scopeIncomplete = true }
+            }
+        }
+        if scopeIncomplete {
+            for index in lossMarkers.indices {
+                guard var object = ClaudeJSONValidation.object(lossMarkers[index].line) else { throw Failure.invalidRecord }
+                object["scope_incomplete"] = true
+                let newLine = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+                if newLine != lossMarkers[index].line {
+                    lossMarkers[index].line = newLine
+                    sources[lossMarkers[index].source].needsRewrite = true
+                    changed = true
+                }
+            }
+            reserved = lossMarkers.reduce(0) { $0 + $1.bytes }
+            guard reserved <= maximum else { throw Failure.tooLarge }
+            while total > maximum - reserved, let removed = pop(&entries) { total -= removed.bytes; changed = true }
+        }
+        for marker in lossMarkers { push(marker, into: &entries); total += marker.bytes }
         guard changed else { return }
         var staged: [URL] = []
         defer { for url in staged { try? FileManager.default.removeItem(at: url) } }
-        for (index, source) in sources.enumerated() {
+        // Commit a surviving loss marker (including scope_incomplete) before
+        // deleting identity records in another file. An interrupted second
+        // rename must leave either old identity or the conservative marker.
+        let markerSources = Set(lossMarkers.map { $0.source })
+        let commitOrder = sources.indices.sorted {
+            if markerSources.contains($0) != markerSources.contains($1) { return markerSources.contains($0) }
+            return $0 < $1
+        }
+        for index in commitOrder {
+            let source = sources[index]
             let selected = entries.filter { $0.source == index }.sorted { $0.order < $1.order }
-            guard selected.count != source.count else { continue }
+            guard selected.count != source.count || source.needsRewrite else { continue }
             let temporary = directory.appendingPathComponent(".aitm-retention-\(UUID().uuidString).tmp")
             let descriptor = open(temporary.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, S_IRUSR | S_IWUSR)
             guard descriptor >= 0 else { throw Failure.io }
@@ -130,6 +187,28 @@ enum ClaudeRetention {
                 guard rename(temporary.path, source.url.path) == 0 else { throw Failure.io }
             }
         }
+    }
+
+    private static func sourceLossMarker(_ object: [String: Any]) -> (event: String, scopeIncomplete: Bool)? {
+        guard let session = object["session_id"] as? String, session.isEmpty,
+              let version = object["plan_version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(),
+              let name = object["event"] as? String, let signal = object["plan_signal"] as? String else { return nil }
+        var scopeIncomplete = false
+        if let raw = object["scope_incomplete"] {
+            guard let flag = raw as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() else { return nil }
+            scopeIncomplete = flag.boolValue
+        }
+        func same(_ left: String, _ right: String) -> Bool { left.utf8.elementsEqual(right.utf8) }
+        if version.doubleValue == 2 && same(signal, "source_uncertain") && same(name, "AITMSourceUncertain") {
+            return ("AITMSourceUncertain", scopeIncomplete)
+        }
+        if version.doubleValue == 2 && same(signal, "source_uncertain") && same(name, "AITMPartialTail") {
+            return ("AITMPartialTail", scopeIncomplete)
+        }
+        if version.doubleValue == 1 && same(signal, "uncertain") && same(name, "Unknown") {
+            return ("AITMSourceUncertain", scopeIncomplete)
+        }
+        return nil
     }
 
     private static func readLines(_ url: URL, consume: (Data) throws -> Void) throws -> SHA256.Digest {

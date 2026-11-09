@@ -12,6 +12,10 @@ final class ExternalProviderChannel {
         let device: dev_t
         let inode: ino_t
     }
+    private struct AcceptedClient {
+        let descriptor: Int32
+        let allowedAtAccept: [String: UInt64]
+    }
 
     private let endpoint: Endpoint
     private let stateLock = NSLock()
@@ -23,18 +27,23 @@ final class ExternalProviderChannel {
     private var allowed: [String: UInt64] = [:]
     private var permissionSequence: UInt64 = 0
     private var acceptedCount: UInt64 = 0
+    private var pendingClients: [AcceptedClient] = []
+    private var quarantinedProviders: Set<String> = []
+    private let pendingCapacity: Int
     private static let knownProviders: Set<String> = ["kimi", "deepseek", "hermes", "opencode"]
 
     #if DEBUG
     private let testBeforeAccept: (() -> Void)?
 
-    init(directory: String? = nil, testBeforeAccept: (() -> Void)? = nil) throws {
+    init(directory: String? = nil, testBeforeAccept: (() -> Void)? = nil, testPendingCapacity: Int = 128) throws {
         self.testBeforeAccept = testBeforeAccept
+        pendingCapacity = max(1, min(128, testPendingCapacity))
         endpoint = try Self.openEndpoint(directory: directory ?? "/private/tmp/aitm-provider-\(geteuid())")
         DispatchQueue(label: "com.aitaskmonitor.external-providers", qos: .utility).async { self.serve() }
     }
     #else
     init(directory: String? = nil) throws {
+        pendingCapacity = 128
         endpoint = try Self.openEndpoint(directory: directory ?? "/private/tmp/aitm-provider-\(geteuid())")
         DispatchQueue(label: "com.aitaskmonitor.external-providers", qos: .utility).async { self.serve() }
     }
@@ -46,6 +55,29 @@ final class ExternalProviderChannel {
         let requested = providers.intersection(Self.knownProviders)
         stateLock.lock()
         defer { stateLock.unlock() }
+        let current = Set(allowed.keys)
+        let changed = current.symmetricDifference(requested)
+        if !changed.isEmpty && !stopping && !finished {
+            // Claim connections already in the listener queue under the old
+            // permissions before publishing the new generation. No frame is
+            // read here, and the number of accepted descriptors is bounded.
+            let oldAllowed = allowed
+            while pendingClients.count < pendingCapacity {
+                let descriptor = accept(endpoint.listener, nil, nil)
+                if descriptor < 0 {
+                    if errno != EAGAIN && errno != EWOULDBLOCK {
+                        quarantinedProviders.formUnion(changed)
+                        if errno != EINTR { gap = true }
+                    }
+                    break
+                }
+                pendingClients.append(AcceptedClient(descriptor: descriptor, allowedAtAccept: oldAllowed))
+                acceptedCount &+= 1
+            }
+            // If the cap was reached, reject changed providers until the
+            // remaining backlog has actually drained. Neighbours remain enabled.
+            if pendingClients.count >= pendingCapacity { quarantinedProviders.formUnion(changed) }
+        }
         for provider in Array(allowed.keys) where !requested.contains(provider) {
             allowed.removeValue(forKey: provider)
         }
@@ -71,6 +103,20 @@ final class ExternalProviderChannel {
         return acceptedCount
     }
 
+    var isStopped: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return stopping || finished
+    }
+
+    #if DEBUG
+    var testQuarantinedProviders: Set<String> {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return quarantinedProviders
+    }
+    #endif
+
     @discardableResult
     func stop() -> Bool {
         stateLock.lock()
@@ -85,6 +131,11 @@ final class ExternalProviderChannel {
 
     private func serve() {
         defer {
+            stateLock.lock()
+            let abandoned = pendingClients
+            pendingClients.removeAll()
+            stateLock.unlock()
+            for client in abandoned { Darwin.close(client.descriptor) }
             Darwin.close(endpoint.listener)
             var current = stat()
             if endpoint.socketPath.withCString({ lstat($0, &current) }) == 0,
@@ -102,23 +153,46 @@ final class ExternalProviderChannel {
         while true {
             stateLock.lock()
             let shouldStop = stopping
+            let queued = pendingClients.isEmpty ? nil : pendingClients.removeFirst()
+            if queued == nil && !quarantinedProviders.isEmpty {
+                var item = pollfd(fd: endpoint.listener, events: Int16(POLLIN), revents: 0)
+                // An error or interruption is not proof that backlog is empty.
+                if poll(&item, nfds_t(1), 0) == 0 { quarantinedProviders.removeAll() }
+            }
             stateLock.unlock()
-            if shouldStop { break }
+            if shouldStop { if let queued { Darwin.close(queued.descriptor) }; break }
+            if let queued { serveClient(queued); continue }
             guard ClaudeLoopSocket.wait(endpoint.listener, Int16(POLLIN), milliseconds: 100) else { continue }
             #if DEBUG
             testBeforeAccept?()
             #endif
-            let client = accept(endpoint.listener, nil, nil)
-            if client < 0 { markGap(); Thread.sleep(forTimeInterval: 0.025); continue }
             stateLock.lock()
-            let allowedAtAccept = allowed
-            acceptedCount &+= 1
+            let client: AcceptedClient?
+            var acceptFailure = false
+            if stopping { client = nil }
+            else if !pendingClients.isEmpty { client = pendingClients.removeFirst() }
+            else {
+                let descriptor = accept(endpoint.listener, nil, nil)
+                if descriptor >= 0 {
+                    client = AcceptedClient(descriptor: descriptor, allowedAtAccept: allowed)
+                    acceptedCount &+= 1
+                } else {
+                    acceptFailure = errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR
+                    client = nil
+                }
+            }
             stateLock.unlock()
-            if ClaudeLoopSocket.nonblocking(client), ClaudeLoopSocket.suppressSigpipe(client),
-               ClaudeLoopSocket.peerIsCurrentUser(client) { receive(client, allowedAtAccept: allowedAtAccept) }
-            else { markGap() }
-            Darwin.close(client)
+            if let client { serveClient(client) }
+            else if acceptFailure { markGap(); Thread.sleep(forTimeInterval: 0.025) }
         }
+    }
+
+    private func serveClient(_ client: AcceptedClient) {
+        let descriptor = client.descriptor
+        defer { Darwin.close(descriptor) }
+        if ClaudeLoopSocket.nonblocking(descriptor), ClaudeLoopSocket.suppressSigpipe(descriptor),
+           ClaudeLoopSocket.peerIsCurrentUser(descriptor) { receive(descriptor, allowedAtAccept: client.allowedAtAccept) }
+        else { markGap() }
     }
 
     private func receive(_ client: Int32, allowedAtAccept: [String: UInt64]) {
@@ -130,14 +204,18 @@ final class ExternalProviderChannel {
               var event = ExternalProviderEventParser.parse(payload) else { markGap(); return }
         event.receivedAt = Date()
         stateLock.lock()
-        let authorized = allowedAtAccept[event.provider].map { allowed[event.provider] == $0 } ?? false
+        let authorized = (allowedAtAccept[event.provider].map { allowed[event.provider] == $0 } ?? false) &&
+            !quarantinedProviders.contains(event.provider) && !stopping && !finished
         if authorized {
             if events.count >= 1_024 { events.removeAll(keepingCapacity: true); gap = true }
             events.append(event)
+            // The descriptor is nonblocking. Commit and the one-byte ACK share
+            // this lock with revocation so a rejected frame is never ACKed.
+            var acknowledgement: UInt8 = 0x06
+            let written = withUnsafePointer(to: &acknowledgement) { Darwin.write(client, $0, 1) }
+            if written != 1 { events.removeAll(keepingCapacity: true); gap = true }
         }
         stateLock.unlock()
-        // Confirm only after the frame has been parsed and accepted or filtered.
-        if !ClaudeLoopSocket.write(client, data: Data([0x06]), milliseconds: 100), authorized { markGap() }
     }
 
     private func markGap() {

@@ -35,7 +35,7 @@ final class CodexCloudReaderTests: XCTestCase {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let executable = try writeExecutable(script, in: directory)
-        let client = CodexCloudClient(executable: executable, environment: ["PATH": "/usr/bin:/bin", "HOME": directory.path])
+        let client = CodexCloudClient(executable: executable, environment: ["PATH": "/usr/bin:/bin"])
         let snapshot = try client.list()
         XCTAssertTrue(snapshot.complete)
         XCTAssertEqual(snapshot.tasks.map(\.status), [.pending, .terminal])
@@ -46,10 +46,10 @@ final class CodexCloudReaderTests: XCTestCase {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let tooMuch = try writeExecutable("#!/bin/sh\nexec /usr/bin/yes x\n", in: directory)
-        let oversized = CodexCloudClient(executable: tooMuch, environment: ["PATH": "/usr/bin:/bin", "HOME": directory.path], requestTimeout: 3)
+        let oversized = CodexCloudClient(executable: tooMuch, environment: ["PATH": "/usr/bin:/bin"], requestTimeout: 3)
         XCTAssertThrowsError(try oversized.list())
         let slow = try writeExecutable("#!/bin/sh\nwhile :; do :; done\n", in: directory, name: "slow")
-        let timed = CodexCloudClient(executable: slow, environment: ["PATH": "/usr/bin:/bin", "HOME": directory.path], requestTimeout: 0.25)
+        let timed = CodexCloudClient(executable: slow, environment: ["PATH": "/usr/bin:/bin"], requestTimeout: 0.25)
         let start = Date()
         XCTAssertThrowsError(try timed.list())
         XCTAssertLessThan(Date().timeIntervalSince(start), 3)

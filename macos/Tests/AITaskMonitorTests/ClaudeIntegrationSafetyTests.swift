@@ -45,22 +45,24 @@ final class ClaudeIntegrationSafetyTests: XCTestCase {
         try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: copiedBinary.path)
         let hooks = try XCTUnwrap(try readObject(settings)["hooks"] as? [String: Any])
 
-        func invoke(_ event: String) throws {
+        func invoke(_ event: String, clearBackground: Bool = false) throws {
             let groups = try XCTUnwrap(hooks[event] as? [[String: Any]])
             let commands = try XCTUnwrap(groups.first?["hooks"] as? [[String: Any]])
             let command = try XCTUnwrap(commands.first?["command"] as? String)
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/sh")
             process.arguments = ["-c", command]
-            process.environment = ["HOME": directory.path, "PATH": "/usr/bin:/bin",
+            process.environment = ["CFFIXED_USER_HOME": directory.path, "PATH": "/usr/bin:/bin",
                                    "AI_TASK_MONITOR_SUPPORT_DIR": support.path, "AI_TASK_MONITOR_AUDIT": "1"]
             let input = Pipe(), output = Pipe(), errors = Pipe()
             process.standardInput = input
             process.standardOutput = output
             process.standardError = errors
             try process.run()
-            let payload: [String: Any] = ["hook_event_name": event, "session_id": "synthetic-session",
+            var payload: [String: Any] = ["hook_event_name": event, "session_id": "synthetic-session",
                                           "prompt": "SYNTHETIC_PROMPT_SECRET", "cwd": "/synthetic/private/path"]
+            if clearBackground { payload["background_tasks"] = [Any](); payload["session_crons"] = [Any]() }
+            if event == "SessionStart" { payload["source"] = "startup" }
             try input.fileHandleForWriting.write(contentsOf: JSONSerialization.data(withJSONObject: payload))
             try input.fileHandleForWriting.close()
             process.waitUntilExit()
@@ -70,19 +72,95 @@ final class ClaudeIntegrationSafetyTests: XCTestCase {
         }
 
         let since = Date().addingTimeInterval(-1)
+        try invoke("SessionStart")
         try invoke("UserPromptSubmit")
         let eventFile = support.appendingPathComponent("claude-events-v2.jsonl")
         let reader = ClaudeTaskReader(eventFile: eventFile)
         let active = try reader.readSnapshot(observedSince: since)
         XCTAssertEqual(active.tasks.map(\.id), ["claude:synthetic-session"])
         XCTAssertEqual(active.tasks.first?.isActive, true)
+        try invoke("StopFailure")
+        let failure = try reader.readSnapshot(now: Date().addingTimeInterval(1), observedSince: since)
+        XCTAssertTrue(failure.tasks.first?.isUnconfirmed == true)
+        XCTAssertTrue(failure.terminalIDs.isEmpty)
+        XCTAssertTrue(failure.interruptedIDs.isEmpty)
         try invoke("Stop")
-        let stopped = try reader.readSnapshot(observedSince: since)
+        let unknown = try reader.readSnapshot(now: Date().addingTimeInterval(1), observedSince: since)
+        XCTAssertTrue(unknown.tasks.first?.isUnconfirmed == true)
+        XCTAssertTrue(unknown.terminalIDs.isEmpty)
+        XCTAssertTrue(unknown.neutralEndedIDs.isEmpty)
+        try invoke("Stop", clearBackground: true)
+        let stopped = try reader.readSnapshot(now: Date().addingTimeInterval(1), observedSince: since)
         XCTAssertTrue(stopped.tasks.isEmpty)
-        XCTAssertTrue(stopped.terminalIDs.contains("claude:synthetic-session"))
+        XCTAssertTrue(stopped.terminalIDs.isEmpty)
+        XCTAssertTrue(stopped.neutralEndedIDs.contains("claude:synthetic-session"))
         let saved = try String(contentsOf: eventFile, encoding: .utf8)
         XCTAssertFalse(saved.contains("SYNTHETIC_PROMPT_SECRET"))
         XCTAssertFalse(saved.contains("/synthetic/private/path"))
+    }
+
+    func testOldTenEventsArePartialUntilStopFailureAndSessionStartAreAdded() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settings = directory.appendingPathComponent("settings.json")
+        let executable = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: executable)
+        var root = try readObject(settings)
+        var hooks = try XCTUnwrap(root["hooks"] as? [String: Any])
+        XCTAssertEqual(ClaudeIntegration.events.count, 12)
+        let unrelated: [[String: Any]] = [["matcher": "synthetic", "hooks": [["type": "command", "command": "/synthetic/other-hook"]]]]
+        hooks["StopFailure"] = unrelated
+        hooks["SessionStart"] = unrelated
+        root["hooks"] = hooks
+        try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]).write(to: settings)
+        XCTAssertEqual(try ClaudeIntegration.connectionState(settingsURL: settings), .partial)
+        try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: executable)
+        XCTAssertEqual(try ClaudeIntegration.connectionState(settingsURL: settings), .connected)
+        let updated = try XCTUnwrap(try readObject(settings)["hooks"] as? [String: Any])
+        let failureGroups = try XCTUnwrap(updated["StopFailure"] as? [[String: Any]])
+        XCTAssertEqual(failureGroups.count, 2)
+        XCTAssertEqual(failureGroups.first?["matcher"] as? String, "synthetic")
+        let firstCommands = try XCTUnwrap(failureGroups.first?["hooks"] as? [[String: Any]])
+        XCTAssertEqual(firstCommands.first?["command"] as? String, "/synthetic/other-hook")
+        let startGroups = try XCTUnwrap(updated["SessionStart"] as? [[String: Any]])
+        XCTAssertEqual(startGroups.count, 2)
+        XCTAssertEqual((startGroups.first?["hooks"] as? [[String: Any]])?.first?["command"] as? String, "/synthetic/other-hook")
+        for event in ClaudeIntegration.events where event != "StopFailure" && event != "SessionStart" {
+            let expected = try JSONSerialization.data(withJSONObject: XCTUnwrap(hooks[event] as? [[String: Any]]), options: [.sortedKeys])
+            let actual = try JSONSerialization.data(withJSONObject: XCTUnwrap(updated[event] as? [[String: Any]]), options: [.sortedKeys])
+            XCTAssertEqual(actual, expected, event)
+        }
+        try ClaudeIntegration.setConnected(false, settingsURL: settings, executable: executable)
+        let remaining = try XCTUnwrap(try readObject(settings)["hooks"] as? [String: Any])
+        let left = try XCTUnwrap(remaining["StopFailure"] as? [[String: Any]])
+        XCTAssertEqual(left.count, 1)
+        XCTAssertEqual((left.first?["hooks"] as? [[String: Any]])?.first?["command"] as? String, "/synthetic/other-hook")
+        let startLeft = try XCTUnwrap(remaining["SessionStart"] as? [[String: Any]])
+        XCTAssertEqual(startLeft.count, 1)
+        XCTAssertEqual((startLeft.first?["hooks"] as? [[String: Any]])?.first?["command"] as? String, "/synthetic/other-hook")
+    }
+
+    func testExistingElevenEventsBecomeCompleteAfterSessionStartIsAdded() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settings = directory.appendingPathComponent("settings.json")
+        let executable = Bundle.main.executablePath ?? CommandLine.arguments[0]
+        try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: executable)
+        var root = try readObject(settings)
+        var old = try XCTUnwrap(root["hooks"] as? [String: Any])
+        old.removeValue(forKey: "SessionStart")
+        root["hooks"] = old
+        try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]).write(to: settings)
+        XCTAssertEqual(try ClaudeIntegration.connectionState(settingsURL: settings), .partial)
+        try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: executable)
+        XCTAssertEqual(try ClaudeIntegration.connectionState(settingsURL: settings), .connected)
+        let updated = try XCTUnwrap(try readObject(settings)["hooks"] as? [String: Any])
+        XCTAssertEqual((updated["SessionStart"] as? [[String: Any]])?.count, 1)
+        for event in ClaudeIntegration.events where event != "SessionStart" {
+            let expected = try JSONSerialization.data(withJSONObject: XCTUnwrap(old[event] as? [[String: Any]]), options: [.sortedKeys])
+            let actual = try JSONSerialization.data(withJSONObject: XCTUnwrap(updated[event] as? [[String: Any]]), options: [.sortedKeys])
+            XCTAssertEqual(actual, expected, event)
+        }
     }
 
     func testConnectAndDisconnectPreserveUnrelatedSettingsAndPermissions() throws {
@@ -154,6 +232,74 @@ final class ClaudeIntegrationSafetyTests: XCTestCase {
             XCTAssertThrowsError(try ClaudeIntegration.setConnected(false, settingsURL: settings, executable: executable))
             XCTAssertEqual(try Data(contentsOf: settings), original)
         }
+        XCTAssertTrue(try backups(in: directory).isEmpty)
+    }
+
+    func testRemovingLastOwnedCommandNeverDiscardsGroupMetadata() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settings = directory.appendingPathComponent("settings.json")
+        let executable = "/synthetic/AI Task Monitor"
+        let owned: [String: Any] = ["type": "command", "command": "\"\(executable)\" --claude-hook", "timeout": 10]
+        let variants: [[String: Any]] = [["matcher": "Bash"], ["matcher": "Bash", "custom": "keep"]]
+        for metadata in variants {
+            var group = metadata
+            group["hooks"] = [owned]
+            let original = try JSONSerialization.data(withJSONObject: ["hooks": ["PreToolUse": [group]]], options: [.sortedKeys])
+            try original.write(to: settings)
+            for connect in [false, true] {
+                XCTAssertThrowsError(try ClaudeIntegration.setConnected(connect, settingsURL: settings, executable: executable))
+                XCTAssertEqual(try Data(contentsOf: settings), original)
+            }
+            XCTAssertTrue(try backups(in: directory).isEmpty)
+        }
+    }
+
+    func testRemovingOwnedCommandFromSharedGroupPreservesOtherFieldsAndHooks() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settings = directory.appendingPathComponent("settings.json")
+        let executable = "/synthetic/AI Task Monitor"
+        let owned: [String: Any] = ["type": "command", "command": "\"\(executable)\" --claude-hook", "timeout": 10]
+        let foreign: [String: Any] = ["type": "command", "command": "/synthetic/other"]
+        let root: [String: Any] = ["hooks": ["PreToolUse": [["matcher": "Bash", "custom": "keep", "hooks": [owned, foreign]]]]]
+        try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]).write(to: settings)
+        try ClaudeIntegration.setConnected(false, settingsURL: settings, executable: executable)
+        let hooks = try XCTUnwrap(try readObject(settings)["hooks"] as? [String: Any])
+        let groups = try XCTUnwrap(hooks["PreToolUse"] as? [[String: Any]])
+        let group = try XCTUnwrap(groups.first)
+        XCTAssertEqual(group["matcher"] as? String, "Bash")
+        XCTAssertEqual(group["custom"] as? String, "keep")
+        let commands = try XCTUnwrap(group["hooks"] as? [[String: Any]])
+        XCTAssertEqual(commands.count, 1)
+        XCTAssertEqual(commands.first?["command"] as? String, "/synthetic/other")
+    }
+
+    func testPrecisionOutsideHooksAndEscapedHooksKeyArePreservedExactly() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settings = directory.appendingPathComponent("settings.json")
+        let number = "0.12345678901234567890123456789"
+        let original = Data("{\"unrelated\":{\"threshold\":\(number)},\"\\u0068ooks\":{}}".utf8)
+        try original.write(to: settings)
+        try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: executable)
+        let connected = try XCTUnwrap(String(data: Data(contentsOf: settings), encoding: .utf8))
+        XCTAssertTrue(connected.contains(number))
+        XCTAssertTrue(connected.contains("\\u0068ooks"))
+        let object = try readObject(settings)
+        XCTAssertNotNil(object["hooks"])
+        try ClaudeIntegration.setConnected(false, settingsURL: settings, executable: executable)
+        XCTAssertTrue(try XCTUnwrap(String(data: Data(contentsOf: settings), encoding: .utf8)).contains(number))
+    }
+
+    func testUncertainNumberInsideForeignHooksIsRejectedWithoutWrite() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settings = directory.appendingPathComponent("settings.json")
+        let original = Data("{\"hooks\":{\"Notification\":[{\"precision\":0.12345678901234567890123456789,\"hooks\":[{\"type\":\"command\",\"command\":\"/synthetic/v1.2\"}]}]}}".utf8)
+        try original.write(to: settings)
+        XCTAssertThrowsError(try ClaudeIntegration.setConnected(true, settingsURL: settings, executable: executable))
+        XCTAssertEqual(try Data(contentsOf: settings), original)
         XCTAssertTrue(try backups(in: directory).isEmpty)
     }
 

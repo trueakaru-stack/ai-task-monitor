@@ -181,7 +181,9 @@ final class ParserTests: XCTestCase {
         let quietTask = try XCTUnwrap(tasks.first { $0.id == "claude:stale" })
         XCTAssertEqual(activeTask.title, tr("Задача Claude Code", "Claude Code task"))
         XCTAssertEqual(activeTask.steps.map(\.title), ["Первый этап"])
-        XCTAssertEqual(activeTask.steps.map(\.status), [.active])
+        XCTAssertEqual(activeTask.steps.map(\.status), [.pending])
+        XCTAssertFalse(activeTask.planConfirmed)
+        XCTAssertNil(activeTask.progress)
         XCTAssertFalse(quietTask.isActive)
         XCTAssertTrue(quietTask.isUnconfirmed)
         XCTAssertEqual(quietTask.activity, tr("Статус не подтверждён", "Status unconfirmed"))
@@ -218,8 +220,14 @@ final class ParserTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: legacyFile, encoding: .utf8), oldLine + "\n")
         let stopped = event(session: "legacy-session", name: "Stop", active: false, date: now.addingTimeInterval(1), prompt: "")
         try ([unrelated, observed, stopped].joined(separator: "\n") + "\n").write(to: currentFile, atomically: true, encoding: .utf8)
-        let stoppedSnapshot = try reader.readSnapshot(now: now, observedSince: now.addingTimeInterval(-1))
-        XCTAssertTrue(stoppedSnapshot.terminalIDs.contains("claude:legacy-session"))
+        let futureSnapshot = try reader.readSnapshot(now: now, observedSince: now.addingTimeInterval(-1))
+        XCTAssertFalse(futureSnapshot.terminalIDs.contains("claude:legacy-session"))
+        XCTAssertFalse(futureSnapshot.neutralEndedIDs.contains("claude:legacy-session"))
+        XCTAssertTrue(futureSnapshot.tasks.contains { $0.id == "claude:legacy-session" && $0.isUnconfirmed })
+        let stoppedSnapshot = try reader.readSnapshot(now: now.addingTimeInterval(2), observedSince: now.addingTimeInterval(-1))
+        XCTAssertTrue(stoppedSnapshot.terminalIDs.isEmpty)
+        XCTAssertFalse(stoppedSnapshot.neutralEndedIDs.contains("claude:legacy-session"))
+        XCTAssertTrue(stoppedSnapshot.tasks.contains { $0.id == "claude:legacy-session" && $0.isUnconfirmed })
     }
 
     func testClaudeHookDoesNotStorePromptOrWorkingPath() throws {
@@ -450,10 +458,11 @@ final class ParserTests: XCTestCase {
     }
 
     private func event(session: String, name: String, active: Bool, date: Date, prompt: String) -> String {
-        let record: [String: Any] = [
+        var record: [String: Any] = [
             "timestamp": ISO8601DateFormatter().string(from: date), "session_id": session,
             "event": name, "active": active, "prompt": prompt, "activity": name
         ]
+        if name == "Stop" { record["plan_version"] = 2; record["stop_background"] = "clear" }
         return String(decoding: try! JSONSerialization.data(withJSONObject: record), as: UTF8.self)
     }
 }

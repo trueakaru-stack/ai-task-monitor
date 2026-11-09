@@ -12,6 +12,7 @@ final class ExternalProviderChannelTests: XCTestCase {
         let header = Data([UInt8(count & 255), UInt8((count >> 8) & 255), UInt8((count >> 16) & 255), UInt8((count >> 24) & 255)])
         XCTAssertTrue(ClaudeLoopSocket.write(descriptor, data: header + body))
         if expectAcknowledgement { XCTAssertEqual(ClaudeLoopSocket.read(descriptor, count: 1), Data([0x06])) }
+        else { XCTAssertNotEqual(ClaudeLoopSocket.read(descriptor, count: 1), Data([0x06])) }
     }
 
     private func awaitBatch(_ channel: ExternalProviderChannel) throws -> ExternalProviderChannel.Batch {
@@ -46,7 +47,7 @@ final class ExternalProviderChannelTests: XCTestCase {
         XCTAssertFalse(recovered.gap)
         XCTAssertEqual(recovered.events.first?.steps?.first?.status, "done")
         channel.setAllowedProviders(["deepseek"])
-        try send(#"{"version":1,"provider":"opencode","session":"disconnected","kind":"active"}"#, directory: directory)
+        try send(#"{"version":1,"provider":"opencode","session":"disconnected","kind":"active"}"#, directory: directory, expectAcknowledgement: false)
         try send(#"{"version":1,"provider":"deepseek","session":"barrier","kind":"active"}"#, directory: directory)
         let barrier = try awaitBatch(channel)
         XCTAssertEqual(barrier.events.map(\.session), ["barrier"])
@@ -67,7 +68,7 @@ final class ExternalProviderChannelTests: XCTestCase {
         channel.setAllowedProviders(["deepseek"])
         channel.setAllowedProviders(["deepseek", "opencode"])
         XCTAssertTrue(ClaudeLoopSocket.write(inFlight, data: body))
-        XCTAssertEqual(ClaudeLoopSocket.read(inFlight, count: 1), Data([0x06]))
+        XCTAssertNotEqual(ClaudeLoopSocket.read(inFlight, count: 1), Data([0x06]))
         try send(#"{"version":1,"provider":"deepseek","session":"after_generation","kind":"active"}"#, directory: directory)
         XCTAssertEqual(try awaitBatch(channel).events.map(\.session), ["after_generation"])
         XCTAssertTrue(channel.stop())

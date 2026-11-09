@@ -63,7 +63,9 @@ final class CodexCloudStoreTests: XCTestCase {
         XCTAssertTrue(cloud.isUnconfirmed)
         XCTAssertFalse(cloud.isActive)
         XCTAssertNil(cloud.progress)
-        XCTAssertEqual(store.count(for: .codex), 1)
+        XCTAssertEqual(store.count(for: .codex), 2)
+        store.selectedProvider = .codex
+        XCTAssertEqual(store.filteredTasks.count, 2)
         XCTAssertTrue(defaults.bool(forKey: "codexCloudEnabled"))
 
         try "failure".write(to: mode, atomically: true, encoding: .utf8)

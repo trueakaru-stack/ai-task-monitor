@@ -44,7 +44,7 @@ final class ExternalProviderTaskStoreTests: XCTestCase {
                                   let runtime = ExternalProviderRuntime(channel: try ExternalProviderChannel(directory: directory))
                                   activeRuntime = runtime
                                   return runtime
-                              }, inspectKimiConnection: { try fixture.inspect() }, kimiScanInterval: 0.1)
+                              }, discoverDeepSeekContext: { nil }, inspectKimiConnection: { try fixture.inspect() }, kimiScanInterval: 0.1, discoverHermesContext: { nil })
         func wait(_ message: String, until predicate: () -> Bool) {
             let deadline = Date().addingTimeInterval(4)
             while Date() < deadline && !predicate() {
@@ -97,7 +97,9 @@ final class ExternalProviderTaskStoreTests: XCTestCase {
                                   let runtime = ExternalProviderRuntime(channel: try ExternalProviderChannel(directory: directory))
                                   activeRuntime = runtime
                                   return runtime
-                              })
+                              }, discoverDeepSeekContext: { nil },
+                              inspectKimiConnection: { throw KimiIntegrationError(code: "installation-unconfirmed") },
+                              discoverHermesContext: { nil })
         XCTAssertNil(activeRuntime)
         connection = .connected
         store.refresh()
@@ -128,11 +130,11 @@ final class ExternalProviderTaskStoreTests: XCTestCase {
         XCTAssertFalse(store.unavailableSources.contains(.opencode))
         connection = .connected
         store.refresh()
-        XCTAssertFalse(store.tasks.contains { $0.provider == .opencode })
+        XCTAssertTrue(store.tasks.contains { $0.id == "opencode:one" && $0.isUnconfirmed })
     }
 
     @MainActor
-    func testOneUnavailableProviderDoesNotStopTheOther() throws {
+    func testInjectedProviderWithoutScopeIsHiddenAndDoesNotStopOtherSource() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-store-multi-" + UUID().uuidString, isDirectory: true)
         let directory = "/private/tmp/aitm-provider-multi-\(UUID().uuidString)"
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -154,22 +156,24 @@ final class ExternalProviderTaskStoreTests: XCTestCase {
                                   let runtime = ExternalProviderRuntime(channel: try ExternalProviderChannel(directory: directory))
                                   activeRuntime = runtime
                                   return runtime
-                              })
+                              }, discoverDeepSeekContext: { nil },
+                              inspectKimiConnection: { throw KimiIntegrationError(code: "installation-unconfirmed") },
+                              discoverHermesContext: { nil })
         try send(#"{"version":1,"provider":"opencode","session":"one","kind":"started"}"#, directory: directory)
         let firstEpoch = DispatchTime.now().uptimeNanoseconds
         try send(#"{"version":1,"provider":"hermes","session":"two","kind":"started","turn":"turn_1","epoch":\#(firstEpoch),"tick":\#(firstEpoch + 1)}"#, directory: directory)
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline {
             store.refresh()
-            if store.tasks.contains(where: { $0.id == "opencode:one" }) && store.tasks.contains(where: { $0.id == "hermes:two" }) { break }
+            if store.tasks.contains(where: { $0.id == "opencode:one" }) { break }
             Thread.sleep(forTimeInterval: 0.02)
         }
         XCTAssertTrue(try XCTUnwrap(store.tasks.first { $0.id == "opencode:one" }).isActive)
-        XCTAssertTrue(try XCTUnwrap(store.tasks.first { $0.id == "hermes:two" }).isActive)
+        XCTAssertFalse(store.tasks.contains { $0.provider == .hermes }, "No profile metadata means no verified Hermes identity")
 
         hermes = .partial
         store.refresh()
-        XCTAssertTrue(try XCTUnwrap(store.tasks.first { $0.id == "hermes:two" }).isUnconfirmed)
+        XCTAssertFalse(store.tasks.contains { $0.provider == .hermes })
         XCTAssertTrue(try XCTUnwrap(store.tasks.first { $0.id == "opencode:one" }).isActive)
         XCTAssertTrue(store.unavailableSources.contains(.hermes))
         XCTAssertFalse(store.unavailableSources.contains(.opencode))
@@ -187,10 +191,10 @@ final class ExternalProviderTaskStoreTests: XCTestCase {
         let secondEpoch = DispatchTime.now().uptimeNanoseconds
         try send(#"{"version":1,"provider":"hermes","session":"new","kind":"started","turn":"turn_2","epoch":\#(secondEpoch),"tick":\#(secondEpoch + 1)}"#, directory: directory)
         store.refresh()
-        XCTAssertTrue(try XCTUnwrap(store.tasks.first { $0.id == "hermes:new" }).isActive)
+        XCTAssertFalse(store.tasks.contains { $0.provider == .hermes })
         openCode = .disconnected
         store.refresh()
         XCTAssertFalse(store.tasks.contains { $0.provider == .opencode })
-        XCTAssertTrue(store.tasks.contains { $0.id == "hermes:new" && $0.isActive })
+        XCTAssertFalse(store.tasks.contains { $0.provider == .hermes })
     }
 }

@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 
 enum ClaudeIntegration {
-    static let events = ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "TaskCreated", "TaskCompleted", "SubagentStart", "SubagentStop", "Stop", "SessionEnd"]
+    static let events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "TaskCreated", "TaskCompleted", "SubagentStart", "SubagentStop", "Stop", "StopFailure", "SessionEnd"]
 
     enum ConnectionState: Equatable {
         case disconnected, partial, connected
@@ -63,7 +63,7 @@ enum ClaudeIntegration {
         let destination = try settingsDestination(for: settingsURL)
         let original = try readSettingsData(at: destination)
         if !connect && original == nil { return }
-        var root = try settingsObject(from: original)
+        let root = try settingsObject(from: original)
         var hooks = try hooksObject(from: root)
         let executable = executable ?? executablePath
         let expectedCommand = hookCommand(for: executable)
@@ -90,7 +90,12 @@ enum ClaudeIntegration {
                         keptCommands.append(command)
                     }
                 }
-                if removedOwned && keptCommands.isEmpty { continue }
+                if removedOwned && keptCommands.isEmpty {
+                    // Empty matcher/group semantics are not established.
+                    // Reject before any write rather than discard metadata.
+                    guard Set(group.keys) == Set(["hooks"]) else { throw IntegrationError.invalidSettings }
+                    continue
+                }
                 if removedOwned { updated["hooks"] = keptCommands }
                 keptGroups.append(updated)
             }
@@ -101,8 +106,23 @@ enum ClaudeIntegration {
             if keptGroups.isEmpty { hooks.removeValue(forKey: event) } else { hooks[event] = keptGroups }
         }
         guard changed else { return }
-        root["hooks"] = hooks
-        let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]) + Data([0x0A])
+        let document = (original?.isEmpty == false) ? original! : Data("{}".utf8)
+        guard let member = ClaudeJSONValidation.topLevelMember(document, named: "hooks") else { throw IntegrationError.invalidSettings }
+        let bytes = Array(document)
+        if let range = member.valueRange, !safeHookNumbers(Data(bytes[range])) { throw IntegrationError.invalidSettings }
+        let replacement = try JSONSerialization.data(withJSONObject: hooks, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        var data = Data()
+        if let range = member.valueRange {
+            data.append(contentsOf: bytes[..<range.lowerBound])
+            data.append(replacement)
+            data.append(contentsOf: bytes[range.upperBound...])
+        } else {
+            data.append(contentsOf: bytes[..<member.closingBrace])
+            if member.hasMembers { data.append(0x2c) }
+            data.append(contentsOf: Data("\"hooks\":".utf8))
+            data.append(replacement)
+            data.append(contentsOf: bytes[member.closingBrace...])
+        }
         let directory = settingsURL.deletingLastPathComponent()
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         try beforeCommit?()
@@ -172,9 +192,38 @@ enum ClaudeIntegration {
 
     private static func settingsObject(from data: Data?) throws -> [String: Any] {
         guard let data, !data.isEmpty else { return [:] }
-        let value = try JSONSerialization.jsonObject(with: data)
-        guard let settings = value as? [String: Any] else { throw IntegrationError.invalidSettings }
+        guard let settings = ClaudeJSONValidation.object(data) else { throw IntegrationError.invalidSettings }
         return settings
+    }
+
+    // JSONSerialization can round foreign numbers. Reject uncommon numerical
+    // forms inside hooks; other top-level members remain byte-for-byte intact.
+    private static func safeHookNumbers(_ data: Data) -> Bool {
+        let bytes = Array(data)
+        var index = 0, inString = false, escaped = false
+        while index < bytes.count {
+            let byte = bytes[index]
+            if inString {
+                if escaped { escaped = false }
+                else if byte == 0x5c { escaped = true }
+                else if byte == 0x22 { inString = false }
+                index += 1
+                continue
+            }
+            if byte == 0x22 { inString = true; index += 1; continue }
+            if byte == 0x2d || (0x30...0x39).contains(byte) {
+                let start = index
+                while index < bytes.count && ((0x30...0x39).contains(bytes[index]) ||
+                    [0x2d, 0x2b, 0x2e, 0x65, 0x45].contains(bytes[index])) { index += 1 }
+                let number = bytes[start..<index]
+                if number.contains(0x2e) || number.contains(0x65) || number.contains(0x45) { return false }
+                let digits = number.first == 0x2d ? number.dropFirst() : number[...]
+                if digits.isEmpty || digits.count > 15 { return false }
+                continue
+            }
+            index += 1
+        }
+        return !inString
     }
 
     private static func hooksObject(from root: [String: Any]) throws -> [String: Any] {

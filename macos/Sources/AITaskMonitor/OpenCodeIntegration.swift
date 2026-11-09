@@ -7,7 +7,8 @@ enum OpenCodeIntegrationError: Error { case invalidPath, conflict, modified, mis
 enum OpenCodeIntegration {
     typealias State = ExternalProviderConnectionState
     private static let owner = "AI Task Monitor OpenCode v1"
-    private static let files = ["provider-events.mjs", "provider-observers.mjs", "provider-transport.mjs"]
+    private static let legacyFiles = ["provider-events.mjs", "provider-observers.mjs", "provider-transport.mjs"]
+    private static let files = legacyFiles + ["provider-v2-sender.mjs"]
 
     private struct Manifest: Codable {
         let owner: String
@@ -210,7 +211,8 @@ enum OpenCodeIntegration {
         let manager = FileManager.default
         guard manager.fileExists(atPath: paths.manifest.path) else { return nil }
         let names = try manager.contentsOfDirectory(atPath: paths.folder.path)
-        guard Set(names) == Set(files + ["manifest.json"]) else { throw OpenCodeIntegrationError.modified }
+        let expectedLegacy = Set(legacyFiles + ["manifest.json"]), expectedCurrent = Set(files + ["manifest.json"])
+        guard Set(names) == expectedLegacy || Set(names) == expectedCurrent else { throw OpenCodeIntegrationError.modified }
         for name in names {
             var info = stat()
             let item = paths.folder.appendingPathComponent(name)
@@ -219,9 +221,11 @@ enum OpenCodeIntegration {
         }
         let data = try Data(contentsOf: paths.manifest)
         guard data.count <= 8_192, let manifest = try? JSONDecoder().decode(Manifest.self, from: data),
-              manifest.owner == owner, Set(manifest.files.keys) == Set(files),
+              manifest.owner == owner,
+              (Set(manifest.files.keys) == Set(legacyFiles) || Set(manifest.files.keys) == Set(files)),
+              Set(names) == Set(manifest.files.keys).union(["manifest.json"]),
               manifest.shim.range(of: #"^[A-F0-9]{64}$"#, options: .regularExpression) != nil else { throw OpenCodeIntegrationError.modified }
-        for name in files {
+        for name in manifest.files.keys {
             guard let expected = manifest.files[name], expected.range(of: #"^[A-F0-9]{64}$"#, options: .regularExpression) != nil,
                   try digest(paths.folder.appendingPathComponent(name)) == expected else { throw OpenCodeIntegrationError.modified }
         }
@@ -230,8 +234,8 @@ enum OpenCodeIntegration {
     }
 
     private static func removeOwnedFolder(_ paths: Paths) throws {
-        guard try readOwnedManifest(paths) != nil else { throw OpenCodeIntegrationError.conflict }
-        for name in files { try FileManager.default.removeItem(at: paths.folder.appendingPathComponent(name)) }
+        guard let manifest = try readOwnedManifest(paths) else { throw OpenCodeIntegrationError.conflict }
+        for name in manifest.files.keys { try FileManager.default.removeItem(at: paths.folder.appendingPathComponent(name)) }
         try FileManager.default.removeItem(at: paths.manifest)
         try FileManager.default.removeItem(at: paths.folder)
     }

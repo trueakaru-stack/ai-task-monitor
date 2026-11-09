@@ -1,5 +1,6 @@
 import { createOrderedSender, registerDeepSeekObserver } from './provider-observers.mjs';
 import { createHash } from 'node:crypto';
+import { createRestartableSender, loadV2Startup } from './provider-v2-sender.mjs';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
 
 export const name = 'ai-task-monitor-dsh-observer';
@@ -39,7 +40,10 @@ export function apply(ctx) {
     const namespace = readProfileNamespace();
     if (!namespace || typeof ctx?.effect !== 'function') return;
     // Normalize identifiers before the shared protocol validates and transmits them.
-    sender = createOrderedSender();
+    const directory = typeof process.getuid === 'function' ? `/private/tmp/aitm-provider-${process.getuid()}` : '';
+    const startup = loadV2Startup('deepseek', namespace, directory);
+    sender = startup ? createRestartableSender({ provider: 'deepseek', scope: namespace, ...startup }) : null;
+    sender ??= createOrderedSender();
     ctx.effect(() => () => sender.close());
     registerDeepSeekObserver(ctx, sender, {}, identifier => scopedIdentifier(namespace, identifier));
   } catch {

@@ -7,12 +7,19 @@ enum ExternalProviderTaskMapper {
             guard let provider = TaskProvider(rawValue: state.provider),
                   [.kimi, .deepseek, .hermes, .opencode].contains(provider),
                   ["active", "waiting", "unknown"].contains(state.status) else { return nil }
+            if provider == .deepseek && state.deepSeekUnassigned {
+                let raw = MonitoredTask(id: "deepseek:" + state.session, provider: .deepseek, title: "",
+                    activity: "", isActive: false, progress: nil, progressKind: .none,
+                    steps: [], updatedAt: state.updatedAt, isUnconfirmed: true, planConfirmed: false)
+                return ExternalProfileVisibility.neutralDeepSeek(raw)
+            }
             let steps = state.steps.enumerated().compactMap { index, step -> TaskStep? in
                 guard let status = StepStatus(rawValue: step.status) else { return nil }
                 return TaskStep(id: "\(provider.rawValue):\(state.session):step:\(index)", title: step.title, status: status)
             }
             guard steps.count == state.steps.count else { return nil }
-            let progress = MonitoredTask.progress(for: steps)
+            let progress = ([TaskProvider.opencode, .deepseek].contains(provider) && !state.planConfirmed)
+                ? nil : MonitoredTask.progress(for: steps)
             let activity: String
             if state.status == "unknown" {
                 activity = tr("Статус не подтверждён", "Status unconfirmed")

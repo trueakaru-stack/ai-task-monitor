@@ -56,7 +56,12 @@ struct TaskCardView: View {
                     LazyVStack(alignment: .leading, spacing: 9) {
                         ForEach(task.steps) { step in
                             HStack(spacing: 9) {
-                                StepMark(status: hidesUnconfirmedPlanStatus ? .pending : step.status)
+                                if task.provider == .claude && hidesUnconfirmedPlanStatus {
+                                    // An empty pending circle is itself a status claim.
+                                    Color.clear.frame(width: 14, height: 16).accessibilityHidden(true)
+                                } else {
+                                    StepMark(status: hidesUnconfirmedPlanStatus ? .pending : step.status)
+                                }
                                 TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: !hidesUnconfirmedPlanStatus && step.status == .active ? .labelColor : .secondaryLabelColor)
                                     .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
                             }

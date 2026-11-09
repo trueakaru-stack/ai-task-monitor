@@ -1,8 +1,58 @@
 import Combine
 import Foundation
 
+private struct ClaudePhaseChanges {
+    var affectsAll = false
+    var sessions: Set<String> = []
+}
+
 @MainActor
 final class TaskStore: ObservableObject {
+    // Keep titles already displayed when an uncertain replacement snapshot
+    // lacks them. This is in-memory only and does not persist private text.
+    static func preserveUncertainClaudeTitles(previous: [MonitoredTask], current: [MonitoredTask], affected: Set<String>? = nil) -> (tasks: [MonitoredTask], overflow: Bool) {
+        let old = Dictionary(previous.filter { $0.provider == .claude }.map { ($0.id, $0) },
+                             uniquingKeysWith: { first, _ in first })
+        var overflow = false
+        let tasks = current.map { task in
+            guard task.provider == .claude, affected == nil || affected!.contains(task.id),
+                  (!task.planConfirmed || task.isUnconfirmed), let prior = old[task.id] else { return task }
+            let currentTitles = Set(task.steps.map(\.title))
+            var kept: [TaskStep] = []
+            var seen = currentTitles
+            for step in prior.steps where seen.insert(step.title).inserted {
+                guard kept.count < 4096 else { overflow = true; continue }
+                kept.append(TaskStep(id: "~aitm-history-\(kept.count)", title: step.title, status: .pending))
+            }
+            var merged = task
+            merged.steps = kept + task.steps
+            return merged
+        }
+        return (tasks, overflow)
+    }
+
+    static func clearClaudePlanConfirmations(_ items: [MonitoredTask], affected: Set<String>? = nil) -> [MonitoredTask] {
+        items.map { item in
+            guard item.provider == .claude, affected == nil || affected!.contains(item.id) else { return item }
+            var copy = item
+            copy.planConfirmed = false
+            copy.progress = nil
+            copy.progressKind = .none
+            return copy
+        }
+    }
+
+    static func clearUnconfirmedClaudePlans(_ items: [MonitoredTask]) -> [MonitoredTask] {
+        items.map { item in
+            guard item.provider == .claude, item.isUnconfirmed else { return item }
+            var uncertain = item
+            uncertain.planConfirmed = false
+            uncertain.progress = nil
+            uncertain.progressKind = .none
+            return uncertain
+        }
+    }
+
     @Published private(set) var tasks: [MonitoredTask] = []
     @Published var selectedProvider: ProviderFilter = .all
     @Published var showsSettings = false
@@ -12,6 +62,7 @@ final class TaskStore: ObservableObject {
     @Published var sourceMessage = ""
     @Published private(set) var openCodeMessage = ""
     @Published private(set) var openCodeSetupInProgress = false
+    @Published private(set) var externalV2Failed = false
     @Published private(set) var deepSeekProfiles: [DeepSeekProfile] = []
     @Published var selectedDeepSeekProfile = ""
     @Published private(set) var deepSeekMessage = ""
@@ -52,8 +103,11 @@ final class TaskStore: ObservableObject {
     private let claudeLoopProfile: URL?
     private let claudeRetentionWorker: ClaudeRetentionWorker?
     private let externalProvidersEnabled: Bool
+    private let externalV2Enabled: Bool
     private let externalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState]
     private let makeExternalRuntime: () throws -> ExternalProviderRuntime
+    private let makeExternalV2Runtime: () throws -> ExternalProviderV2Runtime
+    private let discoverDeepSeekContext: () -> DeepSeekIntegration.Context?
     private let inspectKimiConnection: () throws -> KimiConnection
     private let kimiScanInterval: TimeInterval
     private let discoverHermesContext: () -> HermesIntegration.Context?
@@ -73,19 +127,22 @@ final class TaskStore: ObservableObject {
     private let monitoringStartedAt = Date()
     private var previousCodex: [MonitoredTask] = []
     private var previousClaude: [MonitoredTask] = []
+    private var claudeRetainedTitlesOverflow = false
     private var previousExternal: [MonitoredTask] = []
     private var externalRuntime: ExternalProviderRuntime?
+    private var externalV2Runtime: ExternalProviderV2Runtime?
+    private var parkedExternalProviderState: ExternalProviderStateStore?
     private var seenExternalConnections: Set<TaskProvider> = []
     private var kimiScope: String?
     private var kimiSeenScope: String?
     private var kimiScanInProgress = false
     private var nextKimiScan = Date.distantPast
     private var deepSeekContext: DeepSeekIntegration.Context?
-    private var deepSeekSeenScopes: [String: String] = [:]
+    private var deepSeekHistory = ProviderScopeHistory()
     private var deepSeekScanError: String?
     private var nextDeepSeekScan = Date.distantPast
     private var hermesContext: HermesIntegration.Context?
-    private var hermesSeenScopes: [String: String] = [:]
+    private var hermesHistory = ProviderScopeHistory()
     private var hermesScanError: String?
     private var nextHermesScan = Date.distantPast
     private var taskFocus = TaskFocusTracker()
@@ -94,6 +151,7 @@ final class TaskStore: ObservableObject {
     private var nextJournalMaintenance = Date.distantPast
     private var loopDetectors: [String: LoopDetector] = [:]
     private var claudeLoopChannel: ClaudeLoopChannel?
+    private var claudePhaseEvidence = ClaudePhaseEvidence()
     private var claudeLoopDetectors: [String: ClaudeLoopTracker] = [:]
     private var timer: Timer?
 
@@ -116,6 +174,37 @@ final class TaskStore: ObservableObject {
         }
     }
 
+    var openCodeRestartAvailable: Bool {
+        externalV2Runtime?.canAcknowledge(ExternalProviderV2Scope(provider: "opencode", scope: "global")) == true
+    }
+
+    var deepSeekRestartAvailable: Bool {
+        guard deepSeekScanError == nil, let profile = deepSeekSelectedProfile, profile.state == "connected",
+              let scope = profile.scope, deepSeekAllowedScopes.contains(scope),
+              !deepSeekHistory.ambiguous(deepSeekProfiles).contains(scope) else { return false }
+        return externalV2Runtime?.canAcknowledge(ExternalProviderV2Scope(provider: "deepseek", scope: scope)) == true
+    }
+
+    func acknowledgeOpenCodeRestart() {
+        guard openCodeRestartAvailable,
+              externalV2Runtime?.acknowledge(ExternalProviderV2Scope(provider: "opencode", scope: "global")) == true else {
+            openCodeMessage = tr("Не удалось отметить перезапуск. Статусы остаются неподтверждёнными.", "Could not record the restart. Statuses remain unconfirmed.")
+            return
+        }
+        openCodeMessage = tr("Перезапуск отмечен. Статусы OpenCode пока не подтверждены.", "Restart recorded. OpenCode statuses remain unconfirmed.")
+        refresh()
+    }
+
+    func acknowledgeDeepSeekRestart() {
+        guard deepSeekRestartAvailable, let scope = deepSeekSelectedProfile?.scope,
+              externalV2Runtime?.acknowledge(ExternalProviderV2Scope(provider: "deepseek", scope: scope)) == true else {
+            deepSeekMessage = tr("Не удалось отметить перезапуск. Статусы остаются неподтверждёнными.", "Could not record the restart. Statuses remain unconfirmed.")
+            return
+        }
+        deepSeekMessage = tr("Перезапуск выбранного профиля отмечен.", "Restart recorded for the selected profile.")
+        refresh()
+    }
+
     func setDeepSeekConnected(_ connect: Bool) {
         guard !deepSeekSetupInProgress, !deepSeekScanInProgress, let context = deepSeekContext,
               deepSeekProfiles.contains(where: { $0.name == selectedDeepSeekProfile }) else { return }
@@ -129,7 +218,13 @@ final class TaskStore: ObservableObject {
                 self.deepSeekSetupInProgress = false
                 switch result {
                 case .success:
-                    if !connect { self.deepSeekSeenScopes.removeValue(forKey: profile) }
+                    if !connect {
+                        self.deepSeekHistory.markDisconnected(profile)
+                        self.deepSeekProfiles = self.deepSeekProfiles.map { item in
+                            guard Data(item.name.utf8) == Data(profile.utf8) else { return item }
+                            return DeepSeekProfile(name: item.name, state: "disconnected", scope: nil, error: nil)
+                        }
+                    }
                 case .failure(let error):
                     self.deepSeekMessage = self.deepSeekErrorMessage((error as? DeepSeekIntegrationError)?.code ?? "operation-failed")
                 }
@@ -197,8 +292,9 @@ final class TaskStore: ObservableObject {
         guard externalProvidersEnabled, !deepSeekSetupInProgress, !deepSeekScanInProgress,
               Date() >= nextDeepSeekScan else { return }
         deepSeekScanInProgress = true
+        let discover = discoverDeepSeekContext
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let context = DeepSeekIntegration.discover()
+            let context = discover()
             let result: Result<[DeepSeekProfile], Error>
             if let context { result = Result { try DeepSeekIntegration.profiles(context) } }
             else { result = .failure(DeepSeekIntegrationError(code: "installation-unconfirmed")) }
@@ -210,15 +306,20 @@ final class TaskStore: ObservableObject {
                 self.deepSeekInstallationAvailable = context != nil
                 switch result {
                 case .success(let profiles):
+                    guard self.deepSeekHistory.update(profiles) else {
+                        self.deepSeekHistory.markInvalidRoster()
+                        self.deepSeekScanError = "invalid-response"
+                        self.refresh()
+                        return
+                    }
                     self.deepSeekScanError = nil
                     self.deepSeekProfiles = profiles
-                    for item in profiles {
-                        if item.state == "connected", let scope = item.scope { self.deepSeekSeenScopes[item.name] = scope }
-                        else if item.state == "disconnected" { self.deepSeekSeenScopes.removeValue(forKey: item.name) }
-                    }
                     if !profiles.contains(where: { $0.name == self.selectedDeepSeekProfile }) { self.selectedDeepSeekProfile = "" }
                 case .failure(let error):
-                    self.deepSeekScanError = (error as? DeepSeekIntegrationError)?.code ?? "operation-failed"
+                    let code = (error as? DeepSeekIntegrationError)?.code ?? "operation-failed"
+                    if code == "invalid-response" { self.deepSeekHistory.markInvalidRoster() }
+                    else { self.deepSeekHistory.markScanFailed() }
+                    self.deepSeekScanError = code
                 }
                 self.refresh()
             }
@@ -258,27 +359,46 @@ final class TaskStore: ObservableObject {
         }
     }
 
+    static func ambiguousDeepSeekScopes(_ profiles: [DeepSeekProfile], seenScopes: [String: String] = [:]) -> Set<String> {
+        var seen: Set<String> = [], ambiguous: Set<String> = []
+        for profile in profiles where profile.state == "connected" {
+            guard let scope = profile.scope, DeepSeekIntegration.validScope(scope) else { continue }
+            if !seen.insert(scope).inserted { ambiguous.insert(scope) }
+        }
+        for (name, scope) in seenScopes where DeepSeekIntegration.validScope(scope) {
+            let matches = profiles.filter { $0.name == name }
+            if matches.count != 1 || matches[0].state != "connected" || matches[0].scope != scope {
+                if !seen.insert(scope).inserted { ambiguous.insert(scope) }
+            }
+        }
+        return ambiguous
+    }
+
     private var deepSeekAllowedScopes: Set<String> {
-        guard deepSeekScanError == nil else { return [] }
-        return Set(deepSeekProfiles.compactMap { $0.state == "connected" ? $0.scope : nil })
+        deepSeekHistory.allowed(deepSeekProfiles, scanFailed: deepSeekScanError != nil)
     }
 
     private var deepSeekUncertainScopes: Set<String> {
-        Set(deepSeekSeenScopes.compactMap { name, scope in
-            let profile = deepSeekProfiles.first { $0.name == name }
-            return deepSeekScanError != nil || profile == nil || profile?.state == "partial" || profile?.state == "error" ? scope : nil
-        })
+        // A structurally invalid roster may conceal conflicting ownership.
+        if deepSeekScanError == "invalid-response" { return [] }
+        return deepSeekHistory.uncertain(deepSeekProfiles, scanFailed: deepSeekScanError != nil)
+    }
+
+    private var deepSeekDisabledScopes: Set<String> {
+        Set(deepSeekHistory.disabled.compactMap { deepSeekHistory.seen[$0] })
     }
 
     private func deepSeekConnectionState() throws -> ExternalProviderConnectionState {
         if deepSeekScanError != nil {
-            if deepSeekSeenScopes.isEmpty { return .disconnected }
+            if deepSeekHistory.seen.isEmpty { return .disconnected }
             throw DeepSeekIntegrationError(code: "operation-failed")
         }
         if !deepSeekAllowedScopes.isEmpty { return deepSeekUncertainScopes.isEmpty ? .connected : .connectedDegraded }
+        if deepSeekHistory.historyLost && deepSeekProfiles.contains(where: { ["partial", "error"].contains($0.state) }) {
+            return .partial
+        }
         return deepSeekUncertainScopes.isEmpty ? .disconnected : .partial
     }
-
     func prepareHermes() {
         guard !hermesSetupInProgress, !hermesScanInProgress, hermesScanError == nil,
               let context = hermesContext, let profile = hermesSelectedProfile,
@@ -318,20 +438,23 @@ final class TaskStore: ObservableObject {
                 self.hermesInstallationAvailable = context != nil
                 switch result {
                 case .success(let profiles) where HermesIntegration.validProfiles(profiles):
+                    guard self.hermesHistory.update(Self.hermesHistoryProfiles(profiles)) else {
+                        self.hermesHistory.markInvalidRoster()
+                        self.hermesScanError = "invalid-response"
+                        self.refresh()
+                        return
+                    }
                     self.hermesScanError = nil
                     self.hermesProfiles = profiles
-                    for item in profiles {
-                        if item.state == "prepared", item.enabled == true, let scope = item.scope {
-                            self.hermesSeenScopes[item.id] = scope
-                        } else if item.state == "absent" || (item.state == "prepared" && item.enabled == false) {
-                            self.hermesSeenScopes.removeValue(forKey: item.id)
-                        }
-                    }
                     if !profiles.contains(where: { $0.id == self.selectedHermesProfile }) { self.selectedHermesProfile = "" }
                 case .success:
+                    self.hermesHistory.markInvalidRoster()
                     self.hermesScanError = "invalid-response"
                 case .failure(let error):
-                    self.hermesScanError = (error as? HermesIntegrationError)?.code ?? "operation-failed"
+                    let code = (error as? HermesIntegrationError)?.code ?? "operation-failed"
+                    if code == "invalid-response" { self.hermesHistory.markInvalidRoster() }
+                    else { self.hermesHistory.markScanFailed() }
+                    self.hermesScanError = code
                 }
                 self.refresh()
             }
@@ -380,33 +503,38 @@ final class TaskStore: ObservableObject {
               profile.state == "prepared" else { return nil }
         return HermesIntegration.command(profile, context: context, enable: false)
     }
+    private static func hermesHistoryProfiles(_ profiles: [HermesProfile]) -> [DeepSeekProfile] {
+        profiles.map { profile in
+            let connected = profile.state == "prepared" && profile.enabled == true
+            let state = connected ? "connected" : (profile.state == "error" ? "error" : "disconnected")
+            let evidence = profile.state == "prepared" ? profile.scope : nil
+            return DeepSeekProfile(name: profile.id, state: state, scope: evidence, error: profile.error)
+        }
+    }
     private var hermesAllowedScopes: Set<String> {
-        guard hermesScanError == nil else { return [] }
-        return Set(hermesProfiles.compactMap { $0.state == "prepared" && $0.enabled == true ? $0.scope : nil })
+        hermesHistory.allowed(Self.hermesHistoryProfiles(hermesProfiles), scanFailed: hermesScanError != nil)
     }
     private var hermesUncertainScopes: Set<String> {
-        Set(hermesSeenScopes.compactMap { id, scope in
-            let profile = hermesProfiles.first { $0.id == id }
-            return hermesScanError != nil || profile == nil || profile?.state == "error" ? scope : nil
-        })
+        if hermesScanError == "invalid-response" { return [] }
+        return hermesHistory.uncertain(Self.hermesHistoryProfiles(hermesProfiles), scanFailed: hermesScanError != nil)
     }
     private func hermesConnectionState() throws -> ExternalProviderConnectionState {
         if hermesScanError != nil {
-            if hermesSeenScopes.isEmpty { return .disconnected }
+            if hermesHistory.seen.isEmpty { return .disconnected }
             throw HermesIntegrationError(code: "operation-failed")
         }
         if !hermesAllowedScopes.isEmpty { return hermesUncertainScopes.isEmpty ? .connected : .connectedDegraded }
         return hermesUncertainScopes.isEmpty ? .disconnected : .partial
     }
 
-    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, additionalExternalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState] = [:], makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }, inspectKimiConnection: @escaping () throws -> KimiConnection = {
+    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, additionalExternalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState] = [:], makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }, makeExternalV2Runtime: @escaping () throws -> ExternalProviderV2Runtime = { try ExternalProviderV2Runtime() }, discoverDeepSeekContext: @escaping () -> DeepSeekIntegration.Context? = { DeepSeekIntegration.discover() }, inspectKimiConnection: @escaping () throws -> KimiConnection = {
         guard let context = KimiIntegration.discover() else { throw KimiIntegrationError(code: "installation-unconfirmed") }
         return try KimiIntegration.inspect(context)
     }, kimiScanInterval: TimeInterval = 15,
        discoverHermesContext: @escaping () -> HermesIntegration.Context? = { HermesIntegration.discover() },
        inspectHermesProfiles: @escaping (HermesIntegration.Context) throws -> [HermesProfile] = { try HermesIntegration.profiles($0) },
        prepareHermesProfile: @escaping (HermesProfile, HermesIntegration.Context) throws -> Void = { try HermesIntegration.prepare($0, context: $1) },
-       hermesScanInterval: TimeInterval = 15,
+       hermesScanInterval: TimeInterval = 15, enableExternalV2: Bool = false,
        enableCodexCloud: Bool = false, codexCloudDefaults: UserDefaults = .standard, codexCloudInterval: TimeInterval = 30, makeCodexCloudClient: @escaping () -> CodexCloudClient? = { CodexCloudClient.discover().map { CodexCloudClient(executable: $0) } },
        updateDefaults: UserDefaults = .standard, updateClock: ReleaseRetryClock? = nil,
        updateFileStore: ReleaseScheduleFileStore? = nil,
@@ -415,10 +543,13 @@ final class TaskStore: ObservableObject {
         self.claudeReader = claudeReader
         self.claudeLoopProfile = claudeLoopProfile
         self.externalProvidersEnabled = enableExternalProviders && previewTasks == nil
+        self.externalV2Enabled = enableExternalV2 && enableExternalProviders && previewTasks == nil
         var connections = additionalExternalConnections.filter { [.kimi, .deepseek, .hermes].contains($0.key) }
         connections[.opencode] = openCodeConnection
         self.externalConnections = connections
         self.makeExternalRuntime = makeExternalRuntime
+        self.makeExternalV2Runtime = makeExternalV2Runtime
+        self.discoverDeepSeekContext = discoverDeepSeekContext
         self.inspectKimiConnection = inspectKimiConnection
         self.kimiScanInterval = max(0.1, kimiScanInterval)
         self.discoverHermesContext = discoverHermesContext
@@ -470,6 +601,7 @@ final class TaskStore: ObservableObject {
         timer?.invalidate()
         claudeLoopChannel?.stop()
         externalRuntime?.stop()
+        externalV2Runtime?.stop()
     }
 
     func setClaudeRetention(days: Int? = nil, maximumMB: Int? = nil) {
@@ -653,15 +785,14 @@ final class TaskStore: ObservableObject {
         }
         return messages.joined(separator: ". ")
     }
-    var filteredTasks: [MonitoredTask] {
-        guard let provider = selectedProvider.provider else { return tasks }
+    private func tasks(for filter: ProviderFilter) -> [MonitoredTask] {
+        guard let provider = filter.provider else { return tasks }
         return tasks.filter { $0.provider == provider }
     }
 
-    func count(for filter: ProviderFilter) -> Int {
-        guard let provider = filter.provider else { return tasks.filter(\.isActive).count }
-        return tasks.filter { $0.isActive && $0.provider == provider }.count
-    }
+    var filteredTasks: [MonitoredTask] { tasks(for: selectedProvider) }
+
+    func count(for filter: ProviderFilter) -> Int { tasks(for: filter).count }
 
     func setCodexCloudEnabled(_ enabled: Bool) {
         guard codexCloudAllowed else { return }
@@ -728,6 +859,7 @@ final class TaskStore: ObservableObject {
         var codexPartial = false
         var terminalIDs: Set<String> = []
         var interruptedIDs: Set<String> = []
+        var neutralEndedIDs: Set<String> = []
         var codexToolEvents: [String: [CodexToolEvent]] = [:]
         var claudeConnected = false
         do {
@@ -750,29 +882,64 @@ final class TaskStore: ObservableObject {
             else { connection = try ClaudeIntegration.connectionState() }
             if connection == .disconnected {
                 previousClaude = []
+                claudeRetainedTitlesOverflow = false
                 sawClaudeEvents = false
             } else {
                 let complete = connection == .connected
                 claudeConnected = complete && (!claudeReader.usesExplicitFile || claudeLoopProfile != nil)
+                // Drain phase evidence before matching the file snapshot. A
+                // record whose frame is still in flight remains unconfirmed.
+                syncClaudeLoop(connected: claudeConnected, now: Date())
                 if !complete { unavailable.append(.claude) }
                 let exists = FileManager.default.fileExists(atPath: claudeReader.eventFile.path)
-                if !exists && sawClaudeEvents { throw CocoaError(.fileReadNoSuchFile) }
+                if !exists && sawClaudeEvents {
+                    claudeReader.noteSourceLoss()
+                    throw CocoaError(.fileReadNoSuchFile)
+                }
                 if exists {
                     sawClaudeEvents = true
-                    let snapshot = try claudeReader.readSnapshot(observedSince: monitoringStartedAt)
+                    let snapshot = try claudeReader.readSnapshot(observedSince: monitoringStartedAt,
+                                                                phaseEvidence: claudePhaseEvidence)
                     terminalIDs.formUnion(snapshot.terminalIDs)
                     interruptedIDs.formUnion(snapshot.interruptedIDs)
-                    previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
+                    neutralEndedIDs.formUnion(snapshot.neutralEndedIDs)
+                    let phaseAffected = Set(snapshot.tasks.compactMap { task -> String? in
+                        guard task.provider == .claude, task.id.hasPrefix("claude:") else { return nil }
+                        let session = String(task.id.dropFirst(7))
+                        return claudePhaseEvidence.isSessionUncertain(session) ? task.id : nil
+                    })
+                    let retainAll = snapshot.sourceUncertain || claudePhaseEvidence.poisoned
+                    let affected = phaseAffected.union(snapshot.titleHistoryOverflowIDs)
+                    let retainedTitles = retainAll || !affected.isEmpty
+                        ? Self.preserveUncertainClaudeTitles(previous: previousClaude, current: snapshot.tasks,
+                                                            affected: retainAll ? nil : affected)
+                        : (tasks: snapshot.tasks, overflow: false)
+                    claudeRetainedTitlesOverflow = claudeRetainedTitlesOverflow || retainedTitles.overflow
+                    previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: retainedTitles.tasks,
+                                                               terminalIDs: snapshot.terminalIDs.union(snapshot.neutralEndedIDs))
+                    if snapshot.sourceUncertain || !snapshot.titleHistoryOverflowIDs.isEmpty || claudeRetainedTitlesOverflow {
+                        // The warning remains for the affected history; keep
+                        // the live channel available for a scoped new session.
+                        if !unavailable.contains(.claude) { unavailable.append(.claude) }
+                    }
                 }
                 if !complete {
                     previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
                 }
             }
+        } catch ClaudeReadError.journalBusy {
+            // A concurrent hook or retention pass is transient. Preserve the
+            // channel and its phase evidence while the snapshot is retried.
+            if !unavailable.contains(.claude) { unavailable.append(.claude) }
+            previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         } catch {
             claudeConnected = false
             if !unavailable.contains(.claude) { unavailable.append(.claude) }
             previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         }
+        // A retained card after a read error or lost source must not retain a
+        // confirmed plan internally even when the UI also hides stale state.
+        previousClaude = Self.clearUnconfirmedClaudePlans(previousClaude)
         if externalProvidersEnabled { scheduleKimiScan(); scheduleDeepSeekScan(); scheduleHermesScan(); refreshExternalProviders(unavailable: &unavailable) }
         scheduleCodexCloudScan()
         codexPartiallyUnavailable = codexPartial
@@ -781,7 +948,14 @@ final class TaskStore: ObservableObject {
             .filter { $0.isActive || $0.isUnconfirmed || $0.isWaiting }
             .sorted { $0.updatedAt > $1.updatedAt }
         let now = Date()
-        syncClaudeLoop(connected: claudeConnected, now: now)
+        let phaseChanges = syncClaudeLoop(connected: claudeConnected, now: now)
+        let knownIDs = Set(phaseChanges.sessions.compactMap { claudeSessionKey($0).map { "claude:" + $0 } })
+        let all = phaseChanges.affectsAll || claudePhaseEvidence.poisoned || knownIDs.count != phaseChanges.sessions.count
+        if all || !knownIDs.isEmpty {
+            let affected: Set<String>? = all ? nil : knownIDs
+            previousClaude = Self.clearClaudePlanConfirmations(previousClaude, affected: affected)
+            combined = Self.clearClaudePlanConfirmations(combined, affected: affected)
+        }
         for id in Array(loopDetectors.keys) {
             guard var detector = loopDetectors[id] else { continue }
             detector.configure(threshold: diagnosticSettings.loopThreshold, windowMinutes: diagnosticSettings.loopWindowMinutes)
@@ -802,7 +976,7 @@ final class TaskStore: ObservableObject {
             detector.refresh(now: now)
             loopDetectors[id] = detector
         }
-        for id in terminalIDs {
+        for id in terminalIDs.union(neutralEndedIDs) {
             if var detector = loopDetectors[id] { detector.finishTurn(); loopDetectors[id] = detector }
             if id.hasPrefix("claude:") { claudeLoopDetectors.removeValue(forKey: String(id.dropFirst(7))) }
         }
@@ -851,7 +1025,14 @@ final class TaskStore: ObservableObject {
                     unavailable.append(provider)
                 case .partial:
                     unavailable.append(provider)
-                    uncertain.insert(provider)
+                    if provider == .deepseek && externalConnections[.deepseek] == nil &&
+                        deepSeekProfiles.contains(where: { $0.state == "connected" }) {
+                        // The receiver may collect only neutral evidence from
+                        // ambiguous scopes while at least one profile is live.
+                        allowed.insert(provider)
+                    } else {
+                        uncertain.insert(provider)
+                    }
                 case .disconnected:
                     seenExternalConnections.remove(provider)
                 }
@@ -862,38 +1043,148 @@ final class TaskStore: ObservableObject {
                 }
             }
         }
-        let retained = unconfirmedExternalTasks(for: uncertain)
+        // Build ownership before every fallback, including failed or partial providers.
+        var scopes: [TaskProvider: Set<String>] = [:]
+        var uncertainScopes: [TaskProvider: Set<String>] = [:]
+        var ambiguousScopes: [TaskProvider: Set<String>] = [:]
+        if externalConnections[.deepseek] == nil {
+            scopes[.deepseek] = deepSeekAllowedScopes
+            uncertainScopes[.deepseek] = deepSeekUncertainScopes
+            ambiguousScopes[.deepseek] = deepSeekHistory.ambiguous(deepSeekProfiles)
+        }
+        if externalConnections[.kimi] == nil {
+            if kimiScanError == nil, kimiState == "connected", let scope = kimiScope { scopes[.kimi] = [scope] }
+            if kimiScanError != nil, let scope = kimiSeenScope { uncertainScopes[.kimi] = [scope] }
+        }
+        if externalConnections[.hermes] == nil {
+            scopes[.hermes] = hermesAllowedScopes
+            uncertainScopes[.hermes] = hermesUncertainScopes
+            ambiguousScopes[.hermes] = hermesHistory.ambiguous(Self.hermesHistoryProfiles(hermesProfiles))
+        }
+        func filteredFallback(_ providers: Set<TaskProvider>) -> [MonitoredTask] {
+            let allowedDeepSeek = scopes[.deepseek] ?? []
+            let ambiguousDeepSeek = ambiguousScopes[.deepseek] ?? []
+            let candidates = unconfirmedExternalTasks(for: providers).compactMap { task -> MonitoredTask? in
+                guard task.provider == .deepseek, task.id.hasPrefix("deepseek:"),
+                      let scope = ExternalProfileVisibility.scopedSession(String(task.id.dropFirst("deepseek:".count))) else { return task }
+                if ambiguousDeepSeek.contains(scope) ||
+                    (deepSeekHistory.historyLost && !allowedDeepSeek.contains(scope) && !deepSeekDisabledScopes.contains(scope)) {
+                    return ExternalProfileVisibility.neutralDeepSeek(task)
+                }
+                return task
+            }
+            return ExternalProfileVisibility.filter(candidates, allowed: providers,
+                profileScopes: scopes, uncertainScopes: uncertainScopes, ambiguousScopes: ambiguousScopes,
+                deepSeekDisabledScopes: deepSeekDisabledScopes)
+        }
+        let retained = filteredFallback(uncertain)
         guard !allowed.isEmpty else {
-            externalRuntime?.stop()
+            if let runtime = externalRuntime {
+                parkedExternalProviderState = runtime.parkState(markTransportGap: false)
+                runtime.stop()
+            }
             externalRuntime = nil
+            externalV2Runtime?.stop()
+            externalV2Runtime = nil
             previousExternal = retained
             return
         }
         do {
-            if externalRuntime == nil { externalRuntime = try makeExternalRuntime() }
-            var scopes: [TaskProvider: Set<String>] = [:]
-            var uncertainScopes: [TaskProvider: Set<String>] = [:]
-            if allowed.contains(.deepseek), externalConnections[.deepseek] == nil {
-                scopes[.deepseek] = deepSeekAllowedScopes
-                uncertainScopes[.deepseek] = deepSeekUncertainScopes
+            if externalRuntime == nil {
+                let runtime = try makeExternalRuntime()
+                if let parked = parkedExternalProviderState { runtime.adoptState(parked); parkedExternalProviderState = nil }
+                if externalV2Enabled { runtime.markV1Unconfirmed() }
+                externalRuntime = runtime
             }
-            if allowed.contains(.kimi), externalConnections[.kimi] == nil, let scope = kimiScope {
-                scopes[.kimi] = [scope]
+            guard let runtime = externalRuntime else { throw ExternalProviderRuntimeError.stopped }
+            let current = runtime.snapshot(allowed: allowed, profileScopes: scopes,
+                uncertainScopes: uncertainScopes, ambiguousScopes: ambiguousScopes,
+                deepSeekHistoryLost: deepSeekHistory.historyLost, deepSeekDisabledScopes: deepSeekDisabledScopes)
+            guard !runtime.transportUnavailable else { throw ExternalProviderRuntimeError.stopped }
+            var combined: [String: MonitoredTask] = [:]
+            for task in current + retained { combined[task.id] = task }
+            let v2Providers = allowed.intersection([.opencode, .deepseek])
+            if externalV2Enabled && !v2Providers.isEmpty {
+                do {
+                    guard !externalV2Failed else { throw ExternalProviderRuntimeError.stopped }
+                    if externalV2Runtime == nil { externalV2Runtime = try makeExternalV2Runtime() }
+                    guard let v2 = externalV2Runtime, !v2.isStopped else { throw ExternalProviderRuntimeError.stopped }
+                    var desired: Set<ExternalProviderV2Scope> = []
+                    if allowed.contains(.opencode) { desired.insert(ExternalProviderV2Scope(provider: "opencode", scope: "global")) }
+                    if allowed.contains(.deepseek) {
+                        let usable = (scopes[.deepseek] ?? []).subtracting(ambiguousScopes[.deepseek] ?? [])
+                        desired.formUnion(usable.map { ExternalProviderV2Scope(provider: "deepseek", scope: $0) })
+                    }
+                    try v2.setScopes(desired)
+                    let observed = ExternalProfileVisibility.filter(v2.snapshot(), allowed: allowed,
+                        profileScopes: scopes, uncertainScopes: [:], ambiguousScopes: ambiguousScopes,
+                        deepSeekDisabledScopes: deepSeekDisabledScopes)
+                    for id in v2.terminalIDs where id.hasPrefix("deepseek:") {
+                        let session = String(id.dropFirst("deepseek:".count))
+                        guard let scope = ExternalProfileVisibility.scopedSession(session),
+                              (scopes[.deepseek] ?? []).contains(scope),
+                              !(ambiguousScopes[.deepseek] ?? []).contains(scope) else { continue }
+                        combined.removeValue(forKey: id)
+                    }
+                    for task in observed { combined[task.id] = task }
+                    for scope in v2.capacityLimitedScopes {
+                        if let provider = TaskProvider(rawValue: scope.provider), !unavailable.contains(provider) { unavailable.append(provider) }
+                    }
+                } catch {
+                    externalV2Failed = true
+                    externalV2Runtime?.stop(); externalV2Runtime = nil
+                    for provider in v2Providers where !unavailable.contains(provider) { unavailable.append(provider) }
+                    for task in filteredFallback(v2Providers) where combined[task.id] == nil { combined[task.id] = task }
+                }
+            } else if externalV2Runtime != nil {
+                externalV2Runtime?.stop(); externalV2Runtime = nil
             }
-            if allowed.contains(.hermes), externalConnections[.hermes] == nil {
-                scopes[.hermes] = hermesAllowedScopes
-                uncertainScopes[.hermes] = hermesUncertainScopes
+            previousExternal = Array(combined.values)
+            for provider in runtime.capacityLimitedProviders where allowed.contains(provider) && !unavailable.contains(provider) {
+                unavailable.append(provider)
             }
-            previousExternal = (externalRuntime?.snapshot(allowed: allowed, profileScopes: scopes, uncertainScopes: uncertainScopes) ?? []) + retained
         } catch {
             for provider in TaskProvider.allCases where allowed.contains(provider) && !unavailable.contains(provider) {
                 unavailable.append(provider)
             }
-            previousExternal = unconfirmedExternalTasks(for: uncertain.union(allowed))
-            externalRuntime?.stop()
+            previousExternal = filteredFallback(uncertain.union(allowed))
+            if let runtime = externalRuntime {
+                parkedExternalProviderState = runtime.parkState(markTransportGap: true)
+                runtime.stop()
+            }
             externalRuntime = nil
+            externalV2Runtime?.stop(); externalV2Runtime = nil
         }
     }
+
+    #if DEBUG
+    // Preview-only seam; tests must inject a synthetic runtime factory.
+    func testExternalFallback(previous: [MonitoredTask], deepSeekRosters: [[DeepSeekProfile]],
+                              hermesRosters: [[HermesProfile]] = [],
+                              deepSeekFailure: Bool = false, hermesFailure: Bool = false,
+                              deepSeekInvalid: Bool = false, hermesInvalid: Bool = false) -> ([MonitoredTask], [TaskProvider]) {
+        precondition(!externalProvidersEnabled && diagnosticWorker == nil)
+        previousExternal = previous
+        for roster in deepSeekRosters {
+            precondition(deepSeekHistory.update(roster))
+            deepSeekProfiles = roster
+        }
+        for roster in hermesRosters {
+            precondition(HermesIntegration.validProfiles(roster))
+            precondition(hermesHistory.update(Self.hermesHistoryProfiles(roster)))
+            hermesProfiles = roster
+        }
+        if !deepSeekRosters.isEmpty { seenExternalConnections.insert(.deepseek) }
+        if !hermesRosters.isEmpty { seenExternalConnections.insert(.hermes) }
+        if deepSeekInvalid { deepSeekHistory.markInvalidRoster() }
+        if hermesInvalid { hermesHistory.markInvalidRoster() }
+        deepSeekScanError = deepSeekInvalid ? "invalid-response" : (deepSeekFailure ? "synthetic" : nil)
+        hermesScanError = hermesInvalid ? "invalid-response" : (hermesFailure ? "synthetic" : nil)
+        var unavailable: [TaskProvider] = []
+        refreshExternalProviders(unavailable: &unavailable)
+        return (previousExternal, unavailable)
+    }
+    #endif
 
     private func unconfirmedExternalTasks(for providers: Set<TaskProvider>) -> [MonitoredTask] {
         previousExternal.filter { providers.contains($0.provider) }.map { task in
@@ -901,33 +1192,59 @@ final class TaskStore: ObservableObject {
             copy.isActive = false
             copy.isWaiting = false
             copy.isUnconfirmed = true
+            if copy.provider == .opencode || copy.provider == .deepseek { copy.progress = nil; copy.progressKind = .none }
+            if copy.provider == .opencode { copy.steps = [] }
             copy.activity = tr("Статус не подтверждён", "Status unconfirmed")
             copy.planConfirmed = false
             return copy
         }
     }
 
-    private func syncClaudeLoop(connected: Bool, now: Date) {
-        guard connected, diagnosticWorker != nil else {
+    @discardableResult
+    private func syncClaudeLoop(connected: Bool, now: Date) -> ClaudePhaseChanges {
+        guard connected else {
+            let changed = claudeLoopChannel != nil
+            if changed { claudePhaseEvidence.invalidate() }
             claudeLoopChannel?.stop()
             claudeLoopChannel = nil
             claudeLoopDetectors.removeAll()
             claudeLoopError = ""
-            return
+            return ClaudePhaseChanges(affectsAll: changed)
         }
         if claudeLoopChannel == nil {
-            do { claudeLoopChannel = try ClaudeLoopChannel(profile: claudeLoopProfile ?? AppPaths.supportDirectory) }
+            do {
+                let channel = try ClaudeLoopChannel(profile: claudeLoopProfile ?? AppPaths.supportDirectory)
+                claudeLoopChannel = channel
+                if let key = channel.phaseKey() { claudePhaseEvidence.start(key: key) }
+                else { claudePhaseEvidence.invalidate() }
+            }
             catch {
+                claudePhaseEvidence.invalidate()
                 claudeLoopDetectors.removeAll()
-                claudeLoopError = tr("Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение.", "Claude Code loop warnings are unavailable. Check access or restart the app.")
-                return
+                if diagnosticWorker != nil {
+                    claudeLoopError = tr("Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение.", "Claude Code loop warnings are unavailable. Check access or restart the app.")
+                }
+                return ClaudePhaseChanges(affectsAll: true)
             }
         }
-        guard let channel = claudeLoopChannel else { return }
+        guard let channel = claudeLoopChannel else { return ClaudePhaseChanges(affectsAll: true) }
         claudeLoopError = ""
         let batch = channel.drain()
-        if batch.gap { claudeLoopDetectors.removeAll() }
+        var phaseChanges = ClaudePhaseChanges(affectsAll: batch.gap)
+        if batch.gap { claudeLoopDetectors.removeAll(); claudePhaseEvidence.invalidate() }
+        if diagnosticWorker == nil { claudeLoopDetectors.removeAll() }
         for event in batch.events {
+            if event.kind == .phase {
+                if let fingerprint = event.fingerprint,
+                   let affected = claudePhaseEvidence.observe(session: event.sessionID, toolID: event.toolID, fingerprint: fingerprint) {
+                    phaseChanges.sessions.formUnion(affected)
+                } else {
+                    claudePhaseEvidence.invalidate()
+                    phaseChanges.affectsAll = true
+                }
+                continue
+            }
+            guard diagnosticWorker != nil else { continue }
             if claudeLoopDetectors[event.sessionID] == nil {
                 guard event.kind == .start else { continue }
                 if claudeLoopDetectors.count >= 256,
@@ -950,6 +1267,7 @@ final class TaskStore: ObservableObject {
             if detector.lastSeen < now.addingTimeInterval(-1800) { claudeLoopDetectors.removeValue(forKey: id) }
             else { claudeLoopDetectors[id] = detector }
         }
+        return phaseChanges
     }
 
     func setDiagnosticSettings(_ settings: DiagnosticSettings) {

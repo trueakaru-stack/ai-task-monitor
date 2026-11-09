@@ -3,6 +3,6 @@
   "version": "0.1.0",
   "type": "module",
   "main": "deepseek-plugin.js",
-  "files": ["deepseek-plugin.js", "provider-events.mjs", "provider-observers.mjs", "provider-transport.mjs", "cordis.patch.yml", "monitor-profile.json"],
+  "files": ["deepseek-plugin.js", "provider-events.mjs", "provider-observers.mjs", "provider-transport.mjs", "provider-v2-sender.mjs", "cordis.patch.yml", "monitor-profile.json"],
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
 }

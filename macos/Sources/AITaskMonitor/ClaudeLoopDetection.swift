@@ -3,7 +3,7 @@ import CryptoKit
 import Foundation
 
 struct ClaudeLoopEvent {
-    enum Kind: String { case start, failed, success, edit, stop, reset }
+    enum Kind: String { case start, failed, success, edit, stop, reset, phase }
 
     let sessionID: String
     let toolID: String
@@ -114,7 +114,7 @@ struct ClaudeLoopInput {
 enum ClaudeLoopPayload {
     static func parse(_ data: Data, now: Date = Date()) -> ClaudeLoopEvent? {
         guard data.count >= 2, data.count <= 4096,
-              let raw = try? JSONSerialization.jsonObject(with: data), let value = raw as? [String: Any],
+              let value = ClaudeJSONValidation.object(data),
               Set(value.keys).isSubset(of: ["session", "tool", "kind", "fingerprint", "exitCode"]),
               let session = value["session"] as? String, ClaudeLoopInput.validID(session),
               let name = value["kind"] as? String, let kind = ClaudeLoopEvent.Kind(rawValue: name),
@@ -135,6 +135,11 @@ enum ClaudeLoopPayload {
                       number.int32Value != 0 else { return nil }
                 code = number.int32Value
             }
+        }
+        if kind == .phase {
+            guard ClaudeLoopInput.validID(tool), let hash = value["fingerprint"] as? String,
+                  ClaudePhaseEvidence.validDigest(hash), value["exitCode"] == nil else { return nil }
+            fingerprint = hash
         }
         return ClaudeLoopEvent(sessionID: session, toolID: tool, kind: kind,
                                fingerprint: fingerprint, exitCode: code, time: now)
@@ -197,6 +202,7 @@ struct ClaudeLoopTracker {
             resetSequence()
             if !inFlight.isEmpty { overlap = true }
             return
+        case .phase: return
         case .start, .failed, .success: break
         }
         guard ClaudeLoopInput.validID(event.toolID), let current = event.fingerprint else { reset(); return }

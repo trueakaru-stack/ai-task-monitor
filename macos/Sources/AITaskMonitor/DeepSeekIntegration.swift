@@ -62,7 +62,7 @@ enum DeepSeekIntegration {
 
     static func profiles(_ context: Context) throws -> [DeepSeekProfile] {
         let value: [DeepSeekProfile] = try perform(context, action: "list")
-        guard value.count <= 256, value.allSatisfy({ profile in
+        guard value.filter({ $0.state == "connected" }).count <= 256, Set(value.map(\.name)).count == value.count, value.allSatisfy({ profile in
             guard !profile.name.isEmpty, ["connected", "disconnected", "partial", "error"].contains(profile.state) else { return false }
             if profile.state == "connected" { return validScope(profile.scope) }
             return profile.scope == nil

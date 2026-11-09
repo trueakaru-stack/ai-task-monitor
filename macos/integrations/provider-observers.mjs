@@ -77,7 +77,7 @@ export const AITaskMonitorPlugin = async () => createOpenCodeObserver();
 
 // OpenCode 2 uses a passive async event stream instead of V1 hook maps.
 // The caller owns this subscription and invokes the returned cleanup on unload.
-export function observeOpenCodeV2(ctx, enqueue = createOrderedSender()) {
+export function observeOpenCodeV2(ctx, enqueue = createOrderedSender(), options = {}) {
   const controller = new AbortController();
   let origin = null;
   const types = ['session.execution.started', 'session.execution.succeeded', 'session.execution.failed',
@@ -97,9 +97,44 @@ export function observeOpenCodeV2(ctx, enqueue = createOrderedSender()) {
     } catch { /* A broken subscription must not affect the agent. */ }
     finally {
       if (origin) try { enqueue({ version: 1, ...origin, kind: 'gap' }); } catch { /* Best effort. */ }
+      else if (options.reportEmptyGap) try {
+        enqueue({ version: 1, provider: 'opencode', session: 'monitor_channel', kind: 'gap' });
+      } catch { /* Best effort. */ }
     }
   })();
   return () => controller.abort();
+}
+
+// A new authorization creates a fresh live subscription. A buffered callback
+// from an earlier subscription remains unconfirmed even if it arrives late.
+export function observeOpenCodeV2Restartable(ctx, enqueue) {
+  let stopped = false, subscription = null, live = false, previousEpoch = -1;
+  function restartSubscription() {
+    live = false;
+    if (subscription) subscription();
+    const boundEpoch = enqueue.epoch, confirmed = enqueue.ready;
+    previousEpoch = boundEpoch;
+    let thisLive = true;
+    const sink = value => {
+      if (!thisLive || stopped) return;
+      if (confirmed) enqueue.bound(boundEpoch, value);
+      else enqueue.unconfirmed(value);
+    };
+    const cancel = observeOpenCodeV2(ctx, sink, { reportEmptyGap: true });
+    subscription = () => { thisLive = false; cancel(); };
+    live = true;
+  }
+  restartSubscription();
+  const timer = setInterval(() => {
+    if (!stopped && (!live || previousEpoch !== enqueue.epoch)) restartSubscription();
+  }, 50);
+  timer.unref?.();
+  return () => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(timer);
+    if (subscription) subscription();
+  };
 }
 
 // DeepSeek Harness exposes committed session events and live agent status separately.

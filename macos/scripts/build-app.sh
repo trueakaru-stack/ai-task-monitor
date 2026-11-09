@@ -11,7 +11,7 @@ cp ".build/apple/Products/Release/AITaskMonitor" "dist/AI Task Monitor.app/Conte
 cp "Info.plist" "dist/AI Task Monitor.app/Contents/Info.plist"
 chmod 755 "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
 mkdir -p "dist/AI Task Monitor.app/Contents/Resources/integrations"
-for file in opencode-entry.js provider-events.mjs provider-observers.mjs provider-transport.mjs deepseek-integration.mjs deepseek-setup.mjs deepseek-plugin.js kimi-integration.mjs kimi-setup.mjs package.json cordis.patch.yml hermes-setup.py hermes-manager.py ruamel.yaml-0.18.16-py3-none-any.whl ruamel.yaml-LICENSE.txt provider_bundle.py hermes-entry.py hermes-plugin.yaml hermes_observer.py provider_hooks.py provider_sender.py provider_transport.py; do
+for file in opencode-entry.js provider-events.mjs provider-observers.mjs provider-transport.mjs provider-v2-sender.mjs deepseek-integration.mjs deepseek-setup.mjs deepseek-plugin.js kimi-integration.mjs kimi-setup.mjs package.json cordis.patch.yml hermes-setup.py hermes-manager.py ruamel.yaml-0.18.16-py3-none-any.whl ruamel.yaml-LICENSE.txt provider_bundle.py hermes-entry.py hermes-plugin.yaml hermes_observer.py provider_hooks.py provider_sender.py provider_transport.py; do
     cp "integrations/$file" "dist/AI Task Monitor.app/Contents/Resources/integrations/$file"
 done
 mkdir -p "dist/AI Task Monitor.app/Contents/Resources/integrations/kimi-plugin"

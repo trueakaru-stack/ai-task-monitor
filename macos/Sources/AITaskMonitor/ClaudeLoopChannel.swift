@@ -141,18 +141,46 @@ enum ClaudeLoopSocket {
 }
 
 enum ClaudeLoopClient {
-    static func send(_ input: [String: Any], profile: URL = AppPaths.supportDirectory) {
-        guard let prepared = ClaudeLoopInput.classify(input),
+    static func send(_ input: [String: Any], profile: URL = AppPaths.supportDirectory, record: Data? = nil) {
+        let name = input.string("hook_event_name"), toolName = input.string("tool_name")
+        let phase = ["PreToolUse", "PostToolUse", "PostToolUseFailure"].contains(name) &&
+            ["TaskCreate", "TaskUpdate"].contains(toolName)
+        // A locally unsupported identifier must not create a connection that
+        // closes without a frame and falsely reports a global channel gap.
+        if phase {
+            guard ClaudeLoopInput.validID(input.string("session_id")),
+                  ClaudeLoopInput.validID(input.string("tool_use_id")),
+                  let record, record.count <= 1_048_576 else { return }
+        }
+        let prepared = phase ? nil : ClaudeLoopInput.classify(input)
+        guard phase || prepared != nil,
               let directory = try? ClaudeLoopSocket.directory(profile: profile, create: false),
               let descriptor = ClaudeLoopSocket.connect(path: directory + "/events.sock") else { return }
         defer { Darwin.close(descriptor) }
         guard var key = ClaudeLoopSocket.read(descriptor, count: 32) else { return }
         defer { key.resetBytes(in: 0..<key.count) }
-        guard let body = prepared.payload(key: key) else { return }
+        let body: Data
+        if phase {
+            guard let record, let payload = phasePayload(input, record: record, key: key) else { return }
+            body = payload
+        } else {
+            guard let payload = prepared?.payload(key: key) else { return }
+            body = payload
+        }
         let length = body.count
         let header = Data([UInt8(length & 0xff), UInt8((length >> 8) & 0xff),
                            UInt8((length >> 16) & 0xff), UInt8((length >> 24) & 0xff)])
         _ = ClaudeLoopSocket.write(descriptor, data: header + body)
+    }
+
+    static func phasePayload(_ input: [String: Any], record: Data, key: Data) -> Data? {
+        let session = input.string("session_id"), tool = input.string("tool_use_id")
+        guard ClaudeLoopInput.validID(session), ClaudeLoopInput.validID(tool), key.count == 32,
+              record.count <= 1_048_576 else { return nil }
+        let value: [String: Any] = ["session": session, "tool": tool, "kind": "phase",
+                                    "fingerprint": ClaudePhaseEvidence.digest(record, key: key)]
+        guard let payload = try? JSONSerialization.data(withJSONObject: value), payload.count <= 4096 else { return nil }
+        return payload
     }
 }
 
@@ -190,6 +218,25 @@ final class ClaudeLoopChannel {
         return batch
     }
 
+    #if DEBUG
+    // Synthetic tests wait for the real receiver without draining its queue.
+    func hasPendingPhaseForTesting(_ session: String) -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return events.contains { $0.kind == .phase && $0.sessionID == session }
+    }
+    func hasPendingGapForTesting() -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return gap
+    }
+    #endif
+
+    // The copy is used only by the in-memory phase matcher.
+    func phaseKey() -> Data? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return stopping || finished ? nil : key
+    }
+
     @discardableResult
     func stop() -> Bool {
         stateLock.lock()
@@ -213,8 +260,8 @@ final class ClaudeLoopChannel {
             }
             _ = flock(endpoint.ownership, LOCK_UN)
             Darwin.close(endpoint.ownership)
-            key.resetBytes(in: 0..<key.count)
             stateLock.lock()
+            key.resetBytes(in: 0..<key.count)
             finished = true
             stateLock.unlock()
             stopped.signal()

@@ -14,8 +14,9 @@ const expectedDsh = '0.2.1-rc.5';
 const expectedPnpm = '11.25.0';
 const markerName = 'aitm-manifest.json';
 const scopeName = 'monitor-profile.json';
-const files = ['package.json', 'cordis.patch.yml', 'deepseek-plugin.js', 'provider-events.mjs',
+const legacyFiles = ['package.json', 'cordis.patch.yml', 'deepseek-plugin.js', 'provider-events.mjs',
   'provider-observers.mjs', 'provider-transport.mjs'];
+const files = [...legacyFiles, 'provider-v2-sender.mjs'];
 const maxBytes = 1048576;
 
 export class DeepSeekIntegrationError extends Error {
@@ -121,9 +122,12 @@ async function ownedBundle(paths) {
   if (!folder) return null;
   if (!folder.isDirectory()) fail('bundle-conflict');
   const marker = await readJson(join(paths.folder, markerName), 16384);
-  const expected = [...files, scopeName];
-  if (!marker || marker.owner !== owner || Object.keys(marker).sort().join(',') !== 'files,owner' ||
-      !marker.files || Object.keys(marker.files).sort().join(',') !== [...expected].sort().join(',')) fail('modified-bundle');
+  if (!marker || marker.owner !== owner || Object.keys(marker).sort().join(',') !== 'files,owner' || !marker.files) fail('modified-bundle');
+  const listed = Object.keys(marker.files).sort().join(',');
+  const legacy = [...legacyFiles, scopeName], current = [...files, scopeName];
+  const expected = listed === [...legacy].sort().join(',') ? legacy :
+    listed === [...current].sort().join(',') ? current : null;
+  if (!expected) fail('modified-bundle');
   const names = await readdir(paths.folder);
   if (names.length !== expected.length + 1 || names.some(name => !expected.includes(name) && name !== markerName)) fail('modified-bundle');
   for (const name of expected) {
@@ -132,7 +136,7 @@ async function ownedBundle(paths) {
   }
   const scope = await readJson(join(paths.folder, scopeName), 256);
   if (!scope || Object.keys(scope).join(',') !== 'namespace' || !/^[a-f0-9]{32}$/.test(scope.namespace)) fail('modified-bundle');
-  return { marker, folder, namespace: scope.namespace };
+  return { marker, folder, namespace: scope.namespace, files: expected };
 }
 
 async function stateFor(paths, manifest, bundle = undefined) {
@@ -244,7 +248,7 @@ async function removeOwnedBundle(paths) {
   if (!owned) return;
   const current = await lstat(paths.folder);
   if (current.dev !== owned.folder.dev || current.ino !== owned.folder.ino) fail('changed-bundle');
-  for (const name of [...files, scopeName, markerName]) await unlink(join(paths.folder, name));
+  for (const name of [...owned.files, markerName]) await unlink(join(paths.folder, name));
   await rmdir(paths.folder);
 }
 
