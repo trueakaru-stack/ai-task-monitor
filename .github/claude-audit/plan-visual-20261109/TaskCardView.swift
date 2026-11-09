@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct TaskCardView: View {
+    @Environment(\.colorScheme) private var colorScheme
     let task: MonitoredTask
     let showProvider: Bool
 
@@ -60,7 +61,8 @@ struct TaskCardView: View {
                 .padding(.top, 16)
                 Text("\(task.planStatusNote ?? tr("План задачи", "Task plan")) · \(task.stepCountLabel)")
                     .font(.system(size: 11))
-                    .foregroundStyle(task.planStatusNote == nil ? MonitorTheme.muted : MonitorTheme.secondary)
+                    .foregroundStyle(task.planStatusNote == nil ? MonitorTheme.muted :
+                                     (task.provider == .claude && colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary))
                     .padding(.top, 14)
             }
         }

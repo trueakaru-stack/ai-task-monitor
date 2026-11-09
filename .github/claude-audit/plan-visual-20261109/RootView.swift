@@ -183,7 +183,8 @@ struct RootView: View {
                     }
                 }
                 if let planNote = task.planStatusNote {
-                    Text(planNote).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                    Text(planNote).font(.system(size: 11.5))
+                        .foregroundStyle(task.provider == .claude && colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary)
                 }
                 if task.loopWarning != nil { LoopWarningView(task: task, compact: true) }
                 if !store.unavailableMessage.isEmpty {

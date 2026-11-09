@@ -45,9 +45,9 @@ jobs:
           git diff --quiet cf9dce5918011a581f68193c74fdda196f23d35b "$GITHUB_SHA" -- macos
           cd "$GITHUB_WORKSPACE/.github/claude-audit/plan-visual-20261109"
           printf '%s  %s\n' \
-            '6dbd67c184c552a3fa547f858c81e96bb04884f761008e1012cc5a6d07eaebb7' TaskCardView.swift \
+            '7c8b0fbe144458ea5ad3622df303e8aba39331f95804c559329186e9856e2090' TaskCardView.swift \
             '9332bf7142fead0bdad1bdf8f9adf067bee585d5a3135b3ed6f7a245af45b76c' SnapshotRenderer.swift \
-            'acee42947c2936ca92ecb13b7be3e0c154ed6802f30d9034567a767cf9a9bb8b' RootView.swift \
+            '81fd267e3445c0fc77af00479c441ed701d0aea5a2479dbfbc1b70277d273760' RootView.swift \
             '54219cf61c1deb4a9e344f1665aec93e12f21e521950c0dc218e6b170e596832' Models.swift \
             '8462d208aa6b11c03c5f0effb232e2a64d94215f3fb1618cfca89bbd8fdd68d3' ClaudePlanLabelTests.swift \
             | shasum -a 256 -c -
