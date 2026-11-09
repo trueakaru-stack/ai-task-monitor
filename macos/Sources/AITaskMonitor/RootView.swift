@@ -182,8 +182,9 @@ struct RootView: View {
                             .padding(.top, 2)
                     }
                 }
-                if !task.steps.isEmpty && !task.planConfirmed {
-                    Text(tr("План не подтверждён", "Plan unconfirmed")).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                if let planNote = task.planStatusNote {
+                    Text(planNote).font(.system(size: 11.5))
+                        .foregroundStyle(task.provider == .claude && colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary)
                 }
                 if task.loopWarning != nil { LoopWarningView(task: task, compact: true) }
                 if !store.unavailableMessage.isEmpty {
@@ -225,7 +226,7 @@ struct RootView: View {
         let sourceExtra: CGFloat = !store.tasks.isEmpty && !store.unavailableMessage.isEmpty ? 24 : 0
         let selected = store.tasks.isEmpty ? nil : store.tasks[min(store.compactIndex, store.tasks.count - 1)]
         let loopExtra: CGFloat = selected?.loopWarning == nil ? 0 : 64
-        let planExtra: CGFloat = selected.map { !$0.steps.isEmpty && !$0.planConfirmed } == true ? 22 : 0
+        let planExtra: CGFloat = selected?.planStatusNote == nil ? 0 : 22
         return base + sourceExtra + loopExtra + planExtra
     }
 }
