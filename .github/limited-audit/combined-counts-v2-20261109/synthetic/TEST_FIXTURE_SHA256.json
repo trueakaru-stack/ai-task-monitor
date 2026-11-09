@@ -1,0 +1,14 @@
+{
+  "integrations/provider-transport.mjs": "5bcfd57dd6530eec18124008e31ef688ae22f6c61e8a40a914bf814456a1eb9c",
+  "integrations/kimi-plugin/provider-transport.mjs": "5bcfd57dd6530eec18124008e31ef688ae22f6c61e8a40a914bf814456a1eb9c",
+  "integrations/deepseek-plugin.js": "d3d4c47b16a34276cab1e274d8c304ae5eefe0610cb0c4a317c71ddafe201f0e",
+  "integration-tests/Test-KimiObserver.mjs": "6e72b9682d0345ed135a77b0111bc6972896288f2283fb781679577b6dff19a6",
+  "integration-tests/Test-KimiUpstreamHook.mjs": "ad9a6b64c10eee9dbb6ef08dde04b6e30ddcfafa3cf50e39c0f59868aa454fbf",
+  "integration-tests/Test-DeepSeekIntegration.mjs": "928d062fb90b904f6c6beb5313114e0211c840e884bda86f9adb7c17a15b4241",
+  "integration-tests/Test-KimiIntegration.mjs": "047f4eb33b0c70eee99d65396dc31b2d373de92140d0e7cdec82aabf3b0234b2",
+  "integration-tests/Test-ProviderBundles.mjs": "2444170107f06a61879f7574df1dbf9f4e0981d92c50a10fffeef616160ef7dc",
+  "integration-tests/Test-HermesLiveness.py": "e047293974aa377d3d1a0534cdb3166c1fd952e1c2214f71acd5b06a414d143f",
+  "integration-tests/test_external_provider_hooks.py": "8ecc15e1de601aa0108eb554d5e265a875fd64cb29e19a6f6dee6a9c2e0e683d",
+  "integration-tests/test_provider_bundle.py": "0568ef05547e0480bc706db86bcf34e06bc320b3cb269fcf17e7fe71a4efcc3b",
+  "integration-tests/AitmFixture.mjs": "aa79b9fc930f90353b7b3405f8c34ecc88027666820424bc4f37a746b2d86d65"
+}

@@ -1,0 +1,513 @@
+{
+  "scope": "Limited synthetic verification; not a complete audit or live integration test",
+  "workflowSha256": "cf46d491c945554164354639718644de61158749ddf25f4b1e7e4d5841d1bc6d",
+  "baseCommit": "bbef0654fdb2789c62c8d8511576f05b75a289ca",
+  "candidateFileCount": 224,
+  "candidateManifestSha256": "2806821366bbce3a5e24dd6f3207fcb52ab7bd8bc5cd9e23f50e75bf0b855d21",
+  "suiteCount": 69,
+  "expectedXCTestCount": 371,
+  "suites": [
+    {
+      "suite": "DeepSeekNeutralBoundaryTests",
+      "count": 6,
+      "path": "macos/Tests/AITaskMonitorTests/DeepSeekNeutralBoundaryTests.swift",
+      "sha256": "e491f2d702b0fd08ffcdfed1363e0376e52108ba0997fea89dacecfdaff7efce"
+    },
+    {
+      "suite": "ExternalProviderChannelTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderChannelTests.swift",
+      "sha256": "066c7f26a278839cdfcd28e0e08d01261af8c39a0f204df7e376e1c789725666"
+    },
+    {
+      "suite": "ExternalProviderQueueRaceTests",
+      "count": 4,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderQueueRaceTests.swift",
+      "sha256": "ffd46a230a2ea6ff971dd6c9af764f980ce6fa7051199e6d2d35fac29f04baae"
+    },
+    {
+      "suite": "ExternalProviderRuntimeTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderRuntimeTests.swift",
+      "sha256": "45f1808f76a704bfcbc10bbeb78976a6dc71cf8902e3b02f2a24d8ba9c888051"
+    },
+    {
+      "suite": "ExternalProviderStateTests",
+      "count": 7,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderStateTests.swift",
+      "sha256": "197ebc348e46a683b90f43c5e1a35b0a554ec3fc48db88b8dfc644b8f0291f3a"
+    },
+    {
+      "suite": "ExternalProviderTaskMapperTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderTaskMapperTests.swift",
+      "sha256": "692a2e397b820539688a61ca0b06d2d6eff69425d719a691fc0bc8f330e2b8f1"
+    },
+    {
+      "suite": "ExternalProviderTaskStoreTests",
+      "count": 3,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderTaskStoreTests.swift",
+      "sha256": "d49179f1cfa0193f18715bf0222a395a4d23801c7c3c2a1548b9eea6ba2057a1"
+    },
+    {
+      "suite": "HermesTaskStoreTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/HermesTaskStoreTests.swift",
+      "sha256": "b18c4a8a9fd1d58c3a8627e26df420e2ea8c5d1a4dd2e6c51058c21d5f098346"
+    },
+    {
+      "suite": "HistoryUnstableFallbackTests",
+      "count": 4,
+      "path": "macos/Tests/AITaskMonitorTests/HistoryUnstableFallbackTests.swift",
+      "sha256": "ec36ef6f1ae8e861913deb7773abaf141f5bac2f0fbe1461a6e580a8af54788d"
+    },
+    {
+      "suite": "IndependentIsolationReviewTests",
+      "count": 4,
+      "path": "macos/Tests/AITaskMonitorTests/IndependentIsolationReviewTests.swift",
+      "sha256": "12a0105f7b5a9f02306dfb284310e8e49c337ad9944e7e04b6a18b11af41a819"
+    },
+    {
+      "suite": "NeutralCompletedIndependentTests",
+      "count": 3,
+      "path": "macos/Tests/AITaskMonitorTests/NeutralCompletedIndependentTests.swift",
+      "sha256": "63d724baad9e69ce50a1e807d63e5e790034c23ca8c06eb7be957ea5e61b033a"
+    },
+    {
+      "suite": "NeutralTerminalTransitionTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/NeutralTerminalTransitionTests.swift",
+      "sha256": "322f662f950c68d2176e5e369e4c5f263b8f81c2bcb2b6a8f989e5dfd6bd8d18"
+    },
+    {
+      "suite": "V1IsolationFixTests",
+      "count": 17,
+      "path": "macos/Tests/AITaskMonitorTests/V1IsolationFixTests.swift",
+      "sha256": "687fd837b4e63eaa90710225730e0920eab2499ff80c89713e23398bc3596dca"
+    },
+    {
+      "suite": "V1ProtectionTests",
+      "count": 4,
+      "path": "macos/Tests/AITaskMonitorTests/V1ProtectionTests.swift",
+      "sha256": "739cf66460e41fe730ae57a56d3c751fd09f51001d294b22dfce5507fdd96570"
+    },
+    {
+      "suite": "V1RuntimeProtectionTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/V1RuntimeProtectionTests.swift",
+      "sha256": "bb64166fb84b8b88aa33540533988edf3f2ebad7324cfa10964602c65b4ee207"
+    },
+    {
+      "suite": "ExternalProviderFilterTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderFilterTests.swift",
+      "sha256": "4a1693cdc1bdf89da22931e45069302cb35dd18dc63a6b6e00881156fff17adb"
+    },
+    {
+      "suite": "ExternalProviderV2BrokerTests",
+      "count": 12,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderV2BrokerTests.swift",
+      "sha256": "3d10107c414d0d274f54422af524fc83b3653c9d0edca68aff80bdd341080ff5"
+    },
+    {
+      "suite": "ExternalProviderV2ChannelTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderV2ChannelTests.swift",
+      "sha256": "814a35caba6e2beb903295f05b98eb709108176cfa51f8d1385c18a2de033f84"
+    },
+    {
+      "suite": "ExternalProviderV2GenerationTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderV2GenerationTests.swift",
+      "sha256": "0a50c26d2cb37136a1d7140047c897bb4feab706588a564f2c2874ec66a6d73e"
+    },
+    {
+      "suite": "ExternalProviderV2RuntimeTests",
+      "count": 5,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderV2RuntimeTests.swift",
+      "sha256": "ff9283d5f174e3b23924ad9680d9a16f57de5423bf835f07d1b51def99189bd3"
+    },
+    {
+      "suite": "ExternalProviderV2SyntheticIPCTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalProviderV2SyntheticIPCTests.swift",
+      "sha256": "3dd84d29da61c16b26bbc984697351b07d70fe81ce813dbe69c0e4463d8212a7"
+    },
+    {
+      "suite": "ExternalOpenCodeLegacyReconnectTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/ExternalOpenCodeLegacyReconnectTests.swift",
+      "sha256": "543bd3d6d3800eb12a08c0c6c9a68a2dff4ea6da2441207ae9ea691e39dd96c8"
+    },
+    {
+      "suite": "OpenCodeIntegrationTests",
+      "count": 3,
+      "path": "macos/Tests/AITaskMonitorTests/OpenCodeIntegrationTests.swift",
+      "sha256": "9886b904fd212996086bbb270bcb2c781311458def944456c593964cd1a20508"
+    },
+    {
+      "suite": "RestartAcknowledgementIndependentTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/RestartAcknowledgementIndependentTests.swift",
+      "sha256": "3c0a27ba897532eb24cac17be5ccf9e366d5c76b002705bdccc9676d5761c9e4"
+    },
+    {
+      "suite": "ClaudeBackgroundIndependentTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeBackgroundIndependentTests.swift",
+      "sha256": "8f7a63f9b5d957a9ff9db01fe179f0eba9ec8198a9d3769c3b5013eec336efcc"
+    },
+    {
+      "suite": "ClaudeHookPhaseBlockingTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeHookPhaseBlockingTests.swift",
+      "sha256": "9a359fcefcefd9b46a42f7b888c7f5a6ea96e39abb797e2049302891557fc674"
+    },
+    {
+      "suite": "ClaudeIdentityInvalidUTF8Tests",
+      "count": 4,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeIdentityInvalidUTF8Tests.swift",
+      "sha256": "84411c695c4e77e8370caf78d13bffbddde5bd659f1e6c8ac75dd95faa2274b4"
+    },
+    {
+      "suite": "ClaudeIdentityIsolationTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeIdentityIsolationTests.swift",
+      "sha256": "9831d53b7cf8b722319e780462f738480b6f2971d940c01c9d2505c9338ee830"
+    },
+    {
+      "suite": "ClaudeIntegrationSafetyTests",
+      "count": 16,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeIntegrationSafetyTests.swift",
+      "sha256": "0488334385026450adbc847309528a666f3de0598d1c6439ece00310be293088"
+    },
+    {
+      "suite": "ClaudePhaseChannelTests",
+      "count": 14,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudePhaseChannelTests.swift",
+      "sha256": "d7cc94e5934335f6e00506168912852a5b39e832844d96bd7ddf7749667378a9"
+    },
+    {
+      "suite": "ClaudePhaseIndependentCounterexamples",
+      "count": 7,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudePhaseIndependentCounterexamples.swift",
+      "sha256": "be5df34b1ccc67880a9fdc7750733789dfd2f12a6d7264800abff095fd30092b"
+    },
+    {
+      "suite": "ClaudePhaseIntegrationTests",
+      "count": 30,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudePhaseIntegrationTests.swift",
+      "sha256": "72990f0db2302e122dbbeac99eb4f1c0a4775ce9ff422c0327beafa4e61c8f9e"
+    },
+    {
+      "suite": "ClaudePhaseUnresolvedTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudePhaseUnresolvedTests.swift",
+      "sha256": "0262a575e9ee4de04e677b4633601e863b294b64f16c67517cb1c5e736f79d27"
+    },
+    {
+      "suite": "ClaudePlanOrderingCandidateTests",
+      "count": 14,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudePlanOrderingCandidateTests.swift",
+      "sha256": "36c1b723845b75119e97d39a0d5698cecd48ced65ed1da6ffadebbe1316c7ce1"
+    },
+    {
+      "suite": "ClaudeReaderIndependentTests",
+      "count": 13,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeReaderIndependentTests.swift",
+      "sha256": "f4804a47e08373a80b5430b91233ebea72049bac1535758de0cb302f541915b1"
+    },
+    {
+      "suite": "ClaudeReaderSafetyCandidateTests",
+      "count": 6,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeReaderSafetyCandidateTests.swift",
+      "sha256": "812258f924d34d040b111bc1b44e843321599e6181138136ce2d2875d7f21ed1"
+    },
+    {
+      "suite": "ClaudeSourceLossRecoveryTests",
+      "count": 17,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeSourceLossRecoveryTests.swift",
+      "sha256": "9fae3bb24c0a3573b2a1ef3761abc4ab4735aa4a9a821264aeddf43e35521ece"
+    },
+    {
+      "suite": "ClaudeRecoveryFix5Tests",
+      "count": 6,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeRecoveryFix5Tests.swift",
+      "sha256": "979268154c85ffa49cf54002506d8b460fe98d835b93ba82ae456099fb0c3034"
+    },
+    {
+      "suite": "ParserTests",
+      "count": 23,
+      "path": "macos/Tests/AITaskMonitorTests/ParserTests.swift",
+      "sha256": "d6b2ce9b0a36338d03553905c624a587d4372f12fd3f39a017c1826c385ccbf4"
+    },
+    {
+      "suite": "ClaudeHookLockTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeHookLockTests.swift",
+      "sha256": "3aeacde18effb36cc446b6e1fa43ba04948ab93427f33cd0e5941bf5fd44494c"
+    },
+    {
+      "suite": "ClaudeLoopChannelTests",
+      "count": 9,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeLoopChannelTests.swift",
+      "sha256": "accf6c95c617ee9ca9b725a64a87b145f5dd72e5a674178548e9c29b4a1f0341"
+    },
+    {
+      "suite": "ClaudeLoopDetectionTests",
+      "count": 7,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeLoopDetectionTests.swift",
+      "sha256": "52ed035a33a8384eb1c3800b06004c62c81f22c6e08bc0094ad07ca5623bbf24"
+    },
+    {
+      "suite": "ClaudeRetentionTests",
+      "count": 3,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeRetentionTests.swift",
+      "sha256": "b00bd439278eea4b62d40d58a7ef7ba959c91891ba3e79c31d21efc5d93282bf"
+    },
+    {
+      "suite": "ClaudePlanLabelTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudePlanLabelTests.swift",
+      "sha256": "c93b867544c1c469b4b6cfa06fe4211971c75ae0c3b21fb797738afeed0fdb31"
+    },
+    {
+      "suite": "ClaudePhaseIdentityIsolationIndependentTests",
+      "count": 3,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudePhaseIdentityIsolationIndependentTests.swift",
+      "sha256": "2c86c1eb3e3880069e9617d2272563235013540d5196a538e35ce5c5c3bf8152"
+    },
+    {
+      "suite": "ClaudeIntegrationPreservationIndependentTests",
+      "count": 4,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeIntegrationPreservationIndependentTests.swift",
+      "sha256": "af304db47e7f9eec041a84c1f61b19e54690e44d846ef93028266e2cfc6d7e30"
+    },
+    {
+      "suite": "ClaudeRecoveryBoundaryIndependentTests",
+      "count": 3,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeRecoveryBoundaryIndependentTests.swift",
+      "sha256": "83df2ddb469e3824364a35778fd9cc13247c12762e01d057210fe641d8222677"
+    },
+    {
+      "suite": "ClaudeCombinedRecoveryTests",
+      "count": 9,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeCombinedRecoveryTests.swift",
+      "sha256": "a392ca07aee1c19b428c27496da958a900cfab2e395cc2c7665450866ec0c393"
+    },
+    {
+      "suite": "ClaudePhaseIsolationRaceTests",
+      "count": 4,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudePhaseIsolationRaceTests.swift",
+      "sha256": "0f27e7deb1b7b9ecd0aab9a5174e330cafa7800d05ca5a53cac60747d6082073"
+    },
+    {
+      "suite": "ClaudeTitleHistoryTests",
+      "count": 6,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeTitleHistoryTests.swift",
+      "sha256": "ea56dc9579d54e41da0364dad8ce9f0511be7c79b8910c12da60e0154558bc8d"
+    },
+    {
+      "suite": "ClaudePrefixTitleTests",
+      "count": 5,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudePrefixTitleTests.swift",
+      "sha256": "407f3a0d9257670ec135c61b79e9e5f5f13f262d320c5237988cce8bc26c2ee5"
+    },
+    {
+      "suite": "ClaudeStopContinuationReviewTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeStopContinuationReviewTests.swift",
+      "sha256": "641f9b1f7736f8b63b085d5f51adc3cfe823c26d34ec365cc312786fc83344c3"
+    },
+    {
+      "suite": "ClaudeScopedRetentionTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeScopedRetentionTests.swift",
+      "sha256": "fb4b50a5c7758d99d87120cbf358f099e698d7bde1cd21d12284234d043e12eb"
+    },
+    {
+      "suite": "ClaudeScopedOverflowBaseTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeScopedOverflowBaseTests.swift",
+      "sha256": "0bf8366e089e73d4392cb4506a9d41e3990804f3d1fee8f658d2be5b6f03550e"
+    },
+    {
+      "suite": "ClaudeScopedOverflowDetailsTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeScopedOverflowDetailsTests.swift",
+      "sha256": "c5158fc00f906721158a9b7931fc7b8bfd7cc15b3324fbdae9fc037ce9653b6a"
+    },
+    {
+      "suite": "CodexColdCompressedIndependentTests",
+      "count": 8,
+      "path": "macos/Tests/AITaskMonitorTests/CodexColdCompressedIndependentTests.swift",
+      "sha256": "9cf23df7eda4164bcc0c1a1843f2cdad1ef45f00ef5082624378abd79f5fa830"
+    },
+    {
+      "suite": "CodexCompressedBoundaryIndependentTests",
+      "count": 4,
+      "path": "macos/Tests/AITaskMonitorTests/CodexCompressedBoundaryIndependentTests.swift",
+      "sha256": "812a6f18510137f8a97336082d23778e80759fa9b8d7ec2615d64e0e5008e1d6"
+    },
+    {
+      "suite": "CodexLongTurnTests",
+      "count": 3,
+      "path": "macos/Tests/AITaskMonitorTests/CodexLongTurnTests.swift",
+      "sha256": "ed181937cf1e926576b55bfec13c754b693aa0bbe24cbb331e89d703a1d49429"
+    },
+    {
+      "suite": "CodexMultipleColdIndependentTests",
+      "count": 5,
+      "path": "macos/Tests/AITaskMonitorTests/CodexMultipleColdIndependentTests.swift",
+      "sha256": "f62c39b9f53038390001d8410ae228c3974078aa9bb9259356f0685015829821"
+    },
+    {
+      "suite": "CodexRevertSafetyTests",
+      "count": 13,
+      "path": "macos/Tests/AITaskMonitorTests/CodexRevertSafetyTests.swift",
+      "sha256": "a804b8dd29db27c82276eb32203634f4e75a7d531a89a8d30c29222d37e87ac1"
+    },
+    {
+      "suite": "CodexSiblingDirectoryIndependentTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/CodexSiblingDirectoryIndependentTests.swift",
+      "sha256": "16f23ab277c4f3d8609d445d7013d99f6c6d851ce3e658ab0d62c6c564934fef"
+    },
+    {
+      "suite": "CodexSourceStalePlanTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/CodexSourceStalePlanTests.swift",
+      "sha256": "8accf33c2b8fcc90c721b331a15a9fceb95abc84b76e52919bd26b32ede288dc"
+    },
+    {
+      "suite": "ClaudeProviderCombinedIsolationTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/ClaudeProviderCombinedIsolationTests.swift",
+      "sha256": "a259295df6e092ca99798873698b511411ec06dba39d673440015c0190ed6d4f"
+    },
+    {
+      "suite": "CodexCloudReaderTests",
+      "count": 4,
+      "path": "macos/Tests/AITaskMonitorTests/CodexCloudReaderTests.swift",
+      "sha256": "7a0063c9b57eb0ce0d214b04829e891281fe666c7a7dcd39496ef94778a7601e"
+    },
+    {
+      "suite": "KimiIntegrationTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/KimiIntegrationTests.swift",
+      "sha256": "1ec41a5e35c34bbaf6483131b03755842e901b710887911b96d79b4607b80533"
+    },
+    {
+      "suite": "HermesIntegrationTests",
+      "count": 5,
+      "path": "macos/Tests/AITaskMonitorTests/HermesIntegrationTests.swift",
+      "sha256": "8a17146060ea38eec8a89c39945d354f71b7bca6c881d895edb35976e53e4c45"
+    },
+    {
+      "suite": "HermesObserverStateTests",
+      "count": 12,
+      "path": "macos/Tests/AITaskMonitorTests/HermesObserverStateTests.swift",
+      "sha256": "dc003527fa356795e82ceea4a169cd647b1c428c73d411c34ac0cbfc9f6f9179"
+    },
+    {
+      "suite": "ProviderCountsVisibilityTests",
+      "count": 2,
+      "path": "macos/Tests/AITaskMonitorTests/ProviderCountsVisibilityTests.swift",
+      "sha256": "2208d7bc57191309e44f98c8a4f00fdd4cf3fb45a5f643ba3a3c5d5833b4e376"
+    },
+    {
+      "suite": "CodexCloudStoreTests",
+      "count": 1,
+      "path": "macos/Tests/AITaskMonitorTests/CodexCloudStoreTests.swift",
+      "sha256": "42b0f49cc47ea843460324e057503a8b4a73d41f8deebe2d28e22792f0052b7f"
+    }
+  ],
+  "stagedScriptsAndManifests": {
+    "scripts/prepare-workspace.sh": "036d3b00cc6b057548e869aaf8e6ab4ebda69721f83812ab80caffb56624aea5",
+    "scripts/prepare-limited-fixtures.sh": "66d5eec58f0a275bbfe7be939fd95a98d6831ca004ade9d42eda7c16252c9426",
+    "scripts/native-limited-tests.sh": "77707c2cce855a457bc0c8ac0fe81f23d8effc2d0148244a976f9d83be0a363c",
+    "scripts/integration-limited-tests.sh": "612772deacce2f994e28bf8cd93f02c875ef68d8b93594a7f826d7062b2a4f8d",
+    "scripts/sandbox.sh": "efc05521058c69bb1b84cb6f659b3a811cfdb3cfa6e88a56f7e392315febb04f",
+    "scripts/network-probe.py": "3cbf34520bd744c40730e88533d9cdbc011d488ef8855099f5654219ebd47954",
+    "scripts/verify-limited-suites.py": "2fba2eb8b5827ee56a74ec50ab3c03ba41ce5b585d62bf8e1c2c81baeb62c4ed",
+    "scripts/visual.sh": "b917b99c36b1d3e7edf06aab64e1beb42474372e82fd0a6a015ab27944d9a09b",
+    "visual/prepare_tab_counts.py": "2a0977c8e0aef47a94d2a2891617afb5b71f73c1be5c96a58b818f67d1f0bcf9",
+    "visual/prepare_visual_warmup_hermes.py": "d40e7d3b6f4b9e52cdd3b27829bc24405564ee035096696c0e34a19bf82560e2",
+    "visual/prepare_hermes_preview.py": "baf68b0583d0395e6c5d809c4ea6a038d192859676f594a724dc946b176ae31b",
+    "visual/prepare_long_profile.py": "38a69c9a7857f261975af92b120c579e93dd69f524dda98da9142d7e6ecfb473",
+    "synthetic/prepare-isolated-integrations.py": "df2a7aba33f9168ceaa672fd239dd6429817adc3acd0eca1ecaa708145283656",
+    "synthetic/AitmFixture.mjs": "aa79b9fc930f90353b7b3405f8c34ecc88027666820424bc4f37a746b2d86d65",
+    "synthetic/run-bundle-limited.py": "1f50da88f64eeb2ab13feba21acc4318c2986525fb86be8b29348a369c24f450",
+    "synthetic/mac-v2-sender-child.mjs": "b2d1b04110f6e38365279c8513303850de0f6176ad0699ad8de9f54c9331c7dc",
+    "synthetic/mac-v2-deepseek-child.mjs": "0c8c11c7f0d10c79b7509b2e88cd7290fd081eec1326fbe756bd4d58d27486e9",
+    "synthetic/restart-v2-gate.mjs": "0b35f7a5ebd45ff77e86d1975872c541a47c8df397005fff5d01e7d388f77872",
+    "synthetic/restart-v2-gate.test.mjs": "062f5d012e0d26ca78235bbf5a36494277ff482143d830f0f63f16cf60e01624",
+    "synthetic/opencode-v2-subscription.test.mjs": "bdab9116cfbeda63a7ae6869633af78517140718203f238f1a703da2ef8d86c8",
+    "synthetic/SOURCE_TREE_SHA256.json": "22e8bd72cd760c62b6e7fe83f64d107e4042beea07b28771d9e279a8272d602c",
+    "synthetic/PREPARED_TREE_SHA256.json": "9bd6905f3a82b9560fa6ae3d6f46f99d784b9ad193062dcc072c44f00f93db07",
+    "synthetic/TEST_FIXTURE_SHA256.json": "be9ab327267b0543ac778e696239725d2f02dd4d5c69ca868e6e24e8cc6f3bf2",
+    "required-suites-limited.txt": "c03107a62af8deb124f1ab0a95077b50738d82268187e8ac49edb33fb78c259f",
+    "candidate.sha256": "2806821366bbce3a5e24dd6f3207fcb52ab7bd8bc5cd9e23f50e75bf0b855d21",
+    "source-pins.json": "9e57b5fde357981c83c20a869c56caf265df98b9b46b12ef51c5853f8bb9cc87",
+    "fixtures/HERMES-FILES.sha256": "6c9203b5f0c065d784b80070518a528616e604effc02bf2b9e57abb9bf5f38d6",
+    "fixtures/HERMES-FIXTURE.md": "edd9a3dcff405523ca3245c10dfd1b58c2e2ae16a77ade892e56dd93d3fa1261",
+    "fixtures/HERMES-LICENSE.txt": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
+    "fixtures/hermes-pinned-fixture.tar.gz": "45d1bede19566e032696d41570c9c5b0669fa32bc9e1e6c99cba7f7b8f0b1bf6",
+    "fixtures/verify-hermes-fixture.py": "6fdfcaedae88b73fffb7d8288a95fd3a79a7ff1395fb590c85a7afe15f568424"
+  },
+  "preparedTreeFileCount": 52,
+  "preparedTreeManifest": "synthetic/PREPARED_TREE_SHA256.json",
+  "executedIntegrationTests": {
+    "integration-tests/Test-KimiObserver.mjs": "6e72b9682d0345ed135a77b0111bc6972896288f2283fb781679577b6dff19a6",
+    "integration-tests/Test-KimiUpstreamHook.mjs": "ad9a6b64c10eee9dbb6ef08dde04b6e30ddcfafa3cf50e39c0f59868aa454fbf",
+    "integration-tests/Test-KimiIntegration.mjs": "047f4eb33b0c70eee99d65396dc31b2d373de92140d0e7cdec82aabf3b0234b2",
+    "integration-tests/Test-ProviderBundles.mjs": "2444170107f06a61879f7574df1dbf9f4e0981d92c50a10fffeef616160ef7dc",
+    "integration-tests/test_external_provider_hooks.py": "8ecc15e1de601aa0108eb554d5e265a875fd64cb29e19a6f6dee6a9c2e0e683d",
+    "integration-tests/test_provider_bundle.py": "0568ef05547e0480bc706db86bcf34e06bc320b3cb269fcf17e7fe71a4efcc3b",
+    "integration-tests/Test-HermesLiveness.py": "e047293974aa377d3d1a0534cdb3166c1fd952e1c2214f71acd5b06a414d143f",
+    "integration-tests/AitmFixture.mjs": "aa79b9fc930f90353b7b3405f8c34ecc88027666820424bc4f37a746b2d86d65"
+  },
+  "preFixChecks": [
+    "ClaudePhaseIsolationRaceTests.testAttributedPhaseAfterSnapshotPreservesNeighbor",
+    "ClaudeTitleHistoryTests.testOldAndNewTitleSameIDBeforeFirstPollSurviveKnownLoss",
+    "ClaudePrefixTitleTests.testValidPrefixTitleBeforePartialBoundarySurvivesFirstRead",
+    "ClaudeScopedOverflowBaseTests.testOneSessionOverflowDoesNotInventGlobalLoss",
+    "RestartAcknowledgementIndependentTests",
+    "ProviderCountsVisibilityTests"
+  ],
+  "childProcesses": [
+    "xcrun SwiftPM/compiler/linker and generated test executable; no Package.swift external dependencies or build plugins",
+    "Node synthetic OpenCode sender and DeepSeek sender over unique AF_UNIX sockets",
+    "Claude generated hook: /bin/sh followed by a copied synthetic monitor executable and a synthetic event journal",
+    "Codex Cloud: synthetic shell scripts, /usr/bin/yes, with synthetic data and bounded output/time",
+    "Hermes: selected Python 3.12.10, synthetic manager/bridge files, /bin/sh for one shell quoting case",
+    "Kimi observer and upstream hook runner: selected Node and /bin/sh launching test-only plugin copy over unique AF_UNIX socket",
+    "Provider bundle and Hermes liveness Python tests: isolated Python child processes with explicitly selected temporary paths",
+    "Visual snapshot jobs: SwiftPM compiler and built test-only preview executable under strict network sandbox",
+    "Artifact upload: actions/upload-artifact pinned ea165f8d65b6e75b540449e92b4886f43607fa02, no pre/post step; static bundle audit recorded separately"
+  ],
+  "publicFixtures": {
+    "kimiArchiveSha512": "018b93e1f5bba73640ab12080e3c7eca92c936800bd3b359094c8f0e57ff26b8322ab8b7e5e56af660ee8687bfc515fbc0d1cbfb57d7f87d038ffac1dc7d3862",
+    "kimiMainSha256": "acd6894e2e2db50d37c449eefe9d3549a0177bd2d12cf17a8e1da94c60eb359f",
+    "kimiRunHookSliceSha256": "292d71e483c548cc9cbdd40b18a2aa4aa6a291856ee8f22d7e3a2c046b0d2c67",
+    "kimiSpawnOptionsSliceSha256": "66b149b79585cbfc5c674be664767e7663868cfc8223e0e63ed91f1451eab16a",
+    "hermesActiveSessionsSha256": "0e3bd5dd93281f4d392850550a8d8bf94b213f965dccd6159513fa5bc6466fb7",
+    "hermesOriginalArchiveSha256": "1f7d43fa1a515283929a739c42e10bf8d48910e523eccec74b2a2bece858d2b5",
+    "hermesUpstreamCommit": "b200f5bc60e31588ba2cb60e288029c4a54ba5fa",
+    "hermesRepackedArchiveSha256": "45d1bede19566e032696d41570c9c5b0669fa32bc9e1e6c99cba7f7b8f0b1bf6",
+    "hermesRepackedSourceFileCount": 70,
+    "hermesLicenseSha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6"
+  },
+  "runtimeEvidence": "Hosted Xcode/system binary and Node/Python toolcache hashes will be observed in CI logs; their SHA values are not pinned before execution. Hermes liveness and its child use selected supported Python 3.12.10.",
+  "excluded": [
+    "DeepSeek upstream boot and pnpm profile integration",
+    "Hermes manager/setup/publication standalone integration tests",
+    "Kimi Approval Web",
+    "ProviderBundleTests.test_python_generated_bytecode_is_removed_only_when_reproducible",
+    "FeedbackAlignmentTests accessibility on headless runner",
+    "All XCTest suites not listed above",
+    "Real agent accounts, profiles, tokens and live tasks"
+  ],
+  "trigger": "push to macos when at least one changed path matches the unique v2 limited audit path or workflow; both jobs also require the commit message marker [macos-limited-counts-v2-20261109]. The complete staged commit must be checked separately.",
+  "networkEvidence": "Strict profile denies network*. Probe confirms TCP loopback denial for IPv4/IPv6 and Unix socket availability; no dynamic UDP, wildcard bind or external-IP denial was tested."
+}

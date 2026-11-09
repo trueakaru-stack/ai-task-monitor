@@ -1,0 +1,169 @@
+name: macOS limited synthetic provider and Claude verification v2
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-limited-counts-v2-20261109.yml"
+      - ".github/limited-audit/combined-counts-v2-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  limited-native-and-integrations:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/macos' && contains(github.event.head_commit.message, '[macos-limited-counts-v2-20261109]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          for tool in /bin/bash /usr/bin/env /usr/bin/git /usr/bin/curl /usr/bin/tar /usr/bin/shasum /usr/bin/python3 /usr/bin/xcrun /usr/bin/awk /usr/bin/grep /usr/bin/tee /usr/bin/find /usr/bin/sandbox-exec; do
+            test -x "$tool"
+            /usr/bin/shasum -a 256 "$tool"
+          done
+      - name: Check out exact public sources without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'trueakaru-stack/ai-task-monitor'
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test -d "$GITHUB_WORKSPACE"
+          test -z "$(ls -A "$GITHUB_WORKSPACE")"
+          run_git() {
+            /usr/bin/env -i 'PATH=/usr/bin:/bin' 'GIT_CONFIG_NOSYSTEM=1' \
+              'GIT_CONFIG_GLOBAL=/dev/null' 'GIT_TERMINAL_PROMPT=0' \
+              /usr/bin/git -c credential.helper= -c core.autocrlf=false "$@"
+          }
+          run_git init "$GITHUB_WORKSPACE"
+          run_git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 https://github.com/trueakaru-stack/ai-task-monitor.git "$GITHUB_SHA"
+          run_git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 https://github.com/trueakaru-stack/ai-task-monitor.git bbef0654fdb2789c62c8d8511576f05b75a289ca
+          run_git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
+          test "$(run_git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Select preinstalled test runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_ARCH" in ARM64) arch=arm64 ;; X64) arch=x64 ;; *) exit 1 ;; esac
+          nodebin="$RUNNER_TOOL_CACHE/node/24.22.2/$arch/bin"
+          pythonbin="$RUNNER_TOOL_CACHE/Python/3.12.10/$arch/bin"
+          test -x "$nodebin/node" && test -x "$pythonbin/python3"
+          /usr/bin/shasum -a 256 "$nodebin/node" "$pythonbin/python3"
+          test "$("$nodebin/node" --version)" = 'v24.22.2'
+          test "$("$pythonbin/python3" -I -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')" = '3.12.10'
+          printf '%s\n' "$nodebin" "$pythonbin" >> "$GITHUB_PATH"
+          printf '%s\n' 'GIT_CONFIG_NOSYSTEM=1' 'GIT_CONFIG_GLOBAL=/dev/null' 'GIT_TERMINAL_PROMPT=0' >> "$GITHUB_ENV"
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        shell: bash
+        run: |
+          test -d /Applications/Xcode_16.1.app/Contents/Developer
+          printf '%s\n' 'DEVELOPER_DIR=/Applications/Xcode_16.1.app/Contents/Developer' >> "$GITHUB_ENV"
+      - name: Verify pinned source and assemble isolated workspace
+        id: workspace
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/limited-audit/combined-counts-v2-20261109/scripts/prepare-workspace.sh"
+      - name: Prepare two pinned public fixtures without package installation
+        id: fixtures
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/limited-audit/combined-counts-v2-20261109/scripts/prepare-limited-fixtures.sh"
+      - name: Reproduce regressions and run 69 named XCTest suites and release build
+        id: native
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/limited-audit/combined-counts-v2-20261109/scripts/native-limited-tests.sh"
+      - name: Run eight explicitly limited synthetic integration groups
+        if: ${{ success() && steps.workspace.outcome == 'success' && steps.fixtures.outcome == 'success' }}
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/limited-audit/combined-counts-v2-20261109/scripts/integration-limited-tests.sh"
+      - name: Upload synthetic logs and layout evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-limited-tests-${{ matrix.runner }}
+          path: |
+            ${{ runner.temp }}/aitm-unified-output/
+            ${{ runner.temp }}/aitm-layout-${{ github.run_id }}/
+            ${{ runner.temp }}/aitm-feedback-${{ github.run_id }}/
+          if-no-files-found: warn
+          retention-days: 7
+
+  visual:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/macos' && contains(github.event.head_commit.message, '[macos-limited-counts-v2-20261109]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          for tool in /bin/bash /usr/bin/env /usr/bin/git /usr/bin/curl /usr/bin/tar /usr/bin/shasum /usr/bin/python3 /usr/bin/xcrun /usr/bin/awk /usr/bin/grep /usr/bin/tee /usr/bin/find /usr/bin/sandbox-exec; do
+            test -x "$tool"
+            /usr/bin/shasum -a 256 "$tool"
+          done
+      - name: Check out exact public sources without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'trueakaru-stack/ai-task-monitor'
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test -d "$GITHUB_WORKSPACE"
+          test -z "$(ls -A "$GITHUB_WORKSPACE")"
+          run_git() {
+            /usr/bin/env -i 'PATH=/usr/bin:/bin' 'GIT_CONFIG_NOSYSTEM=1' \
+              'GIT_CONFIG_GLOBAL=/dev/null' 'GIT_TERMINAL_PROMPT=0' \
+              /usr/bin/git -c credential.helper= -c core.autocrlf=false "$@"
+          }
+          run_git init "$GITHUB_WORKSPACE"
+          run_git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 https://github.com/trueakaru-stack/ai-task-monitor.git "$GITHUB_SHA"
+          run_git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 https://github.com/trueakaru-stack/ai-task-monitor.git bbef0654fdb2789c62c8d8511576f05b75a289ca
+          run_git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
+          test "$(run_git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Select preinstalled test runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_ARCH" in ARM64) arch=arm64 ;; X64) arch=x64 ;; *) exit 1 ;; esac
+          nodebin="$RUNNER_TOOL_CACHE/node/24.22.2/$arch/bin"
+          pythonbin="$RUNNER_TOOL_CACHE/Python/3.12.10/$arch/bin"
+          test -x "$nodebin/node" && test -x "$pythonbin/python3"
+          /usr/bin/shasum -a 256 "$nodebin/node" "$pythonbin/python3"
+          test "$("$nodebin/node" --version)" = 'v24.22.2'
+          test "$("$pythonbin/python3" -I -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')" = '3.12.10'
+          printf '%s\n' "$nodebin" "$pythonbin" >> "$GITHUB_PATH"
+          printf '%s\n' 'GIT_CONFIG_NOSYSTEM=1' 'GIT_CONFIG_GLOBAL=/dev/null' 'GIT_TERMINAL_PROMPT=0' >> "$GITHUB_ENV"
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        shell: bash
+        run: |
+          test -d /Applications/Xcode_16.1.app/Contents/Developer
+          printf '%s\n' 'DEVELOPER_DIR=/Applications/Xcode_16.1.app/Contents/Developer' >> "$GITHUB_ENV"
+      - name: Verify pinned source and assemble isolated workspace
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/limited-audit/combined-counts-v2-20261109/scripts/prepare-workspace.sh"
+      - name: Render synthetic plan and settings states
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/limited-audit/combined-counts-v2-20261109/scripts/visual.sh"
+      - name: Upload synthetic previews
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-limited-visual-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-unified-output/
+          if-no-files-found: warn
+          retention-days: 7
