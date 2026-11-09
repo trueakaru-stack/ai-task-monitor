@@ -48,7 +48,7 @@ jobs:
             'eca945e759d4b9899b877132f001a613cf59747730496e12d9a08ea8e857454c' Sources/DeepSeekIntegration.swift \
             '8896c88dc6bc97d51e5744697b193442fcc4fe4b0265e08a87be6f2aec3c8c21' Sources/ExternalProviderChannel.swift \
             'b83c0741b09b6da671ad184ae1fc7ccc7437fae0ec4bba12c43ed029e7ad712a' Sources/ExternalProviderRuntime.swift \
-            'c1a98d3fbc072b54a96cc141a7d311f27810900cc25ad366f989482d9809e731' Sources/ExternalProviderState.swift \
+            'bb1c707133fd7851be4a2fc6a5d8a34ff590b35423b0d684e4d49ecfbb191e54' Sources/ExternalProviderState.swift \
             'c277362a1d1ad0729c3e35c70a7053e155f3dbd745bc98d1d2a1096a5e5b7f83' Sources/ExternalProviderTaskMapper.swift \
             '1b26a656515742658516d0286d8d481d44adf35c2329f8c9e3716b8803ef4727' Sources/ProviderScopeHistory.swift \
             '64281d35bddce64d58f0ff505d7d2e2f205eaad436d902ac9b2b967972197e30' Sources/TaskStore.swift \
@@ -59,9 +59,11 @@ jobs:
             '197ebc348e46a683b90f43c5e1a35b0a554ec3fc48db88b8dfc644b8f0291f3a' Tests/ExternalProviderStateTests.swift \
             '692a2e397b820539688a61ca0b06d2d6eff69425d719a691fc0bc8f330e2b8f1' Tests/ExternalProviderTaskMapperTests.swift \
             'a3272cce621732216fa0c785ecd984e1cdeb0a2cacef936197f6f18f6c5444f2' Tests/ExternalProviderTaskStoreTests.swift \
-            'e898fcce82155a6ccc20a396a016e70a3f6d767063f4a9ace147bf9d5cd400ea' Tests/HermesTaskStoreTests.swift \
+            '6b74be917b8a60a08a1b4f67d02e78927dda2582d4fa063a73237ce3855c9d92' Tests/HermesTaskStoreTests.swift \
             'ec36ef6f1ae8e861913deb7773abaf141f5bac2f0fbe1461a6e580a8af54788d' Tests/HistoryUnstableFallbackTests.swift \
             '12a0105f7b5a9f02306dfb284310e8e49c337ad9944e7e04b6a18b11af41a819' Tests/IndependentIsolationReviewTests.swift \
+            '63d724baad9e69ce50a1e807d63e5e790034c23ca8c06eb7be957ea5e61b033a' Tests/NeutralCompletedIndependentTests.swift \
+            '322f662f950c68d2176e5e369e4c5f263b8f81c2bcb2b6a8f989e5dfd6bd8d18' Tests/NeutralTerminalTransitionTests.swift \
             '687fd837b4e63eaa90710225730e0920eab2499ff80c89713e23398bc3596dca' Tests/V1IsolationFixTests.swift \
             '739cf66460e41fe730ae57a56d3c751fd09f51001d294b22dfce5507fdd96570' Tests/V1ProtectionTests.swift \
             'bb64166fb84b8b88aa33540533988edf3f2ebad7324cfa10964602c65b4ee207' Tests/V1RuntimeProtectionTests.swift \
@@ -117,7 +119,7 @@ jobs:
           run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-v1-network-probe.py"
           run_isolated /usr/bin/xcrun swift --version
           audit_status=0
-          for entry in DeepSeekNeutralBoundaryTests:6 ExternalProviderChannelTests:2 ExternalProviderQueueRaceTests:4 ExternalProviderRuntimeTests:2 ExternalProviderStateTests:7 ExternalProviderTaskMapperTests:2 ExternalProviderTaskStoreTests:3 HermesTaskStoreTests:2 HistoryUnstableFallbackTests:4 IndependentIsolationReviewTests:4 V1IsolationFixTests:17 V1ProtectionTests:4 V1RuntimeProtectionTests:1 ExternalProviderFilterTests:1; do
+          for entry in DeepSeekNeutralBoundaryTests:6 ExternalProviderChannelTests:2 ExternalProviderQueueRaceTests:4 ExternalProviderRuntimeTests:2 ExternalProviderStateTests:7 ExternalProviderTaskMapperTests:2 ExternalProviderTaskStoreTests:3 HermesTaskStoreTests:2 HistoryUnstableFallbackTests:4 IndependentIsolationReviewTests:4 NeutralCompletedIndependentTests:3 NeutralTerminalTransitionTests:2 V1IsolationFixTests:17 V1ProtectionTests:4 V1RuntimeProtectionTests:1 ExternalProviderFilterTests:1; do
             suite="${entry%:*}"
             count="${entry#*:}"
             log="$RUNNER_TEMP/aitm-v1-$suite.log"

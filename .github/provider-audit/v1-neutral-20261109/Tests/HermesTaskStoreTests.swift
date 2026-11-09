@@ -89,7 +89,7 @@ final class HermesTaskStoreTests: XCTestCase {
             let count = body.count
             let header = Data([UInt8(count & 255), UInt8((count >> 8) & 255), UInt8((count >> 16) & 255), UInt8((count >> 24) & 255)])
             XCTAssertTrue(ClaudeLoopSocket.write(descriptor, data: header + body))
-            XCTAssertEqual(ClaudeLoopSocket.read(descriptor, count: 1), Data([0x06]))
+            XCTAssertEqual(ClaudeLoopSocket.read(descriptor, count: 1), Data([0x06]), "Synthetic session: \(session)")
         }
         wait("Profiles did not load") { store.hermesProfiles.count == 2 && runtime != nil }
         var epoch = DispatchTime.now().uptimeNanoseconds

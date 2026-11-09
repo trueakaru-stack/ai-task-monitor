@@ -230,6 +230,9 @@ final class ExternalProviderStateStore {
             return result
         }
         if unconfirmedV1 {
+            if Self.isTerminalV1(state.status), ["started", "active", "waiting", "tool_started"].contains(event.kind) {
+                state.status = "unknown"
+            }
             if state.startKey.isEmpty { start(&state, now: now, turn: event.turn) }
             if state.provider != "opencode", event.kind == "plan", let steps = event.steps, !steps.isEmpty { state.steps = steps }
             markUnconfirmedV1(&state)
@@ -304,11 +307,17 @@ final class ExternalProviderStateStore {
     }
 
     private func markUnconfirmedV1(_ state: inout ExternalProviderTask) {
-        state.status = "unknown"
+        // A loss of ownership is not evidence that an already finished task
+        // restarted. Preserve terminal state until a later activity signal.
+        if !Self.isTerminalV1(state.status) { state.status = "unknown" }
         state.planConfirmed = false
         if state.provider == "opencode" || state.deepSeekUnassigned { state.steps = [] }
         state.calls.removeAll()
         state.lastHeartbeat = nil
+    }
+
+    private static func isTerminalV1(_ status: String) -> Bool {
+        ["idle", "completed", "failed", "interrupted"].contains(status)
     }
 
     // Accept only minimal evidence from an unowned v1 event. In particular,
@@ -336,6 +345,9 @@ final class ExternalProviderStateStore {
                 startKey: "", startedAt: .distantPast, updatedAt: now, steps: [], planConfirmed: false, turn: "")
         }
         guard var state = states[key] else { return false }
+        if Self.isTerminalV1(state.status), ["started", "active", "waiting", "tool_started"].contains(event.kind) {
+            state.status = "unknown"
+        }
         state.deepSeekUnassigned = true
         markUnconfirmedV1(&state)
         state.updatedAt = now
