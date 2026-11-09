@@ -70,7 +70,7 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
 
     var planStatusNote: String? {
         guard !steps.isEmpty else { return nil }
-        if !planConfirmed || (provider == .claude && isUnconfirmed) {
+        if !planConfirmed || isUnconfirmed {
             return tr("План не подтверждён", "Plan unconfirmed")
         }
         if provider == .claude {
@@ -104,7 +104,7 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
             let done = steps.filter { $0.status == .done }.count
             return tr("Готово \(done) из \(steps.count)", "Done \(done) of \(steps.count)")
         }
-        guard let progress, progressKind != .none else { return nil }
+        guard let progress, progressKind != .none, !isUnconfirmed else { return nil }
         let value = progressKind == .approximate ? "≈\(progress)%" : "\(progress)%"
         return value
     }
@@ -166,6 +166,9 @@ enum TaskSnapshotMerger {
             uncertain.isActive = false
             uncertain.isUnconfirmed = true
             uncertain.isWaiting = false
+            uncertain.planConfirmed = false
+            uncertain.progress = nil
+            uncertain.progressKind = .none
             uncertain.activity = tr("Статус не подтверждён", "Status unconfirmed")
             result.append(uncertain)
         }

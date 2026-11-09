@@ -6,8 +6,15 @@ struct TaskCardView: View {
     let task: MonitoredTask
     let showProvider: Bool
 
-    private var hidesClaudePlanStatus: Bool {
-        task.provider == .claude && (!task.planConfirmed || task.isUnconfirmed)
+    private var hidesUnconfirmedPlanStatus: Bool {
+        !task.planConfirmed || task.isUnconfirmed
+    }
+
+    private var hidesUnconfirmedProgress: Bool {
+        if task.isUnconfirmed { return true }
+        guard !task.planConfirmed else { return false }
+        let basis = task.progressBasis ?? (task.steps.isEmpty ? .task : .steps)
+        return task.provider == .claude || basis == .steps
     }
 
     var body: some View {
@@ -21,7 +28,7 @@ struct TaskCardView: View {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
                     .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
-                if let label = task.progressLabel, !hidesClaudePlanStatus {
+                if let label = task.progressLabel, !hidesUnconfirmedProgress {
                     Text(label)
                         .font(.system(size: 16, weight: .semibold))
                         .monospacedDigit()
@@ -34,7 +41,7 @@ struct TaskCardView: View {
             if task.loopWarning != nil {
                 LoopWarningView(task: task, compact: false).padding(.top, 8)
             }
-            if let progress = task.progress, task.progressKind != .none, !hidesClaudePlanStatus {
+            if let progress = task.progress, task.progressKind != .none, !hidesUnconfirmedProgress {
                 GeometryReader { proxy in
                     ZStack(alignment: .leading) {
                         Capsule().fill(MonitorTheme.track).frame(height: 3)
@@ -49,8 +56,8 @@ struct TaskCardView: View {
                     LazyVStack(alignment: .leading, spacing: 9) {
                         ForEach(task.steps) { step in
                             HStack(spacing: 9) {
-                                StepMark(status: hidesClaudePlanStatus ? .pending : step.status)
-                                TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: !hidesClaudePlanStatus && step.status == .active ? .labelColor : .secondaryLabelColor)
+                                StepMark(status: hidesUnconfirmedPlanStatus ? .pending : step.status)
+                                TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: !hidesUnconfirmedPlanStatus && step.status == .active ? .labelColor : .secondaryLabelColor)
                                     .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
                             }
                         }
@@ -62,7 +69,7 @@ struct TaskCardView: View {
                 Text("\(task.planStatusNote ?? tr("План задачи", "Task plan")) · \(task.stepCountLabel)")
                     .font(.system(size: 11))
                     .foregroundStyle(task.planStatusNote == nil ? MonitorTheme.muted :
-                                     (task.provider == .claude && colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary))
+                                     (colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary))
                     .padding(.top, 14)
             }
         }
