@@ -1,0 +1,128 @@
+name: macOS unconfirmed plan visual candidate
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-unconfirmed-plan-20261109.yml"
+      - ".github/claude-audit/unconfirmed-plan-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[unconfirmed-plan-visual]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify test inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet 96f6ab5f88c60a528f39f93ade610830893d7d13 "$GITHUB_SHA" -- macos
+          cd "$GITHUB_WORKSPACE/.github/claude-audit/unconfirmed-plan-20261109"
+          printf '%s  %s\n' \
+            '737e447fafca573ac949432efd7828efd11075b378f4875abfe3ebb72c9e39cd' CodexTaskReader.swift \
+            'db6d6a22a861642bd3b4a9a75639f53bccdbba6bd91818424ea841467ab96f62' Models.swift \
+            '330b8c3970322266f5870713e25a8f1f5b5bc8b906c4ef328a3438c315a9f869' TaskCardView.swift \
+            'ad7ff62757375e813424f8e737396822a01d1c73e62b4c1d33455c75937dd932' SnapshotRenderer.swift \
+            '5d704a479178f473cbd5f23f7a97650a8925778f5ab045256102790f8e1ec7fd' CodexNamespaceBoundaryTests.swift \
+            '98ca837bf3b518e1fc18fcb74fbabe7e8f6e096997cd177beb4eebb680bfdf17' CodexNamespaceStalePlanIndependentTests.swift \
+            'cd18b2d72336ecdd5a47a4923f5fa34d8763b36440ebfb2165b8ed9473c3598a' UnconfirmedPlanModelTests.swift \
+            | shasum -a 256 -c -
+      - name: Render and test without network
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aitm-plan-home" "$RUNNER_TEMP/aitm-plan-tmp" "$RUNNER_TEMP/aitm-plan-support" \
+            "$RUNNER_TEMP/aitm-plan/base" "$RUNNER_TEMP/aitm-plan/candidate"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*)'
+          cat > "$RUNNER_TEMP/aitm-plan-network-probe.py" <<'PY'
+          import errno
+          import socket
+          import sys
+
+          for family, destination in ((socket.AF_INET, ("127.0.0.1", 0)), (socket.AF_INET6, ("::1", 0))):
+              try:
+                  client = socket.socket(family, socket.SOCK_STREAM)
+              except OSError as error:
+                  if error.errno not in (errno.EPERM, errno.EACCES): raise
+              else:
+                  try:
+                      if client.connect_ex(destination) not in (errno.EPERM, errno.EACCES): sys.exit(1)
+                  finally:
+                      client.close()
+          print("Network probe: IPv4/IPv6 denied")
+          PY
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-plan-home" \
+              "TMPDIR=$RUNNER_TEMP/aitm-plan-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-plan-support" \
+              "AITM_CLAUDE_PLAN_PREVIEW_ONLY=1" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-plan-network-probe.py"
+          INPUT="$GITHUB_WORKSPACE/.github/claude-audit/unconfirmed-plan-20261109"
+          cp "$INPUT/SnapshotRenderer.swift" Sources/AITaskMonitor/SnapshotRenderer.swift
+          run_isolated /usr/bin/xcrun swift build --disable-sandbox
+          run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-plan/base"
+          for name in CodexTaskReader.swift Models.swift TaskCardView.swift; do
+            cp "$INPUT/$name" "Sources/AITaskMonitor/$name"
+          done
+          for name in CodexNamespaceBoundaryTests.swift CodexNamespaceStalePlanIndependentTests.swift UnconfirmedPlanModelTests.swift; do
+            cp "$INPUT/$name" "Tests/AITaskMonitorTests/$name"
+          done
+          audit_status=0
+          for entry in CodexNamespaceBoundaryTests:3 CodexNamespaceStalePlanIndependentTests:1 UnconfirmedPlanModelTests:3 CodexLongTurnTests:3 TaskFocusTests:4 ParserTests:23 ClaudePlanLabelTests:2 ExternalProviderStateTests:7; do
+            suite="${entry%:*}"
+            count="${entry#*:}"
+            log="$RUNNER_TEMP/aitm-plan-$suite.log"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | /usr/bin/tee "$log"; then audit_status=1; fi
+            if ! /usr/bin/grep -Eq "Executed $count tests?, with 0 failures" "$log"; then
+              printf '%s\n' "Missing successful expected test count: $suite"
+              audit_status=1
+            fi
+            if /usr/bin/grep -Eq "Test Case .* skipped " "$log"; then audit_status=1; fi
+          done
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox --configuration release; then audit_status=1; fi
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox; then audit_status=1; fi
+          if ! run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-plan/candidate"; then audit_status=1; fi
+          for variant in base candidate; do
+            count="$(find "$RUNNER_TEMP/aitm-plan/$variant" -name '*.png' -type f | wc -l | tr -d ' ')"
+            if [ "$count" != 48 ]; then printf 'Unexpected %s frame count: %s\n' "$variant" "$count"; audit_status=1; fi
+          done
+          exit "$audit_status"
+      - name: Upload synthetic comparisons
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-unconfirmed-plan-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-plan/
+          if-no-files-found: error
+          retention-days: 7
