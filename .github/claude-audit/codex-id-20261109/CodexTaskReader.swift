@@ -175,8 +175,17 @@ struct CodexTaskReader {
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
             let stem = url.deletingPathExtension().lastPathComponent
             let candidate = String(stem.suffix(36))
-            if ids.contains(candidate) { files[candidate] = url; continue }
-            for id in nonUUIDs where stem == id || stem.hasSuffix("-" + id) { files[id] = url }
+            var matches: [String] = []
+            if UUID(uuidString: candidate) != nil && ids.contains(candidate) { matches.append(candidate) }
+            matches.append(contentsOf: nonUUIDs.filter { stem == $0 || stem.hasSuffix("-" + $0) })
+            // A suffix is not a reliable owner when more than one requested
+            // ID fits, or when several files fit the same ID. Keep the source
+            // uncertain rather than displaying another task's data.
+            if matches.count > 1 { throw CocoaError(.fileReadUnknown) }
+            if let id = matches.first {
+                if files[id] != nil { throw CocoaError(.fileReadUnknown) }
+                files[id] = url
+            }
         }
         if let enumerationError { throw enumerationError }
         return files

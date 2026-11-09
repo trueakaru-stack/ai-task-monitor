@@ -43,6 +43,44 @@ final class CodexIdentityBoundaryTests: XCTestCase {
         XCTAssertEqual(Set(try cache.read(from: index).keys), Set(["safe-session", "other-session"]))
     }
 
+    func testOverlappingFileSuffixesOrMultipleFilesFailClosed() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let index = root.appendingPathComponent("session_index.jsonl")
+        let reader = CodexTaskReader(codexHome: root)
+        try writeIndex(["short", "long-short"], at: index)
+        try Data().write(to: sessions.appendingPathComponent("rollout-long-short.jsonl"))
+        XCTAssertThrowsError(try reader.readSnapshot())
+        try writeIndex(["short"], at: index)
+        try Data().write(to: sessions.appendingPathComponent("another-short.jsonl"))
+        XCTAssertThrowsError(try reader.readSnapshot())
+    }
+
+    func testSingleThirtySixCharacterNonUUIDIsNotMistakenForTwoMatches() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let id = String(repeating: "x", count: 36)
+        try writeIndex([id], at: root.appendingPathComponent("session_index.jsonl"))
+        try Data().write(to: sessions.appendingPathComponent("rollout-\(id).jsonl"))
+        XCTAssertNoThrow(try CodexTaskReader(codexHome: root).readSnapshot())
+    }
+
+    func testMultipleFilesForOneUUIDFailClosed() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let id = "019127f4-35ae-7c73-9e72-a10123456789"
+        try writeIndex([id], at: root.appendingPathComponent("session_index.jsonl"))
+        try Data().write(to: sessions.appendingPathComponent("first-\(id).jsonl"))
+        try Data().write(to: sessions.appendingPathComponent("second-\(id).jsonl"))
+        XCTAssertThrowsError(try CodexTaskReader(codexHome: root).readSnapshot())
+    }
+
     @MainActor
     func testCollisionMakesCodexUnavailableWithoutHidingClaude() throws {
         let root = try temporaryRoot()
@@ -56,7 +94,9 @@ final class CodexIdentityBoundaryTests: XCTestCase {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let timestamp = formatter.string(from: Date().addingTimeInterval(2))
         let codexEvent = #"{"timestamp":"\#(timestamp)","type":"event_msg","payload":{"type":"task_started","turn_id":"synthetic"}}"# + "\n"
-        try Data(codexEvent.utf8).write(to: sessions.appendingPathComponent("rollout-safe-session.jsonl"))
+        let rollout = sessions.appendingPathComponent("rollout-safe-session.jsonl")
+        try Data(codexEvent.utf8).write(to: rollout)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(2)], ofItemAtPath: rollout.path)
         let claude = root.appendingPathComponent("claude.jsonl")
         let claudeEvent = #"{"timestamp":"\#(timestamp)","session_id":"other","event":"UserPromptSubmit","active":true}"# + "\n"
         try Data(claudeEvent.utf8).write(to: claude)
