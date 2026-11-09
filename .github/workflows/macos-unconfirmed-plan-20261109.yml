@@ -49,7 +49,7 @@ jobs:
             'db6d6a22a861642bd3b4a9a75639f53bccdbba6bd91818424ea841467ab96f62' Models.swift \
             '2a64228100035a3a0122e9b622df4b0fb2b6c467ccd546350bde6371ef992a2b' TaskCardView.swift \
             'cf6b168437ab0df5450124464439833e1177118c536f4023e526f283b76df36e' RootView.swift \
-            '80ef0543340e5080b04e136a1838b3c5bdb17b52466bed9f542092a3384e559d' SnapshotRenderer.swift \
+            '68ead87a62bce6944f1e7eabf201548695c5e4a7131a568b02e54a0638a476a6' SnapshotRenderer.swift \
             '5d704a479178f473cbd5f23f7a97650a8925778f5ab045256102790f8e1ec7fd' CodexNamespaceBoundaryTests.swift \
             '98ca837bf3b518e1fc18fcb74fbabe7e8f6e096997cd177beb4eebb680bfdf17' CodexNamespaceStalePlanIndependentTests.swift \
             'cd18b2d72336ecdd5a47a4923f5fa34d8763b36440ebfb2165b8ed9473c3598a' UnconfirmedPlanModelTests.swift \
@@ -116,7 +116,7 @@ jobs:
           if ! run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-plan/candidate"; then audit_status=1; fi
           for variant in base candidate; do
             count="$(find "$RUNNER_TEMP/aitm-plan/$variant" -name '*.png' -type f | wc -l | tr -d ' ')"
-            if [ "$count" != 64 ]; then printf 'Unexpected %s frame count: %s\n' "$variant" "$count"; audit_status=1; fi
+            if [ "$count" != 72 ]; then printf 'Unexpected %s frame count: %s\n' "$variant" "$count"; audit_status=1; fi
           done
           exit "$audit_status"
       - name: Upload synthetic comparisons

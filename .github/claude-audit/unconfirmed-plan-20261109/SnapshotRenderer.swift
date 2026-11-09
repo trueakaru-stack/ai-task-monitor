@@ -27,6 +27,8 @@ enum SnapshotRenderer {
                                     try render(name: name, mode: mode, compact: compact, settings: false, outputDirectory: outputDirectory, planUnconfirmed: state == "unconfirmed" || state == "overall", claudePlanFixture: provider == .claude, codexPlanFixture: provider == .codex, taskUnconfirmed: state == "stale", overallProgress: state == "overall")
                                 }
                             }
+                            let lossName = "codex-source-loss-\(language.rawValue)-\(mode.rawValue)-\(compact ? "compact" : "expanded")"
+                            try render(name: lossName, mode: mode, compact: compact, settings: false, outputDirectory: outputDirectory, unavailableSources: [.codex])
                         }
                     }
                 }
