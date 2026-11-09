@@ -53,11 +53,12 @@ jobs:
             '026b262142f5011829c1c36847f0b547f596d8b789ac40bc2df36641c46923ce' ReleaseUpdateCoordinatorTests.swift \
             '7529c0c87f4dc5a73f1eb669e4ed7af553153d395082d358409d13ad25deac7c' ReleaseRequestSyntheticTests.swift \
             'cbd477270da5a0bacd5d15df909dc678992193cd52f943c9146ec206a60a6817' ReleaseHeaderBoundaryDiagnosticTests.swift \
+            '1fa1b039f7e5bdf38812805f1f9543fcf84f8a8f3ff261c4c11a1580fd187742' TerminalRetainReviewTests.swift \
             | shasum -a 256 -c -
           for name in ReleaseRetrySchedule.swift ReleaseUpdateCoordinator.swift ReleaseUpdates.swift; do
             cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/$name"
           done
-          for name in ReleaseRetryScheduleTests.swift ReleaseUpdateCoordinatorTests.swift ReleaseRequestSyntheticTests.swift ReleaseHeaderBoundaryDiagnosticTests.swift; do
+          for name in ReleaseRetryScheduleTests.swift ReleaseUpdateCoordinatorTests.swift ReleaseRequestSyntheticTests.swift ReleaseHeaderBoundaryDiagnosticTests.swift TerminalRetainReviewTests.swift; do
             cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/$name"
           done
       - name: Run isolated release tests without network
@@ -93,7 +94,7 @@ jobs:
           run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-retry-network-probe.py"
           run_isolated /usr/bin/xcrun swift --version
           audit_status=0
-          for entry in ReleaseUpdatesTests:5 ReleaseRetryScheduleTests:22 ReleaseUpdateCoordinatorTests:33 ReleaseRequestSyntheticTests:11 ReleaseRedirectDiagnosticTests:3 ReleaseHeaderBoundaryDiagnosticTests:2; do
+          for entry in ReleaseUpdatesTests:5 ReleaseRetryScheduleTests:22 ReleaseUpdateCoordinatorTests:33 ReleaseRequestSyntheticTests:11 ReleaseRedirectDiagnosticTests:3 ReleaseHeaderBoundaryDiagnosticTests:2 TerminalRetainReviewTests:1; do
             suite="${entry%:*}"
             count="${entry#*:}"
             log="$RUNNER_TEMP/aitm-retry-$suite.log"
