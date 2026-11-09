@@ -1,0 +1,3 @@
+- insert:
+    - id: ai-task-monitor-observer
+      name: ai-task-monitor-dsh-observer
