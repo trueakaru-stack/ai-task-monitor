@@ -1,0 +1,90 @@
+name: macOS cold compressed independent reproduction
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-cold-compressed-independent-20261109.yml"
+      - ".github/codex-audit/cold-compressed-independent-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  reproduce:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[cold-compressed-repro]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Verify disposable runner
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify pinned synthetic input
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet 0b11986e4c2a3570a46eef49b5e46b95ca56cb80 "$GITHUB_SHA" -- macos
+          printf '%s  %s\n' \
+            '2480f217f7db42763ec4f43cd367b98505f6d37b96e06a6041ed6ed3f8ce785a' '.github/codex-audit/revert-safe-20261109/CodexTaskReader.swift' \
+            '734187524ad64e778ffb1bdea773b350dda77d91e10a888867a1e3819a580ec2' '.github/codex-audit/revert-safe-20261109/TaskStore.swift' \
+            '0c9391a947c55e05b43896ada9603140994c8443b2b3494baa880a84ed8fc1cd' '.github/codex-audit/cold-compressed-independent-20261109/CodexColdCompressedIndependentTests.swift' \
+            | shasum -a 256 -c -
+      - name: Reproduce stale compressed warning in isolated fixtures
+        working-directory: macos
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aitm-cold-user" "$RUNNER_TEMP/aitm-cold-tmp" "$RUNNER_TEMP/aitm-cold-support"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*)'
+          cat > "$RUNNER_TEMP/aitm-cold-network-probe.py" <<'PY'
+          import errno, socket, sys
+          for family, destination in ((socket.AF_INET, ('127.0.0.1', 0)), (socket.AF_INET6, ('::1', 0))):
+              try:
+                  client = socket.socket(family, socket.SOCK_STREAM)
+              except OSError as error:
+                  if error.errno not in (errno.EPERM, errno.EACCES): raise
+              else:
+                  try:
+                      if client.connect_ex(destination) not in (errno.EPERM, errno.EACCES): sys.exit(1)
+                  finally:
+                      client.close()
+          print('Network probe: IPv4/IPv6 denied')
+          PY
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-cold-user" "TMPDIR=$RUNNER_TEMP/aitm-cold-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-cold-support" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-cold-network-probe.py"
+          cp "$GITHUB_WORKSPACE/.github/codex-audit/revert-safe-20261109/CodexTaskReader.swift" Sources/AITaskMonitor/CodexTaskReader.swift
+          cp "$GITHUB_WORKSPACE/.github/codex-audit/revert-safe-20261109/TaskStore.swift" Sources/AITaskMonitor/TaskStore.swift
+          cp "$GITHUB_WORKSPACE/.github/codex-audit/cold-compressed-independent-20261109/CodexColdCompressedIndependentTests.swift" Tests/AITaskMonitorTests/CodexColdCompressedIndependentTests.swift
+          set +e
+          run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter CodexColdCompressedIndependentTests 2>&1 | /usr/bin/tee "$RUNNER_TEMP/aitm-cold.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -eq 0 ]; then echo 'Unexpected pass: update this reproduction to match the current implementation'; exit 1; fi
+          grep -Eq 'Executed 6 tests?, with 2 failures' "$RUNNER_TEMP/aitm-cold.log"
+          grep -E "Test Case .*testOldUnobservedCompressedDoesNotSpoilLiveNeighbor.* failed " "$RUNNER_TEMP/aitm-cold.log"
+          grep -E "Test Case .*testOldCompressedMaterializedAndUpdatedAfterStartupIsSeen.* failed " "$RUNNER_TEMP/aitm-cold.log"
+          if grep -Eq 'Test Case .* skipped ' "$RUNNER_TEMP/aitm-cold.log"; then exit 1; fi
+          echo 'Expected reproduction confirmed: two failing expectations; four safeguards passed.'
