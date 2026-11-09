@@ -1,0 +1,111 @@
+name: macOS source-loss plan synthetic tests
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-source-loss-plan-20261109.yml"
+      - ".github/claude-audit/source-loss-plan-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-tests:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[source-loss-candidate]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify and stage synthetic candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet 96f6ab5f88c60a528f39f93ade610830893d7d13 "$GITHUB_SHA" -- macos
+          INPUT="$GITHUB_WORKSPACE/.github/claude-audit/source-loss-plan-20261109"
+          cd "$INPUT"
+          printf '%s  %s\n' \
+            'db6d6a22a861642bd3b4a9a75639f53bccdbba6bd91818424ea841467ab96f62' Models.swift \
+            '2a64228100035a3a0122e9b622df4b0fb2b6c467ccd546350bde6371ef992a2b' TaskCardView.swift \
+            'cf6b168437ab0df5450124464439833e1177118c536f4023e526f283b76df36e' RootView.swift \
+            '8fa064e14430588114de4071a2d651fa513aad7e95b2801aca821c94063be914' CodexSourceStalePlanTests.swift \
+            'cd18b2d72336ecdd5a47a4923f5fa34d8763b36440ebfb2165b8ed9473c3598a' UnconfirmedPlanModelTests.swift \
+            | shasum -a 256 -c -
+          for name in Models.swift TaskCardView.swift RootView.swift; do
+            cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/$name"
+          done
+          for name in CodexSourceStalePlanTests.swift UnconfirmedPlanModelTests.swift; do
+            cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/$name"
+          done
+      - name: Run synthetic suites without network
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aitm-codex-id-home" "$RUNNER_TEMP/aitm-codex-id-tmp" "$RUNNER_TEMP/aitm-codex-id-support"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*)'
+          cat > "$RUNNER_TEMP/aitm-codex-id-network-probe.py" <<'PY'
+          import errno
+          import socket
+          import sys
+
+          for family, destination in ((socket.AF_INET, ("127.0.0.1", 0)), (socket.AF_INET6, ("::1", 0))):
+              try:
+                  client = socket.socket(family, socket.SOCK_STREAM)
+              except OSError as error:
+                  if error.errno not in (errno.EPERM, errno.EACCES): raise
+              else:
+                  try:
+                      if client.connect_ex(destination) not in (errno.EPERM, errno.EACCES): sys.exit(1)
+                  finally:
+                      client.close()
+          print("Network probe: IPv4/IPv6 denied")
+          PY
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-codex-id-home" \
+              "TMPDIR=$RUNNER_TEMP/aitm-codex-id-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-codex-id-support" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-codex-id-network-probe.py"
+          audit_status=0
+          for entry in CodexSourceStalePlanTests:1 UnconfirmedPlanModelTests:3 CodexLongTurnTests:3 TaskFocusTests:4 ParserTests:23 ClaudePlanLabelTests:2 ExternalProviderStateTests:7; do
+            suite="${entry%:*}"
+            count="${entry#*:}"
+            log="$RUNNER_TEMP/aitm-codex-id-$suite.log"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | /usr/bin/tee "$log"; then
+              audit_status=1
+            fi
+            if ! /usr/bin/grep -Eq "Executed $count tests?, with 0 failures" "$log"; then
+              printf '%s\n' "Missing successful expected test count: $suite"
+              audit_status=1
+            fi
+            if /usr/bin/grep -Eq "Test Case .* skipped " "$log"; then audit_status=1; fi
+          done
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox --configuration release; then
+            audit_status=1
+          fi
+          exit "$audit_status"
