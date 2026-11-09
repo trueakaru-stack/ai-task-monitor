@@ -1,0 +1,289 @@
+name: macOS Claude title history synthetic tests
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-claude-title-history-20261109.yml"
+      - ".github/claude-audit/title-history-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-tests:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[claude-title-history]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify and stage synthetic candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet bbef0654fdb2789c62c8d8511576f05b75a289ca "$GITHUB_SHA" -- macos
+          INPUT="$GITHUB_WORKSPACE/.github/claude-audit/title-history-20261109"
+          cd "$INPUT"
+          printf '%s  %s\n' \
+            '6941ab886d967059640d509c649d9eb32c49b0450eae1b13ba22d340a7bfaeae' ClaudeHook.swift \
+            '9a2a9e0de8ab52e0d59b87bc48a8681ae8afab8c4311de5d1dfe03a2aae2ee7e' ClaudeIntegration.swift \
+            '90f8c9b51d42cdadb2612d7189dd1a991accc617bd3eea571d2e1bc395093542' ClaudeJSONValidation.swift \
+            '861f30835cc64866759eb6f4f24f6df73e63d1b753d1aa6e1fed0701c9e4af68' ClaudeLoopChannel.swift \
+            'cb2a3d3ed31028b5b258d68c2507bbde08fda990d0668f1956ec94eb86f8f8eb' ClaudeLoopDetection.swift \
+            '8411b0ebd702909c6581492816a0e3628328ea76dbef843a080fadd4c7c47333' ClaudePhaseEvidence.swift \
+            '0cd9ff3538d0c768511ba1d5bec85470f8d35358e50717726c4178443a20b19a' ClaudeRetention.swift \
+            '84f6d6b61d004372ebe96463f95e0836044956c59c7ad3d46d56d5890da1d030' ClaudeTaskReader.swift \
+            'b3ef6fd6af663ee4a8c1a02541980fff70faa269bb48ed5d41f12bde00a6f173' TaskStore.swift \
+            '436eb6e670bbd8b878d00db475e3416029e065aa420d0f0d7669f35708c0d289' TaskCardView.swift \
+            '8f7a63f9b5d957a9ff9db01fe179f0eba9ec8198a9d3769c3b5013eec336efcc' ClaudeBackgroundIndependentTests.swift \
+            '9a359fcefcefd9b46a42f7b888c7f5a6ea96e39abb797e2049302891557fc674' ClaudeHookPhaseBlockingTests.swift \
+            '84411c695c4e77e8370caf78d13bffbddde5bd659f1e6c8ac75dd95faa2274b4' ClaudeIdentityInvalidUTF8Tests.swift \
+            '9831d53b7cf8b722319e780462f738480b6f2971d940c01c9d2505c9338ee830' ClaudeIdentityIsolationTests.swift \
+            '0488334385026450adbc847309528a666f3de0598d1c6439ece00310be293088' ClaudeIntegrationSafetyTests.swift \
+            'd7cc94e5934335f6e00506168912852a5b39e832844d96bd7ddf7749667378a9' ClaudePhaseChannelTests.swift \
+            'be5df34b1ccc67880a9fdc7750733789dfd2f12a6d7264800abff095fd30092b' ClaudePhaseIndependentCounterexamples.swift \
+            '72990f0db2302e122dbbeac99eb4f1c0a4775ce9ff422c0327beafa4e61c8f9e' ClaudePhaseIntegrationTests.swift \
+            '0262a575e9ee4de04e677b4633601e863b294b64f16c67517cb1c5e736f79d27' ClaudePhaseUnresolvedTests.swift \
+            '36c1b723845b75119e97d39a0d5698cecd48ced65ed1da6ffadebbe1316c7ce1' ClaudePlanOrderingCandidateTests.swift \
+            'f4804a47e08373a80b5430b91233ebea72049bac1535758de0cb302f541915b1' ClaudeReaderIndependentTests.swift \
+            '812258f924d34d040b111bc1b44e843321599e6181138136ce2d2875d7f21ed1' ClaudeReaderSafetyCandidateTests.swift \
+            '9fae3bb24c0a3573b2a1ef3761abc4ab4735aa4a9a821264aeddf43e35521ece' ClaudeSourceLossRecoveryTests.swift \
+            '979268154c85ffa49cf54002506d8b460fe98d835b93ba82ae456099fb0c3034' ClaudeRecoveryFix5Tests.swift \
+            'd6b2ce9b0a36338d03553905c624a587d4372f12fd3f39a017c1826c385ccbf4' ParserTests.swift \
+            '2c86c1eb3e3880069e9617d2272563235013540d5196a538e35ce5c5c3bf8152' ClaudePhaseIdentityIsolationIndependentTests.swift \
+            'af304db47e7f9eec041a84c1f61b19e54690e44d846ef93028266e2cfc6d7e30' ClaudeIntegrationPreservationIndependentTests.swift \
+            '83df2ddb469e3824364a35778fd9cc13247c12762e01d057210fe641d8222677' ClaudeRecoveryBoundaryIndependentTests.swift \
+            '0e729bdb6e31f1e8d089426c0797bfceccd7ac96413e1e962fd1ddde9c0be659' ClaudeCombinedRecoveryTests.swift \
+            '0f27e7deb1b7b9ecd0aab9a5174e330cafa7800d05ca5a53cac60747d6082073' ClaudePhaseIsolationRaceTests.swift \
+            '37956f54c4f52031d375c7326e5ce6a3087368a3b4263c5d5dd373b8eafe5826' ClaudeTitleHistoryTests.swift \
+            'f0ee23f67fcc38638374d5518bee2568d7e0e7ec86bdad07f4bb8d34ac322220' TaskStore-before.swift \
+            '6f6d23ebd94a3be021382ead68f06ce27e930c0eaef0d10a26b3b54d9bd0404b' ClaudeTaskReader-before.swift \
+            | shasum -a 256 -c -
+          for name in ClaudeHook.swift ClaudeIntegration.swift ClaudeJSONValidation.swift ClaudeLoopChannel.swift ClaudeLoopDetection.swift ClaudePhaseEvidence.swift ClaudeRetention.swift ClaudeTaskReader.swift TaskStore.swift TaskCardView.swift; do
+            cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/$name"
+          done
+          for name in ClaudeBackgroundIndependentTests.swift ClaudeHookPhaseBlockingTests.swift ClaudeIdentityInvalidUTF8Tests.swift ClaudeIdentityIsolationTests.swift ClaudeIntegrationSafetyTests.swift ClaudePhaseChannelTests.swift ClaudePhaseIndependentCounterexamples.swift ClaudePhaseIntegrationTests.swift ClaudePhaseUnresolvedTests.swift ClaudePlanOrderingCandidateTests.swift ClaudeReaderIndependentTests.swift ClaudeReaderSafetyCandidateTests.swift ClaudeSourceLossRecoveryTests.swift ClaudeRecoveryFix5Tests.swift ParserTests.swift ClaudePhaseIdentityIsolationIndependentTests.swift ClaudeIntegrationPreservationIndependentTests.swift ClaudeRecoveryBoundaryIndependentTests.swift ClaudeCombinedRecoveryTests.swift ClaudePhaseIsolationRaceTests.swift ClaudeTitleHistoryTests.swift; do
+            cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/$name"
+          done
+      - name: Run synthetic suites with IP denied
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aitm-phase-home" "$RUNNER_TEMP/aitm-phase-tmp" "$RUNNER_TEMP/aitm-phase-support"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*) (allow network* (local unix-socket)) (allow network-outbound (remote unix-socket))'
+          cat > "$RUNNER_TEMP/aitm-phase-network-probe.py" <<'PY'
+          import errno
+          import os
+          import socket
+          import sys
+
+          for family, destination in ((socket.AF_INET, ("127.0.0.1", 0)), (socket.AF_INET6, ("::1", 0))):
+              try:
+                  internet = socket.socket(family, socket.SOCK_STREAM)
+              except OSError as error:
+                  if error.errno not in (errno.EPERM, errno.EACCES): raise
+              else:
+                  try:
+                      if internet.connect_ex(destination) not in (errno.EPERM, errno.EACCES): sys.exit(1)
+                  finally:
+                      internet.close()
+          path = "/private/tmp/aitm-phase-probe-" + str(os.getpid())
+          server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          try:
+              server.bind(path)
+              server.listen(1)
+              client.connect(path)
+              peer, _ = server.accept()
+              peer.close()
+          finally:
+              client.close()
+              server.close()
+              if os.path.exists(path): os.unlink(path)
+          print("Network probe: IPv4/IPv6 denied; synthetic local Unix socket allowed")
+          PY
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-phase-home" \
+              "TMPDIR=$RUNNER_TEMP/aitm-phase-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-phase-support" \
+              "AITM_CLAUDE_TEST_EXECUTABLE=$GITHUB_WORKSPACE/macos/.build/debug/AITaskMonitor" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-phase-network-probe.py"
+          cp "$GITHUB_WORKSPACE/.github/claude-audit/title-history-20261109/TaskStore-before.swift" Sources/AITaskMonitor/TaskStore.swift
+          run_isolated /usr/bin/xcrun swift build --disable-sandbox
+          set +e
+          run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter ClaudePhaseIsolationRaceTests.testAttributedPhaseAfterSnapshotPreservesNeighbor 2>&1 | /usr/bin/tee "$RUNNER_TEMP/aitm-phase-before.log"
+          before_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$before_status" -eq 0 ]; then echo 'Expected pre-fix isolation failure did not occur'; exit 1; fi
+          /usr/bin/grep -F 'An attributed phase in first must not clear neighbor' "$RUNNER_TEMP/aitm-phase-before.log"
+          /usr/bin/grep -Eq 'Executed 1 test, with 2 failures? \(' "$RUNNER_TEMP/aitm-phase-before.log"
+          cp "$GITHUB_WORKSPACE/.github/claude-audit/title-history-20261109/TaskStore.swift" Sources/AITaskMonitor/TaskStore.swift
+          cp "$GITHUB_WORKSPACE/.github/claude-audit/title-history-20261109/ClaudeTaskReader-before.swift" Sources/AITaskMonitor/ClaudeTaskReader.swift
+          run_isolated /usr/bin/xcrun swift build --disable-sandbox
+          set +e
+          run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter ClaudeTitleHistoryTests.testOldAndNewTitleSameIDBeforeFirstPollSurviveKnownLoss 2>&1 | /usr/bin/tee "$RUNNER_TEMP/aitm-title-before.log"
+          before_title_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$before_title_status" -eq 0 ]; then echo 'Expected pre-fix title loss did not occur'; exit 1; fi
+          /usr/bin/grep -F 'Both observed titles must survive one read' "$RUNNER_TEMP/aitm-title-before.log"
+          /usr/bin/grep -Eq 'Executed 1 test, with 1 failure \(' "$RUNNER_TEMP/aitm-title-before.log"
+          cp "$GITHUB_WORKSPACE/.github/claude-audit/title-history-20261109/ClaudeTaskReader.swift" Sources/AITaskMonitor/ClaudeTaskReader.swift
+          run_isolated /usr/bin/xcrun swift build --disable-sandbox
+          audit_status=0
+          for entry in ClaudeBackgroundIndependentTests:1 ClaudeHookPhaseBlockingTests:1 ClaudeIdentityInvalidUTF8Tests:4 ClaudeIdentityIsolationTests:2 ClaudeIntegrationSafetyTests:16 ClaudePhaseChannelTests:14 ClaudePhaseIndependentCounterexamples:7 ClaudePhaseIntegrationTests:30 ClaudePhaseUnresolvedTests:2 ClaudePlanOrderingCandidateTests:14 ClaudeReaderIndependentTests:13 ClaudeReaderSafetyCandidateTests:6 ClaudeSourceLossRecoveryTests:17 ClaudeRecoveryFix5Tests:6 ParserTests:23 ClaudeHookLockTests:1 ClaudeLoopChannelTests:9 ClaudeLoopDetectionTests:7 ClaudeRetentionTests:3 ClaudePlanLabelTests:2 ClaudePhaseIdentityIsolationIndependentTests:3 ClaudeIntegrationPreservationIndependentTests:4 ClaudeRecoveryBoundaryIndependentTests:3 ClaudeCombinedRecoveryTests:8 ClaudePhaseIsolationRaceTests:4 ClaudeTitleHistoryTests:5 CodexColdCompressedIndependentTests:8 CodexCompressedBoundaryIndependentTests:4 CodexLongTurnTests:3 CodexMultipleColdIndependentTests:5 CodexRevertSafetyTests:13 CodexSiblingDirectoryIndependentTests:1 CodexSourceStalePlanTests:1; do
+            suite="${entry%:*}"
+            count="${entry#*:}"
+            log="$RUNNER_TEMP/aitm-phase-$suite.log"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | /usr/bin/tee "$log"; then
+              audit_status=1
+            fi
+            if ! /usr/bin/grep -Eq "Executed $count tests?, with 0 failures" "$log"; then
+              printf '%s\n' "Missing successful expected test count: $suite"
+              audit_status=1
+            fi
+          done
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox --configuration release; then
+            audit_status=1
+          fi
+          exit "$audit_status"
+
+  visual:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[claude-title-history]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify base and render previews without network
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet bbef0654fdb2789c62c8d8511576f05b75a289ca "$GITHUB_SHA" -- macos
+          mkdir -p "$RUNNER_TEMP/aitm-combined-home" "$RUNNER_TEMP/aitm-combined-tmp" "$RUNNER_TEMP/aitm-combined-support" "$RUNNER_TEMP/aitm-combined-visual/base" "$RUNNER_TEMP/aitm-combined-visual/candidate"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*)'
+          run_visual() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-combined-home" \
+              "TMPDIR=$RUNNER_TEMP/aitm-combined-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-combined-support" \
+              "AITM_CLAUDE_PLAN_PREVIEW_ONLY=1" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          cat > "$RUNNER_TEMP/aitm-combined-network-probe.py" <<'PY'
+          import errno, socket, sys
+          try:
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          except OSError as error:
+              sys.exit(0 if error.errno in (errno.EPERM, errno.EACCES) else 1)
+          try:
+              result = sock.connect_ex(("127.0.0.1", 0))
+          finally:
+              sock.close()
+          sys.exit(0 if result in (errno.EPERM, errno.EACCES) else 1)
+          PY
+          run_visual /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-combined-network-probe.py"
+          run_visual /usr/bin/xcrun swift build --disable-sandbox
+          run_visual .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-combined-visual/base"
+          INPUT="$GITHUB_WORKSPACE/.github/claude-audit/title-history-20261109"
+          cd "$INPUT"
+          printf '%s  %s\n' \
+            '6941ab886d967059640d509c649d9eb32c49b0450eae1b13ba22d340a7bfaeae' ClaudeHook.swift \
+            '9a2a9e0de8ab52e0d59b87bc48a8681ae8afab8c4311de5d1dfe03a2aae2ee7e' ClaudeIntegration.swift \
+            '90f8c9b51d42cdadb2612d7189dd1a991accc617bd3eea571d2e1bc395093542' ClaudeJSONValidation.swift \
+            '861f30835cc64866759eb6f4f24f6df73e63d1b753d1aa6e1fed0701c9e4af68' ClaudeLoopChannel.swift \
+            'cb2a3d3ed31028b5b258d68c2507bbde08fda990d0668f1956ec94eb86f8f8eb' ClaudeLoopDetection.swift \
+            '8411b0ebd702909c6581492816a0e3628328ea76dbef843a080fadd4c7c47333' ClaudePhaseEvidence.swift \
+            '0cd9ff3538d0c768511ba1d5bec85470f8d35358e50717726c4178443a20b19a' ClaudeRetention.swift \
+            '84f6d6b61d004372ebe96463f95e0836044956c59c7ad3d46d56d5890da1d030' ClaudeTaskReader.swift \
+            'b3ef6fd6af663ee4a8c1a02541980fff70faa269bb48ed5d41f12bde00a6f173' TaskStore.swift \
+            '436eb6e670bbd8b878d00db475e3416029e065aa420d0f0d7669f35708c0d289' TaskCardView.swift \
+            '8f7a63f9b5d957a9ff9db01fe179f0eba9ec8198a9d3769c3b5013eec336efcc' ClaudeBackgroundIndependentTests.swift \
+            '9a359fcefcefd9b46a42f7b888c7f5a6ea96e39abb797e2049302891557fc674' ClaudeHookPhaseBlockingTests.swift \
+            '84411c695c4e77e8370caf78d13bffbddde5bd659f1e6c8ac75dd95faa2274b4' ClaudeIdentityInvalidUTF8Tests.swift \
+            '9831d53b7cf8b722319e780462f738480b6f2971d940c01c9d2505c9338ee830' ClaudeIdentityIsolationTests.swift \
+            '0488334385026450adbc847309528a666f3de0598d1c6439ece00310be293088' ClaudeIntegrationSafetyTests.swift \
+            'd7cc94e5934335f6e00506168912852a5b39e832844d96bd7ddf7749667378a9' ClaudePhaseChannelTests.swift \
+            'be5df34b1ccc67880a9fdc7750733789dfd2f12a6d7264800abff095fd30092b' ClaudePhaseIndependentCounterexamples.swift \
+            '72990f0db2302e122dbbeac99eb4f1c0a4775ce9ff422c0327beafa4e61c8f9e' ClaudePhaseIntegrationTests.swift \
+            '0262a575e9ee4de04e677b4633601e863b294b64f16c67517cb1c5e736f79d27' ClaudePhaseUnresolvedTests.swift \
+            '36c1b723845b75119e97d39a0d5698cecd48ced65ed1da6ffadebbe1316c7ce1' ClaudePlanOrderingCandidateTests.swift \
+            'f4804a47e08373a80b5430b91233ebea72049bac1535758de0cb302f541915b1' ClaudeReaderIndependentTests.swift \
+            '812258f924d34d040b111bc1b44e843321599e6181138136ce2d2875d7f21ed1' ClaudeReaderSafetyCandidateTests.swift \
+            '9fae3bb24c0a3573b2a1ef3761abc4ab4735aa4a9a821264aeddf43e35521ece' ClaudeSourceLossRecoveryTests.swift \
+            '979268154c85ffa49cf54002506d8b460fe98d835b93ba82ae456099fb0c3034' ClaudeRecoveryFix5Tests.swift \
+            'd6b2ce9b0a36338d03553905c624a587d4372f12fd3f39a017c1826c385ccbf4' ParserTests.swift \
+            '2c86c1eb3e3880069e9617d2272563235013540d5196a538e35ce5c5c3bf8152' ClaudePhaseIdentityIsolationIndependentTests.swift \
+            'af304db47e7f9eec041a84c1f61b19e54690e44d846ef93028266e2cfc6d7e30' ClaudeIntegrationPreservationIndependentTests.swift \
+            '83df2ddb469e3824364a35778fd9cc13247c12762e01d057210fe641d8222677' ClaudeRecoveryBoundaryIndependentTests.swift \
+            '0e729bdb6e31f1e8d089426c0797bfceccd7ac96413e1e962fd1ddde9c0be659' ClaudeCombinedRecoveryTests.swift \
+            '0f27e7deb1b7b9ecd0aab9a5174e330cafa7800d05ca5a53cac60747d6082073' ClaudePhaseIsolationRaceTests.swift \
+            '37956f54c4f52031d375c7326e5ce6a3087368a3b4263c5d5dd373b8eafe5826' ClaudeTitleHistoryTests.swift \
+            'f0ee23f67fcc38638374d5518bee2568d7e0e7ec86bdad07f4bb8d34ac322220' TaskStore-before.swift \
+            '6f6d23ebd94a3be021382ead68f06ce27e930c0eaef0d10a26b3b54d9bd0404b' ClaudeTaskReader-before.swift \
+            | shasum -a 256 -c -
+          cd "$GITHUB_WORKSPACE/macos"
+          for name in ClaudeHook.swift ClaudeIntegration.swift ClaudeJSONValidation.swift ClaudeLoopChannel.swift ClaudeLoopDetection.swift ClaudePhaseEvidence.swift ClaudeRetention.swift ClaudeTaskReader.swift TaskStore.swift TaskCardView.swift; do
+            cp "$INPUT/$name" "Sources/AITaskMonitor/$name"
+          done
+          run_visual /usr/bin/xcrun swift build --disable-sandbox
+          run_visual .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-combined-visual/candidate"
+          for version in base candidate; do
+            count="$(find "$RUNNER_TEMP/aitm-combined-visual/$version" -name '*.png' -type f | wc -l | tr -d ' ')"
+            test "$count" = 64
+          done
+      - name: Upload synthetic previews
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-claude-title-history-visual-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-combined-visual/
+          if-no-files-found: warn
+          retention-days: 7
