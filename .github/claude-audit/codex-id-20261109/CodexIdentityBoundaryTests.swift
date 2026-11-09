@@ -81,6 +81,34 @@ final class CodexIdentityBoundaryTests: XCTestCase {
         XCTAssertThrowsError(try CodexTaskReader(codexHome: root).readSnapshot())
     }
 
+    func testRevertedRolloutUsesThreadIDNotRolloutID() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let thread = "019127f4-35ae-7c73-9e72-a10123456789"
+        let rollout = "019127f4-35ae-7c73-9e72-a10987654321"
+        try writeIndex([thread, rollout], at: root.appendingPathComponent("session_index.jsonl"))
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let event = #"{"timestamp":"\#(timestamp)","type":"event_msg","payload":{"type":"task_started","turn_id":"synthetic"}}"# + "\n"
+        try Data(event.utf8).write(to: sessions.appendingPathComponent("rollout-2026-11-09-\(thread)_\(rollout).jsonl"))
+        let snapshot = try CodexTaskReader(codexHome: root).readSnapshot()
+        XCTAssertEqual(snapshot.tasks.map(\.id), [thread])
+    }
+
+    func testOriginalAndRevertedRolloutsFailClosed() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        let thread = "019127f4-35ae-7c73-9e72-a10123456789"
+        let rollout = "019127f4-35ae-7c73-9e72-a10987654321"
+        try writeIndex([thread], at: root.appendingPathComponent("session_index.jsonl"))
+        try Data().write(to: sessions.appendingPathComponent("rollout-old-\(thread).jsonl"))
+        try Data().write(to: sessions.appendingPathComponent("rollout-new-\(thread)_\(rollout).jsonl"))
+        XCTAssertThrowsError(try CodexTaskReader(codexHome: root).readSnapshot())
+    }
+
     @MainActor
     func testCollisionMakesCodexUnavailableWithoutHidingClaude() throws {
         let root = try temporaryRoot()

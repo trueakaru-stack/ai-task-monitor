@@ -46,11 +46,13 @@ jobs:
           INPUT="$GITHUB_WORKSPACE/.github/claude-audit/codex-id-20261109"
           cd "$INPUT"
           printf '%s  %s\n' \
-            '59559fa3be27c18fe1ddd127b654087cfe80428cebe663ed6bd127775c37d833' CodexTaskReader.swift \
-            '82e81d4df003f2ee6f1b4bb11e1aedf5e157a32698fd1ddb10b8c03f97a3230b' CodexIdentityBoundaryTests.swift \
+            '6e8a6d6e63480641babb25ad40e18266e45a8c17fb941589d94435fe336038a9' CodexTaskReader.swift \
+            '2383b6d812cccfaea0f4fb098b617bf79783b8677133c81f4064efb27273fb37' CodexIdentityBoundaryTests.swift \
+            '6214982dda285c592e4888090a214492c583e4882a5c89d15555270648d6c6fc' CodexBoundaryIndependentTests.swift \
             | shasum -a 256 -c -
           cp "$INPUT/CodexTaskReader.swift" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/CodexTaskReader.swift"
           cp "$INPUT/CodexIdentityBoundaryTests.swift" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/CodexIdentityBoundaryTests.swift"
+          cp "$INPUT/CodexBoundaryIndependentTests.swift" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/CodexBoundaryIndependentTests.swift"
       - name: Run synthetic suites without network
         shell: bash
         working-directory: macos
@@ -85,7 +87,7 @@ jobs:
           }
           run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-codex-id-network-probe.py"
           audit_status=0
-          for entry in CodexIdentityBoundaryTests:6 CodexLongTurnTests:3 TaskFocusTests:4 ParserTests:23 ClaudePlanLabelTests:2; do
+          for entry in CodexIdentityBoundaryTests:8 CodexBoundaryIndependentTests:6 CodexLongTurnTests:3 TaskFocusTests:4 ParserTests:23 ClaudePlanLabelTests:2; do
             suite="${entry%:*}"
             count="${entry#*:}"
             log="$RUNNER_TEMP/aitm-codex-id-$suite.log"

@@ -174,9 +174,21 @@ struct CodexTaskReader {
         var files: [String: URL] = [:]
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
             let stem = url.deletingPathExtension().lastPathComponent
-            let candidate = String(stem.suffix(36))
             var matches: [String] = []
-            if UUID(uuidString: candidate) != nil && ids.contains(candidate) { matches.append(candidate) }
+            // After thread/revert, the filename ends in threadID_rolloutID.
+            // The second UUID identifies the immutable rollout, not its owner.
+            let pair = String(stem.suffix(73))
+            let pairParts = pair.split(separator: "_", omittingEmptySubsequences: false)
+            let isReverted = pairParts.count == 2 && pairParts.allSatisfy {
+                $0.utf8.count == 36 && UUID(uuidString: String($0)) != nil
+            } && (stem == pair || stem.hasSuffix("-" + pair))
+            if isReverted {
+                let owner = String(pairParts[0])
+                if ids.contains(owner) { matches.append(owner) }
+            } else {
+                let candidate = String(stem.suffix(36))
+                if UUID(uuidString: candidate) != nil && ids.contains(candidate) { matches.append(candidate) }
+            }
             matches.append(contentsOf: nonUUIDs.filter { stem == $0 || stem.hasSuffix("-" + $0) })
             // A suffix is not a reliable owner when more than one requested
             // ID fits, or when several files fit the same ID. Keep the source
