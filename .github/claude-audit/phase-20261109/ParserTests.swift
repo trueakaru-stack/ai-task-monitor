@@ -222,9 +222,11 @@ final class ParserTests: XCTestCase {
         try ([unrelated, observed, stopped].joined(separator: "\n") + "\n").write(to: currentFile, atomically: true, encoding: .utf8)
         let futureSnapshot = try reader.readSnapshot(now: now, observedSince: now.addingTimeInterval(-1))
         XCTAssertFalse(futureSnapshot.terminalIDs.contains("claude:legacy-session"))
+        XCTAssertFalse(futureSnapshot.neutralEndedIDs.contains("claude:legacy-session"))
         XCTAssertTrue(futureSnapshot.tasks.contains { $0.id == "claude:legacy-session" && $0.isUnconfirmed })
         let stoppedSnapshot = try reader.readSnapshot(now: now.addingTimeInterval(2), observedSince: now.addingTimeInterval(-1))
-        XCTAssertTrue(stoppedSnapshot.terminalIDs.contains("claude:legacy-session"))
+        XCTAssertTrue(stoppedSnapshot.terminalIDs.isEmpty)
+        XCTAssertTrue(stoppedSnapshot.neutralEndedIDs.contains("claude:legacy-session"))
     }
 
     func testClaudeHookDoesNotStorePromptOrWorkingPath() throws {
@@ -455,10 +457,11 @@ final class ParserTests: XCTestCase {
     }
 
     private func event(session: String, name: String, active: Bool, date: Date, prompt: String) -> String {
-        let record: [String: Any] = [
+        var record: [String: Any] = [
             "timestamp": ISO8601DateFormatter().string(from: date), "session_id": session,
             "event": name, "active": active, "prompt": prompt, "activity": name
         ]
+        if name == "Stop" { record["plan_version"] = 2; record["stop_background"] = "clear" }
         return String(decoding: try! JSONSerialization.data(withJSONObject: record), as: UTF8.self)
     }
 }

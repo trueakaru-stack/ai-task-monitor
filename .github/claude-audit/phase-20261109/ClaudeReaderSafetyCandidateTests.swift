@@ -12,6 +12,7 @@ final class ClaudeReaderSafetyCandidateTests: XCTestCase {
         if let id { value["task_id"] = id }
         if let subject { value["task_subject"] = subject }
         if let status { value["task_status"] = status }
+        if event == "Stop" { value["plan_version"] = 2; value["stop_background"] = "clear" }
         return String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self)
     }
 
@@ -70,6 +71,7 @@ final class ClaudeReaderSafetyCandidateTests: XCTestCase {
             let stop = try line(time, "Stop", active: false)
             let state = try snapshot([begin, stop], now: start)
             XCTAssertTrue(state.terminalIDs.isEmpty)
+            XCTAssertTrue(state.neutralEndedIDs.isEmpty)
             let task = try XCTUnwrap(state.tasks.first)
             XCTAssertTrue(task.isUnconfirmed)
             XCTAssertFalse(task.planConfirmed)
@@ -78,7 +80,8 @@ final class ClaudeReaderSafetyCandidateTests: XCTestCase {
         let stopNow = try line("2026-11-05T15:09:01Z", "Stop", active: false)
         let ended = try snapshot([begin, stopNow], now: start.addingTimeInterval(1))
         XCTAssertTrue(ended.tasks.isEmpty)
-        XCTAssertEqual(ended.terminalIDs, ["claude:synthetic"])
+        XCTAssertTrue(ended.terminalIDs.isEmpty)
+        XCTAssertEqual(ended.neutralEndedIDs, ["claude:synthetic"])
     }
 
     func testReorderedAndEqualTimeActivityDoesNotBecomeConfirmed() throws {

@@ -42,7 +42,8 @@ final class ClaudePhaseIntegrationTests: XCTestCase {
         return record(time, input)
     }
 
-    private func snapshot(_ records: [[String: Any]], legacy: [[String: Any]]? = nil) throws -> ClaudeTaskSnapshot {
+    private func snapshot(_ records: [[String: Any]], legacy: [[String: Any]]? = nil,
+                          since: TimeInterval? = 0) throws -> ClaudeTaskSnapshot {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-phase-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -56,7 +57,7 @@ final class ClaudePhaseIntegrationTests: XCTestCase {
         try write(records, to: current)
         if let legacy { try write(legacy, to: old) }
         return try ClaudeTaskReader(eventFile: current, legacyFile: legacy == nil ? nil : old)
-            .readSnapshot(now: start.addingTimeInterval(20), observedSince: start)
+            .readSnapshot(now: start.addingTimeInterval(20), observedSince: since.map { start.addingTimeInterval($0) })
     }
 
     private func assertUnconfirmed(_ result: ClaudeTaskSnapshot, file: StaticString = #filePath, line: UInt = #line) throws {
@@ -69,9 +70,8 @@ final class ClaudePhaseIntegrationTests: XCTestCase {
     }
 
     func testValidObservedCreateAndMatchingUpdateShowObservedProgress() throws {
-        let pre = update(2, call: "call-1", event: "PreToolUse", includeResponse: false)
         let post = update(3, call: "call-1")
-        let task = try XCTUnwrap(snapshot([prompt(), created(), pre, post]).tasks.first)
+        let task = try XCTUnwrap(snapshot([prompt(), created(), post]).tasks.first)
         XCTAssertTrue(task.planConfirmed)
         XCTAssertEqual(task.steps.map(\.title), ["Synthetic step"])
         XCTAssertEqual(task.steps.first?.status, .done)
@@ -88,14 +88,12 @@ final class ClaudePhaseIntegrationTests: XCTestCase {
         try assertUnconfirmed(snapshot([prompt(), created(), done, pre, failure]))
     }
 
-    func testValidResultClearsOnlyItsMatchingAttempt() throws {
+    func testMatchingFieldsCannotProveAttemptIdentityWithoutPersistedCallID() throws {
         let pre = update(2, call: "call-1", event: "PreToolUse", includeResponse: false)
         let unrelatedPost = update(3, call: "call-2")
         try assertUnconfirmed(snapshot([prompt(), created(), pre, unrelatedPost]))
         let matching = update(4, call: "call-1")
-        let task = try XCTUnwrap(snapshot([prompt(), created(), pre, matching]).tasks.first)
-        XCTAssertTrue(task.planConfirmed)
-        XCTAssertEqual(task.progress, 100)
+        try assertUnconfirmed(snapshot([prompt(), created(), pre, matching]))
     }
 
     func testSameCallWithDifferentIntentRemainsUnconfirmed() throws {
@@ -116,6 +114,25 @@ final class ClaudePhaseIntegrationTests: XCTestCase {
             XCTAssertNotEqual(result.tasks.first?.steps.first?.status, .done)
             XCTAssertEqual(result.tasks.first?.steps.first?.title, "Synthetic step")
         }
+    }
+
+    func testLaterValidCreateCanResolveIsolatedCreatedNotice() throws {
+        let notice = record(1, ["hook_event_name": "TaskCreated", "task_id": "step-1", "task_subject": "Synthetic step"])
+        let result = try snapshot([prompt(), notice, created(2)])
+        let task = try XCTUnwrap(result.tasks.first)
+        XCTAssertTrue(task.planConfirmed)
+        XCTAssertEqual(task.steps.first?.title, "Synthetic step")
+        XCTAssertEqual(task.steps.first?.status, .pending)
+        XCTAssertEqual(task.progress, 0)
+    }
+
+    func testLaterValidUpdateCanResolveIsolatedCompletedNotice() throws {
+        let notice = record(2, ["hook_event_name": "TaskCompleted", "task_id": "step-1", "task_subject": "Synthetic step"])
+        let result = try snapshot([prompt(), created(), notice, update(3)])
+        let task = try XCTUnwrap(result.tasks.first)
+        XCTAssertTrue(task.planConfirmed)
+        XCTAssertEqual(task.steps.first?.status, .done)
+        XCTAssertEqual(task.progress, 100)
     }
 
     func testUnsupportedOrContradictoryResponseDoesNotProveDone() throws {
@@ -161,9 +178,8 @@ final class ClaudePhaseIntegrationTests: XCTestCase {
     }
 
     func testIdenticalOverlapIsNotAContradiction() throws {
-        let pre = update(2, call: "same", event: "PreToolUse", includeResponse: false)
         let post = update(3, call: "same")
-        let events = [prompt(), created(), pre, post]
+        let events = [prompt(), created(), post]
         let task = try XCTUnwrap(snapshot(events, legacy: events).tasks.first)
         XCTAssertTrue(task.planConfirmed)
         XCTAssertEqual(task.progress, 100)
@@ -179,9 +195,64 @@ final class ClaudePhaseIntegrationTests: XCTestCase {
         XCTAssertEqual(result["plan_signal"] as? String, "observed_update")
         let bytes = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
         let text = try XCTUnwrap(String(data: bytes, encoding: .utf8))
-        for secret in ["synthetic-prompt-secret", "/synthetic/path", "synthetic-api-key", "synthetic-private", "synthetic-response-secret"] {
+        for secret in ["synthetic-prompt-secret", "/synthetic/path", "synthetic-api-key", "synthetic-private", "synthetic-response-secret", "call-1", "plan_call_id", "tool_use_id"] {
             XCTAssertFalse(text.contains(secret))
         }
+    }
+
+    func testMixedTitleAndStatusUpdateIsNotConfirmed() throws {
+        let mixed = record(2, ["hook_event_name": "PostToolUse", "tool_name": "TaskUpdate", "tool_use_id": "private-call",
+            "tool_input": ["taskId": "step-1", "status": "completed", "subject": "New title"],
+            "tool_response": ["success": true, "taskId": "step-1", "updatedFields": ["status", "subject"],
+                              "statusChange": ["from": "pending", "to": "completed"]]])
+        let result = try snapshot([prompt(), created(), mixed])
+        try assertUnconfirmed(result)
+        XCTAssertNotEqual(result.tasks.first?.steps.first?.status, .done)
+        XCTAssertEqual(result.tasks.first?.steps.first?.title, "Synthetic step")
+    }
+
+    func testStoredStatusUpdateWithUnexpectedTitleCannotConfirm() throws {
+        var invalid = update(2)
+        invalid["task_subject"] = "Unexpected rename"
+        let result = try snapshot([prompt(), created(), invalid])
+        try assertUnconfirmed(result)
+        XCTAssertNotEqual(result.tasks.first?.steps.first?.status, .done)
+    }
+
+    func testPartialFinalRecordIsRepairedAndHistoryMarkedUncertain() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-partial-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("claude-events-v2.jsonl")
+        try Data("{\"session_id\":\"synthetic\"".utf8).write(to: file)
+        XCTAssertThrowsError(try ClaudeTaskReader(eventFile: file).readSnapshot())
+        XCTAssertEqual(ClaudeHook.process(["session_id": "synthetic", "hook_event_name": "UserPromptSubmit"],
+                                         directory: dir, retentionPolicy: { nil }, sendLoop: { _, _ in }), 0)
+        let result = try ClaudeTaskReader(eventFile: file).readSnapshot(now: Date().addingTimeInterval(1),
+                                                                        observedSince: Date().addingTimeInterval(-2))
+        XCTAssertTrue(result.sourceUncertain)
+        XCTAssertTrue(result.tasks.first?.isUnconfirmed == true)
+        XCTAssertFalse(result.tasks.first?.planConfirmed == true)
+        XCTAssertNoThrow(try ClaudeRetention.clean(directory: dir, backups: dir.appendingPathComponent("backups"), now: Date(),
+                                                   policy: ClaudeRetentionPolicy(days: 7, maximumMB: 10)))
+    }
+
+    func testDamagedLastRecordFollowedByBlankLinesIsRepaired() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-blank-tail-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("claude-events-v2.jsonl")
+        try Data("{\"session_id\":\"synthetic\"\n\n".utf8).write(to: file)
+        XCTAssertThrowsError(try ClaudeTaskReader(eventFile: file).readSnapshot())
+        XCTAssertEqual(ClaudeHook.process(["session_id": "synthetic", "hook_event_name": "UserPromptSubmit"],
+                                         directory: dir, retentionPolicy: { nil }, sendLoop: { _, _ in }), 0)
+        let result = try ClaudeTaskReader(eventFile: file).readSnapshot(now: Date().addingTimeInterval(1),
+                                                                        observedSince: Date().addingTimeInterval(-2))
+        XCTAssertTrue(result.sourceUncertain)
+        XCTAssertTrue(result.tasks.first?.isUnconfirmed == true)
+        XCTAssertFalse(result.tasks.first?.planConfirmed == true)
+        XCTAssertNoThrow(try ClaudeRetention.clean(directory: dir, backups: dir.appendingPathComponent("backups"), now: Date(),
+                                                   policy: ClaudeRetentionPolicy(days: 7, maximumMB: 10)))
     }
 
     func testProcessWritesMinimalRecordsThatReaderConsumes() throws {
@@ -274,6 +345,56 @@ final class ClaudePhaseIntegrationTests: XCTestCase {
         XCTAssertTrue(task.isUnconfirmed)
         XCTAssertFalse(task.planConfirmed)
         XCTAssertNil(task.progress)
+    }
+
+    func testStopWithBackgroundOrMissingInformationRetainsUnconfirmedCard() throws {
+        let payloads: [[String: Any]] = [
+            ["hook_event_name": "Stop", "background_tasks": [["description": "synthetic-private"]]],
+            ["hook_event_name": "Stop", "session_crons": [["description": "synthetic-private"]]],
+            ["hook_event_name": "Stop"],
+            ["hook_event_name": "Stop", "background_tasks": []]
+        ]
+        for payload in payloads {
+            let stop = record(2, payload)
+            let encoded = try JSONSerialization.data(withJSONObject: stop)
+            XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("synthetic-private"))
+            let result = try snapshot([prompt(), created(), stop])
+            XCTAssertTrue(result.terminalIDs.isEmpty)
+            XCTAssertTrue(result.neutralEndedIDs.isEmpty)
+            let task = try XCTUnwrap(result.tasks.first)
+            XCTAssertTrue(task.isUnconfirmed)
+            XCTAssertFalse(task.planConfirmed)
+            XCTAssertNil(task.progress)
+        }
+    }
+
+    func testLegacyStopWithoutBackgroundInformationIsUnconfirmed() throws {
+        var stop = record(2, ["hook_event_name": "Stop", "background_tasks": [], "session_crons": []])
+        stop.removeValue(forKey: "plan_version")
+        stop.removeValue(forKey: "stop_background")
+        let result = try snapshot([prompt(), created(), stop])
+        XCTAssertTrue(result.terminalIDs.isEmpty)
+        XCTAssertTrue(result.neutralEndedIDs.isEmpty)
+        XCTAssertTrue(result.tasks.first?.isUnconfirmed == true)
+        XCTAssertFalse(result.tasks.first?.planConfirmed == true)
+    }
+
+    func testClearStopIsNeutralAndDoesNotClaimSuccess() throws {
+        let stop = record(2, ["hook_event_name": "Stop", "background_tasks": [], "session_crons": []])
+        let result = try snapshot([prompt(), created(), stop])
+        XCTAssertTrue(result.tasks.isEmpty)
+        XCTAssertTrue(result.terminalIDs.isEmpty)
+        XCTAssertTrue(result.interruptedIDs.isEmpty)
+        XCTAssertEqual(result.neutralEndedIDs, ["claude:synthetic"])
+    }
+
+    func testSessionEndDoesNotEraseKnownBackgroundUncertainty() throws {
+        let stop = record(2, ["hook_event_name": "Stop", "background_tasks": [["id": "synthetic"]]])
+        let end = record(3, ["hook_event_name": "SessionEnd"])
+        let result = try snapshot([prompt(), created(), stop, end])
+        XCTAssertTrue(result.terminalIDs.isEmpty)
+        XCTAssertTrue(result.neutralEndedIDs.isEmpty)
+        XCTAssertTrue(result.tasks.first?.isUnconfirmed == true)
     }
 
     @MainActor

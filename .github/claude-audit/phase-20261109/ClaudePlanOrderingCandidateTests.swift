@@ -19,7 +19,7 @@ final class ClaudePlanOrderingCandidateTests: XCTestCase {
 
     private func observed(_ seconds: TimeInterval, session: String, status: String, subject: String? = nil) throws -> String {
         var event: [String: Any] = ["session_id": session, "timestamp": formatter.string(from: start.addingTimeInterval(seconds)),
-                                    "event": "PostToolUse", "active": true, "plan_version": 1, "task_id": "x", "task_status": status]
+                                    "event": "PostToolUse", "active": true, "plan_version": 2, "task_id": "x", "task_status": status]
         if let subject {
             event["tool_name"] = "TaskCreate"; event["plan_signal"] = "observed_create"; event["task_subject"] = subject
         } else {

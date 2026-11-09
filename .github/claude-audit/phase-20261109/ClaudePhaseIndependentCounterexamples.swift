@@ -131,28 +131,30 @@ final class ClaudePhaseIndependentCounterexamples: XCTestCase {
         }
     }
 
-    // Characterizes the current recovery delay; this intentionally does not
-    // request reading any real event file or changing the candidate.
-    func testInvalidMarkerPersistsUntilRetentionCutoff() throws {
+    func testInvalidMarkerIsVisibleAndRestartAllowsOnlyNewObservedPlan() throws {
         try withDirectory { directory in
             let now = Date(), current = directory.appendingPathComponent("claude-events-v2.jsonl")
             let marker = record(now, ["hook_event_name": "Unknown", "session_id": ""])
-            let fresh = prompt(now.addingTimeInterval(86_409))
-            try encodeLines([marker, fresh]).write(to: current)
+            let fresh = prompt(now.addingTimeInterval(2))
+            let observation = create(now.addingTimeInterval(3))
+            try encodeLines([marker, fresh, observation]).write(to: current)
             let reader = ClaudeTaskReader(eventFile: current)
-            XCTAssertThrowsError(try reader.readSnapshot(now: now))
+            let before = try reader.readSnapshot(now: now.addingTimeInterval(4), observedSince: now.addingTimeInterval(-1))
+            XCTAssertTrue(before.sourceUncertain)
+            XCTAssertTrue(before.tasks.first?.isUnconfirmed == true)
+            XCTAssertFalse(before.tasks.first?.planConfirmed == true)
             let policy = ClaudeRetentionPolicy(days: 1, maximumMB: 1)
             try ClaudeRetention.clean(directory: directory, backups: directory.appendingPathComponent("backups"),
                                       now: now.addingTimeInterval(1), policy: policy)
-            XCTAssertThrowsError(try reader.readSnapshot(now: now.addingTimeInterval(1)))
-            try ClaudeRetention.clean(directory: directory, backups: directory.appendingPathComponent("backups"),
-                                      now: now.addingTimeInterval(86_410), policy: policy)
-            let recovered = try reader.readSnapshot(now: now.addingTimeInterval(86_410))
+            let recovered = try reader.readSnapshot(now: now.addingTimeInterval(4), observedSince: now.addingTimeInterval(1))
+            XCTAssertFalse(recovered.sourceUncertain)
             XCTAssertEqual(recovered.tasks.count, 1)
+            XCTAssertTrue(recovered.tasks.first?.planConfirmed == true)
+            XCTAssertEqual(recovered.tasks.first?.progress, 0)
         }
     }
 
-    func testPartialAppendFollowedByAnotherRecordBlocksReaderAndRetention() throws {
+    func testPartialAppendThenHookRecoversReaderAndRetentionWithoutConfirmingLoss() throws {
         try withDirectory { directory in
             let now = Date(), current = directory.appendingPathComponent("claude-events-v2.jsonl")
             var bytes = Data("{\"session_id\":\"synthetic\"".utf8)
@@ -161,6 +163,18 @@ final class ClaudePhaseIndependentCounterexamples: XCTestCase {
             XCTAssertThrowsError(try ClaudeTaskReader(eventFile: current).readSnapshot(now: now))
             XCTAssertThrowsError(try ClaudeRetention.clean(directory: directory,
                 backups: directory.appendingPathComponent("backups"), now: now,
+                policy: ClaudeRetentionPolicy(days: 7, maximumMB: 10)))
+            let result = ClaudeHook.process(["session_id": "synthetic", "hook_event_name": "UserPromptSubmit"],
+                directory: directory, retentionPolicy: { nil }, sendLoop: { _, _ in })
+            XCTAssertEqual(result, 0)
+            let repaired = try ClaudeTaskReader(eventFile: current).readSnapshot(now: Date().addingTimeInterval(1),
+                                                                                 observedSince: now.addingTimeInterval(-1))
+            XCTAssertTrue(repaired.sourceUncertain)
+            XCTAssertTrue(repaired.terminalIDs.isEmpty)
+            XCTAssertTrue(repaired.neutralEndedIDs.isEmpty)
+            XCTAssertFalse(repaired.tasks.first?.planConfirmed == true)
+            XCTAssertNoThrow(try ClaudeRetention.clean(directory: directory,
+                backups: directory.appendingPathComponent("backups"), now: Date(),
                 policy: ClaudeRetentionPolicy(days: 7, maximumMB: 10)))
         }
     }

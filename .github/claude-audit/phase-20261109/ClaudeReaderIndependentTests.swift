@@ -18,6 +18,7 @@ final class ClaudeReaderIndependentTests: XCTestCase {
         if let task { result["task_id"] = task }
         if let subject { result["task_subject"] = subject }
         if let status { result["task_status"] = status }
+        if name == "Stop" { result["plan_version"] = 2; result["stop_background"] = "clear" }
         return result
     }
 
@@ -45,6 +46,7 @@ final class ClaudeReaderIndependentTests: XCTestCase {
             XCTAssertEqual(result.tasks.count, 1, "offset=\(offset)")
             XCTAssertEqual(result.tasks.first?.isUnconfirmed, true, "offset=\(offset)")
             XCTAssertTrue(result.terminalIDs.isEmpty, "offset=\(offset)")
+            XCTAssertTrue(result.neutralEndedIDs.isEmpty, "offset=\(offset)")
             XCTAssertTrue(result.interruptedIDs.isEmpty, "offset=\(offset)")
         }
     }
@@ -53,8 +55,14 @@ final class ClaudeReaderIndependentTests: XCTestCase {
         for name in ["Stop", "StopFailure", "SessionEnd"] {
             let result = try snapshot([event(-1, "UserPromptSubmit"), event(0, name, active: false)], now: 0, since: -1)
             XCTAssertTrue(result.tasks.isEmpty, name)
-            XCTAssertTrue(result.terminalIDs.contains("claude:synthetic"), name)
-            XCTAssertEqual(result.interruptedIDs.contains("claude:synthetic"), name != "Stop", name)
+            if name == "Stop" {
+                XCTAssertTrue(result.terminalIDs.isEmpty)
+                XCTAssertTrue(result.neutralEndedIDs.contains("claude:synthetic"))
+                XCTAssertTrue(result.interruptedIDs.isEmpty)
+            } else {
+                XCTAssertTrue(result.terminalIDs.contains("claude:synthetic"), name)
+                XCTAssertTrue(result.interruptedIDs.contains("claude:synthetic"), name)
+            }
         }
         let tooOld = try snapshot([event(-2, "UserPromptSubmit"), event(-1, "Stop", active: false)], now: 0, since: 0)
         XCTAssertTrue(tooOld.terminalIDs.isEmpty)
@@ -67,7 +75,8 @@ final class ClaudeReaderIndependentTests: XCTestCase {
         XCTAssertEqual(before.tasks.first?.isUnconfirmed, true)
         XCTAssertTrue(before.terminalIDs.isEmpty)
         XCTAssertTrue(after.tasks.isEmpty)
-        XCTAssertTrue(after.terminalIDs.contains("claude:synthetic"))
+        XCTAssertTrue(after.terminalIDs.isEmpty)
+        XCTAssertTrue(after.neutralEndedIDs.contains("claude:synthetic"))
     }
 
     func testNewPromptDoesNotConfirmOldPlanAndPreservesLaterSubject() throws {
@@ -93,12 +102,14 @@ final class ClaudeReaderIndependentTests: XCTestCase {
         ], now: 121, since: 0)
         XCTAssertEqual(result.tasks.first?.isUnconfirmed, true)
         XCTAssertTrue(result.terminalIDs.isEmpty)
+        XCTAssertTrue(result.neutralEndedIDs.isEmpty)
     }
 
     func testEqualTimesAndCrossFileContradiction() throws {
         let ordinary = try snapshot([event(0, "UserPromptSubmit"), event(0, "Stop", active: false)], now: 1)
         XCTAssertTrue(ordinary.tasks.isEmpty)
-        XCTAssertTrue(ordinary.terminalIDs.contains("claude:synthetic"))
+        XCTAssertTrue(ordinary.terminalIDs.isEmpty)
+        XCTAssertTrue(ordinary.neutralEndedIDs.contains("claude:synthetic"))
 
         let conflict = try snapshot([event(0, "UserPromptSubmit"), event(10, "Stop", active: false)],
                                     legacy: [event(10, "PreToolUse")], now: 11, since: 0)
@@ -162,7 +173,7 @@ final class ClaudeReaderIndependentTests: XCTestCase {
         XCTAssertEqual(result.tasks.count, 1)
         XCTAssertEqual(result.tasks.first?.id, "claude:" + firstKey)
         XCTAssertFalse(result.terminalIDs.contains("claude:" + firstKey))
-        XCTAssertTrue(result.terminalIDs.contains("claude:" + secondKey))
+        XCTAssertTrue(result.neutralEndedIDs.contains("claude:" + secondKey))
     }
 
     func testSessionKeysPreserveDistinctBytesAndPlainLoopIDs() throws {

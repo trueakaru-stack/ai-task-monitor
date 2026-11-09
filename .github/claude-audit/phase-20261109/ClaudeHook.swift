@@ -9,7 +9,7 @@ enum ClaudeHook {
               let input = ClaudeJSONValidation.object(data) else {
             // Unknown input may have changed a plan. Persist a minimal source
             // uncertainty marker; never persist the malformed input itself.
-            return process(["hook_event_name": "Unknown", "session_id": ""])
+            return process(["hook_event_name": "AITMSourceUncertain", "session_id": ""])
         }
         return process(input)
     }
@@ -32,6 +32,7 @@ enum ClaudeHook {
                 defer { flock(lockDescriptor, LOCK_UN) }
                 var existing = stat()
                 if lstat(events.path, &existing) == 0 && (existing.st_mode & S_IFMT) != S_IFREG { throw HookError.lock }
+                try markDamagedTailIfNeeded(at: events)
                 try rotateIfNeeded(at: events, policy: retentionPolicy())
                 let line = try JSONSerialization.data(withJSONObject: record) + Data([0x0A])
                 let eventDescriptor = open(events.path, O_CREAT | O_WRONLY | O_APPEND | O_NOFOLLOW, S_IRUSR | S_IWUSR)
@@ -90,23 +91,36 @@ enum ClaudeHook {
         let active = !["Stop", "SessionEnd", "StopFailure"].contains(eventName)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return [
+        if session.isEmpty || same(rawEventName, "AITMSourceUncertain") {
+            return ["timestamp": formatter.string(from: Date()), "provider": "claude", "session_id": "",
+                    "event": "AITMSourceUncertain", "plan_version": 2, "plan_signal": "source_uncertain"]
+        }
+        var record: [String: Any] = [
             "timestamp": formatter.string(from: Date()),
             "provider": "claude",
             "session_id": session,
             "event": eventName,
             "active": active,
-            "activity": activity(event: eventName, tool: toolName, subject: subject),
+            "activity": activity(event: eventName, tool: toolName, subject: subject, signal: stage.signal),
             "task_id": taskID,
             "task_subject": subject,
             "task_status": stage.status ?? "",
             "task_from_status": stage.previousStatus ?? "",
             "task_intent_status": stage.intentStatus ?? "",
             "tool_name": toolName,
-            "plan_version": 1,
-            "plan_signal": stage.signal,
-            "plan_call_id": stage.callID ?? ""
+            "plan_version": 2,
+            "plan_signal": stage.signal
         ]
+        if same(eventName, "Stop") { record["stop_background"] = stopBackground(input) }
+        return record
+    }
+
+    private static func stopBackground(_ input: [String: Any]) -> String {
+        let background = input["background_tasks"] as? [Any]
+        let scheduled = input["session_crons"] as? [Any]
+        if (background?.isEmpty == false) || (scheduled?.isEmpty == false) { return "observed" }
+        if let background, let scheduled, background.isEmpty, scheduled.isEmpty { return "clear" }
+        return "unknown"
     }
 
     private struct StageAssessment {
@@ -116,7 +130,6 @@ enum ClaudeHook {
         var status: String? = nil
         var previousStatus: String? = nil
         var intentStatus: String? = nil
-        var callID: String? = nil
     }
 
     private static func same(_ left: String, _ right: String) -> Bool {
@@ -147,13 +160,12 @@ enum ClaudeHook {
     // This narrow synthetic response shape is not a claim about every Claude
     // version. Only a minimal derived signal is persisted, never the response.
     private static func assessStage(event: String, tool: String, input: [String: Any], toolInput: [String: Any]) -> StageAssessment {
-        let call = input.string("tool_use_id")
-        let callID = safeID(call) ? call : nil
         if same(event, "TaskCreated") || same(event, "TaskCompleted") {
             let id = input.string("task_id")
             let subject = input.string("task_subject")
-            return StageAssessment(signal: "unlinked", taskID: safeID(id) ? id : nil,
-                                   subject: safeSubject(subject) ? subject : nil, callID: callID)
+            guard safeID(id) else { return StageAssessment(signal: "uncertain") }
+            let kind = same(event, "TaskCreated") ? "created_notice" : "completed_notice"
+            return StageAssessment(signal: kind, taskID: id, subject: safeSubject(subject) ? subject : nil)
         }
         guard same(event, "PreToolUse") || same(event, "PostToolUse") || same(event, "PostToolUseFailure") else {
             return StageAssessment()
@@ -168,26 +180,26 @@ enum ClaudeHook {
         if isUpdate {
             for alias in ["id", "task_id"] where toolInput[alias] != nil {
                 guard let alternate = toolInput[alias] as? String, same(alternate, candidateID) else {
-                    return StageAssessment(signal: "uncertain", callID: callID)
+                    return StageAssessment(signal: "uncertain")
                 }
             }
         }
         if same(event, "PreToolUse") {
             if isCreate {
                 let subject = toolInput.string("subject")
-                guard safeSubject(subject) else { return StageAssessment(signal: "uncertain", callID: callID) }
-                return StageAssessment(signal: "attempt", subject: subject, callID: callID)
+                guard safeSubject(subject) else { return StageAssessment(signal: "uncertain") }
+                return StageAssessment(signal: "attempt", subject: subject)
             }
             let requestedStatus = toolInput.string("status")
-            guard taskID != nil, validStatus(requestedStatus) else { return StageAssessment(signal: "uncertain", callID: callID) }
-            return StageAssessment(signal: "attempt", taskID: taskID, intentStatus: requestedStatus, callID: callID)
+            guard taskID != nil, validStatus(requestedStatus) else { return StageAssessment(signal: "uncertain") }
+            return StageAssessment(signal: "attempt", taskID: taskID, intentStatus: requestedStatus)
         }
         if same(event, "PostToolUseFailure") {
-            return StageAssessment(signal: "failure", taskID: taskID, callID: callID)
+            return StageAssessment(signal: "failure", taskID: taskID)
         }
         guard let response = input.object("tool_response"),
               response["error"] == nil || response["error"] is NSNull else {
-            return StageAssessment(signal: "uncertain", taskID: taskID, callID: callID)
+            return StageAssessment(signal: "uncertain", taskID: taskID)
         }
         if isCreate {
             let requested = toolInput.string("subject")
@@ -196,10 +208,9 @@ enum ClaudeHook {
                   let returnedSubject = task["subject"] as? String,
                   safeID(returnedID), safeSubject(requested), safeSubject(returnedSubject),
                   same(requested, returnedSubject) else {
-                return StageAssessment(signal: "uncertain", callID: callID)
+                return StageAssessment(signal: "uncertain")
             }
-            return StageAssessment(signal: "observed_create", taskID: returnedID, subject: returnedSubject,
-                                   status: "pending", callID: callID)
+            return StageAssessment(signal: "observed_create", taskID: returnedID, subject: returnedSubject, status: "pending")
         }
         let status = toolInput.string("status")
         guard let id = taskID, isTrueBoolean(response["success"]),
@@ -208,25 +219,29 @@ enum ClaudeHook {
               let change = response.object("statusChange"),
               let from = change["from"] as? String, let to = change["to"] as? String,
               validStatus(from), validStatus(to), !same(from, to), same(to, status) else {
-            return StageAssessment(signal: "uncertain", taskID: taskID, callID: callID)
+            return StageAssessment(signal: "uncertain", taskID: taskID)
         }
         var seen = Set<Data>()
         var hasStatus = false
         for field in fields {
             guard let name = field as? String, seen.insert(Data(name.utf8)).inserted else {
-                return StageAssessment(signal: "uncertain", taskID: id, callID: callID)
+                return StageAssessment(signal: "uncertain", taskID: id)
             }
             if same(name, "status") { hasStatus = true }
         }
-        guard hasStatus else { return StageAssessment(signal: "uncertain", taskID: id, callID: callID) }
-        return StageAssessment(signal: "observed_update", taskID: id, status: status, previousStatus: from, callID: callID)
+        // A simultaneous rename or other update is not represented by this
+        // status-only record; do not confirm a stale title.
+        guard hasStatus, fields.count == 1, toolInput["subject"] == nil else { return StageAssessment(signal: "uncertain", taskID: id) }
+        return StageAssessment(signal: "observed_update", taskID: id, status: status, previousStatus: from)
     }
 
-    private static func activity(event: String, tool: String, subject: String) -> String {
+    private static func activity(event: String, tool: String, subject: String, signal: String) -> String {
         switch event {
         case "UserPromptSubmit": return "New request"
         case "PreToolUse": return tool.isEmpty ? "Running tool" : "Running: \(tool)"
-        case "PostToolUse": return tool.isEmpty ? "Tool completed" : "Completed: \(tool)"
+        case "PostToolUse":
+            if same(signal, "uncertain") { return "Action unconfirmed" }
+            return tool.isEmpty ? "Tool completed" : "Completed: \(tool)"
         case "PostToolUseFailure": return tool.isEmpty ? "Tool failed" : "Failed: \(tool)"
         case "TaskCreated", "TaskCompleted": return subject.isEmpty ? "Processing step" : "Processing step: \(subject)"
         case "SubagentStart": return "Subagent started"
@@ -249,7 +264,96 @@ enum ClaudeHook {
         guard tail.count == Int(count), let kept = preservedTailBytes(tail, beginsMidFile: length > count) else {
             throw HookError.invalidRecord
         }
-        try kept.write(to: events, options: .atomic)
+        var replacement = kept
+        replacement.append(try markerLine("AITMSourceUncertain"))
+        try replacement.write(to: events, options: .atomic)
+    }
+
+    // Replace only an invalid final fragment and add the loss marker in the
+    // same atomic rename. A crash before rename leaves the old damaged file.
+    private static func markDamagedTailIfNeeded(at events: URL) throws {
+        let descriptor = open(events.path, O_RDONLY | O_NOFOLLOW)
+        if descriptor < 0 {
+            if errno == ENOENT { return }
+            throw HookError.invalidRecord
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var opened = stat()
+        guard fstat(descriptor, &opened) == 0, (opened.st_mode & S_IFMT) == S_IFREG else { throw HookError.invalidRecord }
+        let length = try handle.seekToEnd()
+        guard length > 0 else { return }
+        let count = min(UInt64(1_048_578), length)
+        try handle.seek(toOffset: length - count)
+        let tail = try handle.read(upToCount: Int(count)) ?? Data()
+        guard tail.count == Int(count) else { throw HookError.invalidRecord }
+        let incomplete = tail.last != 0x0a
+        var invalid = incomplete
+        if !incomplete {
+            // Empty trailing lines are ignored by the reader and retention;
+            // they must not hide a damaged final non-empty record.
+            var end = tail.endIndex
+            while end > tail.startIndex && tail[tail.index(before: end)] == 0x0a { end = tail.index(before: end) }
+            if end == tail.startIndex {
+                guard length == count else { throw HookError.invalidRecord }
+                return
+            }
+            let prefix = tail[..<end]
+            let lastLine: Data
+            if let newline = prefix.lastIndex(of: 0x0a) { lastLine = Data(prefix[prefix.index(after: newline)...]) }
+            else { lastLine = Data(prefix) }
+            invalid = !validBoundaryRecord(lastLine)
+        }
+        guard invalid else { return }
+        // Avoid unbounded memory when a non-cooperating writer has grown the
+        // file beyond the product's 100 MB retention plus one hook input.
+        guard length <= 101_048_576 else { throw HookError.invalidRecord }
+        try handle.seek(toOffset: 0)
+        let original = try handle.read(upToCount: Int(length)) ?? Data()
+        guard original.count == Int(length) else { throw HookError.invalidRecord }
+        var fragmentEnd = original.endIndex
+        if !incomplete {
+            while fragmentEnd > original.startIndex && original[original.index(before: fragmentEnd)] == 0x0a {
+                fragmentEnd = original.index(before: fragmentEnd)
+            }
+        }
+        let beforeFragment = original[..<fragmentEnd]
+        let cutoff: Data.Index
+        if let newline = beforeFragment.lastIndex(of: 0x0a) { cutoff = original.index(after: newline) }
+        else { cutoff = original.startIndex }
+        let temporary = events.deletingLastPathComponent().appendingPathComponent(".aitm-tail-repair-\(UUID().uuidString).tmp")
+        let writerDescriptor = open(temporary.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard writerDescriptor >= 0 else { throw HookError.invalidRecord }
+        let writer = FileHandle(fileDescriptor: writerDescriptor, closeOnDealloc: true)
+        defer { try? writer.close(); _ = unlink(temporary.path) }
+        try writer.write(contentsOf: Data(original[..<cutoff]))
+        try writer.write(contentsOf: markerLine("AITMPartialTail"))
+        try writer.synchronize()
+        try writer.close()
+        var after = stat(), pathInfo = stat()
+        guard fstat(descriptor, &after) == 0, lstat(events.path, &pathInfo) == 0,
+              opened.st_dev == after.st_dev, opened.st_ino == after.st_ino,
+              opened.st_size == after.st_size, opened.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              opened.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+              opened.st_dev == pathInfo.st_dev, opened.st_ino == pathInfo.st_ino,
+              (pathInfo.st_mode & S_IFMT) == S_IFREG else { throw HookError.invalidRecord }
+        guard rename(temporary.path, events.path) == 0 else { throw HookError.invalidRecord }
+    }
+
+    private static func validBoundaryRecord(_ bytes: Data) -> Bool {
+        guard let event = ClaudeJSONValidation.object(bytes), FileHelpers.isoDate(event["timestamp"]) != nil,
+              let session = event["session_id"] as? String else { return false }
+        if !session.isEmpty { return !event.string("event").isEmpty && claudeSessionKey(session) != nil }
+        let name = event.string("event"), signal = event.string("plan_signal")
+        guard let version = event["plan_version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID() else { return false }
+        return (version.doubleValue == 2 && ["AITMSourceUncertain", "AITMPartialTail"].contains { same(name, $0) } && same(signal, "source_uncertain")) ||
+            (version.doubleValue == 1 && same(name, "Unknown") && same(signal, "uncertain"))
+    }
+
+    private static func markerLine(_ event: String) throws -> Data {
+        var marker = makeRecord(from: ["hook_event_name": "AITMSourceUncertain", "session_id": ""])
+        marker["event"] = event
+        return try JSONSerialization.data(withJSONObject: marker) + Data([0x0a])
     }
 
     // Rotation must not repair invalid UTF-8 into a different session ID.

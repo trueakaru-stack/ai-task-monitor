@@ -727,6 +727,7 @@ final class TaskStore: ObservableObject {
         var unavailable: [TaskProvider] = []
         var terminalIDs: Set<String> = []
         var interruptedIDs: Set<String> = []
+        var neutralEndedIDs: Set<String> = []
         var codexToolEvents: [String: [CodexToolEvent]] = [:]
         var claudeConnected = false
         do {
@@ -760,7 +761,13 @@ final class TaskStore: ObservableObject {
                     let snapshot = try claudeReader.readSnapshot(observedSince: monitoringStartedAt)
                     terminalIDs.formUnion(snapshot.terminalIDs)
                     interruptedIDs.formUnion(snapshot.interruptedIDs)
-                    previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
+                    neutralEndedIDs.formUnion(snapshot.neutralEndedIDs)
+                    previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: snapshot.tasks,
+                                                               terminalIDs: snapshot.terminalIDs.union(snapshot.neutralEndedIDs))
+                    if snapshot.sourceUncertain {
+                        claudeConnected = false
+                        if !unavailable.contains(.claude) { unavailable.append(.claude) }
+                    }
                 }
                 if !complete {
                     previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
@@ -802,7 +809,7 @@ final class TaskStore: ObservableObject {
             detector.refresh(now: now)
             loopDetectors[id] = detector
         }
-        for id in terminalIDs {
+        for id in terminalIDs.union(neutralEndedIDs) {
             if var detector = loopDetectors[id] { detector.finishTurn(); loopDetectors[id] = detector }
             if id.hasPrefix("claude:") { claudeLoopDetectors.removeValue(forKey: String(id.dropFirst(7))) }
         }

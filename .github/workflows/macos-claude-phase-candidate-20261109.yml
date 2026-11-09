@@ -46,25 +46,26 @@ jobs:
           INPUT="$GITHUB_WORKSPACE/.github/claude-audit/phase-20261109"
           cd "$INPUT"
           printf '%s  %s\n' \
-            '1e9c87ba739e57de22df5ef1f5c853e43ae1327ebd64e8fdebf22be22567a1a9' ClaudeHook.swift \
+            'd4b4bad12932d2f0afb50a093a9b07895cfdb5e6aca65cbfadde66b404fb1438' ClaudeHook.swift \
             '6074db67e1ed3e8ac5937aea6f504e2de8e481662a3c66d0563316fe75da687c' ClaudeJSONValidation.swift \
-            'a839bd7eb5f2a0dc41414964bcb32c0f15606a093a320ffdfb2c3d380349c2fe' ClaudeTaskReader.swift \
-            '9a7c76cd93d1dac151856d628dfd0b83ae2ea0d2c834c0131f2e89fa11fb4b7c' TaskStore.swift \
-            '8f7417fc739cedd5d61692f8f1cadff2a0eaccd5ce16fd96f987769b0fc97ab4' ClaudePhaseIntegrationTests.swift \
+            '440d74d608bab5a17fd5c1613b01aba9654e5210fac81327476191a59a26fc8f' ClaudeTaskReader.swift \
+            '9756fd705893608fc9f89940b2f00bfda8b467b05be307500fb5f3d92754cb21' TaskStore.swift \
+            'f0fab7c33d35d4d10e2fb4882030a3358b96a3886ead9b4edb4dad1b0b5375c6' ClaudePhaseIntegrationTests.swift \
             '61143d15e9efbebec4c2d9db66989879929d517acbd226f29a0b28111daaeb02' ClaudeIdentityInvalidUTF8Tests.swift \
             '9a359fcefcefd9b46a42f7b888c7f5a6ea96e39abb797e2049302891557fc674' ClaudeHookPhaseBlockingTests.swift \
-            '4ab9880e242c9458698704f058ab2c9e014acd741ef286414385b8282b56573e' ClaudeReaderIndependentTests.swift \
-            '48965d3eab07d0b4136d61ff2b61b90e03fdfe4d4bab6a41c6684de3fe498bc5' ClaudeReaderSafetyCandidateTests.swift \
-            '7e1e3ebe97ed119bde9d9839964c5720d8ba9e18e36ec4cde600ae34d3810592' ClaudePlanOrderingCandidateTests.swift \
-            '02db1cd6b0a82123cfbf0b12a6f495089792d633c044d6618eb794a67de8403c' ParserTests.swift \
+            '237c793f6a588e2e9c389483f2e4565f0b5bfa207e8b081e83637e7be450283f' ClaudeReaderIndependentTests.swift \
+            '812258f924d34d040b111bc1b44e843321599e6181138136ce2d2875d7f21ed1' ClaudeReaderSafetyCandidateTests.swift \
+            'a4494d8a6b28dab85460f40d4f9146a5ae399d42a93f706ccfdcd993113f81b3' ClaudePlanOrderingCandidateTests.swift \
+            '43e4be4f9cf87edb1716b1faa389006031d4b616f45aa8f086663bfd81522c33' ParserTests.swift \
             '8d1b38442643ed0de90823eb3edc6373479fc735ac6606202755c2e7f118ed14' ClaudeIntegrationSafetyTests.swift \
-            '64f3c051fe44e9bc0c56bcaf4309e590e32b0f4f16b1a77df3285cfc91095128' ClaudePhaseIndependentCounterexamples.swift \
+            '5f5e552733b109ea19becf2ec15ef1982842e8a9957d08b0797c5e5c24eaf7af' ClaudePhaseIndependentCounterexamples.swift \
             '8f7a63f9b5d957a9ff9db01fe179f0eba9ec8198a9d3769c3b5013eec336efcc' ClaudeBackgroundIndependentTests.swift \
+            '5b9438cd1e0bd0f54421b3c84a822a1243c60ebe21047331d6488a9052a561f3' ClaudePhaseUnresolvedTests.swift \
             | shasum -a 256 -c -
           for name in ClaudeHook.swift ClaudeJSONValidation.swift ClaudeTaskReader.swift TaskStore.swift; do
             cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/$name"
           done
-          for name in ClaudePhaseIntegrationTests.swift ClaudeIdentityInvalidUTF8Tests.swift ClaudeHookPhaseBlockingTests.swift ClaudeReaderIndependentTests.swift ClaudeReaderSafetyCandidateTests.swift ClaudePlanOrderingCandidateTests.swift ParserTests.swift ClaudeIntegrationSafetyTests.swift ClaudePhaseIndependentCounterexamples.swift ClaudeBackgroundIndependentTests.swift; do
+          for name in ClaudePhaseIntegrationTests.swift ClaudeIdentityInvalidUTF8Tests.swift ClaudeHookPhaseBlockingTests.swift ClaudeReaderIndependentTests.swift ClaudeReaderSafetyCandidateTests.swift ClaudePlanOrderingCandidateTests.swift ParserTests.swift ClaudeIntegrationSafetyTests.swift ClaudePhaseIndependentCounterexamples.swift ClaudeBackgroundIndependentTests.swift ClaudePhaseUnresolvedTests.swift; do
             cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/$name"
           done
       - name: Run synthetic suites with IP denied
@@ -117,7 +118,7 @@ jobs:
           run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-phase-network-probe.py"
           run_isolated /usr/bin/xcrun swift build --disable-sandbox
           audit_status=0
-          for entry in ClaudePhaseIntegrationTests:17 ClaudeIdentityInvalidUTF8Tests:4 ClaudeHookPhaseBlockingTests:1 ClaudeReaderIndependentTests:13 ClaudeReaderSafetyCandidateTests:6 ClaudePlanOrderingCandidateTests:14 ParserTests:23 ClaudeHookLockTests:1 ClaudeLoopChannelTests:9 ClaudeLoopDetectionTests:7 ClaudeRetentionTests:3 ClaudeIntegrationSafetyTests:10 ClaudePlanLabelTests:2 ClaudePhaseIndependentCounterexamples:7 ClaudeBackgroundIndependentTests:1; do
+          for entry in ClaudePhaseIntegrationTests:27 ClaudeIdentityInvalidUTF8Tests:4 ClaudeHookPhaseBlockingTests:1 ClaudeReaderIndependentTests:13 ClaudeReaderSafetyCandidateTests:6 ClaudePlanOrderingCandidateTests:14 ParserTests:23 ClaudeHookLockTests:1 ClaudeLoopChannelTests:9 ClaudeLoopDetectionTests:7 ClaudeRetentionTests:3 ClaudeIntegrationSafetyTests:10 ClaudePlanLabelTests:2 ClaudePhaseIndependentCounterexamples:7 ClaudeBackgroundIndependentTests:1 ClaudePhaseUnresolvedTests:2; do
             suite="${entry%:*}"
             count="${entry#*:}"
             log="$RUNNER_TEMP/aitm-phase-$suite.log"
