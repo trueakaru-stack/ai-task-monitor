@@ -17,10 +17,38 @@ func claudeSessionKey(_ value: String) -> String? {
 private enum ClaudeReadError: Error { case incomplete, invalidRecord, unsupportedIdentity }
 private typealias ClaudeRecord = ([String: Any], Date, String)
 
+// A reader instance must remember a marker even if another operation removes
+// it while the monitor is running. Copying the reader shares the latch.
+private final class ClaudeSourceLossLatch {
+    private let lock = NSLock()
+    private var known = false
+    private var affected: Set<String> = []
+    private var saturated = false
+    private let maximumSessions = 1024
+
+    func record(_ ids: Set<String>) {
+        lock.lock(); defer { lock.unlock() }
+        known = true
+        guard !saturated else { return }
+        for id in ids where !affected.contains(id) {
+            if affected.count >= maximumSessions { saturated = true; affected.removeAll(); return }
+            affected.insert(id)
+        }
+    }
+
+    func markSaturated() { lock.lock(); known = true; saturated = true; affected.removeAll(); lock.unlock() }
+
+    func state() -> (known: Bool, affected: Set<String>, saturated: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (known, affected, saturated)
+    }
+}
+
 // A complete invalid line can belong to any session: do not replace bytes or
 // skip it and then accept another session's terminal record. An incomplete
 // final write is retried on the next poll instead of being parsed as complete.
-private func readClaudeRecords(_ url: URL) throws -> (records: [ClaudeRecord], truncated: Bool, sourceLosses: [Date]) {
+private func readClaudeRecords(_ url: URL, noteLoss: (Set<String>) -> Void) throws ->
+    (records: [ClaudeRecord], truncated: Bool, sourceLosses: [Date], freshStartIDs: Set<String>, scopeIncomplete: Bool) {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
     let length = try handle.seekToEnd()
@@ -40,21 +68,37 @@ private func readClaudeRecords(_ url: URL) throws -> (records: [ClaudeRecord], t
     var sourceLosses: [Date] = []
     let lines = data.split(separator: 0x0a, omittingEmptySubsequences: true)
     var recoveryIndex: Int? = nil
+    var lastLossIndex: Int? = nil
+    var firstSeen: [String: Int] = [:]
+    var scopeIncomplete = false
     for (index, bytes) in lines.enumerated() {
         guard let marker = ClaudeJSONValidation.object(Data(bytes)),
-              let session = marker["session_id"] as? String, session.isEmpty,
+              let session = marker["session_id"] as? String else { continue }
+        if !session.isEmpty {
+            if let id = claudeSessionKey(session), firstSeen[id] == nil { firstSeen[id] = index }
+            continue
+        }
+        guard session.isEmpty,
               let timestamp = FileHelpers.isoDate(marker["timestamp"]) else { continue }
         let name = marker.string("event"), signal = marker.string("plan_signal")
         let isNew = phaseVersionTwo(marker) && sameBytes(signal, "source_uncertain") &&
             (sameBytes(name, "AITMSourceUncertain") || sameBytes(name, "AITMPartialTail"))
         let isOld = phaseVersion(marker, 1) && sameBytes(name, "Unknown") && sameBytes(signal, "uncertain")
         if isNew || isOld {
+            noteLoss(Set(firstSeen.keys))
             sourceLosses.append(timestamp)
+            lastLossIndex = index
+            if let raw = marker["scope_incomplete"] {
+                if let flag = raw as? NSNumber, CFGetTypeID(flag) == CFBooleanGetTypeID() { scopeIncomplete = scopeIncomplete || flag.boolValue }
+                else { scopeIncomplete = true }
+            }
             if isNew && sameBytes(name, "AITMPartialTail") { recoveryIndex = index }
         }
     }
     let first = recoveryIndex.map { $0 + 1 } ?? 0
-    for bytes in lines.dropFirst(first) {
+    var freshStartIDs: Set<String> = []
+    var rejectedStartIDs: Set<String> = []
+    for (index, bytes) in lines.enumerated().dropFirst(first) {
         let line = Data(bytes)
         guard let event = ClaudeJSONValidation.object(line),
               let timestamp = FileHelpers.isoDate(event["timestamp"]),
@@ -65,9 +109,18 @@ private func readClaudeRecords(_ url: URL) throws -> (records: [ClaudeRecord], t
             sameBytes(event.string("plan_signal"), "uncertain")
         if session.isEmpty && (newMarker || oldMarker) { continue }
         guard let id = claudeSessionKey(session) else { throw ClaudeReadError.unsupportedIdentity }
+        if let lastLossIndex, index > lastLossIndex, sameBytes(event.string("event"), "SessionStart") {
+            if firstSeen[id] == index, !rejectedStartIDs.contains(id), phaseVersionTwo(event),
+               sameBytes(event.string("session_start_source"), "startup") {
+                freshStartIDs.insert(id)
+            } else {
+                freshStartIDs.remove(id)
+                rejectedStartIDs.insert(id)
+            }
+        }
         records.append((event, timestamp, id))
     }
-    return (records, truncated, sourceLosses)
+    return (records, truncated, sourceLosses, freshStartIDs, scopeIncomplete)
 }
 
 private func sameBytes(_ a: String, _ b: String) -> Bool { a.utf8.elementsEqual(b.utf8) }
@@ -310,11 +363,13 @@ struct ClaudeTaskReader {
     let eventFile: URL
     let legacyFile: URL?
     let usesExplicitFile: Bool
+    private let sourceLossLatch: ClaudeSourceLossLatch
 
     init(eventFile: URL? = nil, legacyFile: URL? = nil) {
         self.eventFile = eventFile ?? AppPaths.claudeEvents
         self.legacyFile = legacyFile ?? (eventFile == nil ? AppPaths.legacyClaudeEvents : nil)
         self.usesExplicitFile = eventFile != nil
+        self.sourceLossLatch = ClaudeSourceLossLatch()
     }
 
     func readTasks(now: Date = Date(), observedSince: Date? = nil) -> [MonitoredTask] {
@@ -323,35 +378,51 @@ struct ClaudeTaskReader {
 
     func readSnapshot(now: Date = Date(), observedSince: Date? = nil,
                       phaseEvidence: ClaudePhaseEvidence? = nil) throws -> ClaudeTaskSnapshot {
-        let currentInput = try readClaudeRecords(eventFile)
+        let currentInput = try readClaudeRecords(eventFile, noteLoss: { sourceLossLatch.record($0) })
         var current = currentInput.records
         var observedIDs = Set(current.map { $0.2 })
         var legacy: [([String: Any], Date, String)] = []
         var legacyTruncated = false
         var losses = currentInput.sourceLosses
+        var scopeIncomplete = currentInput.scopeIncomplete
         if let legacyFile, !observedIDs.isEmpty {
             do {
-                let prior = try readClaudeRecords(legacyFile)
+                let prior = try readClaudeRecords(legacyFile, noteLoss: { sourceLossLatch.record($0) })
                 legacyTruncated = prior.truncated
                 losses.append(contentsOf: prior.sourceLosses)
+                scopeIncomplete = scopeIncomplete || prior.scopeIncomplete
                 legacy = prior.records
             } catch {
                 let nsError = error as NSError
                 if nsError.domain != NSCocoaErrorDomain || nsError.code != NSFileReadNoSuchFileError { throw error }
             }
         }
-        var sourceUncertain = false
+        let sourceUncertain = sourceLossLatch.state().known
+        if sourceUncertain && scopeIncomplete { sourceLossLatch.markSaturated() }
+        var freshStartIDs: Set<String> = []
+        if sourceUncertain && !scopeIncomplete && !currentInput.truncated && !legacyTruncated {
+            // Legacy and current have no shared cursor; a reused legacy ID is
+            // not a safely scoped new session.
+            freshStartIDs = currentInput.freshStartIDs.subtracting(Set(legacy.map { $0.2 }))
+            sourceLossLatch.record(observedIDs.subtracting(freshStartIDs))
+            let known = sourceLossLatch.state()
+            if known.saturated { freshStartIDs.removeAll() }
+            else { freshStartIDs.subtract(known.affected) }
+        } else if sourceUncertain && (currentInput.truncated || legacyTruncated) {
+            // Once identity history was clipped, later cleanup cannot prove
+            // which session IDs were previously affected.
+            sourceLossLatch.markSaturated()
+        }
         if let lastLoss = losses.max() {
             if let observedSince, lastLoss < observedSince {
-                // A restarted monitor uses only new observations. Old plans or
-                // terminal events before this boundary must not be revived.
+                // Do not revive older records. Restart time is not proof of a
+                // new agent generation, so uncertainty remains latched.
                 current = current.filter { $0.1 >= observedSince }
                 legacy = legacy.filter { $0.1 >= observedSince }
                 observedIDs = Set(current.map { $0.2 })
-            } else {
-                sourceUncertain = true
             }
         }
+        freshStartIDs.formIntersection(observedIDs)
         legacy = legacy.filter { observedIDs.contains($0.2) }
         let freshIDs = Set(current.compactMap { item -> String? in
             if let observedSince, item.1 < observedSince { return nil }
@@ -363,11 +434,13 @@ struct ClaudeTaskReader {
         typealias Observation = (date: Date, active: Bool?)
         var latest: [[String: Observation]] = [[:], [:]]
         var latestActive: [[String: Observation]] = [[:], [:]]
-        var timeUncertain: Set<String> = (currentInput.truncated || legacyTruncated || sourceUncertain) ? observedIDs : []
+        let uncertainIDs = (currentInput.truncated || legacyTruncated) ? observedIDs :
+            (sourceUncertain ? observedIDs.subtracting(freshStartIDs) : [])
+        var timeUncertain: Set<String> = uncertainIDs
         // Plan ordering is separate from session activity. A short reversal of
         // two plan mutations can make progress unsafe without proving the
         // session itself stopped or became inactive.
-        var planUncertain: Set<String> = (currentInput.truncated || legacyTruncated || sourceUncertain) ? observedIDs : []
+        var planUncertain: Set<String> = uncertainIDs
         var latestPrompt: [[String: Date]] = [[:], [:]]
         var latestStep: [[String: Date]] = [[:], [:]]
         var latestTask: [[PlanTaskKey: Date]] = [[:], [:]]
@@ -538,7 +611,9 @@ struct ClaudeTaskReader {
             let unconfirmed = age >= 7_200 || timeAnomaly || state.backgroundUncertain
             // A step observed without any prompt boundary is not proof that
             // it belongs to the currently observed user request.
-            let planConfirmed = state.planConfirmed && !unconfirmed && phaseEvidence?.poisoned != true && !planUncertain.contains(state.id) &&
+            let channelIdentitySupported = ClaudeLoopInput.validID(state.id)
+            let channelSessionUncertain = phaseEvidence?.isSessionUncertain(state.id) ?? false
+            let planConfirmed = state.planConfirmed && !unconfirmed && channelIdentitySupported && !channelSessionUncertain && !planUncertain.contains(state.id) &&
                 sessionsWithPrompt.contains(state.id) && !(phaseTrackers[state.id]?.isUncertain ?? true)
             let progress = planConfirmed ? MonitoredTask.progress(for: steps) : nil
             result.tasks.append(MonitoredTask(

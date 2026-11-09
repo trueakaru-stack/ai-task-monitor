@@ -145,6 +145,13 @@ enum ClaudeLoopClient {
         let name = input.string("hook_event_name"), toolName = input.string("tool_name")
         let phase = ["PreToolUse", "PostToolUse", "PostToolUseFailure"].contains(name) &&
             ["TaskCreate", "TaskUpdate"].contains(toolName)
+        // A locally unsupported identifier must not create a connection that
+        // closes without a frame and falsely reports a global channel gap.
+        if phase {
+            guard ClaudeLoopInput.validID(input.string("session_id")),
+                  ClaudeLoopInput.validID(input.string("tool_use_id")),
+                  let record, record.count <= 1_048_576 else { return }
+        }
         let prepared = phase ? nil : ClaudeLoopInput.classify(input)
         guard phase || prepared != nil,
               let directory = try? ClaudeLoopSocket.directory(profile: profile, create: false),

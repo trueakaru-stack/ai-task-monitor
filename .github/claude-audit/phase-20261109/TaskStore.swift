@@ -781,7 +781,8 @@ final class TaskStore: ObservableObject {
                     previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: snapshot.tasks,
                                                                terminalIDs: snapshot.terminalIDs.union(snapshot.neutralEndedIDs))
                     if snapshot.sourceUncertain {
-                        claudeConnected = false
+                        // The warning remains for the affected history; keep
+                        // the live channel available for a scoped new session.
                         if !unavailable.contains(.claude) { unavailable.append(.claude) }
                     }
                 }

@@ -149,7 +149,7 @@ final class ClaudePhaseIndependentCounterexamples: XCTestCase {
         }
     }
 
-    func testInvalidMarkerIsVisibleAndRestartAllowsOnlyNewObservedPlan() throws {
+    func testInvalidMarkerRemainsUncertainAfterMonitorRestart() throws {
         try withDirectory { directory in
             let now = Date(), current = directory.appendingPathComponent("claude-events-v2.jsonl")
             let marker = record(now, ["hook_event_name": "Unknown", "session_id": ""])
@@ -165,10 +165,11 @@ final class ClaudePhaseIndependentCounterexamples: XCTestCase {
             try ClaudeRetention.clean(directory: directory, backups: directory.appendingPathComponent("backups"),
                                       now: now.addingTimeInterval(1), policy: policy)
             let recovered = try reader.readSnapshot(now: now.addingTimeInterval(4), observedSince: now.addingTimeInterval(1))
-            XCTAssertFalse(recovered.sourceUncertain)
+            XCTAssertTrue(recovered.sourceUncertain)
             XCTAssertEqual(recovered.tasks.count, 1)
-            XCTAssertTrue(recovered.tasks.first?.planConfirmed == true)
-            XCTAssertEqual(recovered.tasks.first?.progress, 100)
+            XCTAssertTrue(recovered.tasks.first?.isUnconfirmed == true)
+            XCTAssertFalse(recovered.tasks.first?.planConfirmed == true)
+            XCTAssertNil(recovered.tasks.first?.progress)
         }
     }
 

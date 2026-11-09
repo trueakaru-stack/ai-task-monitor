@@ -2,8 +2,8 @@ import Foundation
 import XCTest
 @testable import AITaskMonitor
 
-// These acceptance counterexamples intentionally remain in the test plan.
-// They have not been compiled or run; both are expected to fail with fix2.
+// Acceptance counterexamples reproduced by macOS CI on fix3. These tests
+// have not yet been compiled or run against fix4.
 final class ClaudePhaseUnresolvedTests: XCTestCase {
     private func make(_ input: [String: Any], at date: Date) -> [String: Any] {
         var result = ClaudeHook.makeRecord(from: input)
@@ -48,6 +48,7 @@ final class ClaudePhaseUnresolvedTests: XCTestCase {
         try write([marker, prompt, create(at: now.addingTimeInterval(-1.5)), update(at: now.addingTimeInterval(-1))], to: file)
         let state = try ClaudeTaskReader(eventFile: file).readSnapshot(now: now, observedSince: now.addingTimeInterval(-3))
         let task = try XCTUnwrap(state.tasks.first)
+        XCTAssertTrue(state.sourceUncertain)
         XCTAssertFalse(task.planConfirmed, "A restart time alone cannot exclude delayed old hook events")
     }
 
@@ -68,5 +69,8 @@ final class ClaudePhaseUnresolvedTests: XCTestCase {
         let after = try reader.readSnapshot(now: now, observedSince: since)
         XCTAssertTrue(after.sourceUncertain, "Deleting the marker does not restore lost history")
         XCTAssertFalse(after.tasks.first?.planConfirmed == true)
+        let restarted = try ClaudeTaskReader(eventFile: file).readSnapshot(now: now, observedSince: since)
+        XCTAssertTrue(restarted.sourceUncertain, "Retention must preserve the marker across monitor restart")
+        XCTAssertFalse(restarted.tasks.first?.planConfirmed == true)
     }
 }

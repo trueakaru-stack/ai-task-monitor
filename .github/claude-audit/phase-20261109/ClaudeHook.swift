@@ -79,19 +79,28 @@ enum ClaudeHook {
     static func makeRecord(from input: [String: Any]) -> [String: Any] {
         let toolInput = input.object("tool_input") ?? [:]
         let rawEventName = input.string("hook_event_name")
-        let knownEvents = ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "TaskCreated",
+        let knownEvents = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure", "TaskCreated",
                            "TaskCompleted", "SubagentStart", "SubagentStop", "Stop", "StopFailure", "SessionEnd"]
         let eventName = knownEvents.first { same($0, rawEventName) } ?? "Unknown"
         let rawToolName = input.string("tool_name")
         let toolName = safeID(rawToolName) ? rawToolName : ""
-        let stage = eventName == "Unknown" ? StageAssessment(signal: "uncertain") :
+        var stage = eventName == "Unknown" ? StageAssessment(signal: "uncertain") :
             assessStage(event: eventName, tool: input.string("tool_name"), input: input, toolInput: toolInput)
+        let phaseEvent = ["PreToolUse", "PostToolUse", "PostToolUseFailure"].contains { same($0, eventName) }
+        let phaseTool = ["TaskCreate", "TaskUpdate"].contains { same($0, rawToolName) }
+        if phaseEvent && phaseTool && input["tool_use_id"] != nil &&
+           !((input["tool_use_id"] as? String).map(ClaudeLoopInput.validID) ?? false) {
+            stage.signal = "uncertain"
+            stage.status = nil
+            stage.previousStatus = nil
+            stage.intentStatus = nil
+        }
         let subject = stage.subject ?? ""
         let taskID = stage.taskID ?? ""
         let rawSession = input.string("session_id")
         let boundedSession = Array(rawSession.utf8.prefix(257))
         let session = !boundedSession.isEmpty && boundedSession.count <= 256 ? rawSession : ""
-        let active = !["Stop", "SessionEnd", "StopFailure"].contains(eventName)
+        let active = !["SessionStart", "Stop", "SessionEnd", "StopFailure"].contains(eventName)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         if session.isEmpty || same(rawEventName, "AITMSourceUncertain") {
@@ -115,6 +124,12 @@ enum ClaudeHook {
             "plan_signal": stage.signal
         ]
         if same(eventName, "Stop") { record["stop_background"] = stopBackground(input) }
+        if same(eventName, "SessionStart") {
+            let source = input.string("source")
+            if ["startup", "resume", "clear", "compact", "fork"].contains(where: { same($0, source) }) {
+                record["session_start_source"] = source
+            }
+        }
         return record
     }
 
@@ -270,7 +285,9 @@ enum ClaudeHook {
             throw HookError.invalidRecord
         }
         var replacement = kept
-        replacement.append(try markerLine("AITMSourceUncertain"))
+        // Rotation can remove previously seen session identities. Without
+        // those identities a later startup cannot be proved fresh.
+        replacement.append(try markerLine("AITMSourceUncertain", scopeIncomplete: true))
         try replacement.write(to: events, options: .atomic)
     }
 
@@ -332,7 +349,9 @@ enum ClaudeHook {
         let writer = FileHandle(fileDescriptor: writerDescriptor, closeOnDealloc: true)
         defer { try? writer.close(); _ = unlink(temporary.path) }
         try writer.write(contentsOf: Data(original[..<cutoff]))
-        try writer.write(contentsOf: markerLine("AITMPartialTail"))
+        // The damaged fragment may itself contain an earlier loss boundary
+        // or a previously known session identity.
+        try writer.write(contentsOf: markerLine("AITMPartialTail", scopeIncomplete: true))
         try writer.synchronize()
         try writer.close()
         var after = stat(), pathInfo = stat()
@@ -355,9 +374,10 @@ enum ClaudeHook {
             (version.doubleValue == 1 && same(name, "Unknown") && same(signal, "uncertain"))
     }
 
-    private static func markerLine(_ event: String) throws -> Data {
+    private static func markerLine(_ event: String, scopeIncomplete: Bool = false) throws -> Data {
         var marker = makeRecord(from: ["hook_event_name": "AITMSourceUncertain", "session_id": ""])
         marker["event"] = event
+        if scopeIncomplete { marker["scope_incomplete"] = true }
         return try JSONSerialization.data(withJSONObject: marker) + Data([0x0a])
     }
 

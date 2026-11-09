@@ -4,12 +4,26 @@ import Foundation
 // those, ill-formed UTF-8 and unpaired escaped surrogates before deriving any
 // session identity or successful-observation signal.
 enum ClaudeJSONValidation {
+    struct TopLevelMember {
+        let valueRange: Range<Int>?
+        let closingBrace: Int
+        let hasMembers: Bool
+    }
+
     static func object(_ data: Data, maximumBytes: Int = 1_048_576) -> [String: Any]? {
         guard !data.isEmpty, data.count <= maximumBytes, String(data: data, encoding: .utf8) != nil else { return nil }
         var parser = Parser(bytes: Array(data))
         guard parser.validate(), let raw = try? JSONSerialization.jsonObject(with: data),
               let object = raw as? [String: Any] else { return nil }
         return object
+    }
+
+    // Used for settings edits so unrelated top-level bytes, including exact
+    // foreign numbers, are not parsed and serialized again.
+    static func topLevelMember(_ data: Data, named name: String) -> TopLevelMember? {
+        guard object(data) != nil else { return nil }
+        var parser = Parser(bytes: Array(data))
+        return parser.topLevelMember(named: name)
     }
 
     private struct Parser {
@@ -22,6 +36,31 @@ enum ClaudeJSONValidation {
             guard value(depth: 0) else { return false }
             whitespace()
             return offset == bytes.count
+        }
+
+        mutating func topLevelMember(named wanted: String) -> TopLevelMember? {
+            whitespace()
+            guard consume(0x7b) else { return nil }
+            whitespace()
+            if offset < bytes.count && bytes[offset] == 0x7d {
+                return TopLevelMember(valueRange: nil, closingBrace: offset, hasMembers: false)
+            }
+            var found: Range<Int>?
+            while true {
+                whitespace()
+                guard let range = stringRange(), let name = decodedKey(range) else { return nil }
+                whitespace()
+                guard consume(0x3a) else { return nil }
+                whitespace()
+                let start = offset
+                guard value(depth: 1) else { return nil }
+                if name.utf8.elementsEqual(wanted.utf8) { found = start..<offset }
+                whitespace()
+                if offset < bytes.count && bytes[offset] == 0x7d {
+                    return TopLevelMember(valueRange: found, closingBrace: offset, hasMembers: true)
+                }
+                guard consume(0x2c) else { return nil }
+            }
         }
 
         mutating func whitespace() {

@@ -11,32 +11,58 @@ struct ClaudePhaseEvidence {
     }
     private var key: Data?
     private var entries: [String: Entry] = [:]
+    private var evictionOrder: [String] = []
+    private var evictionHead = 0
+    private var evictedSessions: Set<String> = []
     private(set) var poisoned = false
     private let maximumEntries = 8192
+    private let maximumEvictedSessions = 1024
 
     mutating func start(key: Data) {
         guard !poisoned, key.count == 32 else { invalidate(); return }
         self.key = key
         entries.removeAll(keepingCapacity: false)
+        evictionOrder.removeAll(keepingCapacity: false)
+        evictionHead = 0
+        evictedSessions.removeAll(keepingCapacity: false)
     }
 
     mutating func invalidate() {
         key = nil
         entries.removeAll(keepingCapacity: false)
+        evictionOrder.removeAll(keepingCapacity: false)
+        evictionHead = 0
+        evictedSessions.removeAll(keepingCapacity: false)
         poisoned = true
     }
 
     mutating func observe(session: String, toolID: String, fingerprint: String) {
         guard !poisoned, key != nil, ClaudeLoopInput.validID(session), ClaudeLoopInput.validID(toolID),
               Self.validDigest(fingerprint) else { invalidate(); return }
+        if evictedSessions.contains(session) { return }
         if var prior = entries[fingerprint] {
             // Even identical repeated frames may correspond to two writes.
             prior.ambiguous = true
             entries[fingerprint] = prior
             return
         }
-        guard entries.count < maximumEntries else { invalidate(); return }
+        while entries.count >= maximumEntries {
+            guard evictionHead < evictionOrder.count else { invalidate(); return }
+            let oldest = evictionOrder[evictionHead]
+            evictionHead += 1
+            guard let evicted = entries.removeValue(forKey: oldest) else { continue }
+            if !evictedSessions.contains(evicted.session) && evictedSessions.count >= maximumEvictedSessions {
+                invalidate(); return
+            }
+            evictedSessions.insert(evicted.session)
+            if evictionHead >= 4096 {
+                evictionOrder.removeFirst(evictionHead)
+                evictionHead = 0
+            }
+        }
+        if evictedSessions.contains(session) { return }
         entries[fingerprint] = Entry(session: session, toolID: toolID, ambiguous: false)
+        evictionOrder.append(fingerprint)
     }
 
     func fingerprint(_ event: [String: Any]) -> String? {
@@ -47,9 +73,13 @@ struct ClaudePhaseEvidence {
     }
 
     func toolID(fingerprint: String, session: String) -> String? {
-        guard !poisoned, let entry = entries[fingerprint], !entry.ambiguous,
+        guard !isSessionUncertain(session), let entry = entries[fingerprint], !entry.ambiguous,
               entry.session.utf8.elementsEqual(session.utf8) else { return nil }
         return entry.toolID
+    }
+
+    func isSessionUncertain(_ session: String) -> Bool {
+        poisoned || evictedSessions.contains(session)
     }
 
     static func digest(_ data: Data, key: Data) -> String {

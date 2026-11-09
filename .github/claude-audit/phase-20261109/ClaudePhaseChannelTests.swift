@@ -126,11 +126,33 @@ final class ClaudePhaseChannelTests: XCTestCase {
         XCTAssertNil(task.progress)
     }
 
-    func testBoundedEvidenceOverflowIsFailClosed() throws {
+    func testEvidenceEvictionAffectsOnlyItsSession() throws {
         var current = ClaudePhaseEvidence()
         current.start(key: key)
         for index in 0...8192 {
             current.observe(session: "synthetic", toolID: "call", fingerprint: String(format: "%064d", index))
+        }
+        XCTAssertFalse(current.poisoned)
+        XCTAssertTrue(current.isSessionUncertain("synthetic"))
+        let task = try XCTUnwrap(snapshot(sequence(), evidence: current).tasks.first)
+        XCTAssertFalse(task.planConfirmed)
+        var neighbor = sequence()
+        for index in neighbor.indices { neighbor[index]["session_id"] = "neighbor" }
+        for (index, id) in matches {
+            let fingerprint = try XCTUnwrap(current.fingerprint(neighbor[index]))
+            current.observe(session: "neighbor", toolID: id, fingerprint: fingerprint)
+        }
+        let healthy = try XCTUnwrap(snapshot(neighbor, evidence: current).tasks.first)
+        XCTAssertFalse(current.poisoned)
+        XCTAssertTrue(healthy.planConfirmed)
+        XCTAssertEqual(healthy.progress, 100)
+    }
+
+    func testEvictionSessionLimitFailsClosedGlobally() throws {
+        var current = ClaudePhaseEvidence()
+        current.start(key: key)
+        for index in 0..<9217 {
+            current.observe(session: "session-\(index)", toolID: "call", fingerprint: String(format: "%064d", index))
         }
         XCTAssertTrue(current.poisoned)
         let task = try XCTUnwrap(snapshot(sequence(), evidence: current).tasks.first)
