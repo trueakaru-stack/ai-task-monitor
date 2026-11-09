@@ -1,0 +1,113 @@
+name: macOS retry candidate synthetic tests
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-retry-candidate-20261109.yml"
+      - ".github/updater-audit/candidate-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-tests:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[macos-retry-candidate]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify and stage the synthetic candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet cf9dce5918011a581f68193c74fdda196f23d35b "$GITHUB_SHA" -- macos
+          INPUT="$GITHUB_WORKSPACE/.github/updater-audit/candidate-20261109"
+          cd "$INPUT"
+          printf '%s  %s\n' \
+            '14366b8627baa63f6b23289764fd75df91a2ee16ff4ec0d174aa9548affcf167' ReleaseRetrySchedule.swift \
+            '1dcbbe3c51fa49e14352599b3777d5699aecbe83f86d119f846b82f87b918179' ReleaseUpdateCoordinator.swift \
+            'f810f34c3480d09bdac70da4a43b26cd9ef4297931a573ab8f88bc03981d21c8' ReleaseUpdates.swift \
+            'ba9026089988cefa0c5f3f9b50ee635cf5dc0a80680ae521064663bac574a20a' ReleaseRetryScheduleTests.swift \
+            'e968b2a942941d02a343906258cafb3ff1a384e325eb5a56c51c7c0f69aba823' ReleaseUpdateCoordinatorTests.swift \
+            '6d7d49dbb896ee166b582b1dbc4244633b28f8c046bae34d3be19490f4b2414e' ReleaseRequestSyntheticTests.swift \
+            | shasum -a 256 -c -
+          for name in ReleaseRetrySchedule.swift ReleaseUpdateCoordinator.swift ReleaseUpdates.swift; do
+            cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/$name"
+          done
+          for name in ReleaseRetryScheduleTests.swift ReleaseUpdateCoordinatorTests.swift ReleaseRequestSyntheticTests.swift; do
+            cp "$INPUT/$name" "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/$name"
+          done
+      - name: Run isolated release tests without network
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aitm-retry-home" "$RUNNER_TEMP/aitm-retry-tmp" "$RUNNER_TEMP/aitm-retry-support"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*)'
+          cat > "$RUNNER_TEMP/aitm-retry-network-probe.py" <<'PY'
+          import errno
+          import socket
+          import sys
+
+          try:
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          except OSError as error:
+              sys.exit(0 if error.errno in (errno.EPERM, errno.EACCES) else 1)
+          try:
+              result = sock.connect_ex(("127.0.0.1", 0))
+          finally:
+              sock.close()
+          sys.exit(0 if result in (errno.EPERM, errno.EACCES) else 1)
+          PY
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-retry-home" \
+              "TMPDIR=$RUNNER_TEMP/aitm-retry-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-retry-support" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-retry-network-probe.py"
+          run_isolated /usr/bin/xcrun swift --version
+          audit_status=0
+          for entry in ReleaseUpdatesTests:5 ReleaseRetryScheduleTests:22 ReleaseUpdateCoordinatorTests:30 ReleaseRequestSyntheticTests:10 ReleaseRedirectDiagnosticTests:3; do
+            suite="${entry%:*}"
+            count="${entry#*:}"
+            log="$RUNNER_TEMP/aitm-retry-$suite.log"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | /usr/bin/tee "$log"; then
+              audit_status=1
+            fi
+            if ! /usr/bin/grep -Eq "Executed $count tests?, with 0 failures" "$log"; then
+              printf '%s\n' "Missing successful expected test count: $suite"
+              audit_status=1
+            fi
+          done
+          if run_isolated /usr/bin/xcrun swiftc Sources/AITaskMonitor/ReleaseScheduleFileStore.swift \
+            integration-tests/release-lease-fixture/main.swift -o "$RUNNER_TEMP/aitm-retry-lease"; then
+            if ! run_isolated "$RUNNER_TEMP/aitm-retry-lease"; then audit_status=1; fi
+          else
+            audit_status=1
+          fi
+          exit "$audit_status"
