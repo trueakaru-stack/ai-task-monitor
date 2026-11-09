@@ -24,3 +24,12 @@ var guarded = new UpdateRetrySchedule();
 if (!guarded.Record(false, 0, 10, wall, new string?[] { "86400" })) throw new Exception("Initial hint rejected.");
 if (guarded.Record(false, 10, 10, wall) || guarded.Delay != TimeSpan.FromDays(1) || guarded.Due(72010) || !guarded.Due(864000))
     throw new Exception("Early result shortened the requested server delay.");
+var unrepresentable = new UpdateRetrySchedule();
+if (!unrepresentable.Record(false, 0, 1, wall, new string?[] { "18446744073709551616" }) ||
+    unrepresentable.Delay != TimeSpan.MaxValue || unrepresentable.Due(long.MaxValue))
+    throw new Exception("An unrepresentable server delay allowed automatic retry.");
+var paddedAtLimit = new string('0', 65530) + "172800";
+if (UpdateRetryPolicy.FailureDelay(1, new[] { paddedAtLimit }, null, null, wall) != TimeSpan.FromHours(48) ||
+    UpdateRetryPolicy.FailureDelay(1, new[] { new string('0', 65536) }, null, null, wall) != TimeSpan.FromHours(1) ||
+    UpdateRetryPolicy.FailureDelay(1, new[] { new string('0', 65537) }, null, null, wall) != TimeSpan.MaxValue)
+    throw new Exception("A Retry-After length boundary was not handled conservatively.");

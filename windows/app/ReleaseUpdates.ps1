@@ -136,12 +136,14 @@ function Start-UpdateTransport([Threading.CancellationToken]$cancellation) {
 # Delays are kept in memory and measured with Stopwatch, not the wall clock.
 # Restarting the application clears the schedule. An absolute server hint with
 # no valid Date uses the local clock and a 24-hour floor; a fast local clock can
-# still cause an early retry. Invalid or unrepresentable hints are ignored.
+# still cause an early retry. An unrepresentable numeric hint disables the
+# automatic retry for the lifetime of this in-memory schedule.
 function New-UpdateRetryState {
  return [PSCustomObject]@{Failures=0;HasSchedule=$false;ScheduledAt=[long]0;Frequency=[long][Diagnostics.Stopwatch]::Frequency;DelayTicks=[long]0}
 }
 function Test-UpdateRetryDue($state,[long]$now) {
  if(-not $state.HasSchedule){return $true}
+ if($state.DelayTicks -eq [long]::MaxValue){return $false}
  if($state.Frequency -le 0){$state.Frequency=[long][Diagnostics.Stopwatch]::Frequency;$state.ScheduledAt=$now;return $false}
  if($now -lt $state.ScheduledAt){$state.ScheduledAt=$now;return $false}
  [long]$fraction=0;[long]$neededFraction=0
@@ -166,11 +168,11 @@ function Get-UpdateRetryDelay([int]$failures,[string[]]$retryAfter,[string[]]$ra
  }
  $reference=if($validServer){$serverDate}else{$utcNow}
  foreach($raw in @($retryAfter)){
-  if($null -eq $raw -or $raw.Length -gt 256){continue};$value=$raw.Trim();if(-not $value){continue}
+  if($null -eq $raw){continue};if($raw.Length -gt 65536){return [TimeSpan]::MaxValue};$value=$raw.Trim();if(-not $value){continue}
   [TimeSpan]$hint=[TimeSpan]::Zero
-  if($value -cmatch '^\d+$'){
+  if($value -cmatch '\A[0-9]+\z'){
    [uint64]$seconds=0
-   if(-not [uint64]::TryParse($value,[Globalization.NumberStyles]::None,[Globalization.CultureInfo]::InvariantCulture,[ref]$seconds) -or $seconds -gt 922337203685){continue}
+   if(-not [uint64]::TryParse($value,[Globalization.NumberStyles]::None,[Globalization.CultureInfo]::InvariantCulture,[ref]$seconds) -or $seconds -gt 922337203685){return [TimeSpan]::MaxValue}
    $hint=[TimeSpan]::FromTicks([long]([decimal]$seconds*[TimeSpan]::TicksPerSecond))
   }else{
    $date=ConvertFrom-UpdateHttpDate $value
@@ -181,10 +183,10 @@ function Get-UpdateRetryDelay([int]$failures,[string[]]$retryAfter,[string[]]$ra
   if($hint -gt $delay){$delay=$hint}
  }
  foreach($raw in @($rateReset)){
-  if($null -eq $raw -or $raw.Length -gt 256){continue};$value=$raw.Trim()
-  if($value -cnotmatch '^\d+$'){continue};[long]$seconds=0
-  if(-not [long]::TryParse($value,[Globalization.NumberStyles]::None,[Globalization.CultureInfo]::InvariantCulture,[ref]$seconds)){continue}
-  try{$date=[DateTimeOffset]::FromUnixTimeSeconds($seconds)}catch{continue}
+  if($null -eq $raw){continue};if($raw.Length -gt 65536){return [TimeSpan]::MaxValue};$value=$raw.Trim()
+  if($value -cnotmatch '\A[0-9]+\z'){continue};[long]$seconds=0
+  if(-not [long]::TryParse($value,[Globalization.NumberStyles]::None,[Globalization.CultureInfo]::InvariantCulture,[ref]$seconds)){return [TimeSpan]::MaxValue}
+  try{$date=[DateTimeOffset]::FromUnixTimeSeconds($seconds)}catch{return [TimeSpan]::MaxValue}
   if(-not $validServer -and $delay -lt [TimeSpan]::FromHours(24)){$delay=[TimeSpan]::FromHours(24)}
   if($date -gt $reference -and ($date-$reference) -gt $delay){$delay=$date-$reference}
  }

@@ -7,6 +7,9 @@ namespace AITaskMonitor.NativeUpdateRetry;
 public static class UpdateRetryPolicy
 {
     private const long MaxHintSeconds = 922337203685;
+    // The production HTTP handler limits response headers to 64 KiB. If a
+    // caller supplies a larger value, its meaning cannot be trusted safely.
+    private const int MaxHeaderCharacters = 65536;
 
     public static TimeSpan FailureDelay(int failures, IReadOnlyList<string?>? retryAfter,
         IReadOnlyList<string?>? rateLimitReset, IReadOnlyList<string?>? serverDates, DateTimeOffset now)
@@ -18,13 +21,15 @@ public static class UpdateRetryPolicy
 
         foreach (string? raw in retryAfter ?? Array.Empty<string?>())
         {
-            if (raw is null || raw.Length > 256) continue;
+            if (raw is null) continue;
+            if (raw.Length > MaxHeaderCharacters) return TimeSpan.MaxValue;
             string value = raw.Trim();
             if (value.Length == 0) continue;
             TimeSpan hint = TimeSpan.Zero;
             if (AsciiDigits(value))
             {
-                if (!ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out ulong seconds) || seconds > MaxHintSeconds) continue;
+                if (!ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out ulong seconds) || seconds > MaxHintSeconds)
+                    return TimeSpan.MaxValue;
                 hint = TimeSpan.FromTicks(checked((long)seconds * TimeSpan.TicksPerSecond));
             }
             else
@@ -38,12 +43,14 @@ public static class UpdateRetryPolicy
 
         foreach (string? raw in rateLimitReset ?? Array.Empty<string?>())
         {
-            if (raw is null || raw.Length > 256) continue;
+            if (raw is null) continue;
+            if (raw.Length > MaxHeaderCharacters) return TimeSpan.MaxValue;
             string value = raw.Trim();
-            if (!AsciiDigits(value) || !long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long seconds)) continue;
+            if (!AsciiDigits(value)) continue;
+            if (!long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long seconds)) return TimeSpan.MaxValue;
             DateTimeOffset date;
             try { date = DateTimeOffset.FromUnixTimeSeconds(seconds); }
-            catch (ArgumentOutOfRangeException) { continue; }
+            catch (ArgumentOutOfRangeException) { return TimeSpan.MaxValue; }
             if (!hasServerDate && result < TimeSpan.FromHours(24)) result = TimeSpan.FromHours(24);
             if (date > reference && date - reference > result) result = date - reference;
         }
@@ -87,6 +94,9 @@ public sealed class UpdateRetrySchedule
     public bool Due(long now)
     {
         if (!HasSchedule) return true;
+        // MaxValue is the sentinel for a server hint that cannot be honored
+        // with a representable interval. Keep automatic retry disabled.
+        if (Delay == TimeSpan.MaxValue) return false;
         if (now < ScheduledAt) { ScheduledAt = now; return false; }
         decimal elapsed = (decimal)now - ScheduledAt;
         decimal seconds = decimal.Truncate(elapsed / Frequency);

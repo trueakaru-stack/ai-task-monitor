@@ -157,8 +157,28 @@ $delay=Get-UpdateRetryDelay 1 @('broken','7200',$absolute) @('bad',$reset) @($se
 Assert ($delay -eq [TimeSpan]::FromHours(72)) 'Valid Retry-After or rate-limit reset was shortened.'
 $delay=Get-UpdateRetryDelay 1 @('120') @() @($server) $now
 Assert ($delay -eq [TimeSpan]::FromHours(1)) 'A server hint shortened backoff.'
-$delay=Get-UpdateRetryDelay 1 @('bad','18446744073709551616') @('-1') @('invalid') $now
+$delay=Get-UpdateRetryDelay 1 @('bad','-1') @('-1') @('invalid') $now
 Assert ($delay -eq [TimeSpan]::FromHours(1)) 'Invalid headers prevented finite backoff.'
+$long48=('0'*251)+'172800'
+$delay=Get-UpdateRetryDelay 1 @('3600',$long48) @() @($server) $now
+Assert ($delay -eq [TimeSpan]::FromHours(48)) 'A long numeric Retry-After was shortened.'
+$delay=Get-UpdateRetryDelay 1 @((('0'*65530)+'172800')) @() @($server) $now
+Assert ($delay -eq [TimeSpan]::FromHours(48)) 'A numeric Retry-After at the input limit was shortened.'
+$delay=Get-UpdateRetryDelay 1 @('0'*65536) @() @($server) $now
+Assert ($delay -eq [TimeSpan]::FromHours(1)) 'An all-zero delay at the input limit changed backoff.'
+$paddedReset=('0'*251)+$reset
+$delay=Get-UpdateRetryDelay 1 @() @($paddedReset) @($server) $now
+Assert ($delay -eq [TimeSpan]::FromHours(72)) 'A long numeric rate-limit reset was shortened.'
+foreach($hint in @('922337203686','18446744073709551616',('9'*1000))){
+ $delay=Get-UpdateRetryDelay 1 @('3600',$hint) @() @($server) $now
+ Assert ($delay -eq [TimeSpan]::MaxValue) 'An unrepresentable delay did not disable automatic retry.'
+}
+$delay=Get-UpdateRetryDelay 1 @() @('253402300800') @($server) $now
+Assert ($delay -eq [TimeSpan]::MaxValue) 'An unrepresentable reset did not disable automatic retry.'
+$delay=Get-UpdateRetryDelay 1 @('0'*65537) @() @($server) $now
+Assert ($delay -eq [TimeSpan]::MaxValue) 'An oversized header did not disable automatic retry.'
+$state.DelayTicks=[long]::MaxValue;$state.HasSchedule=$true;$state.ScheduledAt=0;$state.Frequency=1
+Assert (-not (Test-UpdateRetryDue $state ([long]::MaxValue))) 'An unrepresentable hint allowed automatic retry.'
 $delay=Get-UpdateRetryDelay 1 @($now.AddHours(3).ToString('r',[Globalization.CultureInfo]::InvariantCulture)) @() @() $now
 Assert ($delay -eq [TimeSpan]::FromHours(24)) 'Missing server Date did not use the conservative fallback.'
 $delay=Get-UpdateRetryDelay 1 @($now.AddHours(48).ToString('r',[Globalization.CultureInfo]::InvariantCulture)) @() @() $now

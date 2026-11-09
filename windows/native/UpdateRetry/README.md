@@ -6,12 +6,13 @@ schedule. It does not make network requests, read or write settings, open
 downloads, start PowerShell, or connect to the application.
 
 Successful checks schedule the next check after 24 hours. Failed checks use a
-bounded exponential retry and respect representable `Retry-After` and rate
-limit hints. Where an absolute hint has no valid server `Date`, the policy
+bounded exponential retry and respect `Retry-After` and rate limit hints.
+Numeric hints that cannot be represented, and values beyond the 64 KiB input
+limit, disable automatic retries for the lifetime of the in-memory schedule.
+Where an absolute hint has no valid server `Date`, the policy
 uses the supplied local time and a 24-hour floor; an incorrectly fast local
-clock can still cause an early retry. Excessive or unrepresentable hints are
-ignored, as in the existing PowerShell implementation. The schedule is not
-persisted, so restarting the app clears it.
+clock can still cause an early retry. The schedule is not persisted, so
+restarting the app clears it, including any disabled-retry sentinel.
 
 The schedule must be accessed serially, with a single request in flight, a
 consistent positive monotonic clock frequency, and stale request generations

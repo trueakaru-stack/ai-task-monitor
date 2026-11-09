@@ -91,7 +91,7 @@ for directory in protected:
     if work == directory or work.is_relative_to(directory):
         raise SystemExit('The work directory must be outside the current profile and application data.')
 reference_data = REFERENCE.read_bytes().replace(b'\r\n', b'\n')
-if hashlib.sha256(reference_data).hexdigest() != 'f1608dfa933294f7c3d0bf5709e52f4dd1d56b5079f925f025d9ab0509947a7b':
+if hashlib.sha256(reference_data).hexdigest() != '3d88d1a3a08b61f19f00d3beff882702bbef2d21389f35cbabe8008976f21341':
     raise SystemExit('Pinned reference changed.')
 work.mkdir(parents=True, exist_ok=True)
 run = work / ('update-retry-' + uuid.uuid4().hex)
@@ -137,12 +137,14 @@ execute([dotnet, 'build', ROOT / 'Tests' / 'RetryFixture.csproj', '--configurati
          '--nologo', '-maxcpucount:1', '-nodeReuse:false'])
 assembly = run / 'artifacts' / 'bin' / 'RetryFixture' / 'release' / 'AITaskMonitor.UpdateRetry.Tests.dll'
 numbers = ['', '0', '1', '59', '3600', '3601', '86400', '86401', '922337203685',
-           '922337203686', '18446744073709551616', '-1', '+1', '1.5', ' 7200 ', '\t30\t', 'abc', '١٢', '0' * 257, None]
+           '922337203686', '18446744073709551616', '-1', '+1', '1.5', ' 7200 ', '\t30\t', 'abc', '١٢',
+           '0' * 257, '0' * 251 + '172800', '9' * 1000, None]
 dates = ['Thu, 01 Jan 2026 00:00:00 GMT', 'Thu, 01 Jan 2026 01:00:00 GMT',
          'Fri, 02 Jan 2026 01:00:00 GMT', 'Tue, 01 Nov 1994 08:12:31 GMT',
          'Sunday, 06-Nov-94 08:49:37 GMT', 'Sun Nov  6 08:49:37 1994', 'invalid', None]
 reset = ['0', '1767225600', '1767229200', '1767402000', '253402300799',
-         '253402300800', '9223372036854775807', '9223372036854775808', '-1', 'bad', None]
+         '253402300800', '9223372036854775807', '9223372036854775808',
+         '0' * 251 + '1767402000', '-1', 'bad', None]
 rng = random.Random(13123)
 rows = []
 for failures in [-2147483647, -1, 0, 1, 2, 3, 4, 5, 6, 7, 2147483647]:

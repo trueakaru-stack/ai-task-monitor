@@ -55,12 +55,14 @@ drives), or protect against a junction being swapped concurrently after
 validation. Use a trusted local work directory outside all profiles and
 repositories.
 
-The runner checks the SHA-256 of the normalized `ReleaseUpdates.ps1` from
-Windows commit `ade7894`, copies it into an isolated work directory, disables
+The runner checks the SHA-256 of the normalized `ReleaseUpdates.ps1`, copies
+it into an isolated work directory, disables
 SDK telemetry and first-run certificate generation, clears NuGet feeds, and
 compares 2,512 synthetic responses with the PowerShell helpers. Direct checks
 cover prerelease ordering, malformed data, Unicode, numeric overflow, input
 bounds and unsafe URLs. An independent review compared another 4,146 cases,
 with 26 documented intentional strict differences, and separately checked 32
-unsafe URLs. Real GitHub responses, transport, retry behavior, application
+unsafe URLs. That independent review used the reference from Windows commit
+`ade7894`; the later reference update changes retry handling, not the release
+metadata helpers. Real GitHub responses, transport, retry behavior, application
 integration, physical input and installers remain unverified by this library.
