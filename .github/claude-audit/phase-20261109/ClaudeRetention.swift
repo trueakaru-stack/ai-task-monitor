@@ -160,7 +160,16 @@ enum ClaudeRetention {
         guard changed else { return }
         var staged: [URL] = []
         defer { for url in staged { try? FileManager.default.removeItem(at: url) } }
-        for (index, source) in sources.enumerated() {
+        // Commit a surviving loss marker (including scope_incomplete) before
+        // deleting identity records in another file. An interrupted second
+        // rename must leave either old identity or the conservative marker.
+        let markerSources = Set(lossMarkers.map { $0.source })
+        let commitOrder = sources.indices.sorted {
+            if markerSources.contains($0) != markerSources.contains($1) { return markerSources.contains($0) }
+            return $0 < $1
+        }
+        for index in commitOrder {
+            let source = sources[index]
             let selected = entries.filter { $0.source == index }.sorted { $0.order < $1.order }
             guard selected.count != source.count || source.needsRewrite else { continue }
             let temporary = directory.appendingPathComponent(".aitm-retention-\(UUID().uuidString).tmp")

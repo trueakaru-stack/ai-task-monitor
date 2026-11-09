@@ -1,5 +1,6 @@
 import Foundation
 import CoreFoundation
+import Darwin
 
 // Bound work and preserve byte identity. The input must already have passed
 // strict UTF-8 decoding; never truncate an identifier to fit this limit.
@@ -14,8 +15,34 @@ func claudeSessionKey(_ value: String) -> String? {
     return String(decoding: output, as: UTF8.self)
 }
 
-private enum ClaudeReadError: Error { case incomplete, invalidRecord, unsupportedIdentity }
+enum ClaudeReadError: Error { case incomplete, invalidRecord, unsupportedIdentity, journalBusy }
 private typealias ClaudeRecord = ([String: Any], Date, String)
+private typealias ClaudeFileBytes = (data: Data, truncated: Bool)
+private typealias ClaudeInput = (records: [ClaudeRecord], truncated: Bool, sourceLosses: [Date],
+                                 freshStartDates: [String: Date], scopeIncomplete: Bool)
+
+// Retention and the hook hold this same lock while changing either journal.
+// Do not combine a current-file snapshot from before cleanup with a legacy
+// snapshot from after cleanup. Busy means retry; it is not a clean source.
+private func withClaudeJournalReadLock<T>(_ file: URL, timing: ((UInt64) -> Void)?, _ action: () throws -> T) throws -> T {
+    let path = file.deletingLastPathComponent().appendingPathComponent("claude-events.lock").path
+    let descriptor = open(path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+    guard descriptor >= 0 else { throw ClaudeReadError.incomplete }
+    defer { Darwin.close(descriptor) }
+    var info = stat()
+    guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { throw ClaudeReadError.incomplete }
+    if flock(descriptor, LOCK_SH | LOCK_NB) != 0 {
+        if errno == EWOULDBLOCK || errno == EAGAIN { throw ClaudeReadError.journalBusy }
+        throw ClaudeReadError.incomplete
+    }
+    let started = DispatchTime.now().uptimeNanoseconds
+    defer {
+        flock(descriptor, LOCK_UN)
+        let finished = DispatchTime.now().uptimeNanoseconds
+        if let timing { timing(finished >= started ? finished - started : 0) }
+    }
+    return try action()
+}
 
 // A reader instance must remember a marker even if another operation removes
 // it while the monitor is running. Copying the reader shares the latch.
@@ -44,11 +71,9 @@ private final class ClaudeSourceLossLatch {
     }
 }
 
-// A complete invalid line can belong to any session: do not replace bytes or
-// skip it and then accept another session's terminal record. An incomplete
-// final write is retried on the next poll instead of being parsed as complete.
-private func readClaudeRecords(_ url: URL, noteLoss: (Set<String>) -> Void) throws ->
-    (records: [ClaudeRecord], truncated: Bool, sourceLosses: [Date], freshStartIDs: Set<String>, scopeIncomplete: Bool) {
+// Capture bounded bytes under the shared journal lock. JSON parsing happens
+// after unlocking so a slow parse does not needlessly hold up Claude hooks.
+private func readClaudeFile(_ url: URL) throws -> ClaudeFileBytes {
     let handle = try FileHandle(forReadingFrom: url)
     defer { try? handle.close() }
     let length = try handle.seekToEnd()
@@ -64,6 +89,15 @@ private func readClaudeRecords(_ url: URL, noteLoss: (Set<String>) -> Void) thro
         guard let newline = data.firstIndex(of: 0x0a) else { throw ClaudeReadError.incomplete }
         data = Data(data[data.index(after: newline)...])
     }
+    return (data, truncated)
+}
+
+// A complete invalid line can belong to any session: do not replace bytes or
+// skip it and then accept another session's terminal record. An incomplete
+// final write is retried on the next poll instead of being parsed as complete.
+private func readClaudeRecords(_ input: ClaudeFileBytes, noteLoss: (Set<String>) -> Void) throws -> ClaudeInput {
+    let data = input.data
+    let truncated = input.truncated
     var records: [ClaudeRecord] = []
     var sourceLosses: [Date] = []
     let lines = data.split(separator: 0x0a, omittingEmptySubsequences: true)
@@ -96,7 +130,7 @@ private func readClaudeRecords(_ url: URL, noteLoss: (Set<String>) -> Void) thro
         }
     }
     let first = recoveryIndex.map { $0 + 1 } ?? 0
-    var freshStartIDs: Set<String> = []
+    var freshStartDates: [String: Date] = [:]
     var rejectedStartIDs: Set<String> = []
     for (index, bytes) in lines.enumerated().dropFirst(first) {
         let line = Data(bytes)
@@ -112,15 +146,15 @@ private func readClaudeRecords(_ url: URL, noteLoss: (Set<String>) -> Void) thro
         if let lastLossIndex, index > lastLossIndex, sameBytes(event.string("event"), "SessionStart") {
             if firstSeen[id] == index, !rejectedStartIDs.contains(id), phaseVersionTwo(event),
                sameBytes(event.string("session_start_source"), "startup") {
-                freshStartIDs.insert(id)
+                freshStartDates[id] = timestamp
             } else {
-                freshStartIDs.remove(id)
+                freshStartDates.removeValue(forKey: id)
                 rejectedStartIDs.insert(id)
             }
         }
         records.append((event, timestamp, id))
     }
-    return (records, truncated, sourceLosses, freshStartIDs, scopeIncomplete)
+    return (records, truncated, sourceLosses, freshStartDates, scopeIncomplete)
 }
 
 private func sameBytes(_ a: String, _ b: String) -> Bool { a.utf8.elementsEqual(b.utf8) }
@@ -364,12 +398,14 @@ struct ClaudeTaskReader {
     let legacyFile: URL?
     let usesExplicitFile: Bool
     private let sourceLossLatch: ClaudeSourceLossLatch
+    private let readLockTiming: ((UInt64) -> Void)?
 
-    init(eventFile: URL? = nil, legacyFile: URL? = nil) {
+    init(eventFile: URL? = nil, legacyFile: URL? = nil, readLockTiming: ((UInt64) -> Void)? = nil) {
         self.eventFile = eventFile ?? AppPaths.claudeEvents
         self.legacyFile = legacyFile ?? (eventFile == nil ? AppPaths.legacyClaudeEvents : nil)
         self.usesExplicitFile = eventFile != nil
         self.sourceLossLatch = ClaudeSourceLossLatch()
+        self.readLockTiming = readLockTiming
     }
 
     func readTasks(now: Date = Date(), observedSince: Date? = nil) -> [MonitoredTask] {
@@ -378,32 +414,46 @@ struct ClaudeTaskReader {
 
     func readSnapshot(now: Date = Date(), observedSince: Date? = nil,
                       phaseEvidence: ClaudePhaseEvidence? = nil) throws -> ClaudeTaskSnapshot {
-        let currentInput = try readClaudeRecords(eventFile, noteLoss: { sourceLossLatch.record($0) })
+        let files: (ClaudeFileBytes, Result<ClaudeFileBytes?, Error>) = try withClaudeJournalReadLock(eventFile, timing: readLockTiming) {
+            let current = try readClaudeFile(eventFile)
+            guard let legacyFile, !current.data.isEmpty else { return (current, .success(nil)) }
+            do {
+                return (current, .success(try readClaudeFile(legacyFile)))
+            } catch {
+                let nsError = error as NSError
+                if nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileReadNoSuchFileError { return (current, .success(nil)) }
+                return (current, .failure(error))
+            }
+        }
+        let currentInput = try readClaudeRecords(files.0, noteLoss: { sourceLossLatch.record($0) })
         var current = currentInput.records
         var observedIDs = Set(current.map { $0.2 })
         var legacy: [([String: Any], Date, String)] = []
         var legacyTruncated = false
         var losses = currentInput.sourceLosses
         var scopeIncomplete = currentInput.scopeIncomplete
-        if let legacyFile, !observedIDs.isEmpty {
-            do {
-                let prior = try readClaudeRecords(legacyFile, noteLoss: { sourceLossLatch.record($0) })
-                legacyTruncated = prior.truncated
-                losses.append(contentsOf: prior.sourceLosses)
-                scopeIncomplete = scopeIncomplete || prior.scopeIncomplete
-                legacy = prior.records
-            } catch {
-                let nsError = error as NSError
-                if nsError.domain != NSCocoaErrorDomain || nsError.code != NSFileReadNoSuchFileError { throw error }
-            }
+        if !observedIDs.isEmpty, let legacyBytes = try files.1.get() {
+            let prior = try readClaudeRecords(legacyBytes, noteLoss: { sourceLossLatch.record($0) })
+            legacyTruncated = prior.truncated
+            losses.append(contentsOf: prior.sourceLosses)
+            scopeIncomplete = scopeIncomplete || prior.scopeIncomplete
+            legacy = prior.records
         }
         let sourceUncertain = sourceLossLatch.state().known
         if sourceUncertain && scopeIncomplete { sourceLossLatch.markSaturated() }
         var freshStartIDs: Set<String> = []
         if sourceUncertain && !scopeIncomplete && !currentInput.truncated && !legacyTruncated {
-            // Legacy and current have no shared cursor; a reused legacy ID is
-            // not a safely scoped new session.
-            freshStartIDs = currentInput.freshStartIDs.subtracting(Set(legacy.map { $0.2 }))
+            // A delayed start may be written after a newer loss. Check the
+            // timestamp against every visible marker, including the other
+            // journal; equality does not establish an ordering. This is a
+            // necessary check, not a guarantee against clock changes.
+            let sameDirectory = legacyFile.map {
+                $0.deletingLastPathComponent().standardizedFileURL == eventFile.deletingLastPathComponent().standardizedFileURL
+            } ?? true
+            if sameDirectory, let lastLoss = losses.max() {
+                freshStartIDs = Set(currentInput.freshStartDates.compactMap { $0.value > lastLoss ? $0.key : nil })
+                    .subtracting(Set(legacy.map { $0.2 }))
+            }
             sourceLossLatch.record(observedIDs.subtracting(freshStartIDs))
             let known = sourceLossLatch.state()
             if known.saturated { freshStartIDs.removeAll() }

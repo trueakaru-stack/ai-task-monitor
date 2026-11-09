@@ -790,6 +790,11 @@ final class TaskStore: ObservableObject {
                     previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
                 }
             }
+        } catch ClaudeReadError.journalBusy {
+            // A concurrent hook or retention pass is transient. Preserve the
+            // channel and its phase evidence while the snapshot is retried.
+            if !unavailable.contains(.claude) { unavailable.append(.claude) }
+            previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         } catch {
             claudeConnected = false
             if !unavailable.contains(.claude) { unavailable.append(.claude) }
