@@ -1,0 +1,120 @@
+name: Windows native Claude reader isolated audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [windows]
+    paths:
+      - '.github/workflows/windows-claude-reader-safe-audit-20261109.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[windows-safe-audit]')) }}
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Fetch pinned public source without overriding profile variables
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceCommit = '6437e5c4a8e98341c0ada5c3708ef842b34a1c49'
+          $gitFixture = Join-Path $env:RUNNER_TEMP 'aitm-audit-git'
+          $emptyTemplate = Join-Path $gitFixture 'template'
+          $emptyHooks = Join-Path $gitFixture 'hooks'
+          New-Item -ItemType Directory -Path $emptyTemplate, $emptyHooks -ErrorAction Stop | Out-Null
+          $env:GIT_CONFIG_GLOBAL = Join-Path $gitFixture 'empty-gitconfig'
+          $env:GIT_CONFIG_NOSYSTEM = '1'
+          [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL, '', [Text.UTF8Encoding]::new($false))
+          git -c credential.helper= -c core.hooksPath="$emptyHooks" -c init.defaultBranch=audit init --template="$emptyTemplate" .
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot initialize the disposable checkout.' }
+          git -c credential.helper= -c core.hooksPath="$emptyHooks" fetch --no-tags --depth=1 https://github.com/trueakaru-stack/ai-task-monitor.git $sourceCommit
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch the pinned public source.' }
+          git -c credential.helper= -c core.hooksPath="$emptyHooks" checkout --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot select the pinned public source.' }
+          $actualCommit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -ne $sourceCommit) { throw 'Unexpected source commit.' }
+      - name: Verify source and prepare synthetic profile
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $actualCommit = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -ne '6437e5c4a8e98341c0ada5c3708ef842b34a1c49') { throw 'Unexpected audit source commit.' }
+          $expected = [ordered]@{
+            'windows/native/ClaudeReader/Reader.cs' = 'b38ab1a7470f6766c7186c410cc0552624758441'
+            'windows/native/ClaudeReader/ClaudeFileSource.cs' = 'e8434e2d45b3de636c06b0bd4c9eb4af22996688'
+            'windows/native/Prototype/PrototypeWindow.cs' = '90fc4be606a628d79ae2a3eb2a928b6de003e08c'
+            'windows/native/Tests/ClaudeFileUi/Program.cs' = '7e31b47c793e53e3cd012eed1bc04162193042a7'
+            'windows/native/Prototype/Tests/Program.cs' = '8a571cbc1a9d940e409d20bdc964e3964b558cd5'
+            'windows/native/Tests/LoopWarningUi/Program.cs' = '0a701040399f7032fbe20aa90b3e10b4d49c6acc'
+            'windows/native/Tests/ClaudeTitleRetention/Program.cs' = 'af2a142d60d5a66403278427da9f68d482e7b27c'
+            'windows/native/Tests/ClaudeFileSource/Program.cs' = 'f9d644e51afd3d65f25e99e5374cb3b536edeb2d'
+          }
+          foreach ($path in $expected.Keys) {
+            $actual = git rev-parse "HEAD:$path"
+            if ($LASTEXITCODE -ne 0 -or $actual -ne $expected[$path]) { throw "Unexpected source: $path" }
+            $workingBlob = git hash-object --no-filters -- $path
+            if ($LASTEXITCODE -ne 0 -or $workingBlob -ne $expected[$path]) { throw "Unexpected checked-out bytes: $path" }
+          }
+          $taskRoot = Join-Path $env:RUNNER_TEMP 'aitm-native-audit'
+          foreach ($item in @('profile','profile\AppData\Roaming','profile\AppData\Local','sdk','temp','nuget','artifacts','reuse-artifacts')) {
+            New-Item -ItemType Directory -Path (Join-Path $taskRoot $item) -Force | Out-Null
+          }
+          $config = Join-Path $taskRoot 'NuGet.Config'
+          [IO.File]::WriteAllText($config, '<configuration><packageSources><clear /></packageSources></configuration>', [Text.UTF8Encoding]::new($false))
+          @(
+            "AITM_TEST_ROOT=$taskRoot", "AITM_NUGET_CONFIG=$config", "USERPROFILE=$taskRoot\profile",
+            "APPDATA=$taskRoot\profile\AppData\Roaming", "LOCALAPPDATA=$taskRoot\profile\AppData\Local",
+            "TEMP=$taskRoot\temp", "TMP=$taskRoot\temp", "DOTNET_CLI_HOME=$taskRoot\sdk", "NUGET_PACKAGES=$taskRoot\nuget",
+            'DOTNET_CLI_TELEMETRY_OPTOUT=1', 'DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1',
+            'DOTNET_GENERATE_ASPNET_CERTIFICATE=0', 'DOTNET_NOLOGO=1'
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Run synthetic reader, channel and WPF tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $availableSdks = @(dotnet --list-sdks)
+          if ($LASTEXITCODE -ne 0 -or -not ($availableSdks | Where-Object { $_ -match '^10\.0\.403\s' })) { throw 'Pinned .NET SDK 10.0.403 is not installed on this runner.' }
+          if (Test-Path -LiteralPath 'global.json') { throw 'The pinned checkout unexpectedly contains global.json.' }
+          [IO.File]::WriteAllText((Join-Path (Get-Location).Path 'global.json'), '{"sdk":{"version":"10.0.403","rollForward":"disable"}}', [Text.UTF8Encoding]::new($false))
+          $selectedSdk = dotnet --version
+          if ($LASTEXITCODE -ne 0 -or $selectedSdk -ne '10.0.403') { throw 'The pinned .NET SDK was not selected.' }
+          $tests = @(
+            @{ Project='windows/native/Tests/ClaudeTitleRetention/ClaudeTitleRetention.Tests.csproj'; Dll='ClaudeTitleRetention.Tests/release/ClaudeTitleRetention.Tests.dll' },
+            @{ Project='windows/native/Tests/ClaudeFileSource/ClaudeFileSource.Tests.csproj'; Dll='ClaudeFileSource.Tests/release/ClaudeFileSource.Tests.dll' },
+            @{ Project='windows/native/Tests/ClaudeLoop/ClaudeLoop.Tests.csproj'; Dll='ClaudeLoop.Tests/release/ClaudeLoop.Tests.dll' },
+            @{ Project='windows/native/Tests/ClaudeFileUi/ClaudeFileUi.Tests.csproj'; Dll='ClaudeFileUi.Tests/release/AITaskMonitor.Prototype.Tests.dll' },
+            @{ Project='windows/native/Prototype/Tests/Prototype.Tests.csproj'; Dll='Prototype.Tests/release/AITaskMonitor.Prototype.Tests.dll' },
+            @{ Project='windows/native/Tests/LoopWarningUi/LoopWarningUi.Tests.csproj'; Dll='LoopWarningUi.Tests/release/AITaskMonitor.Prototype.Tests.dll' }
+          )
+          foreach ($test in $tests) {
+            dotnet build $test.Project -c Release --configfile $env:AITM_NUGET_CONFIG --artifacts-path "$env:AITM_TEST_ROOT\artifacts" -p:NuGetAudit=false --nologo --verbosity quiet
+            if ($LASTEXITCODE -ne 0) { throw "Build failed: $($test.Project)" }
+            dotnet (Join-Path "$env:AITM_TEST_ROOT\artifacts\bin" $test.Dll)
+            if ($LASTEXITCODE -ne 0) { throw "Test failed: $($test.Project)" }
+          }
+      - name: Render known names with the same synthetic ID
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $file = 'windows/native/Tests/ClaudeFileUi/Program.cs'
+          $text = [IO.File]::ReadAllText((Resolve-Path $file))
+          $before = '            string suffix = json.RootElement.GetProperty("suffix").GetString()!;'
+          $after = '            string suffix = json.RootElement.GetProperty("suffix").GetString()!.Replace("\"third\"", "\"first\"", StringComparison.Ordinal);'
+          if (-not $text.Contains($before)) { throw 'The synthetic UI fixture did not match its expected source.' }
+          [IO.File]::WriteAllText((Resolve-Path $file), $text.Replace($before, $after), [Text.UTF8Encoding]::new($false))
+          dotnet build 'windows/native/Tests/ClaudeFileUi/ClaudeFileUi.Tests.csproj' -c Release --configfile $env:AITM_NUGET_CONFIG --artifacts-path "$env:AITM_TEST_ROOT\reuse-artifacts" -p:NuGetAudit=false --nologo --verbosity quiet
+          if ($LASTEXITCODE -ne 0) { throw 'Same-ID fixture build failed.' }
+          dotnet "$env:AITM_TEST_ROOT\reuse-artifacts\bin\ClaudeFileUi.Tests\release\AITaskMonitor.Prototype.Tests.dll"
+          if ($LASTEXITCODE -ne 0) { throw 'Same-ID fixture failed.' }
+      - name: Save synthetic render evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-native-claude-reader-audit
+          path: ${{ runner.temp }}/aitm-native-audit/temp
+          if-no-files-found: ignore
+          overwrite: false
+          retention-days: 3
