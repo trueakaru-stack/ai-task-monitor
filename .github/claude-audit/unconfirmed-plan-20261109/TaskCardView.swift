@@ -69,7 +69,7 @@ struct TaskCardView: View {
                 Text("\(task.planStatusNote ?? tr("План задачи", "Task plan")) · \(task.stepCountLabel)")
                     .font(.system(size: 11))
                     .foregroundStyle(task.planStatusNote == nil ? MonitorTheme.muted :
-                                     (task.provider == .claude && colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary))
+                                     (colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary))
                     .padding(.top, 14)
             }
         }
