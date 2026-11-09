@@ -1,0 +1,35 @@
+{
+  "scope": "Nine synthetic Node tests only; no XCTest, UI, live agent, or installer.",
+  "candidateManifestSha256": "2806821366bbce3a5e24dd6f3207fcb52ab7bd8bc5cd9e23f50e75bf0b855d21",
+  "priorV2ManifestSha256": "c7fd3fcdf40ac3f82a64a886c567dcdba42c689163127d6be6f38863617f43cf",
+  "previousEvidence": [
+    "macOS 15: v1 run 42665410973 job 129327624257; 371 XCTest passed; restart Node import failed.",
+    "macOS 26: v2 job 129337147039; 371 XCTest and release build passed; restart Node import failed."
+  ],
+  "fix": "One test-only relative import changed from ./integrations/provider-observers.mjs to ../macos/integrations/provider-observers.mjs.",
+  "expectedNodeTests": 9,
+  "workflowSha256": "47f0a6518ab576dbfd82fba730f98307815d8e05603fb36eb8bf59eda0bfefeb",
+  "networkEvidence": "Strict profile denies network*. Prior probe confirms only TCP loopback denial for IPv4/IPv6 and Unix socket availability; UDP, wildcard bind and external-IP denial are not dynamically verified.",
+  "trigger": "push to macos when any changed path matches this unique v3 workflow or v3 input; job also requires marker [macos-restart-node-v3-20261109]; entire commit requires separate verification.",
+  "fixtures": {
+    "candidate.sha256": "2806821366bbce3a5e24dd6f3207fcb52ab7bd8bc5cd9e23f50e75bf0b855d21",
+    "controls/restart-v2-gate-before.test.mjs": "062f5d012e0d26ca78235bbf5a36494277ff482143d830f0f63f16cf60e01624",
+    "macos/integrations/provider-events.mjs": "bb94bd568d708dec26e66b00f8e1e579639a72fc924b883ef1317b255191e7d0",
+    "macos/integrations/provider-observers.mjs": "f1fd02ae1f0abcce3848f5291de58b3f2c1c301f874d92c3de93d564b8a40399",
+    "macos/integrations/provider-transport.mjs": "6430a06f27f9abe1eb6780d45e7a0a79e75c2220d3c27340abbcd6cd9e5c90d2",
+    "scripts/network-probe.py": "3cbf34520bd744c40730e88533d9cdbc011d488ef8855099f5654219ebd47954",
+    "scripts/run-node-v3.sh": "4c913c331b2eb6819fe7cc5bcc7563074a6728863e5212ac5b241ac786685ea1",
+    "scripts/verify-provenance.py": "337d0a152dcef776a5e46b08bc51ceca024a9492b470dd809a7927db6ab5ef5b",
+    "synthetic/opencode-v2-subscription.test.mjs": "bdab9116cfbeda63a7ae6869633af78517140718203f238f1a703da2ef8d86c8",
+    "synthetic/restart-v2-gate.mjs": "0b35f7a5ebd45ff77e86d1975872c541a47c8df397005fff5d01e7d388f77872",
+    "synthetic/restart-v2-gate.test.mjs": "eba596de0f5a33d21831a57a71f5101d1b9778b389294632fbd60a08fb358b6f",
+    "v2-staged.sha256": "c7fd3fcdf40ac3f82a64a886c567dcdba42c689163127d6be6f38863617f43cf"
+  },
+  "excluded": [
+    "All XCTest",
+    "Other integration groups",
+    "UI and visual verification",
+    "Real agent accounts and profiles",
+    "Application bundle and installer"
+  ]
+}

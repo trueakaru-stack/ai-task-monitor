@@ -1,0 +1,71 @@
+name: macOS limited restart Node verification v3
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-restart-node-v3-20261109.yml"
+      - ".github/restart-node-v3-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  restart-node:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/macos' && contains(github.event.head_commit.message, '[macos-restart-node-v3-20261109]')
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Check disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          for tool in /bin/bash /usr/bin/env /usr/bin/git /usr/bin/python3 /usr/bin/shasum /usr/bin/sandbox-exec; do
+            test -x "$tool"
+            /usr/bin/shasum -a 256 "$tool"
+          done
+      - name: Check out exact public sources without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'trueakaru-stack/ai-task-monitor'
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test -d "$GITHUB_WORKSPACE"
+          test -z "$(ls -A "$GITHUB_WORKSPACE")"
+          run_git() {
+            /usr/bin/env -i 'PATH=/usr/bin:/bin' 'GIT_CONFIG_NOSYSTEM=1' \
+              'GIT_CONFIG_GLOBAL=/dev/null' 'GIT_TERMINAL_PROMPT=0' \
+              /usr/bin/git -c credential.helper= -c core.autocrlf=false "$@"
+          }
+          run_git init "$GITHUB_WORKSPACE"
+          run_git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 https://github.com/trueakaru-stack/ai-task-monitor.git "$GITHUB_SHA"
+          run_git -C "$GITHUB_WORKSPACE" checkout --detach "$GITHUB_SHA"
+          test "$(run_git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Select preinstalled Node
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_ARCH" in ARM64) arch=arm64 ;; X64) arch=x64 ;; *) exit 1 ;; esac
+          nodebin="$RUNNER_TOOL_CACHE/node/24.22.2/$arch/bin"
+          test -x "$nodebin/node"
+          /usr/bin/shasum -a 256 "$nodebin/node"
+          test "$("$nodebin/node" --version)" = 'v24.22.2'
+          printf '%s\n' "$nodebin" >> "$GITHUB_PATH"
+      - name: Reproduce old import and run nine isolated Node tests
+        shell: bash
+        run: bash "$GITHUB_WORKSPACE/.github/restart-node-v3-20261109/scripts/run-node-v3.sh"
+      - name: Upload synthetic test evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-restart-node-v3-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-restart-v3-output/
+          if-no-files-found: warn
+          retention-days: 7
