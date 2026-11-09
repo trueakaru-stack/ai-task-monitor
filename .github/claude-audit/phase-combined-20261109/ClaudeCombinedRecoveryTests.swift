@@ -216,4 +216,28 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
         XCTAssertFalse(store.unavailableSources.contains(.codex))
     }
 
+
+    func testUnreadablePartialTailCannotBecomeConfirmedAfterSameFileRepair() throws {
+        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(-3)
+        let original = try encode([prompt("case", time: time), created("case", title: "Known title", time: time.addingTimeInterval(0.1))])
+        try original.write(to: file)
+        let reader = ClaudeTaskReader(eventFile: file)
+        XCTAssertFalse(try reader.readSnapshot(now: Date()).sourceUncertain)
+        let writer = try FileHandle(forWritingTo: file)
+        defer { try? writer.close() }
+        try writer.seekToEnd()
+        try writer.write(contentsOf: Data("{\"partial\":".utf8))
+        XCTAssertThrowsError(try reader.readSnapshot(now: Date()))
+        try writer.truncate(atOffset: UInt64(original.count))
+        try writer.seekToEnd()
+        try writer.write(contentsOf: encode([completed("case", time: time.addingTimeInterval(0.2))]))
+        let after = try reader.readSnapshot(now: Date())
+        XCTAssertTrue(after.sourceUncertain)
+        let task = try XCTUnwrap(after.tasks.first(where: { $0.id == "claude:case" }))
+        XCTAssertTrue(task.isUnconfirmed)
+        XCTAssertFalse(task.planConfirmed)
+        XCTAssertNil(task.progress)
+    }
+
 }

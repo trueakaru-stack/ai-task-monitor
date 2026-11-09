@@ -226,7 +226,8 @@ final class ParserTests: XCTestCase {
         XCTAssertTrue(futureSnapshot.tasks.contains { $0.id == "claude:legacy-session" && $0.isUnconfirmed })
         let stoppedSnapshot = try reader.readSnapshot(now: now.addingTimeInterval(2), observedSince: now.addingTimeInterval(-1))
         XCTAssertTrue(stoppedSnapshot.terminalIDs.isEmpty)
-        XCTAssertTrue(stoppedSnapshot.neutralEndedIDs.contains("claude:legacy-session"))
+        XCTAssertFalse(stoppedSnapshot.neutralEndedIDs.contains("claude:legacy-session"))
+        XCTAssertTrue(stoppedSnapshot.tasks.contains { $0.id == "claude:legacy-session" && $0.isUnconfirmed })
     }
 
     func testClaudeHookDoesNotStorePromptOrWorkingPath() throws {

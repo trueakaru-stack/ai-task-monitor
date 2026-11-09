@@ -456,6 +456,21 @@ struct ClaudeTaskReader {
 
     func readSnapshot(now: Date = Date(), observedSince: Date? = nil,
                       phaseEvidence: ClaudePhaseEvidence? = nil) throws -> ClaudeTaskSnapshot {
+        do {
+            return try readSnapshotImpl(now: now, observedSince: observedSince, phaseEvidence: phaseEvidence)
+        } catch ClaudeReadError.journalBusy {
+            // A cooperative writer holding the shared lock is not a loss.
+            throw ClaudeReadError.journalBusy
+        } catch {
+            // A failed read can conceal overwritten or dropped events. No
+            // later successful read alone repairs their provenance.
+            sourceLossLatch.markSaturated()
+            throw error
+        }
+    }
+
+    private func readSnapshotImpl(now: Date, observedSince: Date?,
+                                  phaseEvidence: ClaudePhaseEvidence?) throws -> ClaudeTaskSnapshot {
         let files: (ClaudeFileBytes, Result<ClaudeFileBytes?, Error>) = try withClaudeJournalReadLock(eventFile, timing: readLockTiming) {
             let current = try readClaudeFile(eventFile)
             guard let legacyFile, !current.data.isEmpty else { return (current, .success(nil)) }
@@ -488,6 +503,7 @@ struct ClaudeTaskReader {
             scopeIncomplete = scopeIncomplete || prior.scopeIncomplete
             legacy = prior.records
         }
+        if currentInput.truncated || legacyTruncated { sourceLossLatch.markSaturated() }
         let sourceUncertain = sourceLossLatch.state().known
         if sourceUncertain && scopeIncomplete { sourceLossLatch.markSaturated() }
         // No documented event generation/order proves a fresh scope after a
