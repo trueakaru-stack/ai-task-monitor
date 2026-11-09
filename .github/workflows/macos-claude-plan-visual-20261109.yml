@@ -42,14 +42,14 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain)"
-          git diff --quiet cf9dce5918011a581f68193c74fdda196f23d35b "$GITHUB_SHA" -- macos
+          git diff --quiet 687da84d0245db6e78bc9273c5ab616d147f4e33 "$GITHUB_SHA" -- macos
           cd "$GITHUB_WORKSPACE/.github/claude-audit/plan-visual-20261109"
           printf '%s  %s\n' \
             '7c8b0fbe144458ea5ad3622df303e8aba39331f95804c559329186e9856e2090' TaskCardView.swift \
             '9332bf7142fead0bdad1bdf8f9adf067bee585d5a3135b3ed6f7a245af45b76c' SnapshotRenderer.swift \
             '81fd267e3445c0fc77af00479c441ed701d0aea5a2479dbfbc1b70277d273760' RootView.swift \
-            '54219cf61c1deb4a9e344f1665aec93e12f21e521950c0dc218e6b170e596832' Models.swift \
-            '8462d208aa6b11c03c5f0effb232e2a64d94215f3fb1618cfca89bbd8fdd68d3' ClaudePlanLabelTests.swift \
+            '27e09491bab0a34e802722aff19d7d97c09335e49b6d5146cad2900fddec8946' Models.swift \
+            'c93b867544c1c469b4b6cfa06fe4211971c75ae0c3b21fb797738afeed0fdb31' ClaudePlanLabelTests.swift \
             | shasum -a 256 -c -
       - name: Render both variants without network
         shell: bash
