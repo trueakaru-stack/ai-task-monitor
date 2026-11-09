@@ -1,0 +1,100 @@
+import Darwin
+import Foundation
+import XCTest
+@testable import AITaskMonitor
+
+final class ExternalProviderRuntimeTests: XCTestCase {
+    private let sourceScope = String(repeating: "a", count: 32)
+    private func send(_ json: String, directory: String) throws {
+        let descriptor = try XCTUnwrap(ClaudeLoopSocket.connect(path: directory + "/events.sock"))
+        defer { Darwin.close(descriptor) }
+        let body = Data(json.utf8)
+        let count = body.count
+        let header = Data([UInt8(count & 255), UInt8((count >> 8) & 255), UInt8((count >> 16) & 255), UInt8((count >> 24) & 255)])
+        XCTAssertTrue(ClaudeLoopSocket.write(descriptor, data: header + body))
+        XCTAssertEqual(ClaudeLoopSocket.read(descriptor, count: 1), Data([0x06]))
+    }
+
+    private func waitFor(_ id: String, runtime: ExternalProviderRuntime, stepCount: Int? = nil) throws -> [MonitoredTask] {
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline {
+            let tasks = runtime.snapshot(allowed: [.opencode, .deepseek], profileScopes: [.deepseek: [sourceScope]])
+            if tasks.contains(where: { task in task.id == id && (stepCount.map { task.steps.count == $0 } ?? true) }) { return tasks }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        throw NSError(domain: "ExternalProviderRuntimeTests", code: 1)
+    }
+
+    func testConnectedSourcesWaitingPlansAndDelayedReads() throws {
+        let directory = "/private/tmp/aitm-provider-runtime-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let channel = try ExternalProviderChannel(directory: directory)
+        let runtime = ExternalProviderRuntime(channel: channel)
+        defer { runtime.stop() }
+        XCTAssertTrue(runtime.snapshot(allowed: [.opencode, .deepseek], profileScopes: [.deepseek: [sourceScope]]).isEmpty)
+        try send(#"{"version":1,"provider":"hermes","session":"disabled","kind":"active"}"#, directory: directory)
+        Thread.sleep(forTimeInterval: 0.1)
+        XCTAssertTrue(runtime.snapshot(allowed: [.opencode, .deepseek], profileScopes: [.deepseek: [sourceScope]]).isEmpty)
+        try send(#"{"version":1,"provider":"opencode","session":"one","kind":"tool_started","call":"c1","action":"command"}"#, directory: directory)
+        XCTAssertTrue(try XCTUnwrap(waitFor("opencode:one", runtime: runtime).first).isActive)
+        try send(#"{"version":1,"provider":"opencode","session":"one","kind":"plan","steps":[{"title":"One","status":"done"},{"title":"Two","status":"active"}]}"#, directory: directory)
+        let planned = try XCTUnwrap(waitFor("opencode:one", runtime: runtime, stepCount: 2).first)
+        XCTAssertEqual(planned.progress, 50)
+        XCTAssertEqual(planned.progressKind, .exact)
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(sourceScope)_two\",\"kind\":\"waiting\"}", directory: directory)
+        let tasks = try waitFor("deepseek:\(sourceScope)_two", runtime: runtime)
+        let waiting = try XCTUnwrap(tasks.first { $0.provider == .deepseek })
+        XCTAssertTrue(waiting.isWaiting)
+        XCTAssertFalse(waiting.isActive)
+        XCTAssertFalse(waiting.startKey.isEmpty)
+        let aged = runtime.snapshot(allowed: [.opencode, .deepseek], profileScopes: [.deepseek: [sourceScope]], now: Date().addingTimeInterval(1_860))
+        XCTAssertTrue(aged.allSatisfy { !$0.isActive && !$0.isWaiting && $0.isUnconfirmed })
+        XCTAssertFalse(runtime.snapshot(allowed: [.deepseek], profileScopes: [.deepseek: [sourceScope]]).contains { $0.provider == .opencode })
+        try send(#"{"version":1,"provider":"opencode","session":"while_disconnected","kind":"active"}"#, directory: directory)
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(sourceScope)_barrier\",\"kind\":\"active\"}", directory: directory)
+        let deadline = Date().addingTimeInterval(3)
+        var barrierSeen = false
+        while Date() < deadline {
+            if runtime.snapshot(allowed: [.deepseek], profileScopes: [.deepseek: [sourceScope]]).contains(where: { $0.id == "deepseek:\(sourceScope)_barrier" }) {
+                barrierSeen = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        XCTAssertTrue(barrierSeen)
+        let reconnected = runtime.snapshot(allowed: [.deepseek, .opencode], profileScopes: [.deepseek: [sourceScope]])
+        XCTAssertTrue(reconnected.contains { $0.id == "opencode:one" && $0.isUnconfirmed })
+        XCTAssertFalse(reconnected.contains { $0.id == "opencode:while_disconnected" })
+        try send(#"{"version":1,"provider":"opencode","session":"fresh","kind":"active"}"#, directory: directory)
+        XCTAssertTrue(try waitFor("opencode:fresh", runtime: runtime).contains { $0.id == "opencode:fresh" })
+        XCTAssertTrue(runtime.stop())
+    }
+
+    func testProfileScopesIsolateFailureDisconnectAndLateEvents() throws {
+        let directory = "/private/tmp/aitm-provider-scopes-\(UUID().uuidString)"
+        defer { try? FileManager.default.removeItem(atPath: directory) }
+        let runtime = ExternalProviderRuntime(channel: try ExternalProviderChannel(directory: directory))
+        defer { runtime.stop() }
+        let first = String(repeating: "a", count: 32)
+        let second = String(repeating: "b", count: 32)
+        let both: [TaskProvider: Set<String>] = [.deepseek: [first, second]]
+        _ = runtime.snapshot(allowed: [.deepseek, .opencode], profileScopes: both)
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(first)_one\",\"kind\":\"started\"}", directory: directory)
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(second)_two\",\"kind\":\"started\"}", directory: directory)
+        try send(#"{"version":1,"provider":"opencode","session":"other","kind":"started"}"#, directory: directory)
+        var tasks = runtime.snapshot(allowed: [.deepseek, .opencode], profileScopes: both)
+        XCTAssertEqual(tasks.filter(\.isActive).count, 3)
+        let healthy: [TaskProvider: Set<String>] = [.deepseek: [first]]
+        let uncertain: [TaskProvider: Set<String>] = [.deepseek: [second]]
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(second)_two\",\"kind\":\"active\"}", directory: directory)
+        tasks = runtime.snapshot(allowed: [.deepseek, .opencode], profileScopes: healthy, uncertainScopes: uncertain)
+        XCTAssertTrue(try XCTUnwrap(tasks.first { $0.id == "deepseek:\(first)_one" }).isActive)
+        XCTAssertTrue(try XCTUnwrap(tasks.first { $0.id == "deepseek:\(second)_two" }).isUnconfirmed)
+        XCTAssertTrue(try XCTUnwrap(tasks.first { $0.provider == .opencode }).isActive)
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(second)_two\",\"kind\":\"active\"}", directory: directory)
+        try send("{\"version\":1,\"provider\":\"deepseek\",\"session\":\"\(second)_two\",\"kind\":\"gap\"}", directory: directory)
+        tasks = runtime.snapshot(allowed: [.deepseek, .opencode], profileScopes: healthy)
+        XCTAssertFalse(tasks.contains { $0.id == "deepseek:\(second)_two" })
+        XCTAssertTrue(try XCTUnwrap(tasks.first { $0.id == "deepseek:\(first)_one" }).isActive)
+    }
+}

@@ -1,0 +1,127 @@
+name: macOS provider v1 candidate synthetic tests
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-v1-isolation-candidate-20261109.yml"
+      - ".github/provider-audit/v1-isolation-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  candidate-tests:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[macos-v1-candidate]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Check disposable runner
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify and stage isolated candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet cf9dce5918011a581f68193c74fdda196f23d35b "$GITHUB_SHA" -- macos
+          INPUT="$GITHUB_WORKSPACE/.github/provider-audit/v1-isolation-20261109"
+          cd "$INPUT"
+          printf '%s  %s\n' \
+            'eca945e759d4b9899b877132f001a613cf59747730496e12d9a08ea8e857454c' Sources/DeepSeekIntegration.swift \
+            '2f39de90e60a4b7004cf4954bc95911accd8c699929e1cf646b9d4b2bd9ceca7' Sources/ExternalProviderChannel.swift \
+            '4ffcfa979de40781a863c7b6db780d66fe025990e9a3cc59794a8b6db2bb5162' Sources/ExternalProviderRuntime.swift \
+            '71ffaf567bfd4e8aa270d7f15d5fd6123e990e3619a0c08541587374ea272cd0' Sources/ExternalProviderState.swift \
+            'f5d4080c45389d79c8b30e86921845b3f0dfa219c6e7d9432349335275244f34' Sources/ExternalProviderTaskMapper.swift \
+            'd145d325373e9904bec9143f202a5be8ac2c237bb33de6cd834f8668795f3588' Sources/ProviderScopeHistory.swift \
+            'f9efb2d29599f3a1f875a09099b357efd73695f2becec67756c2b4fa4385229e' Sources/TaskStore.swift \
+            '3aab28f035f0c23a11d8f36fe8949a5a2ada7f4d7631ae9b24d769fbbb1a1574' Tests/ExternalProviderRuntimeTests.swift \
+            'a3272cce621732216fa0c785ecd984e1cdeb0a2cacef936197f6f18f6c5444f2' Tests/ExternalProviderTaskStoreTests.swift \
+            '74fe801b37577b3a96494a8452565f33a9a4c01f5cf904e9f1fd1f9f33f49225' Tests/V1IsolationFixTests.swift \
+            '739cf66460e41fe730ae57a56d3c751fd09f51001d294b22dfce5507fdd96570' Tests/V1ProtectionTests.swift \
+            'bb64166fb84b8b88aa33540533988edf3f2ebad7324cfa10964602c65b4ee207' Tests/V1RuntimeProtectionTests.swift \
+            | shasum -a 256 -c -
+          cp "$INPUT"/Sources/*.swift "$GITHUB_WORKSPACE/macos/Sources/AITaskMonitor/"
+          cp "$INPUT"/Tests/*.swift "$GITHUB_WORKSPACE/macos/Tests/AITaskMonitorTests/"
+      - name: Run isolated provider tests
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aitm-v1-home" "$RUNNER_TEMP/aitm-v1-tmp" "$RUNNER_TEMP/aitm-v1-support"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*) (allow network* (local unix-socket)) (allow network-outbound (remote unix-socket))'
+          cat > "$RUNNER_TEMP/aitm-v1-network-probe.py" <<'PY'
+          import errno
+          import os
+          import socket
+          import sys
+
+          try:
+              internet = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+          except OSError as error:
+              if error.errno not in (errno.EPERM, errno.EACCES): raise
+          else:
+              try:
+                  result = internet.connect_ex(("127.0.0.1", 0))
+                  if result not in (errno.EPERM, errno.EACCES): sys.exit(1)
+              finally:
+                  internet.close()
+          path = "/private/tmp/aitm-v1-probe-" + str(os.getpid())
+          server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          try:
+              server.bind(path)
+              server.listen(1)
+              client.connect(path)
+              peer, _ = server.accept()
+              peer.close()
+          finally:
+              client.close()
+              server.close()
+              if os.path.exists(path): os.unlink(path)
+          print("Network probe: IP denied; synthetic local Unix socket allowed")
+          PY
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-v1-home" \
+              "TMPDIR=$RUNNER_TEMP/aitm-v1-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-v1-support" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-v1-network-probe.py"
+          run_isolated /usr/bin/xcrun swift --version
+          audit_status=0
+          for entry in V1IsolationFixTests:12 V1ProtectionTests:4 V1RuntimeProtectionTests:1 ExternalProviderRuntimeTests:2 ExternalProviderTaskStoreTests:3 ExternalProviderChannelTests:2 ExternalProviderFilterTests:1 ExternalProviderQueueRaceTests:1 ExternalProviderStateTests:7 ExternalProviderTaskMapperTests:2; do
+            suite="${entry%:*}"
+            count="${entry#*:}"
+            log="$RUNNER_TEMP/aitm-v1-$suite.log"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | /usr/bin/tee "$log"; then
+              audit_status=1
+            fi
+            if ! /usr/bin/grep -Eq "Executed $count tests?, with 0 failures" "$log"; then
+              printf '%s\n' "Missing successful expected test count: $suite"
+              audit_status=1
+            fi
+          done
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox --configuration release; then
+            audit_status=1
+          fi
+          exit "$audit_status"
