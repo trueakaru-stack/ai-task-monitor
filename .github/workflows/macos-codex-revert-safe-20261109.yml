@@ -1,0 +1,139 @@
+name: macOS Codex revert synthetic audit
+
+on:
+  push:
+    branches: [macos]
+    paths:
+      - ".github/workflows/macos-codex-revert-safe-20261109.yml"
+      - ".github/codex-audit/revert-safe-20261109/**"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    if: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[codex-revert-audit]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - name: Verify disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+      - name: Select Xcode on macOS 15
+        if: ${{ matrix.runner == 'macos-15' }}
+        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Verify pinned source and fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          git diff --quiet 0b11986e4c2a3570a46eef49b5e46b95ca56cb80 "$GITHUB_SHA" -- macos
+          cd "$GITHUB_WORKSPACE/.github/codex-audit/revert-safe-20261109"
+          printf '%s  %s\n' \
+            '2480f217f7db42763ec4f43cd367b98505f6d37b96e06a6041ed6ed3f8ce785a' CodexTaskReader.swift \
+            '734187524ad64e778ffb1bdea773b350dda77d91e10a888867a1e3819a580ec2' TaskStore.swift \
+            'a804b8dd29db27c82276eb32203634f4e75a7d531a89a8d30c29222d37e87ac1' CodexRevertSafetyTests.swift \
+            'fcf1bdf1f6166701c3403d3bcd6e43fc16a0f5581a18d20641535b7e6f507a9a' SnapshotRenderer.swift \
+            '2612566bf9ce50fd2c8f201f58ac19042ac07e54f1a6ff26c3480057a47a2410' CodexCloudStoreTests.swift \
+            'ed181937cf1e926576b55bfec13c754b693aa0bbe24cbb331e89d703a1d49429' CodexLongTurnTests.swift \
+            '8accf33c2b8fcc90c721b331a15a9fceb95abc84b76e52919bd26b32ede288dc' CodexSourceStalePlanTests.swift \
+            '1940d30b91f7b98ecc13286b45a0213a95bc2ba755859a129d9bc037d1523771' ParserTests.swift \
+            | shasum -a 256 -c -
+      - name: Render and test with isolated synthetic data
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aitm-revert-user" "$RUNNER_TEMP/aitm-revert-tmp" "$RUNNER_TEMP/aitm-revert-support" \
+            "$RUNNER_TEMP/aitm-revert/base" "$RUNNER_TEMP/aitm-revert/candidate"
+          DEVELOPER="$(xcode-select -p)"
+          PROFILE='(version 1) (allow default) (deny network*)'
+          cat > "$RUNNER_TEMP/aitm-revert-network-probe.py" <<'PY'
+          import errno
+          import socket
+          import sys
+
+          for family, destination in ((socket.AF_INET, ("127.0.0.1", 0)), (socket.AF_INET6, ("::1", 0))):
+              try:
+                  client = socket.socket(family, socket.SOCK_STREAM)
+              except OSError as error:
+                  if error.errno not in (errno.EPERM, errno.EACCES): raise
+              else:
+                  try:
+                      if client.connect_ex(destination) not in (errno.EPERM, errno.EACCES): sys.exit(1)
+                  finally:
+                      client.close()
+          print("Network probe: IPv4/IPv6 denied")
+          PY
+          run_isolated() {
+            /usr/bin/env -i "PATH=/usr/bin:/bin" "DEVELOPER_DIR=$DEVELOPER" \
+              "CFFIXED_USER_HOME=$RUNNER_TEMP/aitm-revert-user" \
+              "TMPDIR=$RUNNER_TEMP/aitm-revert-tmp/" \
+              "AI_TASK_MONITOR_SUPPORT_DIR=$RUNNER_TEMP/aitm-revert-support" \
+              "AITM_CODEX_PARTIAL_PREVIEW_ONLY=1" \
+              /usr/bin/sandbox-exec -p "$PROFILE" "$@"
+          }
+          run_isolated /usr/bin/python3 -I -S -B "$RUNNER_TEMP/aitm-revert-network-probe.py"
+          INPUT="$GITHUB_WORKSPACE/.github/codex-audit/revert-safe-20261109"
+          cp "$INPUT/SnapshotRenderer.swift" Sources/AITaskMonitor/SnapshotRenderer.swift
+          # The published baseline has only a whole-source warning. This
+          # preview-only shim uses that existing warning as the visual reference.
+          run_isolated /usr/bin/python3 -I -S -B - <<'PY'
+          from pathlib import Path
+          path = Path('Sources/AITaskMonitor/TaskStore.swift')
+          value = path.read_text(encoding='utf-8')
+          anchor = '    func setPreviewUpdate() {'
+          assert value.count(anchor) == 1
+          shim = '    func setPreviewCodexPartial() {\n        if !unavailableSources.contains(.codex) { unavailableSources.append(.codex) }\n    }\n\n'
+          path.write_text(value.replace(anchor, shim + anchor), encoding='utf-8')
+          PY
+          run_isolated /usr/bin/xcrun swift build --disable-sandbox
+          run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-revert/base"
+          cp "$INPUT/CodexTaskReader.swift" Sources/AITaskMonitor/CodexTaskReader.swift
+          cp "$INPUT/TaskStore.swift" Sources/AITaskMonitor/TaskStore.swift
+          for name in CodexRevertSafetyTests.swift CodexCloudStoreTests.swift CodexLongTurnTests.swift CodexSourceStalePlanTests.swift ParserTests.swift; do
+            cp "$INPUT/$name" "Tests/AITaskMonitorTests/$name"
+          done
+          audit_status=0
+          for entry in CodexRevertSafetyTests:13 CodexCloudStoreTests:1 CodexLongTurnTests:3 CodexSourceStalePlanTests:1 ParserTests:23 TaskFocusTests:4 ClaudePlanLabelTests:2 ExternalProviderStateTests:7 UnconfirmedPlanModelTests:3; do
+            suite="${entry%:*}"
+            count="${entry#*:}"
+            log="$RUNNER_TEMP/aitm-revert-$suite.log"
+            if ! run_isolated /usr/bin/xcrun swift test --disable-sandbox --filter "$suite" 2>&1 | /usr/bin/tee "$log"; then audit_status=1; fi
+            if ! /usr/bin/grep -Eq "Executed $count tests?, with 0 failures" "$log"; then
+              printf '%s\n' "Missing successful expected test count: $suite"
+              audit_status=1
+            fi
+            if /usr/bin/grep -Eq "Test Case .* skipped " "$log"; then audit_status=1; fi
+          done
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox --configuration release; then audit_status=1; fi
+          if ! run_isolated /usr/bin/xcrun swift build --disable-sandbox; then audit_status=1; fi
+          if ! run_isolated .build/debug/AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-revert/candidate"; then audit_status=1; fi
+          for variant in base candidate; do
+            count="$(find "$RUNNER_TEMP/aitm-revert/$variant" -name '*.png' -type f | wc -l | tr -d ' ')"
+            if [ "$count" != 24 ]; then printf 'Unexpected %s frame count: %s\n' "$variant" "$count"; audit_status=1; fi
+          done
+          exit "$audit_status"
+      - name: Upload synthetic comparison frames
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-codex-revert-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-revert/
+          if-no-files-found: error
+          retention-days: 7
