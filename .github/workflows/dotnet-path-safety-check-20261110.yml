@@ -57,6 +57,7 @@ jobs:
             $env:DOTNET_CLI_HOME = Join-Path $base 'failure-profile'
             $failureOutput = & dotnet new console --no-restore --output (Join-Path $base 'failure-project') --definitely-invalid-option 2>&1 | Out-String
             if ($LASTEXITCODE -eq 0) { throw 'The deliberately invalid command unexpectedly succeeded.' }
+            if (-not $failureOutput.Contains('--definitely-invalid-option')) { throw 'The command failed for an unexpected reason.' }
             if (-not (Get-ChildItem -LiteralPath $env:DOTNET_CLI_HOME -Recurse -Filter '*dotnetFirstUseSentinel' -ErrorAction SilentlyContinue | Select-Object -First 1)) {
               throw 'The failed command did not initialize the SDK in its separate profile.'
             }
