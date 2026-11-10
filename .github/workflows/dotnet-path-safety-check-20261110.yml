@@ -1,0 +1,67 @@
+name: Verify Windows SDK PATH protection
+on:
+  push:
+    branches: [codex/dotnet-path-safety-20261110]
+permissions:
+  contents: read
+jobs:
+  first-use:
+    runs-on: windows-2025
+    timeout-minutes: 8
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - name: Test successful and failed first use
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          function Read-PathState([string]$scope) {
+            $key = if ($scope -eq 'User') {
+              [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+            } else {
+              [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment', $false)
+            }
+            try {
+              return [pscustomobject]@{
+                Value = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                Kind = [string]$key.GetValueKind('Path')
+              }
+            } finally { $key.Dispose() }
+          }
+          $beforeUser = Read-PathState 'User'
+          $beforeMachine = Read-PathState 'Machine'
+          function Assert-PathUnchanged {
+            foreach ($scope in @('User', 'Machine')) {
+              $before = if ($scope -eq 'User') { $beforeUser } else { $beforeMachine }
+              $after = Read-PathState $scope
+              if ($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind) {
+                throw "$scope PATH changed during the protected test."
+              }
+            }
+          }
+          $base = Join-Path $env:RUNNER_TEMP 'dotnet-path-safety'
+          New-Item -ItemType Directory -Path $base | Out-Null
+          try {
+            $env:DOTNET_CLI_HOME = Join-Path $base 'success-profile'
+            & dotnet new console --no-restore --output (Join-Path $base 'success-project') --name PathSafetyFixture | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'The successful first-use command failed.' }
+            if (-not (Get-ChildItem -LiteralPath $env:DOTNET_CLI_HOME -Recurse -Filter '*dotnetFirstUseSentinel' -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+              throw 'The first-use marker was not created; SDK initialization was not verified.'
+            }
+            Assert-PathUnchanged
+            Write-Host 'Successful first use: PATH unchanged.'
+            $env:DOTNET_CLI_HOME = Join-Path $base 'failure-profile'
+            $failureOutput = & dotnet new console --no-restore --output (Join-Path $base 'failure-project') --definitely-invalid-option 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0) { throw 'The deliberately invalid command unexpectedly succeeded.' }
+            if (-not (Get-ChildItem -LiteralPath $env:DOTNET_CLI_HOME -Recurse -Filter '*dotnetFirstUseSentinel' -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+              throw 'The failed command did not initialize the SDK in its separate profile.'
+            }
+            Assert-PathUnchanged
+            Write-Host 'Failed first use: PATH unchanged.'
+          } finally {
+            Assert-PathUnchanged
+          }
