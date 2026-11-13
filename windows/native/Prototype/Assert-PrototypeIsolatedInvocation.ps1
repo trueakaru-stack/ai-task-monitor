@@ -7,7 +7,7 @@ function Assert-PrototypeIsolatedInvocation {
         [Parameter(Mandatory=$true)][string]$Edition
     )
 
-    $message = 'For safety, run this test in a separate PowerShell process using powershell.exe -NoProfile -ExecutionPolicy Bypass -File <path to Test-Prototype.ps1> and its required arguments. Do not use -NoExit.'
+    $message = 'For safety, run this test in a separate PowerShell process using powershell.exe -NoProfile -ExecutionPolicy Bypass -File <test script> and its required arguments. Do not use -NoExit.'
     if ($Edition -eq 'Desktop') { $executableName = 'powershell.exe' }
     elseif ($Edition -eq 'Core') { $executableName = 'pwsh.exe' }
     else { throw $message }

@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $prototype = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\Test-Prototype.ps1'))
+$capture = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Capture-PublishedCompact.ps1'))
 . (Join-Path $PSScriptRoot '..\Assert-PrototypeIsolatedInvocation.ps1')
 
 $syntheticRoot = Join-Path ([IO.Path]::GetPathRoot($prototype)) 'AI Task Monitor fixture\PowerShell'
@@ -62,46 +63,61 @@ foreach ($mode in @('call','dot-source')) {
     Assert-EnvironmentUnchanged
     $count++
 }
-
-# Exercise helper loading using a copy of the actual entry guard. Its remaining
-# body is replaced with a harmless sentinel, so a regression cannot clear this
-# test process's environment or launch the SDK.
-$entryText = [IO.File]::ReadAllText($prototype)
-$bodyMarker = '# Prototype test body starts below the invocation guard.'
-$markerIndex = $entryText.IndexOf($bodyMarker, [StringComparison]::Ordinal)
-if ($markerIndex -lt 0 -or $entryText.IndexOf($bodyMarker, $markerIndex + $bodyMarker.Length, [StringComparison]::Ordinal) -ge 0) {
-    throw 'The entry-guard test boundary is missing or ambiguous.'
+foreach ($mode in @('call','dot-source')) {
+    $message = ''
+    try {
+        if ($mode -eq 'call') { & $capture -PublishedSource $missing -OutputFile $missing -FixtureRoot $missing -Theme dark -Language ru -Scene gap }
+        else { . $capture -PublishedSource $missing -OutputFile $missing -FixtureRoot $missing -Theme dark -Language ru -Scene gap }
+    } catch { $message = $_.Exception.Message }
+    if ($message -notmatch 'separate PowerShell process') { throw 'The reference capture did not reject the unsafe invocation.' }
+    Assert-EnvironmentUnchanged
+    $count++
 }
-$entryGuard = $entryText.Substring(0, $markerIndex) + "`r`nthrow 'RESET_REACHED'`r`n"
+
+# Exercise copies of the actual guards. Replace their remaining bodies with a
+# harmless sentinel, so a regression cannot mutate the test environment or
+# launch the SDK or the reference application.
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('aitm-prototype-guard-' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
-foreach ($case in @('missing','empty','invalid','no-op','false','extra')) {
-    $fixture = Join-Path $fixtureRoot $case
-    [IO.Directory]::CreateDirectory($fixture) | Out-Null
-    $entry = Join-Path $fixture 'Test-Prototype.ps1'
-    $helper = Join-Path $fixture 'Assert-PrototypeIsolatedInvocation.ps1'
-    [IO.File]::WriteAllText($entry, $entryGuard, [Text.UTF8Encoding]::new($false))
-    if ($case -eq 'empty') { [IO.File]::WriteAllText($helper, '', [Text.UTF8Encoding]::new($false)) }
-    if ($case -eq 'invalid') { [IO.File]::WriteAllText($helper, 'function {', [Text.UTF8Encoding]::new($false)) }
-    if ($case -eq 'no-op') { [IO.File]::WriteAllText($helper, 'function Assert-PrototypeIsolatedInvocation {}', [Text.UTF8Encoding]::new($false)) }
-    if ($case -eq 'false') { [IO.File]::WriteAllText($helper, 'function Assert-PrototypeIsolatedInvocation { $false }', [Text.UTF8Encoding]::new($false)) }
-    if ($case -eq 'extra') { [IO.File]::WriteAllText($helper, 'function Assert-PrototypeIsolatedInvocation { $true; "unexpected" }', [Text.UTF8Encoding]::new($false)) }
-    foreach ($mode in @('call','dot-source')) {
-        $message = ''
-        $priorPreference = $ErrorActionPreference
-        try {
-            # The caller may use PowerShell's default non-terminating behavior.
-            $ErrorActionPreference = 'Continue'
+foreach ($target in @(
+    @{ Name='prototype'; Path=$prototype; Marker='# Prototype test body starts below the invocation guard.'; Entry='Test-Prototype.ps1'; Arguments=@{ SdkRoot=$missing; WorkDirectory=$missing } },
+    @{ Name='capture'; Path=$capture; Marker='# Reference capture body starts below the invocation guard.'; Entry='Tests/Capture-PublishedCompact.ps1'; Arguments=@{ PublishedSource=$missing; OutputFile=$missing; FixtureRoot=$missing; Theme='dark'; Language='ru'; Scene='gap' } }
+)) {
+    $entryText = [IO.File]::ReadAllText($target.Path)
+    $markerIndex = $entryText.IndexOf($target.Marker, [StringComparison]::Ordinal)
+    if ($markerIndex -lt 0 -or $entryText.IndexOf($target.Marker, $markerIndex + $target.Marker.Length, [StringComparison]::Ordinal) -ge 0) {
+        throw 'The entry-guard test boundary is missing or ambiguous.'
+    }
+    $entryGuard = $entryText.Substring(0, $markerIndex) + "`r`nthrow 'RESET_REACHED'`r`n"
+    foreach ($case in @('missing','empty','invalid','no-op','false','extra')) {
+        $fixture = Join-Path (Join-Path $fixtureRoot $target.Name) $case
+        $entry = Join-Path $fixture $target.Entry
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($entry)) | Out-Null
+        $helper = Join-Path $fixture 'Assert-PrototypeIsolatedInvocation.ps1'
+        [IO.File]::WriteAllText($entry, $entryGuard, [Text.UTF8Encoding]::new($false))
+        if ($case -eq 'empty') { [IO.File]::WriteAllText($helper, '', [Text.UTF8Encoding]::new($false)) }
+        if ($case -eq 'invalid') { [IO.File]::WriteAllText($helper, 'function {', [Text.UTF8Encoding]::new($false)) }
+        if ($case -eq 'no-op') { [IO.File]::WriteAllText($helper, 'function Assert-PrototypeIsolatedInvocation {}', [Text.UTF8Encoding]::new($false)) }
+        if ($case -eq 'false') { [IO.File]::WriteAllText($helper, 'function Assert-PrototypeIsolatedInvocation { $false }', [Text.UTF8Encoding]::new($false)) }
+        if ($case -eq 'extra') { [IO.File]::WriteAllText($helper, 'function Assert-PrototypeIsolatedInvocation { $true; "unexpected" }', [Text.UTF8Encoding]::new($false)) }
+        foreach ($mode in @('call','dot-source')) {
+            $message = ''
+            $priorPreference = $ErrorActionPreference
+            $entryArguments = $target.Arguments
             try {
-                if ($mode -eq 'call') { & $entry -SdkRoot $missing -WorkDirectory $missing 2>$null }
-                else { . $entry -SdkRoot $missing -WorkDirectory $missing 2>$null }
-            } catch { $message = $_.Exception.Message }
-        } finally { $ErrorActionPreference = $priorPreference }
-        if ($message -notmatch 'Prototype safety guard failed' -or $message -match 'RESET_REACHED') {
-            throw 'The entry guard did not fail closed when its safety helper was unavailable.'
+                # The caller may use PowerShell's default non-terminating behavior.
+                $ErrorActionPreference = 'Continue'
+                try {
+                    if ($mode -eq 'call') { & $entry @entryArguments 2>$null }
+                    else { . $entry @entryArguments 2>$null }
+                } catch { $message = $_.Exception.Message }
+            } finally { $ErrorActionPreference = $priorPreference }
+            if ($message -notmatch 'Prototype safety guard failed' -or $message -match 'RESET_REACHED') {
+                throw 'The entry guard did not fail closed when its safety helper was unavailable.'
+            }
+            Assert-EnvironmentUnchanged
+            $count++
         }
-        Assert-EnvironmentUnchanged
-        $count++
     }
 }
 
@@ -125,6 +141,37 @@ try {
     if (-not $process.WaitForExit(15000)) { $process.Kill(); throw 'The separate process did not exit.' }
     $output = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
     if ($process.ExitCode -eq 0 -or $output -notmatch 'The isolated \.NET SDK is missing') { throw 'The documented separate process did not reach the expected SDK check.' }
+} finally { $process.Dispose() }
+Assert-EnvironmentUnchanged
+$count++
+
+# A separate -File reference capture must pass its real guard. Run only a
+# synthetic copy whose body is a sentinel; no reference application is opened.
+$positiveRoot = Join-Path $fixtureRoot 'capture-positive'
+$positiveEntry = Join-Path $positiveRoot 'Tests/Capture-PublishedCompact.ps1'
+[IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($positiveEntry)) | Out-Null
+$captureText = [IO.File]::ReadAllText($capture)
+$captureMarker = '# Reference capture body starts below the invocation guard.'
+$captureBoundary = $captureText.IndexOf($captureMarker, [StringComparison]::Ordinal)
+if ($captureBoundary -lt 0) { throw 'The reference capture guard boundary is missing.' }
+[IO.File]::WriteAllText($positiveEntry, $captureText.Substring(0, $captureBoundary) + "`r`nWrite-Output 'GUARD_PASSED'`r`n", [Text.UTF8Encoding]::new($false))
+[IO.File]::Copy((Join-Path $PSScriptRoot '..\Assert-PrototypeIsolatedInvocation.ps1'), (Join-Path $positiveRoot 'Assert-PrototypeIsolatedInvocation.ps1'))
+if ($positiveEntry.Contains('"')) { throw 'Synthetic paths contain an unsupported quote.' }
+$info = New-Object Diagnostics.ProcessStartInfo
+$info.FileName = $windowsPowerShell
+$info.Arguments = '-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "' + $positiveEntry + '" -PublishedSource "' + $missing + '" -OutputFile "' + $missing + '" -FixtureRoot "' + $missing + '" -Theme dark -Language ru -Scene gap'
+$info.UseShellExecute = $false
+$info.CreateNoWindow = $true
+$info.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
+$info.RedirectStandardOutput = $true
+$info.RedirectStandardError = $true
+$process = [Diagnostics.Process]::Start($info)
+try {
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $stderr = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit(15000)) { $process.Kill(); throw 'The reference guard process did not exit.' }
+    $output = $stdout.GetAwaiter().GetResult() + $stderr.GetAwaiter().GetResult()
+    if ($process.ExitCode -ne 0 -or $output -notmatch 'GUARD_PASSED') { throw 'The separate reference guard did not pass.' }
 } finally { $process.Dispose() }
 Assert-EnvironmentUnchanged
 $count++
