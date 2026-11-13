@@ -19,11 +19,13 @@ cannot be preserved. Scheduling is in memory and resets at process restart.
 The supplied HTTP transport targets the public GitHub release endpoint. It
 disables redirects, cookies, default credentials and authentication, limits
 response headers to 64 KiB and the body to 1 MiB, and decodes UTF-8 strictly.
-It reports headers before reading the body. A successful HTTP status alone is
-not sufficient: the injected selector must validate the body and URLs. Like
-the previous Windows transport, the current implementation accepts all 2xx
-statuses, including 206; actual HTTP framing, partial responses, TLS, DNS,
-proxy behavior and live GitHub responses have not been verified here.
+It reports headers before reading the body. The releases endpoint must return
+HTTP 200; a 206 partial response is treated as a failed check even when its
+body is valid JSON. This differs from the previous Windows transport, which
+accepted all 2xx statuses. A 200 status alone is not sufficient: the injected
+selector must validate the body and URLs. Actual HTTP framing, a server that
+mislabels a partial body as 200, TLS, DNS, proxy behavior and live GitHub
+responses have not been verified here.
 
 Absolute server deadlines depend on the local clock if a valid server `Date`
 is missing; a fast clock can still lead to an early retry. An unrepresentable

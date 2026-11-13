@@ -41,7 +41,9 @@ public sealed class UpdateHttpTransport : IDisposable
             cancellation.ThrowIfCancellationRequested();
             reportHeaders(new ProbeHeaders(Values(response.Headers, "Retry-After"),
                 Values(response.Headers, "X-RateLimit-Reset"), Values(response.Headers, "Date")));
-            if (!response.IsSuccessStatusCode || response.Content is null || response.Content.Headers.ContentLength > MaximumBytes)
+            // The releases endpoint returns a complete list with 200. Treat a
+            // partial response as a failed check, even if its JSON is valid.
+            if (response.StatusCode != HttpStatusCode.OK || response.Content is null || response.Content.Headers.ContentLength > MaximumBytes)
                 return new ProbeResult(false, null);
 
             await using Stream stream = await response.Content.ReadAsStreamAsync(cancellation).ConfigureAwait(false);

@@ -163,4 +163,5 @@ reply.SetResult(new ProbeResult(true, Valid));
 await Until(() => !stopped.Snapshot().Busy, "The stopped check did not finish.");
 Check(stopped.Snapshot() is { Stopped: true, Available: null }, "A stopped check published a late result.");
 
+await ServiceTests.RunAsync();
 Console.WriteLine($"Update integration: {checks} synthetic assertions passed.");
