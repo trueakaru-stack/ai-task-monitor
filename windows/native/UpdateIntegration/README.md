@@ -24,3 +24,7 @@ package sources, then execute `AITaskMonitor.UpdateIntegration.Tests.dll` from
 the generated `UpdateIntegration.Tests/release` output directory. Preserve the
 same opt-out in any child environment; do not run the tests through an older
 unverified launcher on a user machine.
+
+The Windows PATH safety workflow runs these synthetic checks on a disposable
+Windows runner. It compares the persistent user and machine PATH values before
+and after the test; it does not establish application or installer readiness.
