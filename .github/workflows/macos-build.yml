@@ -86,7 +86,7 @@ jobs:
         working-directory: macos
         run: |
           swift build
-          AITM_CLAUDE_TEST_EXECUTABLE="$(swift build --show-bin-path)/AITaskMonitor" swift test
+          AITM_CLAUDE_TEST_EXECUTABLE="$(swift build --show-bin-path)/AITaskMonitor" bash ./scripts/run-swift-tests.sh
       - name: Test isolated agent integrations
         working-directory: macos
         run: |
@@ -141,7 +141,7 @@ jobs:
         run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
       - name: Test
         working-directory: macos
-        run: swift test
+        run: bash ./scripts/run-swift-tests.sh
       - name: Build universal application
         working-directory: macos
         run: ./scripts/build-app.sh
