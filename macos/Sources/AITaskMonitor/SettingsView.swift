@@ -7,10 +7,47 @@ enum SettingsPreviewClaude: Equatable { case unconfirmed, connected }
 enum SettingsPreviewCloud: Equatable { case disconnected, connected, error, partial }
 enum SettingsPreviewKimi: Equatable { case disconnected, connected, disabled, error }
 enum SettingsPreviewHermes: String, Equatable { case absent, prepared, enabled, error, unavailable }
+struct SettingsPreviewOpenCode {
+    let state: () -> OpenCodeIntegration.State?
+    let present: () -> Bool
+}
+struct SettingsPreviewMenuBindings {
+    let retentionDays: Binding<Int>
+    let maximumMB: Binding<Int>
+    let claudeRetentionDays: Binding<Int>
+    let claudeMaximumMB: Binding<Int>
+    let loopThreshold: Binding<Int>
+    let loopWindowMinutes: Binding<Int>
+}
+struct SettingsPreviewJournalFrameKey: PreferenceKey {
+    static let coordinateSpace = "aitm-settings-preview-root"
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, next in next })
+    }
+}
+private struct SettingsPreviewJournalFrame: ViewModifier {
+    let name: String
+    let enabled: Bool
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if enabled {
+            content.background(GeometryReader { proxy in
+                Color.clear.preference(key: SettingsPreviewJournalFrameKey.self,
+                                       value: [name: proxy.frame(in: .named(SettingsPreviewJournalFrameKey.coordinateSpace))])
+            })
+        } else {
+            content
+        }
+    }
+}
 private struct SettingsPreviewClaudeKey: EnvironmentKey { static let defaultValue: SettingsPreviewClaude? = nil }
 private struct SettingsPreviewCloudKey: EnvironmentKey { static let defaultValue: SettingsPreviewCloud? = nil }
 private struct SettingsPreviewKimiKey: EnvironmentKey { static let defaultValue: SettingsPreviewKimi? = nil }
 private struct SettingsPreviewHermesKey: EnvironmentKey { static let defaultValue: SettingsPreviewHermes? = nil }
+private struct SettingsPreviewOpenCodeKey: EnvironmentKey { static let defaultValue: SettingsPreviewOpenCode? = nil }
+private struct SettingsPreviewMenuBindingsKey: EnvironmentKey { static let defaultValue: SettingsPreviewMenuBindings? = nil }
+private struct SettingsPreviewJournalFramesKey: EnvironmentKey { static let defaultValue = false }
 
 private struct SettingsMenuWidth: ViewModifier {
     let width: CGFloat
@@ -20,10 +57,10 @@ private struct SettingsMenuWidth: ViewModifier {
         if #available(macOS 26.0, *) {
             content.buttonSizing(.flexible).frame(width: width)
         } else {
-            content.frame(width: 120)
+            content.frame(width: width)
         }
         #else
-        content.frame(width: 120)
+        content.frame(width: width)
         #endif
     }
 }
@@ -85,6 +122,18 @@ extension EnvironmentValues {
         get { self[SettingsPreviewHermesKey.self] }
         set { self[SettingsPreviewHermesKey.self] = newValue }
     }
+    var settingsPreviewOpenCode: SettingsPreviewOpenCode? {
+        get { self[SettingsPreviewOpenCodeKey.self] }
+        set { self[SettingsPreviewOpenCodeKey.self] = newValue }
+    }
+    var settingsPreviewMenuBindings: SettingsPreviewMenuBindings? {
+        get { self[SettingsPreviewMenuBindingsKey.self] }
+        set { self[SettingsPreviewMenuBindingsKey.self] = newValue }
+    }
+    var settingsPreviewJournalFrames: Bool {
+        get { self[SettingsPreviewJournalFramesKey.self] }
+        set { self[SettingsPreviewJournalFramesKey.self] = newValue }
+    }
 }
 
 struct SettingsView: View {
@@ -104,6 +153,9 @@ struct SettingsView: View {
     @Environment(\.settingsPreviewCloud) private var settingsPreviewCloud
     @Environment(\.settingsPreviewKimi) private var settingsPreviewKimi
     @Environment(\.settingsPreviewHermes) private var settingsPreviewHermes
+    @Environment(\.settingsPreviewOpenCode) private var settingsPreviewOpenCode
+    @Environment(\.settingsPreviewMenuBindings) private var settingsPreviewMenuBindings
+    @Environment(\.settingsPreviewJournalFrames) private var settingsPreviewJournalFrames
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -189,12 +241,14 @@ struct SettingsView: View {
                             Spacer(minLength: 20)
                             VStack(alignment: .trailing, spacing: 5) {
                                 Button(openCodeState == .connected || openCodeState == .partial ? tr("Отключить", "Disconnect") : tr("Подключить", "Connect")) {
-                                    store.setOpenCodeConnected(openCodeState == .disconnected)
+                                    if settingsPreviewOpenCode == nil { store.setOpenCodeConnected(openCodeState == .disconnected) }
                                 }
                                 .disabled(openCodeState == nil || store.openCodeSetupInProgress || (!openCodePresent && openCodeState == .disconnected))
                                 if openCodeState == .connected {
-                                    Button(tr("Агент перезапущен", "Agent restarted")) { store.acknowledgeOpenCodeRestart() }
-                                        .disabled(!store.openCodeRestartAvailable)
+                                    Button(tr("Агент перезапущен", "Agent restarted")) {
+                                        if settingsPreviewOpenCode == nil { store.acknowledgeOpenCodeRestart() }
+                                    }
+                                    .disabled(!store.openCodeRestartAvailable)
                                 }
                             }
                         }
@@ -329,8 +383,10 @@ struct SettingsView: View {
                         }
                         HStack {
                             Button(tr("Открыть журнал", "Open journal")) { store.openJournal() }
+                                .modifier(SettingsPreviewJournalFrame(name: "open", enabled: settingsPreviewJournalFrames))
                             if !confirmsJournalClear {
                                 Button(tr("Очистить", "Clear")) { confirmsJournalClear = true }
+                                    .modifier(SettingsPreviewJournalFrame(name: "clear", enabled: settingsPreviewJournalFrames))
                             }
                         }
                         if confirmsJournalClear {
@@ -551,11 +607,19 @@ struct SettingsView: View {
         return try? ClaudeIntegration.connectionState()
     }
 
-    private var openCodeState: OpenCodeIntegration.State? { try? OpenCodeIntegration.state() }
-    private var openCodePresent: Bool { OpenCodeIntegration.hasPotentialInstallation() }
+    private var openCodeState: OpenCodeIntegration.State? {
+        if let preview = settingsPreviewOpenCode { return preview.state() }
+        return try? OpenCodeIntegration.state()
+    }
+
+    private var openCodePresent: Bool {
+        if let preview = settingsPreviewOpenCode { return preview.present() }
+        return OpenCodeIntegration.hasPotentialInstallation()
+    }
 
     private var retentionDays: Binding<Int> {
-        Binding(get: { store.diagnosticSettings.retentionDays }, set: { value in
+        if let preview = settingsPreviewMenuBindings { return preview.retentionDays }
+        return Binding(get: { store.diagnosticSettings.retentionDays }, set: { value in
             var settings = store.diagnosticSettings
             settings.retentionDays = value
             store.setDiagnosticSettings(settings)
@@ -563,7 +627,8 @@ struct SettingsView: View {
     }
 
     private var maximumMB: Binding<Int> {
-        Binding(get: { store.diagnosticSettings.maximumMB }, set: { value in
+        if let preview = settingsPreviewMenuBindings { return preview.maximumMB }
+        return Binding(get: { store.diagnosticSettings.maximumMB }, set: { value in
             var settings = store.diagnosticSettings
             settings.maximumMB = value
             store.setDiagnosticSettings(settings)
@@ -571,7 +636,8 @@ struct SettingsView: View {
     }
 
     private var loopThreshold: Binding<Int> {
-        Binding(get: { store.diagnosticSettings.loopThreshold }, set: { value in
+        if let preview = settingsPreviewMenuBindings { return preview.loopThreshold }
+        return Binding(get: { store.diagnosticSettings.loopThreshold }, set: { value in
             var settings = store.diagnosticSettings
             settings.loopThreshold = value
             store.setDiagnosticSettings(settings)
@@ -579,15 +645,18 @@ struct SettingsView: View {
     }
 
     private var claudeRetentionDays: Binding<Int> {
-        Binding(get: { store.claudeRetentionPolicy?.days ?? 7 }, set: { store.setClaudeRetention(days: $0) })
+        if let preview = settingsPreviewMenuBindings { return preview.claudeRetentionDays }
+        return Binding(get: { store.claudeRetentionPolicy?.days ?? 7 }, set: { store.setClaudeRetention(days: $0) })
     }
 
     private var claudeMaximumMB: Binding<Int> {
-        Binding(get: { store.claudeRetentionPolicy?.maximumMB ?? 10 }, set: { store.setClaudeRetention(maximumMB: $0) })
+        if let preview = settingsPreviewMenuBindings { return preview.claudeMaximumMB }
+        return Binding(get: { store.claudeRetentionPolicy?.maximumMB ?? 10 }, set: { store.setClaudeRetention(maximumMB: $0) })
     }
 
     private var loopWindowMinutes: Binding<Int> {
-        Binding(get: { store.diagnosticSettings.loopWindowMinutes }, set: { value in
+        if let preview = settingsPreviewMenuBindings { return preview.loopWindowMinutes }
+        return Binding(get: { store.diagnosticSettings.loopWindowMinutes }, set: { value in
             var settings = store.diagnosticSettings
             settings.loopWindowMinutes = value
             store.setDiagnosticSettings(settings)
@@ -601,25 +670,29 @@ struct SettingsView: View {
     }
 
     private func refreshSettingsMenuWidth() {
-        #if compiler(>=6.2)
-        if #available(macOS 26.0, *) {
-            let groups: [[String]] = [
-                (1...7).map(dayLabel),
-                (1...10).map { "\($0) \(tr("МБ", "MB"))" },
-                (1...30).map(dayLabel),
-                (1...100).map { "\($0) \(tr("МБ", "MB"))" },
-                (3...10).map { "\($0)" },
-                (1...30).map { "\($0) \(tr("мин", "min"))" }
-            ]
-            let widest = groups.map { titles in
-                let control = NSPopUpButton(frame: .zero, pullsDown: false)
-                control.controlSize = .large
-                control.addItems(withTitles: titles)
+        let groups: [[String]] = [
+            (1...7).map(dayLabel),
+            (1...10).map { "\($0) \(tr("МБ", "MB"))" },
+            (1...30).map(dayLabel),
+            (1...100).map { "\($0) \(tr("МБ", "MB"))" },
+            (3...10).map { "\($0)" },
+            (1...30).map { "\($0) \(tr("мин", "min"))" }
+        ]
+        let widest = groups.map { titles in
+            let control = NSPopUpButton(frame: .zero, pullsDown: false)
+            control.controlSize = .large
+            control.addItems(withTitles: titles)
+            #if compiler(>=6.2)
+            if #available(macOS 26.0, *) {
                 return control.fittingSize.width
-            }.max() ?? 0
-            settingsMenuWidth = widest.isFinite && widest > 0 ? widest : 120
-        }
-        #endif
+            }
+            #endif
+            return titles.indices.reduce(CGFloat.zero) { current, index in
+                control.selectItem(at: index)
+                return max(current, control.fittingSize.width)
+            }
+        }.max() ?? 0
+        settingsMenuWidth = widest.isFinite && widest > 0 ? widest : 120
     }
 
     private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
