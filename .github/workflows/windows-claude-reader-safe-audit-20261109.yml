@@ -15,6 +15,8 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[windows-safe-audit]')) }}
     runs-on: windows-2025
     timeout-minutes: 20
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
     steps:
       - name: Fetch pinned public source without overriding profile variables
         shell: pwsh

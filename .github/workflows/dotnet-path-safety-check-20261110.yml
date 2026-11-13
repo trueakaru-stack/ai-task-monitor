@@ -5,6 +5,23 @@ on:
 permissions:
   contents: read
 jobs:
+  launcher-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+    steps:
+      - name: Check test launchers from the exact source revision
+        shell: bash
+        env:
+          AITM_SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          AITM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -eu
+          git -c credential.helper= -c core.hooksPath=/dev/null init --quiet .
+          git -c credential.helper= -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "https://github.com/${AITM_SOURCE_REPOSITORY}.git" "${AITM_SOURCE_SHA}"
+          git -c credential.helper= -c core.hooksPath=/dev/null checkout --quiet --detach FETCH_HEAD
+          python3 -B windows/tests/Test-DotnetPathSafety.py
   first-use:
     runs-on: windows-2025
     timeout-minutes: 8

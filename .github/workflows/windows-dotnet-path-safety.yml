@@ -1,0 +1,92 @@
+name: Verify Windows SDK PATH protection
+on:
+  push:
+    branches: [windows]
+    paths: ['windows/**', '.github/workflows/**']
+  pull_request:
+    branches: [windows]
+    paths: ['windows/**', '.github/workflows/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  launcher-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+    steps:
+      - name: Check test launchers from the exact source revision
+        shell: bash
+        env:
+          AITM_SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          AITM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -eu
+          git -c credential.helper= -c core.hooksPath=/dev/null init --quiet .
+          git -c credential.helper= -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "https://github.com/${AITM_SOURCE_REPOSITORY}.git" "${AITM_SOURCE_SHA}"
+          git -c credential.helper= -c core.hooksPath=/dev/null checkout --quiet --detach FETCH_HEAD
+          python3 -B windows/tests/Test-DotnetPathSafety.py
+  first-use:
+    runs-on: windows-2025
+    timeout-minutes: 8
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - name: Test successful and failed first use
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          function Read-PathState([string]$scope) {
+            $key = if ($scope -eq 'User') {
+              [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+            } else {
+              [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment', $false)
+            }
+            try {
+              return [pscustomobject]@{
+                Value = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                Kind = [string]$key.GetValueKind('Path')
+              }
+            } finally { $key.Dispose() }
+          }
+          $beforeUser = Read-PathState 'User'
+          $beforeMachine = Read-PathState 'Machine'
+          function Assert-PathUnchanged {
+            foreach ($scope in @('User', 'Machine')) {
+              $before = if ($scope -eq 'User') { $beforeUser } else { $beforeMachine }
+              $after = Read-PathState $scope
+              if ($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind) {
+                throw "$scope PATH changed during the protected test."
+              }
+            }
+          }
+          $base = Join-Path $env:RUNNER_TEMP 'dotnet-path-safety'
+          New-Item -ItemType Directory -Path $base | Out-Null
+          try {
+            $env:DOTNET_CLI_HOME = Join-Path $base 'success-profile'
+            & dotnet new console --no-restore --output (Join-Path $base 'success-project') --name PathSafetyFixture | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'The successful first-use command failed.' }
+            if (-not (Get-ChildItem -LiteralPath $env:DOTNET_CLI_HOME -Recurse -Filter '*dotnetFirstUseSentinel' -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+              throw 'The first-use marker was not created; SDK initialization was not verified.'
+            }
+            Assert-PathUnchanged
+            Write-Host 'Successful first use: PATH unchanged.'
+            $env:DOTNET_CLI_HOME = Join-Path $base 'failure-profile'
+            $failureOutput = & dotnet new console --no-restore --output (Join-Path $base 'failure-project') --definitely-invalid-option 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0) { throw 'The deliberately invalid command unexpectedly succeeded.' }
+            if (-not $failureOutput.Contains('--definitely-invalid-option')) { throw 'The command failed for an unexpected reason.' }
+            if (-not (Get-ChildItem -LiteralPath $env:DOTNET_CLI_HOME -Recurse -Filter '*dotnetFirstUseSentinel' -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+              throw 'The failed command did not initialize the SDK in its separate profile.'
+            }
+            Assert-PathUnchanged
+            Write-Host 'Failed first use: PATH unchanged.'
+          } finally {
+            Assert-PathUnchanged
+          }
+          exit 0
+

@@ -45,6 +45,7 @@ env = {
     'SystemRoot': str(system), 'windir': str(system),
     'PATH': str(sdk) + ';' + str(system / 'System32') + ';' + str(system),
     'DOTNET_ROOT': str(sdk), 'DOTNET_CLI_HOME': str(run / 'profile'),
+    'DOTNET_ADD_GLOBAL_TOOLS_TO_PATH': '0',
     'DOTNET_MULTILEVEL_LOOKUP': '0', 'DOTNET_CLI_TELEMETRY_OPTOUT': '1', 'DOTNET_NOLOGO': '1',
     'DOTNET_GENERATE_ASPNET_CERTIFICATE': '0', 'DOTNET_SKIP_FIRST_TIME_EXPERIENCE': '1',
     'DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE': '1', 'DOTNET_CLI_USE_MSBUILD_SERVER': '0',
