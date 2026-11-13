@@ -7,11 +7,17 @@ using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("ClaudeFileSource.Tests")]
+
 namespace AITaskMonitor.Claude;
 
 public enum ClaudeConnection { Disconnected, Partial, Connected }
 
-public sealed record ClaudeSourceSnapshot(IReadOnlyList<Task> Tasks, bool Unavailable);
+public sealed record ClaudeSourceSnapshot(IReadOnlyList<Task> Tasks, bool Unavailable)
+{
+    public long Generation { get; internal init; }
+    internal object? Owner { get; init; }
+}
 
 // One instance belongs to one monitor session. Paths and connection state are
 // supplied by its caller; this class does not find profiles or install hooks.
@@ -20,16 +26,28 @@ public sealed class ClaudeFileSource
     private const int MaximumTailBytes = 4 * 1024 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private readonly object gate = new();
+    private readonly object signalGate = new();
+    private readonly object identity = new();
     private readonly string currentPath;
     private readonly string? legacyPath;
     private readonly DateTime observedSinceUtc;
+    private readonly Action? afterReadBeforeSnapshot;
+    private readonly Action<string>? afterFirstFileRead;
     private readonly SessionReader reader = new();
     private Task[] previous = [];
     private bool currentSeen, legacySeen;
-    private bool pendingRead, pendingLoss;
+    private bool pendingRead, pendingLoss, connectionLoss;
     private Cursor? currentCursor, legacyCursor;
+    private ClaudeConnection? signalledConnection;
+    private long generation;
+    private bool signalLoss, generationExhausted;
 
     public ClaudeFileSource(string currentPath, string? legacyPath, DateTime observedSinceUtc)
+        : this(currentPath, legacyPath, observedSinceUtc, null) { }
+
+    // A synchronization seam for synthetic tests; production uses the public constructor.
+    internal ClaudeFileSource(string currentPath, string? legacyPath, DateTime observedSinceUtc,
+        Action? afterReadBeforeSnapshot, Action<string>? afterFirstFileRead = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(currentPath);
         if (!Path.IsPathFullyQualified(currentPath)) throw new ArgumentException("Current event path must be absolute.", nameof(currentPath));
@@ -38,29 +56,111 @@ public sealed class ClaudeFileSource
         this.currentPath = currentPath;
         this.legacyPath = legacyPath;
         this.observedSinceUtc = observedSinceUtc;
+        this.afterReadBeforeSnapshot = afterReadBeforeSnapshot;
+        this.afterFirstFileRead = afterFirstFileRead;
+    }
+
+    // Call as soon as the owner observes a change, including while a poll runs.
+    // A separate lock lets notification invalidate an in-flight result promptly.
+    public void NotifyConnection(ClaudeConnection connection)
+    {
+        if (!Enum.IsDefined(connection)) throw new ArgumentOutOfRangeException(nameof(connection));
+        lock (signalGate)
+        {
+            if (signalledConnection == connection) return;
+            signalledConnection = connection;
+            if (connection != ClaudeConnection.Connected) signalLoss = true;
+            AdvanceGeneration();
+        }
+    }
+
+    private void AdvanceGeneration()
+    {
+        // Caller holds signalGate. Once exhausted, no snapshot is considered current.
+        if (generation == long.MaxValue) generationExhausted = true;
+        else generation++;
+    }
+
+    private readonly record struct ConnectionSignal(ClaudeConnection? Connection, long Generation, bool Loss, bool Exhausted);
+    private ConnectionSignal Signal()
+    {
+        lock (signalGate) return new(signalledConnection, generation, signalLoss, generationExhausted);
+    }
+
+    // Exposes the retained-loss marker to the synthetic test assembly only.
+    internal bool HasObservedSourceLoss => reader.SourceUncertain;
+
+    private ClaudeSourceSnapshot Stamp(ClaudeSourceSnapshot snapshot, ConnectionSignal signal) =>
+        snapshot with { Generation = signal.Generation, Owner = identity };
+
+    // The owner must serialize this check with presentation and notifications.
+    public bool IsCurrent(ClaudeSourceSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        lock (signalGate)
+            return !generationExhausted && ReferenceEquals(snapshot.Owner, identity) && snapshot.Generation == generation;
     }
 
     public ClaudeSourceSnapshot Poll(ClaudeConnection connection, DateTime utcNow)
     {
-        if (!Enum.IsDefined(connection)) throw new ArgumentOutOfRangeException(nameof(connection));
+        if (utcNow.Kind != DateTimeKind.Utc) throw new ArgumentException("Poll time must be UTC.", nameof(utcNow));
+        NotifyConnection(connection);
+        return Poll(utcNow);
+    }
+
+    // Uses the last signalled connection rather than a potentially stale caller snapshot.
+    public ClaudeSourceSnapshot Poll(DateTime utcNow)
+    {
         if (utcNow.Kind != DateTimeKind.Utc) throw new ArgumentException("Poll time must be UTC.", nameof(utcNow));
         lock (gate)
         {
+            ConnectionSignal start = Signal();
+            if (start.Connection is null) throw new InvalidOperationException("A connection must be signalled before polling.");
+            Task[] before = previous;
+            if (start.Loss || start.Exhausted) MarkConnectionLoss();
+            ClaudeSourceSnapshot result = PollLocked(start.Connection.Value, utcNow);
+            afterReadBeforeSnapshot?.Invoke();
+            ConnectionSignal end = Signal();
+            if (end.Generation != start.Generation || end.Exhausted)
+            {
+                if (end.Loss || end.Exhausted)
+                {
+                    MarkConnectionLoss();
+                    previous = MergePending(before, previous, out bool overflow);
+                    if (overflow) reader.MarkSourceLoss();
+                }
+                result = end.Connection == ClaudeConnection.Disconnected
+                    ? new ClaudeSourceSnapshot([], false)
+                    : new ClaudeSourceSnapshot(Copy(previous, true), true);
+            }
+            return Stamp(result, end);
+        }
+    }
+
+    private void MarkConnectionLoss()
+    {
+        if (connectionLoss) return;
+        connectionLoss = true;
+        reader.MarkSourceLoss();
+        previous = MergePending([], previous, out bool overflow);
+        if (overflow) reader.MarkSourceLoss();
+        pendingLoss = true;
+    }
+
+    private ClaudeSourceSnapshot PollLocked(ClaudeConnection connection, DateTime utcNow)
+    {
             if (connection == ClaudeConnection.Disconnected)
             {
-                previous = [];
                 pendingRead = false;
                 return new ClaudeSourceSnapshot([], false);
             }
             try
             {
-                Tail? current = ReadOptional(currentPath, ref currentSeen, ref currentCursor);
-                if (current is null)
-                    return new ClaudeSourceSnapshot([], connection == ClaudeConnection.Partial);
-                Tail? legacy = legacyPath is null ? null : ReadOptional(legacyPath, ref legacySeen, ref legacyCursor);
-                bool isPending = current.Value.Pending || legacy?.Pending == true;
-                if (current.Value.Discontinuity || legacy?.Discontinuity == true ||
-                    current.Value.WindowMoved || legacy?.WindowMoved == true)
+                Tail? current = ReadOptional(currentPath, ref currentSeen, ref currentCursor, afterFirstFileRead);
+                Tail? legacy = legacyPath is null ? null : ReadOptional(legacyPath, ref legacySeen, ref legacyCursor, afterFirstFileRead);
+                bool isPending = current?.Pending == true || legacy?.Pending == true;
+                if (current?.Discontinuity == true || legacy?.Discontinuity == true ||
+                    current?.WindowMoved == true || legacy?.WindowMoved == true)
                 {
                     reader.MarkSourceLoss();
                     if (pendingRead || isPending) pendingLoss = true;
@@ -70,7 +170,10 @@ public sealed class ClaudeFileSource
                     // Do not mutate the stateful reader until all visible input
                     // is complete: a Stop in the prefix can otherwise erase the
                     // retained card before a subsequent read failure or loss.
-                    Task[] provisional = Reader.Read(current.Value.Text, legacy?.Text ?? "", utcNow, observedSinceUtc);
+                    bool provisionalLoss;
+                    Task[] provisional = Reader.ReadWithSourceLoss(current?.Text ?? "", legacy?.Text ?? "",
+                        utcNow, observedSinceUtc, false, out provisionalLoss, null!, null!, null!, null!);
+                    if (provisionalLoss) { reader.MarkSourceLoss(); pendingLoss = true; }
                     previous = MergePending(previous, provisional, out bool overflow);
                     if (overflow) { reader.MarkSourceLoss(); pendingLoss = true; }
                     pendingRead = true;
@@ -78,7 +181,11 @@ public sealed class ClaudeFileSource
                         connection == ClaudeConnection.Partial || reader.RetentionOverflow || pendingLoss;
                     return new ClaudeSourceSnapshot(Copy(previous, true), unavailable);
                 }
-                Task[] parsed = reader.Read(current.Value.Text, legacy?.Text ?? "", utcNow, observedSinceUtc);
+                bool sourceWasUncertain = reader.SourceUncertain;
+                Task[] parsed = reader.Read(current?.Text ?? "", legacy?.Text ?? "", utcNow, observedSinceUtc);
+                // A newly rejected event can hide a relevant earlier record.
+                // Keep the previously visible cards until a recovery protocol exists.
+                if (!sourceWasUncertain && reader.SourceUncertain) pendingLoss = true;
                 if (pendingRead && reader.SourceUncertain) pendingLoss = true;
                 pendingRead = false;
                 if (pendingLoss)
@@ -98,28 +205,34 @@ public sealed class ClaudeFileSource
                 previous = Copy(previous, true);
                 return new ClaudeSourceSnapshot(Copy(previous, false), true);
             }
-        }
     }
 
     public ClaudeSourceSnapshot ReportUnavailable()
     {
+        lock (signalGate)
+        {
+            signalLoss = true;
+            AdvanceGeneration();
+        }
         lock (gate)
         {
-            if (pendingRead) pendingLoss = true;
-            reader.MarkSourceLoss();
-            previous = Copy(previous, true);
-            return new ClaudeSourceSnapshot(Copy(previous, false), true);
+            MarkConnectionLoss();
+            ConnectionSignal signal = Signal();
+            ClaudeSourceSnapshot result = signal.Connection == ClaudeConnection.Disconnected
+                ? new ClaudeSourceSnapshot([], false)
+                : new ClaudeSourceSnapshot(Copy(previous, true), true);
+            return Stamp(result, signal);
         }
     }
 
-    private readonly record struct Cursor(long Length, byte[] EndDigest, long FirstCompleteOffset);
+    private readonly record struct Cursor(long Length, byte[] ObservedDigest, long FirstCompleteOffset);
     private readonly record struct Tail(string Text, bool Pending, Cursor Cursor, bool Discontinuity, bool WindowMoved);
 
-    private static Tail? ReadOptional(string path, ref bool seen, ref Cursor? cursor)
+    private static Tail? ReadOptional(string path, ref bool seen, ref Cursor? cursor, Action<string>? afterFirstFileRead)
     {
         try
         {
-            Tail text = ReadCompleteTail(path, cursor);
+            Tail text = ReadCompleteTail(path, cursor, afterFirstFileRead);
             seen = true;
             cursor = text.Cursor;
             return text;
@@ -128,59 +241,76 @@ public sealed class ClaudeFileSource
         catch (DirectoryNotFoundException) when (!seen) { return null; }
     }
 
-    // Only complete newline-terminated records from a bounded snapshot are fed
-    // to the reader. Concurrent appends wait until the next poll.
-    private static byte[] DigestEnd(FileStream stream, long end)
-    {
-        int count = (int)Math.Min(128, end);
-        var buffer = new byte[count];
-        stream.Seek(end - count, SeekOrigin.Begin);
-        stream.ReadExactly(buffer);
-        return SHA256.HashData(buffer);
-    }
-
-    private static Tail ReadCompleteTail(string path, Cursor? prior)
+    // Read the bounded window twice through independently opened handles. An
+    // append after the captured length may wait until the next poll, but a
+    // changed captured range records source loss; matching bytes do not prove
+    // that both handles refer to the same file.
+    private static Tail ReadCompleteTail(string path, Cursor? prior, Action<string>? afterFirstFileRead)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
         long length = stream.Length;
-        bool discontinuity = prior is { } old && (length < old.Length ||
-            !CryptographicOperations.FixedTimeEquals(DigestEnd(stream, old.Length), old.EndDigest));
-        byte[] digest = DigestEnd(stream, length);
         int count = (int)Math.Min(length, MaximumTailBytes);
-        if (count == 0) return new Tail("", false, new Cursor(length, digest, 0), discontinuity, false);
         long start = length - count;
-        bool atLineBoundary = start == 0;
-        if (start > 0)
+        int prefix = start > 0 ? 1 : 0;
+        long readStart = start - prefix;
+        var captured = new byte[count + prefix];
+        stream.Seek(readStart, SeekOrigin.Begin);
+        stream.ReadExactly(captured);
+        afterFirstFileRead?.Invoke(path);
+        try
         {
-            stream.Seek(start - 1, SeekOrigin.Begin);
-            int precedingByte = stream.ReadByte();
-            if (precedingByte < 0) throw new EndOfStreamException("Could not verify the source tail boundary.");
-            atLineBoundary = precedingByte == '\n';
+            using var verify = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
+            if (verify.Length < length) throw new IOException("Event source shortened during reading.");
+            var repeated = new byte[captured.Length];
+            verify.Seek(readStart, SeekOrigin.Begin);
+            verify.ReadExactly(repeated);
+            if (verify.Length < length || !captured.AsSpan().SequenceEqual(repeated))
+                throw new IOException("Event source changed during reading.");
         }
-        stream.Seek(start, SeekOrigin.Begin);
-        var bytes = new byte[count];
-        stream.ReadExactly(bytes);
+        // Once the first open succeeded, a missing path is a read loss, not an
+        // optional source that has never existed.
+        catch (FileNotFoundException error) { throw new IOException("Event source disappeared during reading.", error); }
+        catch (DirectoryNotFoundException error) { throw new IOException("Event source disappeared during reading.", error); }
+
+        ReadOnlySpan<byte> bytes = captured.AsSpan(prefix, count);
+        bool atLineBoundary = start == 0 || captured[0] == '\n';
         int first = 0;
         if (!atLineBoundary)
         {
-            int boundary = Array.IndexOf(bytes, (byte)'\n');
+            int boundary = bytes.IndexOf((byte)'\n');
             if (boundary < 0) throw new IOException("No complete event fits in the source tail.");
             first = boundary + 1;
         }
-        int last = Array.LastIndexOf(bytes, (byte)'\n');
+        int last = bytes.LastIndexOf((byte)'\n');
         long firstCompleteOffset = start + first;
         // A first bounded read has no evidence about any omitted prefix. On
         // later reads, crossing a previously observed line has the same effect.
         bool windowMoved = prior is { } oldWindow
             ? firstCompleteOffset > oldWindow.FirstCompleteOffset
             : start > 0;
+        bool discontinuity = false;
+        if (prior is { } old)
+        {
+            if (length < old.Length || old.FirstCompleteOffset < start || old.FirstCompleteOffset > old.Length)
+                discontinuity = true;
+            else
+            {
+                int oldOffset = checked((int)(old.FirstCompleteOffset - start));
+                int oldCount = checked((int)(old.Length - old.FirstCompleteOffset));
+                byte[] oldDigest = SHA256.HashData(bytes.Slice(oldOffset, oldCount));
+                discontinuity = !CryptographicOperations.FixedTimeEquals(oldDigest, old.ObservedDigest);
+            }
+        }
+        byte[] digest = SHA256.HashData(bytes[first..]);
         var cursor = new Cursor(length, digest, firstCompleteOffset);
+        if (count == 0) return new Tail("", false, cursor, discontinuity, windowMoved);
         if (last < first)
         {
             return new Tail("", true, cursor, discontinuity, windowMoved);
         }
-        string text = StrictUtf8.GetString(bytes, first, last - first + 1);
+        string text = StrictUtf8.GetString(bytes.Slice(first, last - first + 1));
         return new Tail(text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text,
             last != bytes.Length - 1, cursor, discontinuity, windowMoved);
     }

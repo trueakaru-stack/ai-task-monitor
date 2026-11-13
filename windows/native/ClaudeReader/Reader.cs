@@ -60,6 +60,9 @@ namespace AITaskMonitor.Claude {
   internal readonly Dictionary<string, int> PendingStatuses = new Dictionary<string, int>(StringComparer.Ordinal);
  }
  public static class Reader {
+  // The installed hook accepts at most 128 UTF-16 units for a session ID.
+  // Never truncate: distinct long IDs could otherwise become one task.
+  private const int MaximumSessionId = 128;
   private sealed class StepMoment {
    internal Event First;
    internal bool Multiple;
@@ -216,6 +219,7 @@ namespace AITaskMonitor.Claude {
         TaskId="", TaskStatus="", Phase="source_uncertain", PreviousStatus="", Active=null });
       continue;
      }
+     if (id.Length > MaximumSessionId) { sourceUncertain = true; continue; }
      if (permitted != null && !permitted.Contains(id)) continue;
      if (!DateTimeOffset.TryParse(Value(data, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out time)) { sourceUncertain = true; continue; }
      object active;
@@ -259,7 +263,9 @@ namespace AITaskMonitor.Claude {
    bool sourceUncertain = priorLoss;
    List<Event> recent = Parse(current, 1, null, ref sourceUncertain);
    var ids = new HashSet<string>(recent.Where(item => item.Id.Length > 0).Select(item => item.Id), StringComparer.Ordinal);
-   List<Event> all = ids.Count == 0 ? new List<Event>() : Parse(legacy, 0, ids, ref sourceUncertain);
+   // Inspect the legacy source for loss even when no current IDs exist. The
+   // empty permitted set still prevents legacy-only cards from being created.
+   List<Event> all = Parse(legacy, 0, ids, ref sourceUncertain);
    all.AddRange(recent);
    observedLoss = sourceUncertain;
    // Retain evidence of a substantial backwards clock jump before sorting the
