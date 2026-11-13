@@ -60,6 +60,45 @@ foreach ($mode in @('call','dot-source')) {
     $count++
 }
 
+# Exercise helper loading using a copy of the actual entry guard. Its remaining
+# body is replaced with a harmless sentinel, so a regression cannot clear this
+# test process's environment or launch the SDK.
+$entryText = [IO.File]::ReadAllText($prototype)
+$bodyMarker = '# Prototype test body starts below the invocation guard.'
+$markerIndex = $entryText.IndexOf($bodyMarker, [StringComparison]::Ordinal)
+if ($markerIndex -lt 0 -or $entryText.IndexOf($bodyMarker, $markerIndex + $bodyMarker.Length, [StringComparison]::Ordinal) -ge 0) {
+    throw 'The entry-guard test boundary is missing or ambiguous.'
+}
+$entryGuard = $entryText.Substring(0, $markerIndex) + "`r`nthrow 'RESET_REACHED'`r`n"
+$fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('aitm-prototype-guard-' + [Guid]::NewGuid().ToString('N'))
+[IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+foreach ($case in @('missing','empty','invalid')) {
+    $fixture = Join-Path $fixtureRoot $case
+    [IO.Directory]::CreateDirectory($fixture) | Out-Null
+    $entry = Join-Path $fixture 'Test-Prototype.ps1'
+    $helper = Join-Path $fixture 'Assert-PrototypeIsolatedInvocation.ps1'
+    [IO.File]::WriteAllText($entry, $entryGuard, [Text.UTF8Encoding]::new($false))
+    if ($case -eq 'empty') { [IO.File]::WriteAllText($helper, '', [Text.UTF8Encoding]::new($false)) }
+    if ($case -eq 'invalid') { [IO.File]::WriteAllText($helper, 'function {', [Text.UTF8Encoding]::new($false)) }
+    foreach ($mode in @('call','dot-source')) {
+        $message = ''
+        $priorPreference = $ErrorActionPreference
+        try {
+            # The caller may use PowerShell's default non-terminating behavior.
+            $ErrorActionPreference = 'Continue'
+            try {
+                if ($mode -eq 'call') { & $entry -SdkRoot $missing -WorkDirectory $missing 2>$null }
+                else { . $entry -SdkRoot $missing -WorkDirectory $missing 2>$null }
+            } catch { $message = $_.Exception.Message }
+        } finally { $ErrorActionPreference = $priorPreference }
+        if ($message -notmatch 'Prototype safety guard failed' -or $message -match 'RESET_REACHED') {
+            throw 'The entry guard did not fail closed when its safety helper was unavailable.'
+        }
+        Assert-EnvironmentUnchanged
+        $count++
+    }
+}
+
 # A dedicated Windows PowerShell -File invocation must pass the guard and stop
 # at the missing SDK. It cannot reach the build or launch a window.
 $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
