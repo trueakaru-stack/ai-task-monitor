@@ -5,6 +5,27 @@ param(
     [string]$PublishedSource = ''
 )
 
+try {
+    $isolatedInvocationConfirmed = & {
+        param([string]$scriptPath, [string]$scriptDirectory)
+        $ErrorActionPreference = 'Stop'
+        function Assert-PrototypeIsolatedInvocation { throw 'The test safety helper did not load.' }
+        $null = . (Join-Path $scriptDirectory 'Assert-PrototypeIsolatedInvocation.ps1')
+        $currentProcess = [Diagnostics.Process]::GetCurrentProcess()
+        try {
+            $confirmation = @(Assert-PrototypeIsolatedInvocation -ProcessArguments ([Environment]::GetCommandLineArgs()) `
+                -ScriptPath $scriptPath -ExecutablePath $currentProcess.MainModule.FileName `
+                -PowerShellRoot $PSHOME -Edition $PSVersionTable.PSEdition)
+            if ($confirmation.Count -ne 1 -or $confirmation[0] -isnot [bool] -or -not $confirmation[0]) {
+                throw 'The test safety helper did not confirm an isolated invocation.'
+            }
+        } finally { $currentProcess.Dispose() }
+        return $true
+    } $PSCommandPath $PSScriptRoot
+} catch { throw "Prototype safety guard failed: $($_.Exception.Message)" }
+if ($isolatedInvocationConfirmed -ne $true) { throw 'Prototype safety guard failed to confirm an isolated invocation.' }
+
+# Prototype test body starts below the invocation guard.
 $ErrorActionPreference = 'Stop'
 function Absolute-TestPath([string]$value, [string]$label) {
     if ([string]::IsNullOrWhiteSpace($value) -or -not [IO.Path]::IsPathRooted($value) -or
