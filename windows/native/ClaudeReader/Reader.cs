@@ -60,6 +60,9 @@ namespace AITaskMonitor.Claude {
   internal readonly Dictionary<string, int> PendingStatuses = new Dictionary<string, int>(StringComparer.Ordinal);
  }
  public static class Reader {
+  // The installed hook accepts at most 128 UTF-16 units for a session ID.
+  // Never truncate: distinct long IDs could otherwise become one task.
+  private const int MaximumSessionId = 128;
   private sealed class StepMoment {
    internal Event First;
    internal bool Multiple;
@@ -216,6 +219,7 @@ namespace AITaskMonitor.Claude {
         TaskId="", TaskStatus="", Phase="source_uncertain", PreviousStatus="", Active=null });
       continue;
      }
+     if (id.Length > MaximumSessionId) { sourceUncertain = true; continue; }
      if (permitted != null && !permitted.Contains(id)) continue;
      if (!DateTimeOffset.TryParse(Value(data, "timestamp"), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out time)) { sourceUncertain = true; continue; }
      object active;

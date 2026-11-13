@@ -9,9 +9,19 @@ This also applies when the same step ID is reused for different observed
 names, including when both arrive before the first read. Without observed loss
 or session uncertainty, an ordinary rename keeps its latest name. Retained
 history is limited to 128 entries per session and is marked incomplete when
-bounded; an overlong ID is represented internally by a SHA-256 identity and
+bounded; an overlong step ID is represented internally by a SHA-256 identity and
 also marks the retained plan incomplete. Values no longer present or observed
 cannot be recovered.
+
+Session IDs are limited to 128 UTF-16 code units, matching the length limit in
+the installed hook. A longer session ID is rejected before it can enter event
+state or retained-card dictionaries; it is not truncated or converted into a
+shared placeholder. The rejected event marks source-wide loss, so the
+unsupported session cannot be displayed as a confirmed card. Previously visible
+cards and bounded names remain unconfirmed, even when the same snapshot contains
+a stop. Existing session IDs within the limit retain their exact identity;
+separate IDs are not merged. The length bound does not establish that every
+other aspect of a historic or independently produced event is trustworthy.
 
 `ClaudeFileSource` reads caller-supplied journal paths and connection state. It
 limits each read to 4 MiB and only parses complete UTF-8 lines. If a bounded
@@ -26,6 +36,26 @@ those records may contain needed plan evidence. A first read of a journal larger
 than 4 MiB likewise marks its unseen prefix as loss, even when the retained tail
 starts exactly at a line boundary. This conservatively keeps large-journal plans
 unconfirmed; names that were never observed cannot be reconstructed.
+
+An observed `Disconnected` or `Partial` connection also records source-wide
+loss. Disconnected snapshots hide cards while keeping bounded known names;
+after a partial connection or reconnection, retained cards and newly read events
+are unconfirmed. A later event or an unchanged journal cannot prove that its
+writer belongs to the new connection, and even a delayed stop cannot erase a
+previously visible card. This uncertainty remains for this reader's lifetime;
+it does not affect a separate source instance. A first direct `Connected` poll
+without a previously observed interruption keeps its ordinary behavior.
+
+The future owner must call `NotifyConnection` promptly for every connection
+change, including while a poll is in progress, and then use `Poll(utcNow)` to
+read the latest signalled state. Each result carries a generation; `IsCurrent`
+rejects a result from an older connection signal or another source. A signal
+detected during the read produces a hidden or unconfirmed result and retains
+names from before the read. `IsCurrent` alone cannot make checking and UI
+presentation atomic: the owner must serialize notifications, the check and
+presentation, and serialize polls. A connection change never reported to the
+source cannot be detected. The existing prototype has not been connected to
+this signaling contract, so live in-flight protection remains unverified.
 
 Pending snapshots use the session reader's existing retention rules: at most
 256 cards and 128 retained steps per card, with bounded step titles and IDs.
@@ -55,19 +85,15 @@ Later observed activity can show the card again, with uncertainty retained
 where the source does not prove the full history.
 
 The synthetic file tests create a new directory inside the process temporary
-directory and accept no external event or fixture arguments. The WPF checks use
-the same checked-in fixture and require Windows. They do not launch a real agent
-or register hooks:
+directory and accept no external event or fixture arguments. The
+`claude-file-source` job in `.github/workflows/windows-dotnet-path-safety.yml`
+runs them on disposable hosted Windows with a cleared child environment,
+synthetic temporary/profile directories and `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0`.
+It passed 77 checks in [CI run 43465447532](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43465447532).
 
-```powershell
-dotnet run --project .\windows\native\Tests\ClaudeFileSource\ClaudeFileSource.Tests.csproj -c Release
-dotnet run --project .\windows\native\Tests\ClaudeFileUi\ClaudeFileUi.Tests.csproj -c Release
-dotnet run --project .\windows\native\Tests\ClaudeTitleRetention\ClaudeTitleRetention.Tests.csproj -c Release
-```
-
-Set the test process's temporary and profile directories to a disposable
-location when isolation is required. `Test-ClaudeReader.ps1` is the earlier
-source-identity check for the legacy embedded reader; the phase-aware native
-reader intentionally diverges, so that older check is not an acceptance test for
-this version. Real Claude sessions, final application integration and installer
-behavior remain unverified.
+The WPF file and title-retention checks require Windows and a similarly isolated
+test environment; they were not run by that job. Do not invoke old local test
+runners without reviewing their environment handling. `Test-ClaudeReader.ps1`
+is an earlier source-identity check for the legacy embedded reader, not an
+acceptance test for this version. Real Claude sessions, final application
+integration and installer behavior remain unverified.

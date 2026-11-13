@@ -33,11 +33,15 @@ string firstTitle = observed.Steps[0].title;
 observed.Steps[0].title = "externally modified";
 snapshot = source.Poll(ClaudeConnection.Connected, now);
 Check(snapshot.Tasks.Single(x => x.Id == "observed").Steps[0].title == firstTitle, "Returned task must be isolated");
-snapshot = source.Poll(ClaudeConnection.Partial, now);
+var partialSource = new ClaudeFileSource(current, legacy, DateTime.MinValue.ToUniversalTime());
+_ = partialSource.Poll(ClaudeConnection.Connected, now);
+snapshot = partialSource.Poll(ClaudeConnection.Partial, now);
 Check(snapshot.Unavailable && snapshot.Tasks.All(x => x.Unconfirmed && !x.PlanConfirmed), "Partial connection must be unconfirmed");
 Check(snapshot.Tasks.Single(x => x.Id == "observed").Steps[0].title == firstTitle, "Partial state preserves step names");
-snapshot = source.Poll(ClaudeConnection.Connected, now);
-Check(!snapshot.Unavailable && snapshot.Tasks.Single(x => x.Id == "observed").PlanConfirmed, "Complete connection recovers after partial state");
+snapshot = partialSource.Poll(ClaudeConnection.Connected, now);
+Check(snapshot.Unavailable && snapshot.Tasks.All(x => x.Unconfirmed && !x.PlanConfirmed) &&
+    snapshot.Tasks.Single(x => x.Id == "observed").Steps[0].title == firstTitle,
+    "A complete connection must not confirm an old journal after partial state");
 string nonTerminal = JsonSerializer.Serialize(new Dictionary<string, object> {
     ["session_id"] = "observed", ["timestamp"] = now.AddMilliseconds(-2).ToString("O"),
     ["event"] = "PreToolUse", ["tool_name"] = "Read", ["active"] = true }) + "\r\n";
@@ -105,6 +109,184 @@ File.AppendAllText(pendingAfterStopPath, afterStopEvent[afterStopSplit..], utf8)
 snapshot = pendingAfterStop.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
 Check(!snapshot.Unavailable && snapshot.Tasks.Count == 1 && snapshot.Tasks.Single().Id == "neighbor" && !snapshot.Tasks.Single().Unconfirmed,
     "A complete tail must apply an earlier confirmed stop");
+
+string SessionEvent(string id) => JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = id, ["timestamp"] = now.ToString("O"),
+    ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
+string idLimitPath = Path.Combine(work, "session-id-limit.jsonl");
+string idLimitPrefix = new('s', 127);
+string idLimitA = idLimitPrefix + "a", idLimitB = idLimitPrefix + "b";
+string idLimitUnicode = new string('u', 126) + "😀";
+Check(idLimitA.Length == 128 && idLimitB.Length == 128 && idLimitUnicode.Length == 128,
+    "The boundary identity fixtures must contain exactly 128 UTF-16 units");
+File.WriteAllText(idLimitPath, SessionEvent(idLimitA) + SessionEvent(idLimitB) + SessionEvent(idLimitUnicode), utf8);
+var idLimitSource = new ClaudeFileSource(idLimitPath, null, DateTime.MinValue.ToUniversalTime());
+snapshot = idLimitSource.Poll(ClaudeConnection.Connected, now);
+Check(!snapshot.Unavailable && snapshot.Tasks.Count == 3 && snapshot.Tasks.All(x => !x.Unconfirmed) &&
+    snapshot.Tasks.Any(x => x.Id == idLimitA) && snapshot.Tasks.Any(x => x.Id == idLimitB) &&
+    snapshot.Tasks.Any(x => x.Id == idLimitUnicode),
+    "Distinct boundary-length session identities must remain separate and confirmed");
+
+string oversizedIdPrefix = new('x', 1_000_000);
+string oversizedIdA = oversizedIdPrefix + "a", oversizedIdB = oversizedIdPrefix + "b";
+string oversizedEvents = SessionEvent(new string('v', 129)) + SessionEvent(oversizedIdA) + SessionEvent(oversizedIdB);
+string oversizedOnlyPath = Path.Combine(work, "oversized-only-sessions.jsonl");
+File.WriteAllText(oversizedOnlyPath, oversizedEvents, utf8);
+var oversizedOnlySource = new ClaudeFileSource(oversizedOnlyPath, null, DateTime.MinValue.ToUniversalTime());
+snapshot = oversizedOnlySource.Poll(ClaudeConnection.Connected, now);
+Check(snapshot.Unavailable && snapshot.Tasks.Count == 0,
+    "Unsupported oversized identities must report source loss without inventing or merging cards");
+
+string oversizedLegacyCurrent = Path.Combine(work, "oversized-legacy-current.jsonl");
+string oversizedLegacyPath = Path.Combine(work, "oversized-legacy.jsonl");
+File.WriteAllText(oversizedLegacyCurrent, complete, utf8);
+File.WriteAllText(oversizedLegacyPath, SessionEvent(new string('v', 129)), utf8);
+var oversizedLegacySource = new ClaudeFileSource(oversizedLegacyCurrent, oversizedLegacyPath, DateTime.MinValue.ToUniversalTime());
+snapshot = oversizedLegacySource.Poll(ClaudeConnection.Connected, now);
+Check(snapshot.Unavailable && snapshot.Tasks.Single().Id == "observed" && snapshot.Tasks.Single().Unconfirmed,
+    "An unsupported legacy identity must report loss without creating a card");
+
+string oversizedWithKnownPath = Path.Combine(work, "oversized-with-known-session.jsonl");
+File.WriteAllText(oversizedWithKnownPath, complete, utf8);
+var oversizedWithKnownSource = new ClaudeFileSource(oversizedWithKnownPath, null, DateTime.MinValue.ToUniversalTime());
+Check(oversizedWithKnownSource.Poll(ClaudeConnection.Connected, now).Tasks.Single().PlanConfirmed,
+    "Oversized-session recovery setup must start with a confirmed plan");
+File.AppendAllText(oversizedWithKnownPath, oversizedEvents + completeStop, utf8);
+snapshot = oversizedWithKnownSource.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
+var oversizedKnownTask = snapshot.Tasks.Single();
+Check(snapshot.Unavailable && oversizedKnownTask.Id == "observed" && oversizedKnownTask.Unconfirmed &&
+    !oversizedKnownTask.PlanConfirmed && oversizedKnownTask.Steps.All(x => x.status == "unknown") &&
+    oversizedKnownTask.Steps.Select(x => x.title).SequenceEqual(new[] { "First step", "Second step" }),
+    "A rejected identity must retain a previously visible task as unconfirmed even beside a stop");
+File.WriteAllText(oversizedWithKnownPath, "", utf8);
+snapshot = oversizedWithKnownSource.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
+Check(snapshot.Unavailable && snapshot.Tasks.Single().Id == "observed" && snapshot.Tasks.Single().Unconfirmed &&
+    snapshot.Tasks.Single().Steps.Select(x => x.title).SequenceEqual(new[] { "First step", "Second step" }),
+    "Recovery from oversized identities must retain known names without confirmation");
+
+foreach (ClaudeConnection interrupted in new[] { ClaudeConnection.Disconnected, ClaudeConnection.Partial })
+{
+    string connectionPath = Path.Combine(work, $"connection-{interrupted}.jsonl");
+    File.WriteAllText(connectionPath, complete + neighbor, utf8);
+    var connectionSource = new ClaudeFileSource(connectionPath, null, DateTime.MinValue.ToUniversalTime());
+    var original = connectionSource.Poll(ClaudeConnection.Connected, now);
+    Check(original.Tasks.Single(x => x.Id == "observed").PlanConfirmed && connectionSource.IsCurrent(original),
+        "Connection setup must begin with a confirmed plan");
+    snapshot = connectionSource.Poll(interrupted, now);
+    Check(!connectionSource.IsCurrent(original), "A connection transition must invalidate an earlier snapshot");
+    if (interrupted == ClaudeConnection.Disconnected)
+    {
+        Check(snapshot.Tasks.Count == 0 && !snapshot.Unavailable, "A disconnect must hide cards");
+        var whileDisconnected = connectionSource.ReportUnavailable();
+        Check(whileDisconnected.Tasks.Count == 0 && !whileDisconnected.Unavailable,
+            "A read-error report must not show cards while disconnected");
+    }
+    else Check(snapshot.Unavailable && snapshot.Tasks.Count == 2 && snapshot.Tasks.All(x => x.Unconfirmed),
+        "A partial connection must keep cards unconfirmed");
+
+    // A later arrival cannot prove whether this stop came from before or after the gap.
+    File.AppendAllText(connectionPath, completeStop, utf8);
+    snapshot = connectionSource.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
+    var connectionTask = snapshot.Tasks.Single(x => x.Id == "observed");
+    Check(snapshot.Unavailable && connectionTask.Unconfirmed && !connectionTask.PlanConfirmed &&
+        connectionTask.Steps.All(x => x.status == "unknown") &&
+        connectionTask.Steps.Select(x => x.title).SequenceEqual(new[] { "First step", "Second step" }) &&
+        snapshot.Tasks.Single(x => x.Id == "neighbor").Unconfirmed,
+        "Reconnection must preserve prior names and must not confirm a delayed stop");
+    string delayed = JsonSerializer.Serialize(new Dictionary<string, object> {
+        ["session_id"] = "delayed", ["timestamp"] = now.AddSeconds(1).ToString("O"),
+        ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
+    File.AppendAllText(connectionPath, delayed, utf8);
+    snapshot = connectionSource.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
+    Check(snapshot.Unavailable && snapshot.Tasks.Single(x => x.Id == "delayed").Unconfirmed &&
+        snapshot.Tasks.Single(x => x.Id == "observed").Steps.Select(x => x.title).SequenceEqual(new[] { "First step", "Second step" }),
+        "A delayed event after reconnect must not establish a new epoch or erase names");
+}
+
+foreach (ClaudeConnection initial in new[] { ClaudeConnection.Disconnected, ClaudeConnection.Partial })
+{
+    string initialPath = Path.Combine(work, $"initial-{initial}.jsonl");
+    File.WriteAllText(initialPath, complete, utf8);
+    var initialSource = new ClaudeFileSource(initialPath, null, DateTime.MinValue.ToUniversalTime());
+    _ = initialSource.Poll(initial, now);
+    snapshot = initialSource.Poll(ClaudeConnection.Connected, now);
+    Check(snapshot.Unavailable && snapshot.Tasks.Single().Unconfirmed && !snapshot.Tasks.Single().PlanConfirmed,
+        "A first non-connected observation cannot confirm an older journal on reconnect");
+}
+
+string connectionManyPath = Path.Combine(work, "connection-many-cards.jsonl");
+var connectionMany = new StringBuilder();
+for (int i = 0; i < 257; i++)
+    connectionMany.Append(JsonSerializer.Serialize(new Dictionary<string, object> {
+        ["session_id"] = $"connection-{i}", ["timestamp"] = now.ToString("O"),
+        ["event"] = "UserPromptSubmit", ["active"] = true })).Append('\n');
+File.WriteAllText(connectionManyPath, connectionMany.ToString(), utf8);
+var connectionManySource = new ClaudeFileSource(connectionManyPath, null, DateTime.MinValue.ToUniversalTime());
+_ = connectionManySource.Poll(ClaudeConnection.Connected, now);
+Check(connectionManySource.Poll(ClaudeConnection.Disconnected, now).Tasks.Count == 0,
+    "Disconnect must hide all cards even when retention reaches its limit");
+snapshot = connectionManySource.Poll(ClaudeConnection.Connected, now);
+Check(snapshot.Unavailable && snapshot.Tasks.Count == 256 && snapshot.Tasks.All(x => x.Unconfirmed),
+    "Reconnection retention must be bounded and unconfirmed");
+
+string independentPath = Path.Combine(work, "independent-connection.jsonl");
+File.WriteAllText(independentPath, complete, utf8);
+var independentSource = new ClaudeFileSource(independentPath, null, DateTime.MinValue.ToUniversalTime());
+try
+{
+    _ = independentSource.Poll(now);
+    throw new ArgumentException("A poll without a connection signal unexpectedly succeeded.");
+}
+catch (InvalidOperationException) { checks++; }
+var independentSnapshot = independentSource.Poll(ClaudeConnection.Connected, now);
+Check(independentSnapshot.Tasks.Single().PlanConfirmed, "The independent source must begin confirmed");
+
+foreach (bool reconnectBeforeReturn in new[] { false, true })
+{
+    string racePath = Path.Combine(work, $"connection-race-{reconnectBeforeReturn}.jsonl");
+    File.WriteAllText(racePath, complete + neighbor, utf8);
+    using var readReached = new System.Threading.ManualResetEventSlim();
+    using var finishRead = new System.Threading.ManualResetEventSlim();
+    int arm = 0;
+    var raceSource = new ClaudeFileSource(racePath, null, DateTime.MinValue.ToUniversalTime(), () =>
+    {
+        if (System.Threading.Interlocked.Exchange(ref arm, 0) != 0)
+        {
+            readReached.Set();
+            if (!finishRead.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException("The synthetic poll was not released.");
+        }
+    });
+    var beforeRace = raceSource.Poll(ClaudeConnection.Connected, now);
+    Check(beforeRace.Tasks.Single(x => x.Id == "observed").PlanConfirmed, "Concurrent setup must begin confirmed");
+    File.AppendAllText(racePath, completeStop, utf8);
+    System.Threading.Volatile.Write(ref arm, 1);
+    var inFlight = System.Threading.Tasks.Task.Run(() => raceSource.Poll(now.AddSeconds(2)));
+    try
+    {
+        Check(readReached.Wait(TimeSpan.FromSeconds(8)), "The synthetic poll did not reach its synchronization point");
+        var notify = System.Threading.Tasks.Task.Run(() => raceSource.NotifyConnection(ClaudeConnection.Disconnected));
+        Check(notify.Wait(TimeSpan.FromSeconds(8)), "Connection notification blocked behind a file poll");
+        notify.GetAwaiter().GetResult();
+        Check(!raceSource.IsCurrent(beforeRace) && !raceSource.IsCurrent(independentSnapshot) &&
+            independentSource.IsCurrent(independentSnapshot),
+            "A disconnect must invalidate only its own source's earlier snapshot");
+        if (reconnectBeforeReturn) raceSource.NotifyConnection(ClaudeConnection.Connected);
+    }
+    finally { finishRead.Set(); }
+    snapshot = inFlight.WaitAsync(TimeSpan.FromSeconds(8)).GetAwaiter().GetResult();
+    if (!reconnectBeforeReturn)
+    {
+        Check(snapshot.Tasks.Count == 0 && raceSource.IsCurrent(snapshot), "An in-flight disconnect must hide the result");
+        raceSource.NotifyConnection(ClaudeConnection.Connected);
+        snapshot = raceSource.Poll(now.AddSeconds(2));
+    }
+    Check(snapshot.Unavailable && snapshot.Tasks.Single(x => x.Id == "observed").Unconfirmed &&
+        snapshot.Tasks.Single(x => x.Id == "observed").Steps.Select(x => x.title).SequenceEqual(new[] { "First step", "Second step" }) &&
+        snapshot.Tasks.Single(x => x.Id == "neighbor").Unconfirmed,
+        "A disconnect during polling must retain earlier names without confirming the delayed stop");
+    Check(independentSource.Poll(ClaudeConnection.Connected, now).Tasks.Single().PlanConfirmed,
+        "A different source must remain confirmed after the interruption");
+}
 
 foreach (bool readFailure in new[] { false, true })
 {
@@ -444,6 +626,13 @@ many.Append(JsonSerializer.Serialize(new Dictionary<string, object> { ["session_
 for (int i = 0; i < 129; i++)
     many.Append(JsonSerializer.Serialize(new Dictionary<string, object> { ["session_id"] = "many", ["timestamp"] = now.AddSeconds(-30).AddMilliseconds(i).ToString("O"), ["event"] = "TaskCreated", ["active"] = true, ["task_id"] = i.ToString(), ["task_subject"] = "Synthetic " + i })).Append('\n');
 File.WriteAllText(bounded, many.ToString(), utf8);
+var disconnectBoundedSource = new ClaudeFileSource(bounded, null, DateTime.MinValue.ToUniversalTime());
+Check(disconnectBoundedSource.Poll(ClaudeConnection.Connected, now).Tasks.Single().Steps.Length == 129,
+    "Disconnect retention setup must contain all 129 observed names");
+_ = disconnectBoundedSource.Poll(ClaudeConnection.Disconnected, now);
+var disconnectBounded = disconnectBoundedSource.Poll(ClaudeConnection.Connected, now).Tasks.Single();
+Check(disconnectBounded.Unconfirmed && disconnectBounded.RetainedPlanIncomplete && disconnectBounded.Steps.Length == 128,
+    "Disconnect must preserve only bounded names and flag the truncated plan");
 var boundedSource = new ClaudeFileSource(bounded, null, DateTime.MinValue.ToUniversalTime());
 Check(boundedSource.Poll(ClaudeConnection.Connected, now).Tasks.Single().Steps.Length == 129, "Bounded setup has 129 observed names");
 string manyEvent = JsonSerializer.Serialize(new Dictionary<string, object> { ["session_id"] = "many",

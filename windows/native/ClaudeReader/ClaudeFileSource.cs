@@ -7,11 +7,17 @@ using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("ClaudeFileSource.Tests")]
+
 namespace AITaskMonitor.Claude;
 
 public enum ClaudeConnection { Disconnected, Partial, Connected }
 
-public sealed record ClaudeSourceSnapshot(IReadOnlyList<Task> Tasks, bool Unavailable);
+public sealed record ClaudeSourceSnapshot(IReadOnlyList<Task> Tasks, bool Unavailable)
+{
+    public long Generation { get; internal init; }
+    internal object? Owner { get; init; }
+}
 
 // One instance belongs to one monitor session. Paths and connection state are
 // supplied by its caller; this class does not find profiles or install hooks.
@@ -20,16 +26,26 @@ public sealed class ClaudeFileSource
     private const int MaximumTailBytes = 4 * 1024 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
     private readonly object gate = new();
+    private readonly object signalGate = new();
+    private readonly object identity = new();
     private readonly string currentPath;
     private readonly string? legacyPath;
     private readonly DateTime observedSinceUtc;
+    private readonly Action? afterReadBeforeSnapshot;
     private readonly SessionReader reader = new();
     private Task[] previous = [];
     private bool currentSeen, legacySeen;
-    private bool pendingRead, pendingLoss;
+    private bool pendingRead, pendingLoss, connectionLoss;
     private Cursor? currentCursor, legacyCursor;
+    private ClaudeConnection? signalledConnection;
+    private long generation;
+    private bool signalLoss, generationExhausted;
 
     public ClaudeFileSource(string currentPath, string? legacyPath, DateTime observedSinceUtc)
+        : this(currentPath, legacyPath, observedSinceUtc, null) { }
+
+    // A synchronization seam for synthetic tests; production uses the public constructor.
+    internal ClaudeFileSource(string currentPath, string? legacyPath, DateTime observedSinceUtc, Action? afterReadBeforeSnapshot)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(currentPath);
         if (!Path.IsPathFullyQualified(currentPath)) throw new ArgumentException("Current event path must be absolute.", nameof(currentPath));
@@ -38,17 +54,97 @@ public sealed class ClaudeFileSource
         this.currentPath = currentPath;
         this.legacyPath = legacyPath;
         this.observedSinceUtc = observedSinceUtc;
+        this.afterReadBeforeSnapshot = afterReadBeforeSnapshot;
+    }
+
+    // Call as soon as the owner observes a change, including while a poll runs.
+    // A separate lock lets notification invalidate an in-flight result promptly.
+    public void NotifyConnection(ClaudeConnection connection)
+    {
+        if (!Enum.IsDefined(connection)) throw new ArgumentOutOfRangeException(nameof(connection));
+        lock (signalGate)
+        {
+            if (signalledConnection == connection) return;
+            signalledConnection = connection;
+            if (connection != ClaudeConnection.Connected) signalLoss = true;
+            AdvanceGeneration();
+        }
+    }
+
+    private void AdvanceGeneration()
+    {
+        // Caller holds signalGate. Once exhausted, no snapshot is considered current.
+        if (generation == long.MaxValue) generationExhausted = true;
+        else generation++;
+    }
+
+    private readonly record struct ConnectionSignal(ClaudeConnection? Connection, long Generation, bool Loss, bool Exhausted);
+    private ConnectionSignal Signal()
+    {
+        lock (signalGate) return new(signalledConnection, generation, signalLoss, generationExhausted);
+    }
+
+    private ClaudeSourceSnapshot Stamp(ClaudeSourceSnapshot snapshot, ConnectionSignal signal) =>
+        snapshot with { Generation = signal.Generation, Owner = identity };
+
+    // The owner must serialize this check with presentation and notifications.
+    public bool IsCurrent(ClaudeSourceSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        lock (signalGate)
+            return !generationExhausted && ReferenceEquals(snapshot.Owner, identity) && snapshot.Generation == generation;
     }
 
     public ClaudeSourceSnapshot Poll(ClaudeConnection connection, DateTime utcNow)
     {
-        if (!Enum.IsDefined(connection)) throw new ArgumentOutOfRangeException(nameof(connection));
+        if (utcNow.Kind != DateTimeKind.Utc) throw new ArgumentException("Poll time must be UTC.", nameof(utcNow));
+        NotifyConnection(connection);
+        return Poll(utcNow);
+    }
+
+    // Uses the last signalled connection rather than a potentially stale caller snapshot.
+    public ClaudeSourceSnapshot Poll(DateTime utcNow)
+    {
         if (utcNow.Kind != DateTimeKind.Utc) throw new ArgumentException("Poll time must be UTC.", nameof(utcNow));
         lock (gate)
         {
+            ConnectionSignal start = Signal();
+            if (start.Connection is null) throw new InvalidOperationException("A connection must be signalled before polling.");
+            Task[] before = previous;
+            if (start.Loss || start.Exhausted) MarkConnectionLoss();
+            ClaudeSourceSnapshot result = PollLocked(start.Connection.Value, utcNow);
+            afterReadBeforeSnapshot?.Invoke();
+            ConnectionSignal end = Signal();
+            if (end.Generation != start.Generation || end.Exhausted)
+            {
+                if (end.Loss || end.Exhausted)
+                {
+                    MarkConnectionLoss();
+                    previous = MergePending(before, previous, out bool overflow);
+                    if (overflow) reader.MarkSourceLoss();
+                }
+                result = end.Connection == ClaudeConnection.Disconnected
+                    ? new ClaudeSourceSnapshot([], false)
+                    : new ClaudeSourceSnapshot(Copy(previous, true), true);
+            }
+            return Stamp(result, end);
+        }
+    }
+
+    private void MarkConnectionLoss()
+    {
+        if (connectionLoss) return;
+        connectionLoss = true;
+        reader.MarkSourceLoss();
+        previous = MergePending([], previous, out bool overflow);
+        if (overflow) reader.MarkSourceLoss();
+        pendingLoss = true;
+    }
+
+    private ClaudeSourceSnapshot PollLocked(ClaudeConnection connection, DateTime utcNow)
+    {
             if (connection == ClaudeConnection.Disconnected)
             {
-                previous = [];
                 pendingRead = false;
                 return new ClaudeSourceSnapshot([], false);
             }
@@ -56,7 +152,7 @@ public sealed class ClaudeFileSource
             {
                 Tail? current = ReadOptional(currentPath, ref currentSeen, ref currentCursor);
                 if (current is null)
-                    return new ClaudeSourceSnapshot([], connection == ClaudeConnection.Partial);
+                    return new ClaudeSourceSnapshot(Copy(previous, true), connectionLoss || connection == ClaudeConnection.Partial);
                 Tail? legacy = legacyPath is null ? null : ReadOptional(legacyPath, ref legacySeen, ref legacyCursor);
                 bool isPending = current.Value.Pending || legacy?.Pending == true;
                 if (current.Value.Discontinuity || legacy?.Discontinuity == true ||
@@ -78,7 +174,11 @@ public sealed class ClaudeFileSource
                         connection == ClaudeConnection.Partial || reader.RetentionOverflow || pendingLoss;
                     return new ClaudeSourceSnapshot(Copy(previous, true), unavailable);
                 }
+                bool sourceWasUncertain = reader.SourceUncertain;
                 Task[] parsed = reader.Read(current.Value.Text, legacy?.Text ?? "", utcNow, observedSinceUtc);
+                // A newly rejected event can hide a relevant earlier record.
+                // Keep the previously visible cards until a recovery protocol exists.
+                if (!sourceWasUncertain && reader.SourceUncertain) pendingLoss = true;
                 if (pendingRead && reader.SourceUncertain) pendingLoss = true;
                 pendingRead = false;
                 if (pendingLoss)
@@ -98,17 +198,23 @@ public sealed class ClaudeFileSource
                 previous = Copy(previous, true);
                 return new ClaudeSourceSnapshot(Copy(previous, false), true);
             }
-        }
     }
 
     public ClaudeSourceSnapshot ReportUnavailable()
     {
+        lock (signalGate)
+        {
+            signalLoss = true;
+            AdvanceGeneration();
+        }
         lock (gate)
         {
-            if (pendingRead) pendingLoss = true;
-            reader.MarkSourceLoss();
-            previous = Copy(previous, true);
-            return new ClaudeSourceSnapshot(Copy(previous, false), true);
+            MarkConnectionLoss();
+            ConnectionSignal signal = Signal();
+            ClaudeSourceSnapshot result = signal.Connection == ClaudeConnection.Disconnected
+                ? new ClaudeSourceSnapshot([], false)
+                : new ClaudeSourceSnapshot(Copy(previous, true), true);
+            return Stamp(result, signal);
         }
     }
 
