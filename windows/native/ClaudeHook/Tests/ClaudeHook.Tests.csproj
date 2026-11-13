@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\ClaudeHook.csproj" />
+    <ProjectReference Include="..\..\ClaudeReader\ClaudeReader.csproj" />
   </ItemGroup>
 </Project>

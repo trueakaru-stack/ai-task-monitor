@@ -5,10 +5,12 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using AITaskMonitor.ClaudeHook;
 using AITaskMonitor.ClaudeLogWriter;
+using ClaudeReader = AITaskMonitor.Claude.Reader;
 using Writer = AITaskMonitor.ClaudeLogWriter.ClaudeLogWriter;
 
 if (args.Length > 0 && args[0] == "worker") return Fixtures.Worker(args);
-if (args.Length != 3) throw new ArgumentException("Expected copied hook, synthetic root and Windows PowerShell.");
+if (args.Length == 2 && args[0] == "--native-only") return Fixtures.Run(null, args[1], null);
+if (args.Length != 3) throw new ArgumentException("Expected --native-only and synthetic root, or copied hook, synthetic root and Windows PowerShell.");
 return Fixtures.Run(args[0], args[1], args[2]);
 
 static class Fixtures
@@ -27,13 +29,19 @@ static class Fixtures
         if (!condition) throw new InvalidOperationException(message);
     }
 
-    public static int Run(string hook, string root, string shell)
+    public static int Run(string? hook, string root, string? shell)
     {
+        RequireCleanEnvironment();
         fixtureRoot = ValidateRoot(root);
-        legacyHook = Path.GetFullPath(hook);
-        powerShell = Path.GetFullPath(shell);
-        Check(File.Exists(legacyHook) && File.Exists(powerShell), "A synthetic dependency is missing.");
-        Check(!File.Exists(Path.Combine(Path.GetDirectoryName(legacyHook)!, "store-channel.marker")), "The copied hook is not isolated.");
+        bool compareLegacy = hook is not null && shell is not null;
+        if (compareLegacy)
+        {
+            legacyHook = Path.GetFullPath(hook!);
+            powerShell = Path.GetFullPath(shell!);
+            Check(File.Exists(legacyHook) && File.Exists(powerShell), "A synthetic dependency is missing.");
+            Check(!File.Exists(Path.Combine(Path.GetDirectoryName(legacyHook)!, "store-channel.marker")), "The copied hook is not isolated.");
+            legacyHook = PrepareReferenceHook(legacyHook);
+        }
 
         string ordinary = FixtureDirectory("basic");
         string mutex = NewMutex();
@@ -49,6 +57,7 @@ static class Fixtures
             Check(parsed.RootElement.EnumerateObject().Count() == 10, "The serialized record changed its field count.");
             Check(parsed.RootElement.GetProperty("task_subject").GetString() == record.TaskSubject, "Unicode or escaped newlines changed.");
         }
+        VerifyPhaseSerialization();
         File.WriteAllText(Path.Combine(ordinary, "settings.json"), "{synthetic invalid settings", Utf8);
         Check(Writer.Write(ordinary, mutex, Limit, Record("no-settings-read")) == ClaudeLogWriteResult.Written,
             "Explicit limits unexpectedly depended on settings.");
@@ -64,29 +73,79 @@ static class Fixtures
             "The highest supported limit was rejected.");
 
         string seed = SeedLines(16, 70_000);
-        CompareLegacy("default", seed, null, 10_000_000, expectedRotate: false, writes: 1);
-        CompareLegacy("rotation", seed, "{\"claudeMaximumMB\":1}", Limit, expectedRotate: true, writes: 1);
-        string exactPrefix = "{\"synthetic\":\"";
-        const string exactSuffix = "\"}\r\n";
-        string exactSeed = exactPrefix + new string('x', (int)Limit - exactPrefix.Length - exactSuffix.Length) + exactSuffix;
-        Check(Utf8.GetByteCount(exactSeed) == Limit, "The exact-size fixture is invalid.");
-        CompareLegacy("at-limit", exactSeed, "{\"claudeMaximumMB\":1}", Limit, expectedRotate: false, writes: 1);
-        CompareLegacy("over-on-next", exactSeed, "{\"claudeMaximumMB\":1}", Limit, expectedRotate: true, writes: 2);
-        CompareLegacy("disabled", seed, "{bad", 0, expectedRotate: false, writes: 1);
-        CompareLegacyNoNewline();
+        if (compareLegacy)
+        {
+            CompareLegacy("default", seed, null, 10_000_000, expectedRotate: false, writes: 1);
+            CompareLegacy("rotation", seed, "{\"claudeMaximumMB\":1}", Limit, expectedRotate: true, writes: 1);
+            string exactPrefix = "{\"synthetic\":\"";
+            const string exactSuffix = "\"}\r\n";
+            string exactSeed = exactPrefix + new string('x', (int)Limit - exactPrefix.Length - exactSuffix.Length) + exactSuffix;
+            Check(Utf8.GetByteCount(exactSeed) == Limit, "The exact-size fixture is invalid.");
+            CompareLegacy("at-limit", exactSeed, "{\"claudeMaximumMB\":1}", Limit, expectedRotate: false, writes: 1);
+            CompareLegacy("over-on-next", exactSeed, "{\"claudeMaximumMB\":1}", Limit, expectedRotate: true, writes: 2);
+            CompareLegacy("disabled", seed, "{bad", 0, expectedRotate: false, writes: 1);
+            CompareLegacyNoNewline();
+        }
+        VerifyUnterminatedTail();
+        VerifyRotationReader();
+        VerifyInvalidTimestamp();
+        VerifyNativeLimitBoundaries();
 
         VerifyBusyAndAbandoned();
         VerifyLockedFile();
         VerifyParallelRotation(seed);
-        VerifyMixedLegacyAndNative();
+        if (compareLegacy) VerifyMixedLegacyAndNative();
         VerifyLinks();
 
-        Console.WriteLine($"Claude log writer: {checks} synthetic assertions passed; legacy comparisons, parallel processes and rotation verified.");
+        Console.WriteLine($"Claude log writer: {checks} synthetic assertions passed; {(compareLegacy ? "legacy comparisons included" : "native-only; legacy comparison not run")}.");
         return 0;
+    }
+
+    private static string PrepareReferenceHook(string sourceHook)
+    {
+        string reference = FixtureDirectory("reference-" + Guid.NewGuid().ToString("N"));
+        string copiedHook = Path.Combine(reference, "ClaudeTaskHook.ps1");
+        File.Copy(sourceHook, copiedHook, false);
+        File.Copy(Path.Combine(Path.GetDirectoryName(sourceHook)!, "ClaudeLoopClient.ps1"), Path.Combine(reference, "ClaudeLoopClient.ps1"), false);
+        string source = Path.Combine(reference, "ClaudeStageObservation.cs");
+        using (Stream input = Assembly.GetExecutingAssembly().GetManifestResourceStream("AITaskMonitor.Tests.ClaudeStageObservation.cs")
+            ?? throw new InvalidOperationException("The synthetic reference source is missing."))
+        using (FileStream output = new(source, FileMode.CreateNew, FileAccess.Write, FileShare.None)) input.CopyTo(output);
+        string system = Environment.GetEnvironmentVariable("SystemRoot") ?? throw new InvalidOperationException("SystemRoot missing.");
+        string compiler = Path.Combine(system, "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe");
+        if (!File.Exists(compiler)) compiler = Path.Combine(system, "Microsoft.NET", "Framework", "v4.0.30319", "csc.exe");
+        Check(File.Exists(compiler), "The synthetic reference compiler is missing.");
+        var start = StartInfo(compiler);
+        foreach (string argument in new[] { "/nologo", "/target:library", "/platform:anycpu", "/reference:System.Web.Extensions.dll",
+            "/out:" + Path.Combine(reference, "ClaudeStageObservation.dll"), source }) start.ArgumentList.Add(argument);
+        using Process process = Process.Start(start) ?? throw new InvalidOperationException("The synthetic reference compiler did not start.");
+        WaitSuccess(process, "Synthetic reference compiler");
+        Check(File.Exists(Path.Combine(reference, "ClaudeStageObservation.dll")), "The synthetic reference helper was not created.");
+        return copiedHook;
+    }
+
+    private static void VerifyPhaseSerialization()
+    {
+        string directory = FixtureDirectory("phase"), mutex = NewMutex();
+        const string input = """{"hook_event_name":"PostToolUse","session_id":"one","tool_name":"TaskUpdate","tool_input":{"taskId":"step-1","status":"in_progress"},"tool_response":{"taskId":"step-1","success":true,"updatedFields":["status"],"statusChange":{"from":"pending","to":"in_progress"}}}""";
+        Check(ClaudeHookTranslator.TryTranslate(input, DateTimeOffset.UnixEpoch, out ClaudeEventRecord? phase), "The synthetic phase was not translated.");
+        Check(Writer.Write(directory, mutex, Limit, phase!) == ClaudeLogWriteResult.Written, "The phase record was not written.");
+        Check(Writer.Write(directory, mutex, Limit, ClaudeHookTranslator.SourceUncertain(DateTimeOffset.UnixEpoch)) == ClaudeLogWriteResult.Written,
+            "The source-loss record was not written.");
+        string[] lines = File.ReadAllLines(Path.Combine(directory, Writer.EventFileName), Utf8);
+        Check(lines.Length == 2, "The phase fixture did not contain two records.");
+        using (JsonDocument update = JsonDocument.Parse(lines[0]))
+            Check(update.RootElement.GetProperty("stage_phase").GetString() == "update_observed" &&
+                update.RootElement.GetProperty("stage_previous_status").GetString() == "pending" &&
+                update.RootElement.GetProperty("stage_version").GetInt32() == 1, "The observed phase or transition was lost.");
+        using (JsonDocument loss = JsonDocument.Parse(lines[1]))
+            Check(loss.RootElement.GetProperty("stage_phase").GetString() == "source_uncertain" &&
+                loss.RootElement.GetProperty("active").ValueKind == JsonValueKind.Null, "The source-loss marker became confirmed.");
     }
 
     public static int Worker(string[] args)
     {
+        RequireCleanEnvironment();
         if (args.Length != 5) throw new ArgumentException("Invalid synthetic worker arguments.");
         fixtureRoot = ValidateRoot(Environment.GetEnvironmentVariable("AITM_LOG_TEST_ROOT") ?? "");
         string directory = Path.GetFullPath(args[1]);
@@ -126,10 +185,17 @@ static class Fixtures
             Check(Writer.Write(nativeDir, mutex, maximumBytes, translated!) == ClaudeLogWriteResult.Written, name + ": native write failed.");
         }
         string[] legacyLines = File.ReadAllLines(oldPath, Utf8), nativeLines = File.ReadAllLines(newPath, Utf8);
-        Check(legacyLines.Length == nativeLines.Length && legacyLines.Length >= writes, name + ": line counts differ.");
-        Check(PrefixBeforeLastLines(File.ReadAllText(oldPath, Utf8), writes) == PrefixBeforeLastLines(File.ReadAllText(newPath, Utf8), writes),
+        int appended = writes + (expectedRotate ? 1 : 0);
+        Check(legacyLines.Length == nativeLines.Length && legacyLines.Length >= appended, name + ": line counts differ.");
+        Check(PrefixBeforeLastLines(File.ReadAllText(oldPath, Utf8), appended) == PrefixBeforeLastLines(File.ReadAllText(newPath, Utf8), appended),
             name + ": retained bytes differ from legacy.");
-        for (int i = 1; i <= writes; i++) CompareEvents(legacyLines[^i], nativeLines[^i], name);
+        for (int i = 1; i <= appended; i++) CompareEvents(legacyLines[^i], nativeLines[^i], name);
+        if (expectedRotate)
+        {
+            using JsonDocument marker = JsonDocument.Parse(nativeLines[^2]);
+            Check(marker.RootElement.GetProperty("stage_phase").GetString() == "source_uncertain" &&
+                marker.RootElement.GetProperty("active").ValueKind == JsonValueKind.Null, name + ": rotation lost its uncertainty marker.");
+        }
         Check(!File.ReadAllText(newPath).Contains("SYNTHETIC_PRIVATE_", StringComparison.Ordinal), name + ": raw input leaked.");
         Check(File.ReadAllText(Path.Combine(legacyDir, "claude-events.jsonl")) == "synthetic legacy sentinel" &&
             File.ReadAllText(Path.Combine(nativeDir, "claude-events.jsonl")) == "synthetic legacy sentinel", name + ": unrelated log changed.");
@@ -150,17 +216,104 @@ static class Fixtures
         using (Process old = StartLegacy(local, mutex, input)) WaitSuccess(old, "No-newline legacy hook");
         Check(ClaudeHookTranslator.TryTranslate(input, DateTimeOffset.UnixEpoch, out ClaudeEventRecord? translated), "No-newline fixture translation failed.");
         Check(Writer.Write(nativeDir, mutex, Limit, translated!) == ClaudeLogWriteResult.Written, "No-newline native write failed.");
-        string a = File.ReadAllText(oldPath, Utf8), b = File.ReadAllText(newPath, Utf8);
-        int firstA = a.IndexOf('{'), firstB = b.IndexOf('{');
-        Check(firstA == 900_000 && firstB == firstA && a[..firstA] == b[..firstB],
-            "A no-newline retained tail differed from legacy.");
-        CompareEvents(a[firstA..].TrimEnd('\r', '\n'), b[firstB..].TrimEnd('\r', '\n'), "no-newline");
+        string[] oldLines = File.ReadAllLines(oldPath, Utf8), newLines = File.ReadAllLines(newPath, Utf8);
+        Check(oldLines.Length == 2 && newLines.Length == 3, "The no-newline rotation did not preserve separate native lines.");
+        Check(newLines[0] == new string('x', 900_000), "The retained no-newline tail changed.");
+        Check(oldLines[0].StartsWith(newLines[0] + "{", StringComparison.Ordinal) &&
+            oldLines[0].Contains("source_uncertain", StringComparison.Ordinal), "The legacy concatenation differs from the documented behavior.");
+        Expect<JsonException>(() => { using JsonDocument ignored = JsonDocument.Parse(oldLines[0]); }, "The legacy concatenated line unexpectedly parsed.");
+        using (JsonDocument marker = JsonDocument.Parse(newLines[1]))
+            Check(marker.RootElement.GetProperty("stage_phase").GetString() == "source_uncertain", "The native marker is not a separate record.");
+        CompareEvents(oldLines[1], newLines[2], "no-newline event");
+    }
+
+    private static void VerifyUnterminatedTail()
+    {
+        foreach ((string name, string seed, string expectedTail) in new[]
+        {
+            ("without-lf", new string('x', (int)Limit + 100), new string('x', 900_000)),
+            ("partial-record", new string('x', (int)Limit) + "\n{\"synthetic_partial\":", "{\"synthetic_partial\":"),
+            ("trailing-cr", new string('x', (int)Limit) + "\npartial\r", "partial")
+        })
+        {
+            string directory = FixtureDirectory("tail-" + name), file = Path.Combine(directory, Writer.EventFileName);
+            File.WriteAllText(file, seed, Utf8);
+            Check(Writer.Write(directory, NewMutex(), Limit, Record("tail-event")) == ClaudeLogWriteResult.Written, name + ": native write failed.");
+            string[] lines = File.ReadAllLines(file, Utf8);
+            Check(lines.Length == 3 && lines[0] == expectedTail, name + ": the retained tail or line boundary changed.");
+            Expect<JsonException>(() => { using JsonDocument ignored = JsonDocument.Parse(lines[0]); }, name + ": the incomplete tail unexpectedly parsed.");
+            using (JsonDocument marker = JsonDocument.Parse(lines[1]))
+                Check(marker.RootElement.GetProperty("stage_phase").GetString() == "source_uncertain", name + ": marker did not occupy its own line.");
+            using (JsonDocument current = JsonDocument.Parse(lines[2]))
+                Check(current.RootElement.GetProperty("session_id").GetString() == "tail-event", name + ": event did not occupy its own line.");
+            if (name == "trailing-cr") Check(File.ReadAllText(file, Utf8).StartsWith("partial\r\n", StringComparison.Ordinal), "A trailing CR was not completed as CRLF.");
+        }
+    }
+
+    private static void VerifyRotationReader()
+    {
+        string directory = FixtureDirectory("rotation-reader"), file = Path.Combine(directory, Writer.EventFileName);
+        ClaudeEventRecord active = Record("rotation-session");
+        ClaudeEventRecord ended = active with { Timestamp = "2026-11-05T15:00:01+03:00", Event = "SessionEnd", Active = false, Activity = "Session ended" };
+        File.WriteAllText(file, "{\"padding\":\"" + new string('x', (int)Limit) + "\"}\r\n" + JsonSerializer.Serialize(active) + "\r\n", Utf8);
+        Check(Writer.Write(directory, NewMutex(), Limit, ended) == ClaudeLogWriteResult.Written, "The reader rotation fixture was not written.");
+        string[] lines = File.ReadAllLines(file, Utf8);
+        Check(lines.Length == 3, "The rotation reader fixture lost its active, marker or end line.");
+        using (JsonDocument marker = JsonDocument.Parse(lines[1]))
+        using (JsonDocument terminal = JsonDocument.Parse(lines[2]))
+        {
+            Check(marker.RootElement.GetProperty("stage_phase").GetString() == "source_uncertain", "The rotation marker is absent.");
+            Check(DateTimeOffset.Parse(marker.RootElement.GetProperty("timestamp").GetString()!, System.Globalization.CultureInfo.InvariantCulture) ==
+                DateTimeOffset.Parse(terminal.RootElement.GetProperty("timestamp").GetString()!, System.Globalization.CultureInfo.InvariantCulture),
+                "The marker and terminal event do not sort at the same instant.");
+        }
+        DateTime now = new(2026, 11, 5, 12, 0, 2, DateTimeKind.Utc), observedSince = now.AddMinutes(-1);
+        var tasks = ClaudeReader.Read(File.ReadAllText(file, Utf8), "", now, observedSince);
+        Check(tasks.Length == 1 && tasks[0].Id == "rotation-session" && tasks[0].Unconfirmed,
+            "Rotation failed to preserve the previously active session as unconfirmed.");
+        Check(ClaudeReader.Read(lines[0] + "\n" + lines[2], "", now, observedSince).Length == 0,
+            "The end-to-end control unexpectedly retained a session without the marker.");
+    }
+
+    private static void VerifyInvalidTimestamp()
+    {
+        string directory = FixtureDirectory("invalid-timestamp"), file = Path.Combine(directory, Writer.EventFileName);
+        string seed = new('x', (int)Limit + 100);
+        File.WriteAllText(file, seed, Utf8);
+        foreach (string timestamp in new[] { "", "not-a-time", "2026-99-99T00:00:00Z" })
+            Expect<ArgumentException>(() => Writer.Write(directory, NewMutex(), Limit, Record("invalid") with { Timestamp = timestamp }),
+                "An invalid timestamp was accepted.");
+        Check(File.ReadAllText(file, Utf8) == seed, "An invalid timestamp changed or rotated the file.");
+    }
+
+    private static void VerifyNativeLimitBoundaries()
+    {
+        const string prefix = "{\"synthetic\":\"", suffix = "\"}\r\n";
+        string exact = prefix + new string('x', (int)Limit - prefix.Length - suffix.Length) + suffix;
+        Check(Utf8.GetByteCount(exact) == Limit, "The exact-size native fixture is invalid.");
+        string directory = FixtureDirectory("native-limit"), file = Path.Combine(directory, Writer.EventFileName), mutex = NewMutex();
+        File.WriteAllText(file, exact, Utf8);
+        Check(Writer.Write(directory, mutex, Limit, Record("at-limit")) == ClaudeLogWriteResult.Written &&
+            File.ReadAllText(file, Utf8).StartsWith(exact, StringComparison.Ordinal), "An exactly full file rotated too early.");
+        Check(Writer.Write(directory, mutex, Limit, Record("after-limit")) == ClaudeLogWriteResult.Written, "The over-limit write failed.");
+        string[] lines = File.ReadAllLines(file, Utf8);
+        Check(lines.Length == 3, "The over-limit rotation did not retain the event and its marker.");
+        using (JsonDocument marker = JsonDocument.Parse(lines[1]))
+            Check(marker.RootElement.GetProperty("stage_phase").GetString() == "source_uncertain", "The over-limit rotation lost its marker.");
+        using (JsonDocument current = JsonDocument.Parse(lines[2]))
+            Check(current.RootElement.GetProperty("session_id").GetString() == "after-limit", "The over-limit event was lost.");
+
+        string disabled = FixtureDirectory("native-limit-disabled"), disabledFile = Path.Combine(disabled, Writer.EventFileName);
+        string oversized = exact + "synthetic-extra\r\n";
+        File.WriteAllText(disabledFile, oversized, Utf8);
+        Check(Writer.Write(disabled, NewMutex(), 0, Record("disabled")) == ClaudeLogWriteResult.Written &&
+            File.ReadAllText(disabledFile, Utf8).StartsWith(oversized, StringComparison.Ordinal), "A disabled limit unexpectedly rotated the file.");
     }
 
     private static void CompareEvents(string legacy, string native, string name)
     {
         using JsonDocument a = JsonDocument.Parse(legacy), b = JsonDocument.Parse(native);
-        Check(a.RootElement.EnumerateObject().Count() == 10 && b.RootElement.EnumerateObject().Count() == 10, name + ": event shape differs.");
+        Check(a.RootElement.EnumerateObject().Count() == b.RootElement.EnumerateObject().Count(), name + ": event shape differs.");
         foreach (JsonProperty property in a.RootElement.EnumerateObject())
         {
             if (property.Name == "timestamp") continue;
@@ -326,7 +479,7 @@ static class Fixtures
             "-LoopTestPipe", "AITM.Test." + Guid.NewGuid().ToString("N"), "-LogTestMutex", mutex[6..] }) start.ArgumentList.Add(arg);
         start.RedirectStandardInput = true;
         start.WorkingDirectory = home;
-        start.Environment["USERPROFILE"] = home; start.Environment["HOME"] = home;
+        start.Environment["USERPROFILE"] = home;
         start.Environment["LOCALAPPDATA"] = local; start.Environment["APPDATA"] = appdata;
         start.Environment["TEMP"] = temp; start.Environment["TMP"] = temp;
         start.Environment["PSModuleAnalysisCachePath"] = Path.Combine(temp, "ModuleAnalysisCache");
@@ -354,7 +507,7 @@ static class Fixtures
         start.Environment.Clear();
         foreach (string key in new[] { "SystemRoot", "windir", "PATH", "DOTNET_ROOT", "DOTNET_MULTILEVEL_LOOKUP", "DOTNET_CLI_HOME",
             "DOTNET_CLI_TELEMETRY_OPTOUT", "DOTNET_NOLOGO", "DOTNET_GENERATE_ASPNET_CERTIFICATE", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE",
-            "DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE", "NUGET_PACKAGES", "USERPROFILE", "HOME", "CODEX_HOME", "APPDATA",
+            "DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE", "NUGET_PACKAGES", "USERPROFILE", "APPDATA",
             "LOCALAPPDATA", "TEMP", "TMP", "PSModuleAnalysisCachePath", "AITM_LOG_TEST_ROOT", "ProgramFiles", "ProgramFiles(x86)",
             "ProgramW6432", "ProgramData", "ALLUSERSPROFILE", "SystemDrive", "ComSpec" })
             if (Environment.GetEnvironmentVariable(key) is string value) start.Environment[key] = value;
@@ -387,6 +540,11 @@ static class Fixtures
         if (!string.Equals(full, Path.GetFullPath(expected).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase) || !Directory.Exists(full))
             throw new InvalidOperationException("The synthetic root does not match the test runner.");
         return full;
+    }
+    private static void RequireCleanEnvironment()
+    {
+        if (Environment.GetEnvironmentVariable("HOME") is not null || Environment.GetEnvironmentVariable("CODEX_HOME") is not null)
+            throw new InvalidOperationException("The isolated test environment must omit HOME and CODEX_HOME.");
     }
     private static void RequireFixturePath(string path)
     {

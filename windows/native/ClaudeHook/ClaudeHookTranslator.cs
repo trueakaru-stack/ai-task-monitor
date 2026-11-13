@@ -1,145 +1,98 @@
 using System.Globalization;
-using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using AITaskMonitor.ClaudePhase;
 
 namespace AITaskMonitor.ClaudeHook;
 
-// This record is the event-log contract. Input prompts, paths, commands,
-// transcripts and tool responses have no output properties.
+// Only the bounded, sanitized event fields are retained; the full hook input
+// and its tool response are never included in the output record.
 public sealed record ClaudeEventRecord(
     [property: JsonPropertyName("timestamp")] string Timestamp,
     [property: JsonPropertyName("provider")] string Provider,
     [property: JsonPropertyName("session_id")] string SessionId,
     [property: JsonPropertyName("event")] string Event,
-    [property: JsonPropertyName("active")] bool Active,
+    [property: JsonPropertyName("active")] bool? Active,
     [property: JsonPropertyName("activity")] string Activity,
     [property: JsonPropertyName("task_id")] string TaskId,
     [property: JsonPropertyName("task_subject")] string TaskSubject,
     [property: JsonPropertyName("task_status")] string TaskStatus,
-    [property: JsonPropertyName("tool_name")] string ToolName);
+    [property: JsonPropertyName("tool_name")] string ToolName,
+    [property: JsonPropertyName("stage_phase"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? StagePhase = null,
+    [property: JsonPropertyName("stage_version"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] int? StageVersion = null,
+    [property: JsonPropertyName("stage_previous_status"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? StagePreviousStatus = null,
+    [property: JsonPropertyName("stage_requested_status"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? StageRequestedStatus = null,
+    [property: JsonPropertyName("stage_task_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? StageTaskId = null);
 
 public static class ClaudeHookTranslator
 {
     public const int MaximumInputCodeUnits = 1_048_576;
     private static readonly Regex Whitespace = new(@"\s+", RegexOptions.CultureInvariant);
 
-    // The caller must impose the same input limit while reading the stream;
-    // accepting a string here does not bound allocation by that caller.
+    // A caller must enforce the input bound while reading. A false result is
+    // not evidence that an event did not occur: use SourceUncertain when the
+    // caller can safely publish a loss marker.
     public static bool TryTranslate(string? json, DateTimeOffset timestamp, out ClaudeEventRecord? record)
     {
         record = null;
         if (string.IsNullOrEmpty(json) || json.Length > MaximumInputCodeUnits) return false;
-        try
+        Observation observation = StageObservation.Assess(json);
+        if (!observation.ValidInput) return false;
+
+        string eventName = observation.Event;
+        string phase = observation.Phase;
+        string taskId = observation.TaskId;
+        string taskStatus = observation.Status;
+        if (phase == "step_uncertain")
         {
-            using JsonDocument document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 64 });
-            JsonElement root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || !Validate(root)) return false;
-            TryGet(root, "tool_input", out JsonElement input);
-
-            string eventName = Read(root, "hook_event_name", "Unknown");
-            string sessionId = Read(root, "session_id", "");
-            string taskId = Has(root, "task_id") ? Read(root, "task_id", "")
-                : Has(input, "taskId") ? Read(input, "taskId", "") : Read(input, "task_id", "");
-            string taskStatus = Read(input, "status", "");
-            string subject = Clip(Has(root, "task_subject") ? Read(root, "task_subject", "") : Read(input, "subject", ""), 240);
-            string toolName = Clip(Read(root, "tool_name", ""), 120);
-
-            string activity = eventName.ToUpperInvariant() switch
-            {
-                "USERPROMPTSUBMIT" => "New request",
-                "PRETOOLUSE" => toolName.Length == 0 ? "Running tool" : "Running: " + toolName,
-                "POSTTOOLUSE" => toolName.Length == 0 ? "Tool completed" : "Completed: " + toolName,
-                "POSTTOOLUSEFAILURE" => toolName.Length == 0 ? "Tool failed" : "Failed: " + toolName,
-                "TASKCREATED" => subject.Length == 0 ? "Added step" : "Added step: " + subject,
-                "TASKCOMPLETED" => subject.Length == 0 ? "Step completed" : "Completed step: " + subject,
-                "SUBAGENTSTART" => "Subagent started",
-                "SUBAGENTSTOP" => "Subagent stopped",
-                "STOP" => "Waiting for the next request",
-                "SESSIONEND" => "Session ended",
-                _ => eventName
-            };
-            bool active = !string.Equals(eventName, "Stop", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(eventName, "SessionEnd", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(eventName, "StopFailure", StringComparison.OrdinalIgnoreCase);
-            record = new ClaudeEventRecord(timestamp.UtcDateTime.ToString("o", CultureInfo.InvariantCulture),
-                "claude", sessionId, eventName, active, activity, taskId, subject, taskStatus, toolName);
-            return true;
+            phase = eventName == "TaskCreated" ? "created_notice" : "completed_notice";
+            eventName = "StageNotice";
         }
-        catch (JsonException) { return false; }
-        catch (InvalidOperationException) { return false; }
-        catch (ArgumentException) { return false; }
-    }
 
-    private static bool Validate(JsonElement element)
-    {
-        if (element.ValueKind == JsonValueKind.Object)
+        string? stageTaskId = null, requestedStatus = null;
+        if (phase is "created_notice" or "completed_notice" or "update_attempt" or "update_failure" or "update_unknown")
         {
-            var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (JsonProperty property in element.EnumerateObject())
-            {
-                if (names.TryGetValue(property.Name, out string? previous) && !string.Equals(previous, property.Name, StringComparison.Ordinal)) return false;
-                names[property.Name] = property.Name;
-                if (!Validate(property.Value)) return false;
-            }
+            stageTaskId = EmptyToNull(taskId);
+            taskId = "";
         }
-        else if (element.ValueKind == JsonValueKind.Array)
+        if (phase is "update_attempt" or "update_failure" or "update_unknown")
         {
-            foreach (JsonElement item in element.EnumerateArray()) if (!Validate(item)) return false;
+            requestedStatus = EmptyToNull(taskStatus);
+            taskStatus = "";
         }
-        else if (element.ValueKind == JsonValueKind.Number &&
-            (!element.TryGetDouble(out double number) || double.IsInfinity(number) || double.IsNaN(number))) return false;
-        return true;
-    }
 
-    private static bool TryGet(JsonElement element, string name, out JsonElement result)
-    {
-        result = default;
-        if (element.ValueKind != JsonValueKind.Object) return false;
-        bool found = false;
-        foreach (JsonProperty property in element.EnumerateObject())
-            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase)) { result = property.Value; found = true; }
-        return found;
-    }
-    private static bool Has(JsonElement element, string name) => TryGet(element, name, out _);
-    private static string Read(JsonElement element, string name, string fallback)
-    {
-        if (!TryGet(element, name, out JsonElement value)) return fallback;
-        string text = value.ValueKind switch
+        string subject = Clip(observation.Subject, 240);
+        string tool = Clip(observation.Tool, 120);
+        string activity = eventName switch
         {
-            JsonValueKind.Null => "",
-            JsonValueKind.String => value.GetString() ?? "",
-            JsonValueKind.True => "True",
-            JsonValueKind.False => "False",
-            JsonValueKind.Number => Number(value),
-            _ => throw new InvalidOperationException("A selected hook field has a non-scalar value.")
+            "UserPromptSubmit" => "New request",
+            "PreToolUse" => tool.Length == 0 ? "Running tool" : "Running: " + tool,
+            "PostToolUse" when phase is "create_unknown" or "update_unknown" => "Status unconfirmed",
+            "PostToolUse" => tool.Length == 0 ? "Tool completed" : "Completed: " + tool,
+            "PostToolUseFailure" => tool.Length == 0 ? "Tool failed" : "Failed: " + tool,
+            "StageNotice" => "Running an action",
+            "SubagentStart" => "Subagent started",
+            "SubagentStop" => "Subagent stopped",
+            "Stop" => "Waiting for the next request",
+            "SessionEnd" => "Session ended",
+            _ => eventName
         };
-        if (!HasValidUtf16(text)) throw new InvalidOperationException("A selected hook field contains invalid UTF-16.");
-        return text;
-    }
-    private static string Number(JsonElement value)
-    {
-        string raw = value.GetRawText();
-        if (!raw.Contains('.') && !raw.Contains('e') && !raw.Contains('E') && value.TryGetInt64(out long integer))
-            return integer.ToString(CultureInfo.InvariantCulture);
-        if (!raw.Contains('e') && !raw.Contains('E') && value.TryGetDecimal(out decimal number))
-            return number.ToString(CultureInfo.InvariantCulture);
-        if (value.TryGetDouble(out double floating) && double.IsFinite(floating)) return floating.ToString("G", CultureInfo.InvariantCulture);
-        throw new InvalidOperationException("A selected hook number is not finite.");
-    }
-    private static bool HasValidUtf16(string value)
-    {
-        for (int i = 0; i < value.Length; i++)
-        {
-            if (char.IsHighSurrogate(value[i]))
-            {
-                if (i + 1 >= value.Length || !char.IsLowSurrogate(value[i + 1])) return false;
-                i++;
-            }
-            else if (char.IsLowSurrogate(value[i])) return false;
-        }
+        bool? active = phase is "source_uncertain" or "session_uncertain" or "stop_uncertain" or "stop_failure"
+            ? null : eventName is not ("Stop" or "SessionEnd" or "StopFailure");
+        record = new ClaudeEventRecord(Format(timestamp), "claude", observation.Session, eventName, active,
+            activity, taskId, subject, taskStatus, tool, EmptyToNull(phase), phase.Length == 0 ? null : 1,
+            EmptyToNull(observation.Previous), requestedStatus, stageTaskId);
         return true;
     }
+
+    // Matches the current hook's fallback when input cannot be trusted. The
+    // future process boundary must publish this marker on failed decoding,
+    // truncation, unsupported input, or translation failure when possible.
+    public static ClaudeEventRecord SourceUncertain(DateTimeOffset timestamp) =>
+        new(Format(timestamp), "claude", "", "Unknown", null, "Unknown", "", "", "", "", "source_uncertain", 1);
+
+    private static string Format(DateTimeOffset timestamp) => timestamp.UtcDateTime.ToString("o", CultureInfo.InvariantCulture);
+    private static string? EmptyToNull(string value) => value.Length == 0 ? null : value;
     private static string Clip(string value, int limit)
     {
         if (value.Length == 0) return "";
