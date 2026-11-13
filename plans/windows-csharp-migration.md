@@ -157,6 +157,7 @@ Use unique disposable fixture directories; inspect their resolved paths before a
 - Native Claude file-source tail and retention checks on the primary branch: [GitHub Actions run 43465447532](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43465447532). Real Claude sessions and visual behavior remain unverified.
 - Synthetic display-preference migration and WPF prototype compilation: [GitHub Actions run 43467142740](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43467142740). This does not demonstrate real settings migration or a functioning settings page.
 - Synthetic Claude loop-packet checks: [GitHub Actions run 43467941028](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43467941028). The pipe transport and real Claude integration were not exercised.
+- Synthetic update-service checks: [GitHub Actions run 43470315786](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43470315786) passed 48 service and 42 integration assertions. The service remains unconnected. HTTP 206 now fails the check, but the transport still reads only the first release page; package identity, architecture, signing and asset selection also remain unresolved. A read-only listing showed 16 releases on the first page and none on the second at the time of inspection, so pagination has not been established as the reported missed notification's cause.
 - A saved synthetic reproduction of the provider generation race is under `D:\Codex\AI Task Monitor Audit\windows-provider-channel-generation-fix-20261109\baseline-output.txt`; it is not evidence of a real user incident.
 - Previous published Windows and macOS artifacts are 0.2.7-alpha and 0.3.8-alpha, respectively. Their availability does not prove that the requested native Windows migration is complete.
 
@@ -188,3 +189,4 @@ The implementation uses C#/.NET 10 and WPF for Windows. The native Codex source 
 - 2026-11-13: Integrated the synthetic Claude file-source fix and replaced unprotected SDK command examples with isolated-CI guidance.
 - 2026-11-13: Recorded the isolated display-preference and WPF compilation checks and the remaining real-migration limitations.
 - 2026-11-13: Recorded native Claude loop-packet checks; transport and application integration remain open.
+- 2026-11-13: Recorded synthetic update-service and partial-response checks, plus first-page-only and installer-verification limitations; the reported missed notification still needs a confirmed cause.
