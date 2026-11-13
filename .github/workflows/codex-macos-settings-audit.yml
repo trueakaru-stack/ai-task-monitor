@@ -1,0 +1,127 @@
+name: Synthetic macOS settings width audit
+on:
+  push:
+    branches: [codex/macos-picker-width-20261113]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  settings-width:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            xcode: /Applications/Xcode_16.1.app/Contents/Developer
+          - os: macos-26
+            xcode: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      AITM_LAYOUT_SYNTHETIC_CI: "1"
+      AITM_XCODE: ${{ matrix.xcode }}
+    steps:
+      - name: Prepare exact candidate and safe baseline fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "$AITM_XCODE" ]]; then
+            test -d "$AITM_XCODE"
+            echo "DEVELOPER_DIR=$AITM_XCODE" >> "$GITHUB_ENV"
+            export DEVELOPER_DIR="$AITM_XCODE"
+          fi
+          xcodebuild -version
+          swift --version
+          task_source="$(mktemp -d "$RUNNER_TEMP/aitm-picker-source-XXXXXXXX")"
+          task_base="$(mktemp -d "$RUNNER_TEMP/aitm-picker-baseline-XXXXXXXX")"
+          task_evidence_base="$(mktemp -d "$RUNNER_TEMP/aitm-layout-baseline-XXXXXXXX")"
+          task_evidence_candidate="$(mktemp -d "$RUNNER_TEMP/aitm-layout-candidate-XXXXXXXX")"
+          echo "AITM_SOURCE=$task_source" >> "$GITHUB_ENV"
+          echo "AITM_BASE=$task_base" >> "$GITHUB_ENV"
+          echo "AITM_BASE_EVIDENCE=$task_evidence_base" >> "$GITHUB_ENV"
+          echo "AITM_CANDIDATE_EVIDENCE=$task_evidence_candidate" >> "$GITHUB_ENV"
+          git -c credential.helper= -c core.hooksPath=/dev/null init "$task_source"
+          git -C "$task_source" -c credential.helper= -c core.hooksPath=/dev/null remote add origin https://github.com/trueakaru-stack/ai-task-monitor.git
+          git -C "$task_source" -c credential.helper= -c core.hooksPath=/dev/null fetch --depth=1 origin "$GITHUB_SHA" db0f80c689ea7fbd5dbe8b7e27e9c4be8943ea98
+          git -C "$task_source" -c credential.helper= -c core.hooksPath=/dev/null checkout --detach "$GITHUB_SHA"
+          cp -R "$task_source/macos" "$task_base/macos"
+          git -C "$task_source" -c credential.helper= -c core.hooksPath=/dev/null show db0f80c689ea7fbd5dbe8b7e27e9c4be8943ea98:macos/Sources/AITaskMonitor/SettingsView.swift > "$RUNNER_TEMP/aitm-original-settings.swift"
+          python3 - "$task_base/macos/Sources/AITaskMonitor/SettingsView.swift" "$RUNNER_TEMP/aitm-original-settings.swift" <<'PY'
+          import pathlib, sys
+          target = pathlib.Path(sys.argv[1])
+          candidate = target.read_text(encoding="utf-8")
+          baseline = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+          markers = [
+              ("private struct SettingsMenuWidth: ViewModifier {\n", "private struct SourceProfileMenuWidth: ViewModifier {\n"),
+              ("    private func refreshSettingsMenuWidth() {\n", "    private func section<Content: View>("),
+          ]
+          for start, end in markers:
+              assert candidate.count(start) == candidate.count(end) == 1
+              assert baseline.count(start) == baseline.count(end) == 1
+              a, b = candidate.index(start), candidate.index(end)
+              x, y = baseline.index(start), baseline.index(end)
+              assert a < b and x < y
+              candidate = candidate[:a] + baseline[x:y] + candidate[b:]
+          target.write_text(candidate, encoding="utf-8")
+          PY
+      - name: Capture original geometry using synthetic state
+        id: baseline
+        continue-on-error: true
+        shell: bash
+        env:
+          AITM_SETTINGS_WIDTH_BASELINE: "1"
+        run: |
+          set -euo pipefail
+          export AITM_LAYOUT_SYNTHETIC_ROOT="${AITM_BASE_EVIDENCE}"
+          swift test --package-path "$AITM_BASE/macos" --scratch-path "$RUNNER_TEMP/aitm-picker-build-baseline" --filter PickerSizingAuditTests/testActualSettingsMenusUseTheWidestNativeControl 2>&1 | tee "$AITM_LAYOUT_SYNTHETIC_ROOT/swift-test.log"
+      - name: Capture proposed geometry using synthetic state
+        id: candidate
+        if: always() && steps.baseline.outcome != 'skipped'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          export AITM_LAYOUT_SYNTHETIC_ROOT="${AITM_CANDIDATE_EVIDENCE}"
+          swift test --package-path "$AITM_SOURCE/macos" --scratch-path "$RUNNER_TEMP/aitm-picker-build-candidate" --filter PickerSizingAuditTests/testActualSettingsMenusUseTheWidestNativeControl 2>&1 | tee "$AITM_LAYOUT_SYNTHETIC_ROOT/swift-test.log"
+      - name: Compare results and verify evidence exists
+        if: always() && steps.baseline.outcome != 'skipped'
+        shell: bash
+        env:
+          BASELINE_OUTCOME: ${{ steps.baseline.outcome }}
+          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib
+          base = pathlib.Path(os.environ["AITM_BASE_EVIDENCE"])
+          candidate = pathlib.Path(os.environ["AITM_CANDIDATE_EVIDENCE"])
+          assert os.environ["BASELINE_OUTCOME"] == "success", "Baseline test did not pass"
+          assert os.environ["CANDIDATE_OUTCOME"] == "success", "Candidate test did not pass"
+          for language in ("ru", "en"):
+              for theme in ("light", "dark"):
+                  stem = f"settings-width-{language}-{theme}"
+                  for folder in (base, candidate):
+                      for suffix in ("initial", "minimum", "maximum", "widest"):
+                          p = folder / f"{stem}-{suffix}.png"
+                          assert p.is_file() and p.stat().st_size > 100, f"Missing capture: {p}"
+                  before = json.loads((base / f"{stem}.json").read_text())
+                  after = json.loads((candidate / f"{stem}.json").read_text())
+                  assert before["baseline"] is True and after["baseline"] is False
+                  assert len(before["menus"]) == len(after["menus"]) == 6
+                  b = {entry["title"]: entry for entry in before["journalButtons"]}
+                  a = {entry["title"]: entry for entry in after["journalButtons"]}
+                  assert len(a) == len(b) == 2 and a.keys() == b.keys()
+                  for title in a:
+                      for dimension in ("width", "height"):
+                          assert abs(a[title][dimension] - b[title][dimension]) <= 0.75, (language, theme, title, dimension, b[title], a[title])
+          print("Both fixtures rendered four language/theme combinations; journal button bounds match baseline.")
+          PY
+      - name: Preserve visual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: settings-width-${{ matrix.os }}
+          path: |
+            ${{ env.AITM_BASE_EVIDENCE }}
+            ${{ env.AITM_CANDIDATE_EVIDENCE }}
+          if-no-files-found: warn

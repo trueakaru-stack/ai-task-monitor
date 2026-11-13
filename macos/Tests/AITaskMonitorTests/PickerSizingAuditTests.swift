@@ -7,6 +7,23 @@ private final class PickerAuditModel: ObservableObject {
     @Published var selections = [7, 10, 7, 10, 5, 10]
 }
 
+private struct PickerWidthChoice {
+    let title: String
+    let textWidth: CGFloat
+    let cellWidth: CGFloat
+    let actualFittingWidth: CGFloat
+    let detachedFittingWidth: CGFloat
+    let fontName: String
+    let fontPointSize: CGFloat
+    let fontVerified: Bool
+
+    var metrics: [String: Any] {
+        ["title": title, "textWidth": Double(textWidth), "cellWidth": Double(cellWidth),
+         "actualFittingWidth": Double(actualFittingWidth), "detachedFittingWidth": Double(detachedFittingWidth),
+         "fontName": fontName, "fontPointSize": Double(fontPointSize), "fontVerified": fontVerified]
+    }
+}
+
 private struct PickerAuditView: View {
     @ObservedObject var model: PickerAuditModel
     let language: String
@@ -312,5 +329,299 @@ final class PickerSizingAuditTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: records, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: URL(fileURLWithPath: root, isDirectory: true)
             .appendingPathComponent("picker-appkit-measurement.json"), options: .atomic)
+    }
+
+    @MainActor func testActualSettingsMenusUseTheWidestNativeControl() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["AITM_LAYOUT_SYNTHETIC_CI"] == "1" else {
+            throw XCTSkip("Settings menu audit runs only on an ephemeral GitHub-hosted runner.")
+        }
+        guard env["GITHUB_ACTIONS"] == "true", env["CI"] == "true",
+              env["RUNNER_ENVIRONMENT"] == "github-hosted", env["RUNNER_OS"] == "macOS",
+              let temporary = env["RUNNER_TEMP"], let root = env["AITM_LAYOUT_SYNTHETIC_ROOT"],
+              root.hasPrefix(temporary + "/aitm-layout-") else {
+            throw NSError(domain: "SyntheticPickerAudit", code: 5)
+        }
+        let destination = URL(fileURLWithPath: root, isDirectory: true)
+        let baseline = env["AITM_SETTINGS_WIDTH_BASELINE"] == "1"
+        _ = NSApplication.shared
+        defer { AppLanguage.previewOverride = nil }
+
+        func descendants(_ view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+
+        func inspect(language: String, theme: String) throws {
+            AppLanguage.previewOverride = language == "ru" ? .ru : .en
+            var previewStateCalls = 0
+            var previewPresenceCalls = 0
+            var storeConnectionCalls = 0
+            let openCodePreview = SettingsPreviewOpenCode(
+                state: { previewStateCalls += 1; return .disconnected },
+                present: { previewPresenceCalls += 1; return false }
+            )
+            let store = TaskStore(
+                codexReader: CodexTaskReader(codexHome: destination.appendingPathComponent("synthetic-codex", isDirectory: true)),
+                claudeReader: ClaudeTaskReader(eventFile: destination.appendingPathComponent("synthetic-claude.jsonl")),
+                previewTasks: [], openCodeConnection: {
+                    storeConnectionCalls += 1
+                    return .disconnected
+                }
+            )
+            store.showsSettings = true
+            let originalDiagnosticSettings = store.diagnosticSettings
+            let originalClaudeRetention = store.claudeRetentionPolicy
+            let view = RootView().environmentObject(store)
+                .environment(\.settingsPreviewEnd, true)
+                .environment(\.settingsPreviewClaude, .connected)
+                .environment(\.settingsPreviewCloud, .disconnected)
+                .environment(\.settingsPreviewKimi, .disconnected)
+                .environment(\.settingsPreviewHermes, .absent)
+                .environment(\.settingsPreviewOpenCode, openCodePreview)
+                .environment(\.colorScheme, theme == "dark" ? .dark : .light)
+            let host = NSHostingView(rootView: view)
+            host.appearance = NSAppearance(named: theme == "dark" ? .darkAqua : .aqua)
+            host.frame = NSRect(x: 0, y: 0, width: 560, height: 700)
+            let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 560, height: 700),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            window.makeKeyAndOrderFront(nil)
+            defer { window.close() }
+            host.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(1.5))
+            host.layoutSubtreeIfNeeded()
+            XCTAssertGreaterThan(previewStateCalls, 0, "SettingsView must use the synthetic OpenCode state.")
+            XCTAssertGreaterThan(previewPresenceCalls, 0, "SettingsView must use the synthetic OpenCode presence.")
+            XCTAssertEqual(storeConnectionCalls, 0, "The synthetic store must not inspect OpenCode.")
+
+            func capture(_ suffix: String) throws {
+                host.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+                    throw NSError(domain: "SyntheticPickerAudit", code: 6)
+                }
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                    throw NSError(domain: "SyntheticPickerAudit", code: 7)
+                }
+                try png.write(to: destination.appendingPathComponent("settings-width-\(language)-\(theme)-\(suffix).png"),
+                              options: .atomic)
+            }
+            try capture("initial")
+
+            let fixture = PickerAuditView(model: PickerAuditModel(), language: language, sharedTextWidth: 0)
+            let popupButtons = descendants(host).compactMap { $0 as? NSPopUpButton }
+            var settingsButtons: [NSPopUpButton] = []
+            for (row, values) in fixture.ranges.enumerated() {
+                let expected = Set(values.map { fixture.label(row, $0) })
+                let matches = popupButtons.filter {
+                    Set($0.itemTitles.filter { !$0.isEmpty }) == expected
+                }
+                XCTAssertEqual(matches.count, 1, "Expected one actual SettingsView popup for row \(row + 1).")
+                guard let button = matches.first, matches.count == 1 else {
+                    throw NSError(domain: "SyntheticPickerAudit", code: 8)
+                }
+                settingsButtons.append(button)
+            }
+
+            var rows: [[String: Any]] = []
+            var naturalWidths: [CGFloat] = []
+            var actualFittingWidths: [CGFloat] = []
+            var detachedFittingWidths: [CGFloat] = []
+            var frameWidths: [CGFloat] = []
+            var originalSelections: [Int] = []
+            var widestTextSelections: [PickerWidthChoice] = []
+            var widestCellSelections: [PickerWidthChoice] = []
+            var widestFittingSelections: [PickerWidthChoice] = []
+            for (row, button) in settingsButtons.enumerated() {
+                let original = button.indexOfSelectedItem
+                guard original >= 0, let cell = button.cell as? NSPopUpButtonCell else {
+                    throw NSError(domain: "SyntheticPickerAudit", code: 9)
+                }
+                originalSelections.append(original)
+                let rect = button.convert(button.bounds, to: host)
+                let drawingRect = cell.drawingRect(forBounds: button.bounds)
+                let visibleRect = button.visibleRect
+                XCTAssertGreaterThanOrEqual(visibleRect.width, button.bounds.width - 1,
+                                            "Each menu must be visible in the captured settings viewport.")
+                XCTAssertGreaterThanOrEqual(visibleRect.height, button.bounds.height - 1,
+                                            "Each menu must be visible in the captured settings viewport.")
+                frameWidths.append(rect.width)
+                let measure = NSPopUpButton(frame: .zero, pullsDown: false)
+                measure.controlSize = .large
+                measure.addItems(withTitles: fixture.ranges[row].map { fixture.label(row, $0) })
+                var choices: [PickerWidthChoice] = []
+                var fontUnavailable = false
+                var attributedTitleMismatch = false
+                for index in 0..<button.numberOfItems {
+                    guard let item = button.item(at: index), !item.title.isEmpty else { continue }
+                    button.selectItem(at: index)
+                    measure.selectItem(withTitle: item.title)
+                    guard button.selectedItem?.title == item.title, measure.selectedItem?.title == item.title else {
+                        throw NSError(domain: "SyntheticPickerAudit", code: 12)
+                    }
+                    let cellWidth = cell.cellSize.width
+                    let fittingWidth = button.fittingSize.width
+                    let detachedWidth = measure.fittingSize.width
+                    let attributedTitle = item.attributedTitle
+                    let attributedFont = attributedTitle.flatMap {
+                        $0.length > 0 ? $0.attribute(.font, at: 0, effectiveRange: nil) as? NSFont : nil
+                    }
+                    let observedFont = button.font ?? cell.font ?? attributedFont
+                    let font = observedFont ?? NSFont.systemFont(ofSize: NSFont.systemFontSize(for: button.controlSize))
+                    if observedFont == nil { fontUnavailable = true }
+                    let styled = NSMutableAttributedString(string: item.title, attributes: [.font: font])
+                    if let attributedTitle, attributedTitle.string == item.title {
+                        attributedTitle.enumerateAttributes(in: NSRange(location: 0, length: attributedTitle.length),
+                                                            options: []) { attributes, range, _ in
+                            styled.addAttributes(attributes, range: range)
+                        }
+                    } else if attributedTitle != nil { attributedTitleMismatch = true }
+                    let textWidth = styled.size().width
+                    guard cellWidth.isFinite && fittingWidth.isFinite && detachedWidth.isFinite &&
+                          textWidth.isFinite && textWidth > 0 else {
+                        throw NSError(domain: "SyntheticPickerAudit", code: 11)
+                    }
+                    naturalWidths.append(cellWidth)
+                    actualFittingWidths.append(fittingWidth)
+                    detachedFittingWidths.append(detachedWidth)
+                    choices.append(PickerWidthChoice(title: item.title, textWidth: textWidth, cellWidth: cellWidth,
+                                                     actualFittingWidth: fittingWidth, detachedFittingWidth: detachedWidth,
+                                                     fontName: font.fontName, fontPointSize: font.pointSize,
+                                                     fontVerified: observedFont != nil &&
+                                                        (attributedTitle == nil || attributedTitle?.string == item.title)))
+                }
+                button.selectItem(at: original)
+                XCTAssertFalse(fontUnavailable, "Popup \(row + 1) font is unavailable; title width is estimated.")
+                XCTAssertFalse(attributedTitleMismatch, "Popup \(row + 1) has an inconsistent attributed title.")
+                guard let widestText = choices.max(by: { $0.textWidth < $1.textWidth }),
+                      let widestCellChoice = choices.max(by: {
+                          $0.cellWidth == $1.cellWidth ? $0.textWidth < $1.textWidth : $0.cellWidth < $1.cellWidth
+                      }),
+                      let widestFittingChoice = choices.max(by: {
+                          $0.detachedFittingWidth == $1.detachedFittingWidth
+                              ? $0.textWidth < $1.textWidth : $0.detachedFittingWidth < $1.detachedFittingWidth
+                      }) else {
+                    throw NSError(domain: "SyntheticPickerAudit", code: 13)
+                }
+                widestTextSelections.append(widestText)
+                widestCellSelections.append(widestCellChoice)
+                widestFittingSelections.append(widestFittingChoice)
+                rows.append(["row": row + 1,
+                             "frameInHost": [rect.minX, rect.minY, rect.width, rect.height].map { Double($0) },
+                             "drawingRectInControl": [drawingRect.minX, drawingRect.minY,
+                                                      drawingRect.width, drawingRect.height].map { Double($0) },
+                             "frameWidth": Double(rect.width), "drawingWidth": Double(drawingRect.width),
+                             "visibleWidth": Double(visibleRect.width),
+                             "visibleHeight": Double(visibleRect.height),
+                             "choiceMeasurements": choices.map(\.metrics),
+                             "widestText": widestText.metrics, "widestCell": widestCellChoice.metrics,
+                             "widestDetachedFitting": widestFittingChoice.metrics,
+                             "selectedTitle": button.selectedItem?.title ?? "",
+                             "enabled": button.isEnabled])
+            }
+            guard let widestCell = naturalWidths.max(), widestCell.isFinite, widestCell > 0,
+                  let widestFitting = detachedFittingWidths.max(), widestFitting.isFinite, widestFitting > 0,
+                  let firstFrame = frameWidths.first else {
+                throw NSError(domain: "SyntheticPickerAudit", code: 10)
+            }
+            if !baseline {
+                for width in frameWidths {
+                    XCTAssertEqual(width, firstFrame, accuracy: 1, "Actual menu control frames must match.")
+                    XCTAssertEqual(width, widestFitting, accuracy: 1,
+                                   "Each actual control frame must match the measured AppKit fitting width.")
+                }
+            }
+
+            // Change the native displayed selection without sending an action or altering app settings.
+            // Binding updates and keyboard interaction require separate checks.
+            for (suffix, useLastItem) in [("minimum", false), ("maximum", true)] {
+                for (row, button) in settingsButtons.enumerated() {
+                    let value = useLastItem ? fixture.ranges[row].upperBound : fixture.ranges[row].lowerBound
+                    button.selectItem(withTitle: fixture.label(row, value))
+                }
+                host.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                for (row, button) in settingsButtons.enumerated() {
+                    let expectedValue = useLastItem ? fixture.ranges[row].upperBound : fixture.ranges[row].lowerBound
+                    XCTAssertEqual(button.selectedItem?.title, fixture.label(row, expectedValue))
+                    if !baseline {
+                        let width = button.convert(button.bounds, to: host).width
+                        XCTAssertEqual(width, firstFrame, accuracy: 1, "Menu width must remain stable after selection changes.")
+                    }
+                }
+                try capture(suffix)
+                for (button, index) in zip(settingsButtons, originalSelections) {
+                    button.selectItem(at: index)
+                }
+            }
+            for (suffix, selections) in [("widest", widestTextSelections),
+                                         ("widest-cell", widestCellSelections),
+                                         ("widest-fitting", widestFittingSelections)] {
+                for (button, selection) in zip(settingsButtons, selections) {
+                    button.selectItem(withTitle: selection.title)
+                }
+                host.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                for (button, selection) in zip(settingsButtons, selections) {
+                    XCTAssertEqual(button.selectedItem?.title, selection.title,
+                                   "The widest-option capture must show the measured title.")
+                    if !baseline {
+                        XCTAssertEqual(button.convert(button.bounds, to: host).width, firstFrame, accuracy: 1,
+                                       "Menu width must remain stable for the widest option.")
+                    }
+                }
+                try capture(suffix)
+                for (button, index) in zip(settingsButtons, originalSelections) {
+                    button.selectItem(at: index)
+                }
+            }
+            XCTAssertEqual(store.diagnosticSettings, originalDiagnosticSettings,
+                           "Synthetic native selection must not change diagnostic settings.")
+            XCTAssertEqual(store.claudeRetentionPolicy, originalClaudeRetention,
+                           "Synthetic native selection must not change retention settings.")
+            XCTAssertEqual(storeConnectionCalls, 0, "The synthetic store must not inspect OpenCode.")
+
+            let journalTitles = language == "ru" ? ["Открыть журнал", "Очистить"] : ["Open journal", "Clear"]
+            let journalControls = descendants(host).compactMap { $0 as? NSButton }
+            var journal: [[String: Any]] = []
+            for title in journalTitles {
+                let matches = journalControls.filter { $0.title == title || $0.accessibilityLabel() == title }
+                XCTAssertEqual(matches.count, 1, "Expected one actual journal button named \(title).")
+                guard let button = matches.first, matches.count == 1 else { continue }
+                let rect = button.convert(button.bounds, to: host)
+                XCTAssertGreaterThanOrEqual(button.visibleRect.width, button.bounds.width - 1,
+                                            "Journal buttons must be visible in the captured settings viewport.")
+                XCTAssertGreaterThanOrEqual(button.visibleRect.height, button.bounds.height - 1,
+                                            "Journal buttons must be visible in the captured settings viewport.")
+                journal.append(["title": title, "width": Double(rect.width), "height": Double(rect.height),
+                                "frameInHost": [rect.minX, rect.minY, rect.width, rect.height].map { Double($0) }])
+            }
+
+            let report: [String: Any] = ["language": language, "theme": theme, "baseline": baseline,
+                                         "widestNaturalCell": Double(widestCell),
+                                         "widestActualFitting": Double(actualFittingWidths.max() ?? 0),
+                                         "widestDetachedFitting": Double(widestFitting), "menus": rows,
+                                         "journalButtons": journal,
+                                         "hostBounds": [host.bounds.minX, host.bounds.minY,
+                                                        host.bounds.width, host.bounds.height].map { Double($0) },
+                                         "hostFlipped": host.isFlipped,
+                                         "windowBackingScale": Double(window.backingScaleFactor),
+                                         "widestCapture": "Each menu shows its widest title measured with the observed control or item font.",
+                                         "widestCellCapture": "Each menu shows the option with the largest actual cellSize; ties use title width.",
+                                         "widestFittingCapture": "Each menu shows the option with the largest detached fittingSize; ties use title width.",
+                                         "scope": "Cell and fitting sizes are distinct. Native frames and PNG require visual comparison to verify the painted outline."]
+            let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: destination.appendingPathComponent("settings-width-\(language)-\(theme).json"),
+                           options: .atomic)
+        }
+
+        for language in ["ru", "en"] {
+            for theme in ["light", "dark"] {
+                try inspect(language: language, theme: theme)
+            }
+        }
     }
 }
