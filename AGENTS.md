@@ -8,6 +8,6 @@
 # Continuity and delivery for this project
 
 - The agreed Windows objective is a standalone C# application and installer that preserve the approved interface and monitoring functionality. Component tests do not by themselves establish application or installer readiness.
-- A question, diagnosis, or partial fix does not replace the agreed objective. Resume the remaining work unless the user stops it or a user-specified resource limit is reached. The current user limit is to pause development at 15% remaining.
+- A question, diagnosis, or partial fix does not replace the agreed objective. Resume the remaining work unless the user stops it or a user-specified resource limit is reached.
 - Windows source is maintained in `windows`, macOS source in `macos`; `main` holds project documentation. Use a temporary branch when needed for verification, then integrate verified and authorized source changes into the relevant platform branch while preserving unrelated local work.
 - Report source integration, application behavior, installer readiness, and visual verification separately. Do not present an unconnected migration component as a completed application.
