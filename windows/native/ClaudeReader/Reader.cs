@@ -283,7 +283,8 @@ namespace AITaskMonitor.Claude {
    var latestSubjectWritten = new[] { new Dictionary<string, Dictionary<string, Event>>(StringComparer.Ordinal),
                                       new Dictionary<string, Dictionary<string, Event>>(StringComparer.Ordinal) };
    var legacyMoments = new Dictionary<string, Dictionary<string, Dictionary<DateTimeOffset, StepMoment>>>(StringComparer.Ordinal);
-   var legacyActiveMoments = new Dictionary<string, Dictionary<DateTimeOffset, int>>(StringComparer.Ordinal);
+   var activeMoments = new[] { new Dictionary<string, Dictionary<DateTimeOffset, int>>(StringComparer.Ordinal),
+                               new Dictionary<string, Dictionary<DateTimeOffset, int>>(StringComparer.Ordinal) };
    var prompts = new[] { new Dictionary<string, HashSet<DateTimeOffset>>(StringComparer.Ordinal),
                          new Dictionary<string, HashSet<DateTimeOffset>>(StringComparer.Ordinal) };
    var stepsAtTime = new[] { new Dictionary<string, HashSet<DateTimeOffset>>(StringComparer.Ordinal),
@@ -301,17 +302,19 @@ namespace AITaskMonitor.Claude {
      if(item.Time >= latest.Time) sourceLatest[item.Id] = item;
     } else sourceLatest[item.Id] = item;
     if(item.Active.HasValue) {
+     // Same-time contradictory active states are unordered even within one
+     // file. Keep every observed moment, not just the most recent one.
      int activeBit = item.Active.Value ? 1 : 2;
      Dictionary<DateTimeOffset, int> moments;
-     if(item.Source == 0) {
-      if(!legacyActiveMoments.TryGetValue(item.Id, out moments)) {
-       moments = new Dictionary<DateTimeOffset, int>(); legacyActiveMoments.Add(item.Id, moments);
-      }
-      int existing;
-      moments.TryGetValue(item.Time, out existing);
-      moments[item.Time] = existing | activeBit;
-     } else if(legacyActiveMoments.TryGetValue(item.Id, out moments)) {
-      int existing;
+     var ownMoments = activeMoments[item.Source];
+     if(!ownMoments.TryGetValue(item.Id, out moments)) {
+      moments = new Dictionary<DateTimeOffset, int>(); ownMoments.Add(item.Id, moments);
+     }
+     int existing;
+     moments.TryGetValue(item.Time, out existing);
+     if((existing & (item.Active.Value ? 2 : 1)) != 0) timeUncertain.Add(item.Id);
+     moments[item.Time] = existing | activeBit;
+     if(item.Source == 1 && activeMoments[0].TryGetValue(item.Id, out moments)) {
       if(moments.TryGetValue(item.Time, out existing) && (existing & (item.Active.Value ? 2 : 1)) != 0)
        timeUncertain.Add(item.Id);
      }

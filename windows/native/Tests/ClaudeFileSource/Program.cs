@@ -113,6 +113,73 @@ Check(!snapshot.Unavailable && snapshot.Tasks.Count == 1 && snapshot.Tasks.Singl
 string SessionEvent(string id) => JsonSerializer.Serialize(new Dictionary<string, object> {
     ["session_id"] = id, ["timestamp"] = now.ToString("O"),
     ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
+DateTimeOffset tieMoment = new(now.AddSeconds(-3));
+string tieUtc = tieMoment.ToUniversalTime().ToString("O");
+string tieOffset = tieMoment.ToOffset(TimeSpan.FromHours(3)).ToString("O");
+string TieEvent(string name, bool active, string timestamp) => JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "tie", ["timestamp"] = timestamp, ["event"] = name, ["active"] = active,
+    ["stage_version"] = 1, ["stage_phase"] = name == "Stop" ? "stop_clear" : "" }) + "\n";
+foreach (bool reverseTie in new[] { false, true })
+foreach (bool offsetTie in new[] { false, true })
+{
+    string tiePath = Path.Combine(work, $"same-active-time-{reverseTie}-{offsetTie}.jsonl");
+    string tieStart = TieEvent("UserPromptSubmit", true, tieUtc);
+    string tieStop = TieEvent("Stop", false, offsetTie ? tieOffset : tieUtc);
+    File.WriteAllText(tiePath, (reverseTie ? tieStop + tieStart : tieStart + tieStop) + SessionEvent("tie-neighbor"), utf8);
+    var tieSource = new ClaudeFileSource(tiePath, null, DateTime.MinValue.ToUniversalTime());
+    for (int repetition = 0; repetition < 2; repetition++)
+    {
+        snapshot = tieSource.Poll(ClaudeConnection.Connected, now);
+        Check(!snapshot.Unavailable && snapshot.Tasks.Count == 2 && snapshot.Tasks.Single(x => x.Id == "tie").Unconfirmed &&
+            !snapshot.Tasks.Single(x => x.Id == "tie").PlanConfirmed && !snapshot.Tasks.Single(x => x.Id == "tie-neighbor").Unconfirmed,
+            "Opposing states at one instant must retain only the affected card as unconfirmed on repeated reads");
+    }
+}
+
+string olderTiePath = Path.Combine(work, "older-same-active-time.jsonl");
+string laterActivity = TieEvent("PreToolUse", true, tieMoment.AddSeconds(1).ToString("O"));
+File.WriteAllText(olderTiePath, TieEvent("Stop", false, tieUtc) + laterActivity + TieEvent("UserPromptSubmit", true, tieUtc) +
+    SessionEvent("tie-neighbor"), utf8);
+var olderTieSource = new ClaudeFileSource(olderTiePath, null, DateTime.MinValue.ToUniversalTime());
+snapshot = olderTieSource.Poll(ClaudeConnection.Connected, now);
+Check(snapshot.Tasks.Single(x => x.Id == "tie").Unconfirmed && !snapshot.Tasks.Single(x => x.Id == "tie-neighbor").Unconfirmed,
+    "A later activity must not mask older contradictory states with the same timestamp");
+
+foreach (bool appendLaterStop in new[] { false, true })
+{
+    string tieLaterStopPath = Path.Combine(work, $"tie-later-stop-{appendLaterStop}.jsonl");
+    string ambiguousPair = TieEvent("UserPromptSubmit", true, tieUtc) + TieEvent("Stop", false, tieUtc);
+    string laterClear = TieEvent("Stop", false, tieMoment.AddSeconds(1).ToString("O"));
+    File.WriteAllText(tieLaterStopPath, ambiguousPair + (appendLaterStop ? "" : laterClear) + SessionEvent("tie-neighbor"), utf8);
+    var tieLaterStopSource = new ClaudeFileSource(tieLaterStopPath, null, DateTime.MinValue.ToUniversalTime());
+    snapshot = tieLaterStopSource.Poll(ClaudeConnection.Connected, now);
+    Check(snapshot.Tasks.Single(x => x.Id == "tie").Unconfirmed,
+        "A tie with or without an already visible later stop must remain unconfirmed");
+    if (appendLaterStop) File.AppendAllText(tieLaterStopPath, laterClear, utf8);
+    for (int repetition = 0; repetition < 2; repetition++)
+    {
+        snapshot = tieLaterStopSource.Poll(ClaudeConnection.Connected, now);
+        Check(!snapshot.Unavailable && snapshot.Tasks.Single(x => x.Id == "tie").Unconfirmed &&
+            !snapshot.Tasks.Single(x => x.Id == "tie-neighbor").Unconfirmed,
+            "A strictly later stop must not resolve a still-visible equal-time conflict");
+    }
+}
+
+string equalSameStatePath = Path.Combine(work, "same-active-state.jsonl");
+File.WriteAllText(equalSameStatePath, TieEvent("UserPromptSubmit", true, tieUtc) + TieEvent("PreToolUse", true, tieUtc), utf8);
+var equalSameStateSource = new ClaudeFileSource(equalSameStatePath, null, DateTime.MinValue.ToUniversalTime());
+snapshot = equalSameStateSource.Poll(ClaudeConnection.Connected, now);
+Check(!snapshot.Unavailable && snapshot.Tasks.Single().Id == "tie" && !snapshot.Tasks.Single().Unconfirmed,
+    "Equal timestamps with matching active states must remain confirmable");
+
+string orderedStopPath = Path.Combine(work, "strictly-later-stop.jsonl");
+File.WriteAllText(orderedStopPath, TieEvent("UserPromptSubmit", true, tieUtc) +
+    TieEvent("Stop", false, tieMoment.AddSeconds(1).ToString("O")) + SessionEvent("tie-neighbor"), utf8);
+var orderedStopSource = new ClaudeFileSource(orderedStopPath, null, DateTime.MinValue.ToUniversalTime());
+snapshot = orderedStopSource.Poll(ClaudeConnection.Connected, now);
+Check(!snapshot.Unavailable && snapshot.Tasks.Count == 1 && snapshot.Tasks.Single().Id == "tie-neighbor" && !snapshot.Tasks.Single().Unconfirmed,
+    "A strictly later clear stop must still finish only its own session");
+
 string idLimitPath = Path.Combine(work, "session-id-limit.jsonl");
 string idLimitPrefix = new('s', 127);
 string idLimitA = idLimitPrefix + "a", idLimitB = idLimitPrefix + "b";
