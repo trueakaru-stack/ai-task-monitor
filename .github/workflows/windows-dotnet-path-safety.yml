@@ -19,8 +19,8 @@ jobs:
       - name: Check test launchers from the exact source revision
         shell: bash
         env:
-          AITM_SOURCE_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
-          AITM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AITM_SOURCE_REPOSITORY: ${{ github.repository }}
+          AITM_SOURCE_SHA: ${{ github.sha }}
         run: |
           set -eu
           git -c credential.helper= -c core.hooksPath=/dev/null init --quiet .
