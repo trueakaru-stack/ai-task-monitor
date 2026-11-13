@@ -52,3 +52,5 @@ cleared child environments without `HOME` or `CODEX_HOME`, and
 interoperability, channel security, actual Claude sessions, integration and
 installer behavior remain unverified until independently exercised. No .NET or
 GUI was run locally for this slice.
+
+The synthetic encoder passed 850 assertions in [Windows CI run 43467941028](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43467941028). This did not test a pipe, the PowerShell client, or a real Claude session.
