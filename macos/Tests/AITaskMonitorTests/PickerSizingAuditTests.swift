@@ -389,6 +389,63 @@ final class PickerSizingAuditTests: XCTestCase {
                     userInfo: [NSLocalizedDescriptionKey: message])
         }
 
+        // Check the complete capture/coordinate pipeline separately from the
+        // product view. The first SwiftUI colour is visually at the top.
+        func calibrateBitmap() throws -> [String: Any] {
+            let view = VStack(spacing: 0) {
+                Color(red: 1, green: 0, blue: 0).frame(height: 32)
+                Color(red: 0, green: 0, blue: 1).frame(height: 32)
+            }.frame(width: 64, height: 64)
+            let host = NSHostingView(rootView: view)
+            host.frame = NSRect(x: 0, y: 0, width: 64, height: 64)
+            guard host.isFlipped else {
+                throw auditError(31, "The calibration host uses an unexpected coordinate system.")
+            }
+            let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 64, height: 64),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            window.makeKeyAndOrderFront(nil)
+            defer { window.close() }
+            host.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+                throw auditError(32, "The calibration bitmap is unavailable.")
+            }
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            let x = bitmap.pixelsWide / 2
+            let topY = bitmap.pixelsHigh / 4
+            let bottomY = bitmap.pixelsHigh * 3 / 4
+            guard bitmap.pixelsWide >= 4, bitmap.pixelsHigh >= 4,
+                  let top = bitmap.colorAt(x: x, y: topY)?.usingColorSpace(.deviceRGB),
+                  let bottom = bitmap.colorAt(x: x, y: bottomY)?.usingColorSpace(.deviceRGB),
+                  top.redComponent > top.blueComponent + 0.5,
+                  bottom.blueComponent > bottom.redComponent + 0.5 else {
+                throw auditError(33, "Bitmap colorAt orientation could not be established.")
+            }
+            // Apple documents getPixel's origin as top-left; record both raw
+            // samples as a separate check of the same synthetic bitmap.
+            var topPixel = [Int](repeating: 0, count: max(5, bitmap.samplesPerPixel))
+            var bottomPixel = [Int](repeating: 0, count: max(5, bitmap.samplesPerPixel))
+            topPixel.withUnsafeMutableBufferPointer { buffer in
+                bitmap.getPixel(buffer.baseAddress!, atX: x, y: topY)
+            }
+            bottomPixel.withUnsafeMutableBufferPointer { buffer in
+                bitmap.getPixel(buffer.baseAddress!, atX: x, y: bottomY)
+            }
+            guard topPixel != bottomPixel else {
+                throw auditError(34, "Bitmap getPixel returned indistinguishable calibration samples.")
+            }
+            return ["method": "Synthetic NSHostingView captured with cacheDisplay",
+                    "origin": "top-left", "hostFlipped": host.isFlipped,
+                    "pixelSize": [bitmap.pixelsWide, bitmap.pixelsHigh],
+                    "topColor": [Double(top.redComponent), Double(top.greenComponent), Double(top.blueComponent)],
+                    "bottomColor": [Double(bottom.redComponent), Double(bottom.greenComponent), Double(bottom.blueComponent)],
+                    "topRawSamples": topPixel, "bottomRawSamples": bottomPixel]
+        }
+        let bitmapCalibration = try calibrateBitmap()
+
         func inspect(language: String, theme: String) throws {
             AppLanguage.previewOverride = language == "ru" ? .ru : .en
             var previewStateCalls = 0
@@ -483,12 +540,16 @@ final class PickerSizingAuditTests: XCTestCase {
             }
 
             typealias Capture = (bitmap: NSBitmapImageRep, frames: [NSRect], journal: [[String: Any]], record: [String: Any])
-            func capture(_ suffix: String, selections: [Int]) throws -> Capture {
+            func capture(_ suffix: String, selections: [Int], updateModel: Bool = true) throws -> Capture {
                 guard selections.count == fixture.ranges.count else {
                     throw auditError(12, "Selection count differs from the menu count.")
                 }
-                // Set the synthetic SwiftUI bindings, not only AppKit's selection.
-                model.selections = selections
+                if updateModel {
+                    // Set the synthetic SwiftUI bindings, not only AppKit's selection.
+                    model.selections = selections
+                } else if model.selections != selections {
+                    throw auditError(35, "The unchanged-model capture has different selections.")
+                }
                 var current: [NSPopUpButton] = []
                 for _ in 0..<20 {
                     host.layoutSubtreeIfNeeded()
@@ -570,6 +631,22 @@ final class PickerSizingAuditTests: XCTestCase {
                     throw auditError(17, "The host cannot provide a bitmap.")
                 }
                 host.cacheDisplay(in: host.bounds, to: bitmap)
+                // cacheDisplay may trigger view work. Verify the binding, native
+                // selections and crop geometry again after the image is captured.
+                let afterCapture = try menus()
+                guard model.selections == selections, afterCapture.count == frames.count else {
+                    throw auditError(36, "The model changed while the frame was being captured.")
+                }
+                for (row, button) in afterCapture.enumerated() {
+                    let frame = button.convert(button.bounds, to: host)
+                    let previous = frames[row]
+                    guard button.selectedItem?.title == fixture.label(row, selections[row]),
+                          abs(frame.minX - previous.minX) < 0.5, abs(frame.minY - previous.minY) < 0.5,
+                          abs(frame.width - previous.width) < 0.5, abs(frame.height - previous.height) < 0.5,
+                          expandedClip.contains(frame), expandedHost.contains(frame) else {
+                        throw auditError(37, "A menu changed during the \(suffix) capture.")
+                    }
+                }
                 guard let png = bitmap.representation(using: .png, properties: [:]) else {
                     throw auditError(18, "The captured bitmap cannot be encoded.")
                 }
@@ -688,27 +765,26 @@ final class PickerSizingAuditTests: XCTestCase {
                 }
             }
 
-            // Compare the changed menu crop in captured bitmaps. Test both bitmap row
-            // origins and record both counts; semantic title verification is separate.
+            // The synthetic calibration above established top-left bitmap coordinates
+            // for a flipped NSHostingView. Do not accept changes in a reflected crop.
             func changedPixels(_ before: NSBitmapImageRep, _ after: NSBitmapImageRep,
-                               frame: NSRect, fromTop: Bool) throws -> Int {
+                               frame: NSRect) throws -> Int {
                 guard before.pixelsWide == after.pixelsWide, before.pixelsHigh == after.pixelsHigh else {
                     throw auditError(26, "Capture pixel dimensions changed.")
                 }
                 let scaleX = CGFloat(before.pixelsWide) / host.bounds.width
                 let scaleY = CGFloat(before.pixelsHigh) / host.bounds.height
                 let label = NSRect(x: frame.minX + 4, y: frame.minY, width: max(0, frame.width - 32), height: frame.height)
-                let x0 = max(0, Int(floor(label.minX * scaleX)))
-                let x1 = min(before.pixelsWide, Int(ceil(label.maxX * scaleX)))
-                let y0 = max(0, Int(floor(label.minY * scaleY)))
-                let y1 = min(before.pixelsHigh, Int(ceil(label.maxY * scaleY)))
+                let x0 = max(0, Int(floor((label.minX - host.bounds.minX) * scaleX)))
+                let x1 = min(before.pixelsWide, Int(ceil((label.maxX - host.bounds.minX) * scaleX)))
+                let y0 = max(0, Int(floor((label.minY - host.bounds.minY) * scaleY)))
+                let y1 = min(before.pixelsHigh, Int(ceil((label.maxY - host.bounds.minY) * scaleY)))
                 guard x1 > x0, y1 > y0 else { throw auditError(27, "The menu label crop was empty.") }
                 var changed = 0
                 for y in y0..<y1 {
-                    let pixelY = fromTop ? y : before.pixelsHigh - 1 - y
                     for x in x0..<x1 {
-                        guard let a = before.colorAt(x: x, y: pixelY)?.usingColorSpace(.deviceRGB),
-                              let b = after.colorAt(x: x, y: pixelY)?.usingColorSpace(.deviceRGB) else {
+                        guard let a = before.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                              let b = after.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else {
                             throw auditError(28, "A captured pixel could not be compared.")
                         }
                         if abs(a.redComponent - b.redComponent) > 0.03 ||
@@ -719,30 +795,48 @@ final class PickerSizingAuditTests: XCTestCase {
                 }
                 return changed
             }
+            func requireSameFrame(_ frame: NSRect, _ reference: NSRect) throws {
+                guard abs(reference.minX - frame.minX) < 1, abs(reference.minY - frame.minY) < 1,
+                      abs(reference.width - frame.width) < 1, abs(reference.height - frame.height) < 1 else {
+                    throw auditError(29, "Menu position changed between comparable crops.")
+                }
+            }
             var pixelChecks: [[String: Any]] = []
+            // A fresh rendering with the same model is a negative control for
+            // capture noise; the binding is deliberately not assigned again.
+            let repeated = try capture("initial-repeat", selections: initialValues, updateModel: false)
+            captureRecords.append(repeated.record)
+            var negativeCounts: [Int] = []
+            for row in 0..<initialValues.count {
+                try requireSameFrame(repeated.frames[row], initial.frames[row])
+                let count = try changedPixels(initial.bitmap, repeated.bitmap, frame: initial.frames[row])
+                guard count <= 2 else {
+                    throw auditError(38, "The unchanged capture is unstable for menu \(row + 1).")
+                }
+                negativeCounts.append(count)
+                pixelChecks.append(["capture": "initial-repeat", "row": row + 1,
+                                    "changedPixels": count, "control": "model unchanged"])
+            }
             for row in 0..<initialValues.count {
                 let initialTitle = fixture.label(row, initialValues[row])
                 let widestTitle = fixture.label(row, widestValues[row])
                 if initialTitle == widestTitle {
-                    pixelChecks.append(["row": row + 1, "skipped": "Initial and widest titles are identical."])
+                    pixelChecks.append(["capture": "widest-row-\(row + 1)", "row": row + 1,
+                                        "skipped": "Initial and widest titles are identical."])
                     continue
                 }
                 var selections = initialValues
                 selections[row] = widestValues[row]
                 let captured = try capture("widest-row-\(row + 1)", selections: selections)
                 captureRecords.append(captured.record)
-                let a = initial.frames[row], b = captured.frames[row]
-                guard abs(a.minX - b.minX) < 1, abs(a.minY - b.minY) < 1,
-                      abs(a.width - b.width) < 1, abs(a.height - b.height) < 1 else {
-                    throw auditError(29, "Menu position changed between comparable crops.")
-                }
-                let top = try changedPixels(initial.bitmap, captured.bitmap, frame: a, fromTop: true)
-                let bottom = try changedPixels(initial.bitmap, captured.bitmap, frame: a, fromTop: false)
-                guard max(top, bottom) > 2 else {
+                try requireSameFrame(captured.frames[row], initial.frames[row])
+                let count = try changedPixels(initial.bitmap, captured.bitmap, frame: initial.frames[row])
+                guard count > negativeCounts[row] + 2 else {
                     throw auditError(30, "The rendered crop did not change for menu \(row + 1).")
                 }
-                pixelChecks.append(["row": row + 1, "initialTitle": initialTitle, "widestTitle": widestTitle,
-                                    "changedPixelsTopOrigin": top, "changedPixelsBottomOrigin": bottom])
+                pixelChecks.append(["capture": "widest-row-\(row + 1)", "row": row + 1,
+                                    "initialTitle": initialTitle, "selectedTitle": widestTitle,
+                                    "changedPixels": count, "negativeControlPixels": negativeCounts[row]])
             }
 
             for (suffix, selections) in [
@@ -754,6 +848,25 @@ final class PickerSizingAuditTests: XCTestCase {
             ] {
                 let captured = try capture(suffix, selections: selections)
                 captureRecords.append(captured.record)
+                if ["minimum", "maximum", "widest"].contains(suffix) {
+                    for row in 0..<initialValues.count {
+                        let initialTitle = fixture.label(row, initialValues[row])
+                        let selectedTitle = fixture.label(row, selections[row])
+                        guard initialTitle != selectedTitle else {
+                            pixelChecks.append(["capture": suffix, "row": row + 1,
+                                                "skipped": "Initial and selected titles are identical."])
+                            continue
+                        }
+                        try requireSameFrame(captured.frames[row], initial.frames[row])
+                        let count = try changedPixels(initial.bitmap, captured.bitmap, frame: initial.frames[row])
+                        guard count > negativeCounts[row] + 2 else {
+                            throw auditError(39, "The \(suffix) crop did not change for menu \(row + 1).")
+                        }
+                        pixelChecks.append(["capture": suffix, "row": row + 1, "initialTitle": initialTitle,
+                                            "selectedTitle": selectedTitle, "changedPixels": count,
+                                            "negativeControlPixels": negativeCounts[row]])
+                    }
+                }
                 if !baseline {
                     for frame in captured.frames {
                         XCTAssertEqual(frame.width, firstFrame.width, accuracy: 1, "Menu width must remain stable.")
@@ -772,7 +885,8 @@ final class PickerSizingAuditTests: XCTestCase {
                                          "widestActualFitting": Double(actualFittingWidths.max() ?? 0),
                                          "widestDetachedFitting": Double(widestFitting), "menus": rows,
                                          "journalButtons": initial.journal, "captures": captureRecords,
-                                         "pixelChecks": pixelChecks, "hostBounds": rectArray(host.bounds),
+                                         "pixelChecks": pixelChecks, "bitmapCalibration": bitmapCalibration,
+                                         "hostBounds": rectArray(host.bounds),
                                          "hostFlipped": host.isFlipped,
                                          "windowBackingScale": Double(window.backingScaleFactor),
                                          "widestCapture": "Every menu shows its widest text title via its synthetic SwiftUI binding.",
