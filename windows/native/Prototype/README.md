@@ -30,12 +30,24 @@ run one at a time on a worker, while connection notifications, generation
 checks and presentation are serialized on the dispatcher. Disconnect hides the
 Claude cards immediately; partial status retains the last displayed names as
 unconfirmed. Disposal prevents later presentation but does not guarantee an
-in-flight file read has physically stopped.
+in-flight file read has physically stopped. A poll has a configurable deadline
+(10 seconds by default, from 1 millisecond to 2 minutes). On expiry the pump
+immediately marks the displayed result unconfirmed, signals source loss without
+waiting for the file lock, and discards that poll's late result. It retains the
+last source-owned snapshot as a bounded fallback for previously shown names,
+including when a late stop was already read. Only one poll worker is allowed;
+repeated refreshes do not start more while it is blocked. A new poll can start
+only after that worker finishes. The deadline is dispatched on the WPF thread
+and can itself be delayed if that thread is blocked; elapsed time is checked
+again before a result is presented. The deadline does not cancel I/O.
 
 `windows/native/Tests/ClaudePump/ClaudePump.Tests.csproj` tests the pump with a
 dispatcher and synthetic files without opening a window. Its controlled races
 cover a disconnect before a background read, a connection change after a read,
-coalesced refreshes, snapshot isolation, partial inspection and disposal. Run
+coalesced refreshes, snapshot isolation, partial inspection, stalled reads,
+late stops, bounded worker count and disposal.
+The disposal test pauses after `Poll` returns and before the dispatcher applies
+its result; it does not block or test cancellation inside real file I/O. Run
 only on disposable hosted Windows with an isolated .NET 10 SDK and
 `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0` for every SDK process; the output assembly
 is `AITaskMonitor.ClaudePump.Tests.dll`. The file-to-window tests are documented

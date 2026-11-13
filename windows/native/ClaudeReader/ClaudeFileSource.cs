@@ -9,6 +9,7 @@ using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("ClaudeFileSource.Tests")]
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("AITaskMonitor.ClaudePump.Tests")]
 
 namespace AITaskMonitor.Claude;
 
@@ -18,6 +19,7 @@ public sealed record ClaudeSourceSnapshot(IReadOnlyList<Task> Tasks, bool Unavai
 {
     public long Generation { get; internal init; }
     internal object? Owner { get; init; }
+    internal Task[]? RetainedFallback { get; init; }
 }
 
 // One instance belongs to one monitor session. Paths and connection state are
@@ -43,6 +45,7 @@ public sealed class ClaudeFileSource
     private ClaudeConnection? signalledConnection;
     private long generation;
     private bool signalLoss, generationExhausted;
+    private Task[]? pendingFallback;
 
     public ClaudeFileSource(string currentPath, string? legacyPath, DateTime observedSinceUtc)
         : this(currentPath, legacyPath, observedSinceUtc, null) { }
@@ -78,6 +81,20 @@ public sealed class ClaudeFileSource
         }
     }
 
+    // Does not wait for the file-read lock. A source-owned snapshot may be
+    // retained as an unconfirmed fallback after the in-flight read finishes.
+    public void NotifyUnavailable(ClaudeSourceSnapshot? fallback)
+    {
+        lock (signalGate)
+        {
+            if (fallback is not null && ReferenceEquals(fallback.Owner, identity) &&
+                fallback.RetainedFallback is { Length: > 0 } && pendingFallback is null)
+                pendingFallback = fallback.RetainedFallback;
+            signalLoss = true;
+            AdvanceGeneration();
+        }
+    }
+
     private void AdvanceGeneration()
     {
         // Caller holds signalGate. Once exhausted, no snapshot is considered current.
@@ -85,17 +102,23 @@ public sealed class ClaudeFileSource
         else generation++;
     }
 
-    private readonly record struct ConnectionSignal(ClaudeConnection? Connection, long Generation, bool Loss, bool Exhausted);
+    private readonly record struct ConnectionSignal(ClaudeConnection? Connection, long Generation, bool Loss, bool Exhausted,
+        Task[]? Fallback);
     private ConnectionSignal Signal()
     {
-        lock (signalGate) return new(signalledConnection, generation, signalLoss, generationExhausted);
+        lock (signalGate) return new(signalledConnection, generation, signalLoss, generationExhausted, pendingFallback);
     }
 
     // Exposes the retained-loss marker to the synthetic test assembly only.
     internal bool HasObservedSourceLoss => reader.SourceUncertain;
 
-    private ClaudeSourceSnapshot Stamp(ClaudeSourceSnapshot snapshot, ConnectionSignal signal) =>
-        snapshot with { Generation = signal.Generation, Owner = identity };
+    private ClaudeSourceSnapshot Stamp(ClaudeSourceSnapshot snapshot, ConnectionSignal signal)
+    {
+        // Freeze bounded names while already off the UI thread. The deadline
+        // signal can then retain this private copy without taking the file lock.
+        Task[] fallback = MergePending([], snapshot.Tasks, out _);
+        return snapshot with { Generation = signal.Generation, Owner = identity, RetainedFallback = fallback };
+    }
 
     // The owner must serialize this check with presentation and notifications.
     public bool IsCurrent(ClaudeSourceSnapshot snapshot)
@@ -122,6 +145,7 @@ public sealed class ClaudeFileSource
             if (start.Connection is null) throw new InvalidOperationException("A connection must be signalled before polling.");
             Task[] before = previous;
             if (start.Loss || start.Exhausted) MarkConnectionLoss();
+            ConsumeFallback(start.Fallback);
             ClaudeSourceSnapshot result = PollLocked(start.Connection.Value, utcNow);
             afterReadBeforeSnapshot?.Invoke();
             ConnectionSignal end = Signal();
@@ -132,6 +156,7 @@ public sealed class ClaudeFileSource
                     MarkConnectionLoss();
                     previous = MergePending(before, previous, out bool overflow);
                     if (overflow) reader.MarkSourceLoss();
+                    ConsumeFallback(end.Fallback);
                 }
                 result = end.Connection == ClaudeConnection.Disconnected
                     ? new ClaudeSourceSnapshot([], false)
@@ -149,6 +174,17 @@ public sealed class ClaudeFileSource
         previous = MergePending([], previous, out bool overflow);
         if (overflow) reader.MarkSourceLoss();
         pendingLoss = true;
+    }
+
+    private void ConsumeFallback(Task[]? fallback)
+    {
+        if (fallback is null) return;
+        previous = MergePending(fallback, previous, out bool overflow);
+        if (overflow) reader.MarkSourceLoss();
+        lock (signalGate)
+        {
+            if (ReferenceEquals(pendingFallback, fallback)) pendingFallback = null;
+        }
     }
 
     private ClaudeSourceSnapshot PollLocked(ClaudeConnection connection, DateTime utcNow)
@@ -222,6 +258,7 @@ public sealed class ClaudeFileSource
         {
             MarkConnectionLoss();
             ConnectionSignal signal = Signal();
+            ConsumeFallback(signal.Fallback);
             ClaudeSourceSnapshot result = signal.Connection == ClaudeConnection.Disconnected
                 ? new ClaudeSourceSnapshot([], false)
                 : new ClaudeSourceSnapshot(Copy(previous, true), true);

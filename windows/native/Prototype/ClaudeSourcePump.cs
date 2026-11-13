@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Linq;
 using System.Windows.Threading;
 using AITaskMonitor.Claude;
@@ -18,14 +19,18 @@ internal sealed class ClaudeSourcePump : IDisposable
     private readonly Action<ClaudeSourceSnapshot> apply;
     private readonly Action<ClaudeSourceSnapshot>? afterPoll;
     private readonly Action? afterCompletion;
+    private readonly TimeSpan timeout;
+    private DispatcherTimer? deadline;
     private ClaudeSourceSnapshot lastPresented = new([], false);
+    private ClaudeSourceSnapshot? lastSourceSnapshot;
     private ClaudeConnection connection;
-    private bool started, inFlight, rerun, disposed;
+    private bool started, inFlight, rerun, disposed, timedOut;
+    private long pollStarted;
     private object revision = new();
 
     public ClaudeSourcePump(Dispatcher dispatcher, ClaudeFileSource source, ClaudeConnection initialConnection,
         Action<ClaudeSourceSnapshot> apply, Func<DateTime>? utcNow = null, TimeSpan? interval = null,
-        Action<ClaudeSourceSnapshot>? afterPoll = null, Action? afterCompletion = null)
+        Action<ClaudeSourceSnapshot>? afterPoll = null, Action? afterCompletion = null, TimeSpan? timeout = null)
     {
         this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         this.source = source ?? throw new ArgumentNullException(nameof(source));
@@ -33,6 +38,9 @@ internal sealed class ClaudeSourcePump : IDisposable
         this.utcNow = utcNow ?? (() => DateTime.UtcNow);
         this.afterPoll = afterPoll; // Synchronization seam for synthetic tests.
         this.afterCompletion = afterCompletion; // Synthetic tests observe dispatcher completion.
+        this.timeout = timeout ?? TimeSpan.FromSeconds(10);
+        if (this.timeout < TimeSpan.FromMilliseconds(1) || this.timeout > TimeSpan.FromMinutes(2))
+            throw new ArgumentOutOfRangeException(nameof(timeout));
         dispatcher.VerifyAccess();
         source.NotifyConnection(initialConnection);
         connection = initialConnection;
@@ -86,7 +94,13 @@ internal sealed class ClaudeSourcePump : IDisposable
     private void StartPoll()
     {
         inFlight = true;
+        timedOut = false;
+        pollStarted = Stopwatch.GetTimestamp();
         object pollRevision = revision;
+        var pollDeadline = new DispatcherTimer(DispatcherPriority.Normal, dispatcher) { Interval = timeout };
+        deadline = pollDeadline;
+        pollDeadline.Tick += (_, _) => OnDeadline(pollDeadline);
+        pollDeadline.Start();
         _ = System.Threading.Tasks.Task.Run(() =>
         {
             try
@@ -108,10 +122,33 @@ internal sealed class ClaudeSourcePump : IDisposable
         }, System.Threading.Tasks.TaskScheduler.Default);
     }
 
+    private void OnDeadline(DispatcherTimer pollDeadline)
+    {
+        pollDeadline.Stop();
+        if (disposed || !inFlight || timedOut || !ReferenceEquals(deadline, pollDeadline)) return;
+        deadline = null;
+        timedOut = true;
+        revision = new object();
+        rerun = true;
+        // Only the lightweight signal runs on the dispatcher; it does not wait
+        // for the potentially blocked file-read lock or create another worker.
+        source.NotifyUnavailable(lastSourceSnapshot);
+        if (connection != ClaudeConnection.Disconnected) Present(lastPresented, true);
+    }
+
     private void CompletePoll(System.Threading.Tasks.Task<ClaudeSourceSnapshot> result, object pollRevision)
     {
         dispatcher.VerifyAccess();
         if (disposed) return;
+        // A congested dispatcher can deliver a completed result before its
+        // overdue timer callback. Check elapsed time before presenting it.
+        if (!timedOut && deadline is not null && Stopwatch.GetElapsedTime(pollStarted) >= timeout)
+        {
+            OnDeadline(deadline);
+            if (disposed) return;
+        }
+        deadline?.Stop();
+        deadline = null;
         inFlight = false;
         try
         {
@@ -119,7 +156,10 @@ internal sealed class ClaudeSourcePump : IDisposable
             if (ReferenceEquals(pollRevision, revision))
             {
                 if (result.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && source.IsCurrent(result.Result))
+                {
+                    lastSourceSnapshot = result.Result;
                     Present(result.Result);
+                }
                 else if (result.Status != System.Threading.Tasks.TaskStatus.RanToCompletion)
                     Present(connection == ClaudeConnection.Disconnected ? new ClaudeSourceSnapshot([], false) : lastPresented,
                         connection != ClaudeConnection.Disconnected);
@@ -161,6 +201,10 @@ internal sealed class ClaudeSourcePump : IDisposable
         if (disposed) return;
         disposed = true;
         revision = new object();
+        lastSourceSnapshot = null;
+        lastPresented = new ClaudeSourceSnapshot([], false);
+        deadline?.Stop();
+        deadline = null;
         timer.Stop();
         timer.Tick -= OnTick;
     }
