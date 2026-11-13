@@ -16,6 +16,7 @@ Replace the released Windows PowerShell-hosted monitor with a standalone C# appl
 - [x] (2026-11-13 16:12Z) Integrated the native Claude event translation and rotation-uncertainty changes after independent review. Native-only CI passed 102 input-reader, 66 translation/reader and 78 writer assertions; comparison against the PowerShell hook was not run. The components remain unconnected.
 - [x] (2026-11-13 16:19Z) Preserved an independently reviewed, unconnected provider-confidence experiment in `windows`. Its CI checks include known counterexamples and are not proof of a working reconnection fix.
 - [x] (2026-11-13 16:42Z) Integrated the independently reviewed native Claude journal-tail handling. Its isolated Windows CI passed 77 checks for partial lines, retained names, losses and bounded windows; the source is not connected to a real profile.
+- [x] (2026-11-13 16:52Z) Integrated the isolated theme/language migration layer. The synthetic suite passed 54 checks and the WPF prototype compiled in Windows CI. The layer does not use real settings or enable the incomplete settings screen.
 - [ ] Establish a reliable Codex source path in C#, including bounded journal reading, lifecycle handling, lock observation, source errors, and uncertainty. The integrated slice is synthetic only; real locks and profiles are not approved for unsafe probing.
 - [ ] Resolve the provider-channel reconnection race and retain per-source and per-profile uncertainty without affecting healthy sources.
 - [ ] Integrate and verify the accepted Claude Code, OpenCode, DeepSeek, Hermes, Kimi, and available official cloud-monitoring behavior. Distinguish local and cloud support and do not invent unsupported statuses.
@@ -69,7 +70,7 @@ Replace the released Windows PowerShell-hosted monitor with a standalone C# appl
 
 ## Outcomes & Retrospective
 
-The Windows source branch and test safety have been repaired. The native update adapter, synthetic Codex source and Claude event components are independently reviewed and covered by synthetic CI; none is wired into the product. Full native monitoring, preservation of the existing UI and features, a C# installer, real integration checks, and final visual acceptance remain open.
+The Windows source branch and test safety have been repaired. The native update adapter, synthetic Codex source, Claude event components and display-preference layer are independently reviewed and covered by synthetic CI; none is wired into the product. Full native monitoring, preservation of the existing UI and features, a C# installer, real integration checks, and final visual acceptance remain open.
 
 ## Open Questions and Blockers
 
@@ -79,6 +80,7 @@ The Windows source branch and test safety have been repaired. The native update 
 - A killed Claude writer can abandon a mutex that the existing retention worker or old hook consumes before the next native write. Recovery therefore cannot rely solely on the next writer detecting abandonment. The synthetic native reader now marks incomplete tails and displaced windows uncertain, but cannot detect every missing event or preserve its loss memory across process restarts. Define and test a shared recovery protocol for the separate journal, writer, retention worker and reader before real activation.
 - Reconnection recovery for OpenCode and DeepSeek still needs a reliable way to establish the full restart of the relevant agent and profile, preserve uncertainty across channel/controller lifetimes, handle capacity loss and prevent an already drained stale frame from becoming confirmed. The unconnected provider experiment intentionally does not claim to solve these issues.
 - The Claude repeated-error warning needs a native loop-channel client. The translator intentionally omits commands and working directories from journal records, so the client must derive and send only the approved keyed fingerprint from validated input without exposing that data.
+- The isolated display-preference adapter cannot yet be used for real migration: an unrelated writer may race its lock or produce a mixed old-file snapshot, and access rights and retention of copied unknown fields are unverified. Store and standalone paths, the old hook's retention policy and the separate diagnostic settings must be handled by the complete application migration.
 - The original clipboard reference files are unavailable at their recorded paths. Existing screenshots are candidate evidence only until matched to the accepted design; final visual acceptance needs the authoritative references and actual Windows/macOS renderers.
 - A complete native installer build command and clean-machine acceptance evidence do not exist yet. Installer planning and isolated verification can continue without installing anything on the user's computer.
 
@@ -152,6 +154,7 @@ Use unique disposable fixture directories; inspect their resolved paths before a
 - Native-only Claude input, translation, reader and writer checks: [GitHub Actions run 43460428875](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43460428875); comparison with the published PowerShell hook was not executed.
 - Provider-confidence experiment and known counterexamples: [GitHub Actions run 43461323619](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43461323619). This is not an acceptance result for the production provider channel.
 - Native Claude file-source tail and retention checks on the primary branch: [GitHub Actions run 43465447532](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43465447532). Real Claude sessions and visual behavior remain unverified.
+- Synthetic display-preference migration and WPF prototype compilation: [GitHub Actions run 43467142740](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43467142740). This does not demonstrate real settings migration or a functioning settings page.
 - A saved synthetic reproduction of the provider generation race is under `D:\Codex\AI Task Monitor Audit\windows-provider-channel-generation-fix-20261109\baseline-output.txt`; it is not evidence of a real user incident.
 - Previous published Windows and macOS artifacts are 0.2.7-alpha and 0.3.8-alpha, respectively. Their availability does not prove that the requested native Windows migration is complete.
 
@@ -181,3 +184,4 @@ The implementation uses C#/.NET 10 and WPF for Windows. The native Codex source 
 - 2026-11-13: Recorded the isolated provider-confidence evidence, its two production counterexamples, and the remaining restart-recovery and native loop-client work.
 - 2026-11-13: Recorded released settings locations and the dependency between Claude's old hook and the old storage policy; identified additional historical visual evidence without treating it as final acceptance.
 - 2026-11-13: Integrated the synthetic Claude file-source fix and replaced unprotected SDK command examples with isolated-CI guidance.
+- 2026-11-13: Recorded the isolated display-preference and WPF compilation checks and the remaining real-migration limitations.

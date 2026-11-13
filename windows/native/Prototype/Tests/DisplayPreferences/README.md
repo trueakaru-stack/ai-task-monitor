@@ -94,3 +94,5 @@ synthetic files and is not part of the adapter's actual reading policy.
 They do not assign `HOME` or `CODEX_HOME`, launch agents, or change persistent
 `PATH`. Tests use only synthetic data and do not establish visual fidelity,
 live interoperability, full migration, or release readiness.
+
+The isolated suite passed 54 checks and the WPF prototype compiled in [Windows CI run 43467142740](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43467142740). Neither test reads real settings or exercises the settings screen.
