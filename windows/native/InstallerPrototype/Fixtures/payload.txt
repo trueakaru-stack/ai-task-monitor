@@ -1,0 +1,2 @@
+Synthetic payload for disposable installation tests only. This is not the application.
+

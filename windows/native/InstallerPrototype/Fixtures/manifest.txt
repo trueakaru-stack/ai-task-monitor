@@ -1,0 +1,2 @@
+Synthetic manifest for disposable installation tests only. No agent or hook is installed.
+
