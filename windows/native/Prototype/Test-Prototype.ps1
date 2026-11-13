@@ -5,6 +5,17 @@ param(
     [string]$PublishedSource = ''
 )
 
+& {
+    param([string]$scriptPath, [string]$scriptDirectory)
+    . (Join-Path $scriptDirectory 'Assert-PrototypeIsolatedInvocation.ps1')
+    $currentProcess = [Diagnostics.Process]::GetCurrentProcess()
+    try {
+        Assert-PrototypeIsolatedInvocation -ProcessArguments ([Environment]::GetCommandLineArgs()) `
+            -ScriptPath $scriptPath -ExecutablePath $currentProcess.MainModule.FileName `
+            -PowerShellRoot $PSHOME -Edition $PSVersionTable.PSEdition
+    } finally { $currentProcess.Dispose() }
+} $PSCommandPath $PSScriptRoot
+
 $ErrorActionPreference = 'Stop'
 function Absolute-TestPath([string]$value, [string]$label) {
     if ([string]::IsNullOrWhiteSpace($value) -or -not [IO.Path]::IsPathRooted($value) -or
