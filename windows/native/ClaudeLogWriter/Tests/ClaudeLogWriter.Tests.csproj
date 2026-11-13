@@ -8,5 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\ClaudeLogWriter.csproj" />
+    <ProjectReference Include="..\..\ClaudeReader\ClaudeReader.csproj" />
+    <EmbeddedResource Include="..\..\..\app\ClaudeStageObservation.cs" LogicalName="AITaskMonitor.Tests.ClaudeStageObservation.cs" />
   </ItemGroup>
 </Project>

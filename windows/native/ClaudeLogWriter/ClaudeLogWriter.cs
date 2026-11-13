@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -39,6 +40,10 @@ public static class ClaudeLogWriter
         if (record.Provider != "claude" || record.Timestamp is null || record.SessionId is null || record.Event is null ||
             record.Activity is null || record.TaskId is null || record.TaskSubject is null || record.TaskStatus is null || record.ToolName is null)
             throw new ArgumentException("A translated Claude record is required.", nameof(record));
+        // Match the reader's parser before touching the log. The marker and the
+        // associated event must sort at the same instant, in file order.
+        if (!DateTimeOffset.TryParse(record.Timestamp, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset eventTime))
+            throw new ArgumentException("The record timestamp is invalid.", nameof(record));
 
         string line = JsonSerializer.Serialize(record, JsonOptions) + "\r\n";
         string eventPath = Path.Combine(full, EventFileName);
@@ -53,9 +58,17 @@ public static class ClaudeLogWriter
 
             AssertOrdinaryDirectoryAndAncestors(full);
             bool exists = AssertOrdinaryFileOrMissing(eventPath);
-            if (exists && maximumBytes > 0) RotateIfNeeded(eventPath, maximumBytes);
+            bool needsDelimiter = false;
+            bool rotated = exists && maximumBytes > 0 && RotateIfNeeded(eventPath, maximumBytes, out needsDelimiter);
             AssertOrdinaryDirectoryAndAncestors(full);
             AssertOrdinaryFileOrMissing(eventPath);
+            if (rotated)
+            {
+                // Rotation discards history. The marker must be its own line and
+                // precede the associated event even when the reader sorts by time.
+                var marker = ClaudeHookTranslator.SourceUncertain(eventTime) with { Activity = "" };
+                File.AppendAllText(eventPath, (needsDelimiter ? "\n" : "") + JsonSerializer.Serialize(marker, JsonOptions) + "\r\n", Utf8);
+            }
             File.AppendAllText(eventPath, line, Utf8);
             return ClaudeLogWriteResult.Written;
         }
@@ -65,10 +78,11 @@ public static class ClaudeLogWriter
         }
     }
 
-    private static void RotateIfNeeded(string path, long maximumBytes)
+    private static bool RotateIfNeeded(string path, long maximumBytes, out bool needsDelimiter)
     {
-        if (!AssertOrdinaryFileOrMissing(path)) return;
-        if (new FileInfo(path).Length <= maximumBytes) return;
+        needsDelimiter = false;
+        if (!AssertOrdinaryFileOrMissing(path)) return false;
+        if (new FileInfo(path).Length <= maximumBytes) return false;
 
         string tail;
         using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
@@ -80,6 +94,7 @@ public static class ClaudeLogWriter
         }
         int newline = tail.IndexOf('\n');
         if (newline >= 0) tail = tail[(newline + 1)..];
+        needsDelimiter = tail.Length > 0 && tail[^1] != '\n';
 
         string temporary = Path.Combine(Path.GetDirectoryName(path)!, ".aitm-hook-retention-" + Guid.NewGuid().ToString("N") + ".tmp");
         bool created = false;
@@ -94,6 +109,7 @@ public static class ClaudeLogWriter
             AssertOrdinaryDirectoryAndAncestors(Path.GetDirectoryName(path)!);
             if (!AssertOrdinaryFileOrMissing(path)) throw new IOException("The event file disappeared during rotation.");
             File.Replace(temporary, path, null);
+            return true;
         }
         finally
         {

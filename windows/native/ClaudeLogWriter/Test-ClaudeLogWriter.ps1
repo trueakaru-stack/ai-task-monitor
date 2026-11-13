@@ -1,9 +1,13 @@
 param(
     [Parameter(Mandatory=$true)][string]$SdkRoot,
     [Parameter(Mandatory=$true)][string]$WorkDirectory,
+    [switch]$NativeOnly,
     [string]$WindowsPowerShell=(Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe')
 )
 $ErrorActionPreference='Stop'
+if($env:CI -ne 'true' -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows'){
+    throw 'These synthetic tests require a disposable GitHub-hosted Windows runner.'
+}
 function Full([string]$path) { return [IO.Path]::GetFullPath($path).TrimEnd('\','/') }
 function IsWithin([string]$path,[string]$root) {
     if([string]::IsNullOrWhiteSpace($root)){return $false}
@@ -25,10 +29,12 @@ while($null -ne $ancestor){
 }
 $run=Join-Path $work ('claude-log-writer-tests-'+[guid]::NewGuid().ToString('N'))
 foreach($name in @('home','appdata','localappdata','temp','nuget','cache','legacy','fixtures')){New-Item -ItemType Directory -Force -Path (Join-Path $run $name)|Out-Null}
-foreach($name in @('ClaudeTaskHook.ps1','ClaudeLoopClient.ps1')){
-    $source=Join-Path $repository ('windows/app/'+$name);$destination=Join-Path $run ('legacy/'+$name)
-    [IO.File]::Copy($source,$destination,$false)
-    if((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -cne (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash){throw 'Synthetic hook copy does not match its source.'}
+if(-not $NativeOnly){
+    foreach($name in @('ClaudeTaskHook.ps1','ClaudeLoopClient.ps1')){
+        $source=Join-Path $repository ('windows/app/'+$name);$destination=Join-Path $run ('legacy/'+$name)
+        [IO.File]::Copy($source,$destination,$false)
+        if((Get-FileHash -Algorithm SHA256 -LiteralPath $source).Hash -cne (Get-FileHash -Algorithm SHA256 -LiteralPath $destination).Hash){throw 'Synthetic hook copy does not match its source.'}
+    }
 }
 $config=Join-Path $run 'NuGet.Config'
 [IO.File]::WriteAllText($config,'<?xml version="1.0" encoding="utf-8"?><configuration><packageSources><clear /></packageSources></configuration>')
@@ -43,7 +49,7 @@ function Invoke-Isolated([string[]]$arguments){
         DOTNET_ROOT=$sdk;DOTNET_MULTILEVEL_LOOKUP='0';DOTNET_CLI_HOME=(Join-Path $run 'home');DOTNET_CLI_TELEMETRY_OPTOUT='1'
         DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='0'
         DOTNET_NOLOGO='1';DOTNET_GENERATE_ASPNET_CERTIFICATE='0';DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1';DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE='1'
-        NUGET_PACKAGES=(Join-Path $run 'nuget');USERPROFILE=(Join-Path $run 'home');HOME=(Join-Path $run 'home');CODEX_HOME=(Join-Path $run 'home/codex-fixture')
+        NUGET_PACKAGES=(Join-Path $run 'nuget');USERPROFILE=(Join-Path $run 'home')
         APPDATA=(Join-Path $run 'appdata');LOCALAPPDATA=(Join-Path $run 'localappdata');TEMP=(Join-Path $run 'temp');TMP=(Join-Path $run 'temp')
         PSModuleAnalysisCachePath=(Join-Path $run 'cache/ModuleAnalysisCache')
         AITM_LOG_TEST_ROOT=(Join-Path $run 'fixtures')
@@ -61,7 +67,9 @@ function Invoke-Isolated([string[]]$arguments){
         if($stderr.Result){Write-Output $stderr.Result.TrimEnd()}
     }finally{$process.Dispose()}
 }
-Invoke-Isolated @('build',(Join-Path $PSScriptRoot 'Tests/ClaudeLogWriter.Tests.csproj'),'--configuration','Release','--configfile',$config,'--artifacts-path',(Join-Path $run 'artifacts'),'-p:NuGetAudit=false','--nologo')
+Invoke-Isolated @('restore',(Join-Path $PSScriptRoot 'Tests/ClaudeLogWriter.Tests.csproj'),'--configfile',$config,'--artifacts-path',(Join-Path $run 'artifacts'),'-p:NuGetAudit=false','--nologo')
+Invoke-Isolated @('build',(Join-Path $PSScriptRoot 'Tests/ClaudeLogWriter.Tests.csproj'),'--configuration','Release','--no-restore','--artifacts-path',(Join-Path $run 'artifacts'),'-p:NuGetAudit=false','--nologo')
 $dll=Join-Path $run 'artifacts/bin/ClaudeLogWriter.Tests/release/AITaskMonitor.ClaudeLogWriter.Tests.dll'
-Invoke-Isolated @($dll,(Join-Path $run 'legacy/ClaudeTaskHook.ps1'),(Join-Path $run 'fixtures'),$framework)
+if($NativeOnly){Invoke-Isolated @($dll,'--native-only',(Join-Path $run 'fixtures'))}
+else{Invoke-Isolated @($dll,(Join-Path $run 'legacy/ClaudeTaskHook.ps1'),(Join-Path $run 'fixtures'),$framework)}
 Write-Output ('Synthetic artifacts: '+$run)
