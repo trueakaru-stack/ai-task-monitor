@@ -791,3 +791,111 @@ jobs:
               }
             }
           }
+
+  claude-pump:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: '1'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - name: Check Claude dispatcher pump and file-to-window flow
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Read-PathState([string]$scope) {
+            $key = if ($scope -eq 'User') {
+              [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+            } else {
+              [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment', $false)
+            }
+            try {
+              return [pscustomobject]@{
+                Value = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                Kind = [string]$key.GetValueKind('Path')
+              }
+            } finally { $key.Dispose() }
+          }
+          $beforeUser = Read-PathState 'User'
+          $beforeMachine = Read-PathState 'Machine'
+          try {
+            $root = Join-Path $env:RUNNER_TEMP 'aitm-claude-pump'
+            $source = Join-Path $root 'source'
+            $template = Join-Path $root 'template'
+            $hooks = Join-Path $root 'hooks'
+            $fixture = Join-Path $root 'fixtures'
+            New-Item -ItemType Directory -Path $source, $template, $hooks, $fixture -Force | Out-Null
+            git -c credential.helper= -c core.hooksPath="$hooks" -c init.defaultBranch=integration init --quiet --template="$template" "$source"
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot initialize the synthetic source checkout.' }
+            git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$env:GITHUB_SHA"
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch the exact test revision.' }
+            git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot select the test revision.' }
+            $command = Get-Command dotnet.exe -CommandType Application | Select-Object -First 1
+            if ($null -eq $command) { throw 'The Windows .NET SDK is unavailable.' }
+            $sdk = Split-Path -Parent $command.Source
+            $taskDir = Join-Path $root 'isolated'
+            foreach ($name in @('profile','appdata','localappdata','temp','nuget','dotnet')) {
+              $null = [IO.Directory]::CreateDirectory((Join-Path $taskDir $name))
+            }
+            $config = Join-Path $taskDir 'NuGet.Config'
+            [IO.File]::WriteAllText($config, '<configuration><packageSources><clear /></packageSources></configuration>', [Text.UTF8Encoding]::new($false))
+            function Invoke-IsolatedDotnet([string[]]$arguments) {
+              foreach ($argument in $arguments) {
+                if ($argument.Contains('"') -or $argument.EndsWith('\')) { throw 'Unsupported synthetic argument.' }
+              }
+              $info = New-Object Diagnostics.ProcessStartInfo
+              $info.FileName = Join-Path $sdk 'dotnet.exe'
+              $info.Arguments = ($arguments | ForEach-Object { '"' + $_ + '"' }) -join ' '
+              $info.WorkingDirectory = $taskDir
+              $info.UseShellExecute = $false
+              $info.CreateNoWindow = $true
+              $info.RedirectStandardOutput = $true
+              $info.RedirectStandardError = $true
+              $info.EnvironmentVariables.Clear()
+              $values = @{
+                SystemRoot=$env:SystemRoot; windir=$env:SystemRoot
+                PATH=($sdk + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot)
+                DOTNET_ROOT=$sdk; DOTNET_MULTILEVEL_LOOKUP='0'; DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='0'
+                DOTNET_CLI_HOME=(Join-Path $taskDir 'dotnet'); DOTNET_CLI_TELEMETRY_OPTOUT='1'
+                DOTNET_GENERATE_ASPNET_CERTIFICATE='0'; DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE='1'
+                NUGET_PACKAGES=(Join-Path $taskDir 'nuget'); USERPROFILE=(Join-Path $taskDir 'profile')
+                APPDATA=(Join-Path $taskDir 'appdata'); LOCALAPPDATA=(Join-Path $taskDir 'localappdata')
+                TEMP=(Join-Path $taskDir 'temp'); TMP=(Join-Path $taskDir 'temp')
+              }
+              foreach ($name in @('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','SystemDrive','ComSpec')) {
+                $value = [Environment]::GetEnvironmentVariable($name)
+                if (-not [string]::IsNullOrEmpty($value)) { $values[$name] = $value }
+              }
+              foreach ($key in $values.Keys) { $info.EnvironmentVariables[$key] = [string]$values[$key] }
+              $process = [Diagnostics.Process]::Start($info)
+              try {
+                $stdout = $process.StandardOutput.ReadToEndAsync()
+                $stderr = $process.StandardError.ReadToEndAsync()
+                if (-not $process.WaitForExit(90000)) { $process.Kill(); throw 'The synthetic Claude file check timed out.' }
+                if ($process.ExitCode -ne 0) { throw ("The synthetic Claude file check failed: " + $stdout.Result + $stderr.Result) }
+                if ($stdout.Result) { Write-Output $stdout.Result.TrimEnd() }
+                if ($stderr.Result) { Write-Output $stderr.Result.TrimEnd() }
+              } finally { $process.Dispose() }
+            }
+            $artifacts = Join-Path $taskDir 'artifacts'
+            $project = Join-Path $source 'windows/native/Tests/ClaudePump/ClaudePump.Tests.csproj'
+            Invoke-IsolatedDotnet @('build', $project, '-c', 'Release', '--configfile', $config, '--artifacts-path', $artifacts, '-p:NuGetAudit=false', '--nologo')
+            $assembly = Join-Path $artifacts 'bin/ClaudePump.Tests/release/AITaskMonitor.ClaudePump.Tests.dll'
+            Invoke-IsolatedDotnet @($assembly)
+            $project = Join-Path $source 'windows/native/Tests/ClaudeFileUi/ClaudeFileUi.Tests.csproj'
+            Invoke-IsolatedDotnet @('build', $project, '-c', 'Release', '--configfile', $config, '--artifacts-path', $artifacts, '-p:NuGetAudit=false', '--nologo')
+            $assembly = Join-Path $artifacts 'bin/ClaudeFileUi.Tests/release/AITaskMonitor.Prototype.Tests.dll'
+            Invoke-IsolatedDotnet @($assembly)
+          } finally {
+            foreach ($scope in @('User', 'Machine')) {
+              $before = if ($scope -eq 'User') { $beforeUser } else { $beforeMachine }
+              $after = Read-PathState $scope
+              if ($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind) {
+                throw "$scope PATH changed during the integration test."
+              }
+            }
+          }

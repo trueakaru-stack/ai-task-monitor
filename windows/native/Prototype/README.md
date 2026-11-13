@@ -21,18 +21,34 @@ and event-order and hook-result validation are still under review.
 `ClaudeSourcePump` and `ApplyClaudeSource` can pass an explicitly supplied
 synthetic file source into a test window without blocking the WPF thread. The
 pump is not started by the application entry point, and it does not establish a
-real Claude connection. The file-to-window tests are documented in the
-`ClaudeReader` README.
+real Claude connection. The owner supplies an initial connection and reports
+every later change through the pump on its dispatcher; it must not notify the
+source directly or use a stale connection value from a background read. An
+inspection error is not proof of disconnection: until a separate inspector
+contract exists, the owner must report that uncertainty as `Partial`. Polls
+run one at a time on a worker, while connection notifications, generation
+checks and presentation are serialized on the dispatcher. Disconnect hides the
+Claude cards immediately; partial status retains the last displayed names as
+unconfirmed. Disposal prevents later presentation but does not guarantee an
+in-flight file read has physically stopped.
+
+`windows/native/Tests/ClaudePump/ClaudePump.Tests.csproj` tests the pump with a
+dispatcher and synthetic files without opening a window. Its controlled races
+cover a disconnect before a background read, a connection change after a read,
+coalesced refreshes, snapshot isolation, partial inspection and disposal. Run
+only on disposable hosted Windows with an isolated .NET 10 SDK and
+`DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0` for every SDK process; the output assembly
+is `AITaskMonitor.ClaudePump.Tests.dll`. The file-to-window tests are documented
+in the `ClaudeReader` README. Neither test establishes real hook behavior,
+actual connection inspection, or application integration.
 
 The preview can also render a caller-supplied synthetic repeated-error warning
 and pass its dismissal back to that caller. It does not start the loop detector
 or hook, and the application entry point does not supply these warnings. A
-synthetic WPF test covers both layouts, languages and themes, focus retention
-and scrolling:
-
-```powershell
-dotnet run --project .\windows\native\Tests\LoopWarningUi\LoopWarningUi.Tests.csproj -c Release
-```
+synthetic WPF test in `windows/native/Tests/LoopWarningUi/` covers both layouts,
+languages and themes, focus retention and scrolling. Run it only on a disposable
+hosted Windows environment with isolated temporary/profile directories and
+`DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0` for every SDK process.
 
 The tests exercise programmatic WPF focus; a real active window, physical
 keyboard input, visible focus indication, and high-DPI behavior remain
