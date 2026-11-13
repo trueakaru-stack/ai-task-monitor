@@ -75,6 +75,13 @@ source cannot be detected. The prototype pump uses this contract in synthetic
 tests, but the application entry point does not start it and live in-flight
 protection remains unverified.
 
+`NotifyUnavailable` can signal source loss without waiting for a blocked poll's
+read lock. The pump supplies a previously displayed, source-owned bounded
+fallback so a late stop cannot erase earlier names. The signal invalidates the
+prior generation but cannot cancel physical I/O or prove event delivery. The
+owner must serialize presentation and ensure one lifetime pump as documented in
+the prototype; no real-profile integration is enabled by this behavior.
+
 Pending snapshots use the session reader's existing retention rules: at most
 256 cards and 128 retained steps per card, with bounded step titles and IDs.
 An incomplete retained plan is flagged and retention overflow marks the source

@@ -30,14 +30,44 @@ run one at a time on a worker, while connection notifications, generation
 checks and presentation are serialized on the dispatcher. Disconnect hides the
 Claude cards immediately; partial status retains the last displayed names as
 unconfirmed. Disposal prevents later presentation but does not guarantee an
-in-flight file read has physically stopped. A blocked poll can also leave the
-last confirmed snapshot visible indefinitely. A bounded stale-state policy and
-protection against accumulating blocked workers are required before real use.
+in-flight file read has physically stopped. A poll has a configurable deadline
+(10 seconds by default, from 1 millisecond to 2 minutes). On expiry the pump
+immediately marks the displayed result unconfirmed, signals source loss without
+waiting for the file lock, and discards that poll's late result. It retains the
+last source-owned snapshot as a bounded fallback for previously shown names,
+including when a late stop was already read. Each pump allows only one poll
+worker; repeated refreshes do not start more while it is blocked or while its
+result is being presented. Identical connection notifications have no effect.
+A refresh invalidates at most one in-flight result between presentations;
+further requests coalesce into a follow-up rather than starving every poll.
+A presented snapshot can therefore precede the latest refresh request, for
+which a follow-up is scheduled; it is not guaranteed current at presentation.
+`RequestRefresh` only asks for another read. It must not be used as a signal
+that the connection changed or became unavailable: the owner must separately
+report a known disconnect or an uncertain inspection through `NotifyConnection`.
+Actual connection changes and timeouts always invalidate the previous result.
+When a connection becomes partial or disconnected, the pump passes its last
+source-owned snapshot as a bounded fallback without waiting for the read lock;
+this can preserve names after an undelivered terminal event. The deadline is
+dispatched on the WPF thread and can itself be delayed if that thread is
+blocked; elapsed time is checked
+again before a result is presented. The deadline does not cancel I/O.
+
+The worker limit applies to a single pump instance. `Dispose` prevents later
+presentation but cannot stop a permanently blocked read; constructing another
+pump can therefore add another blocked worker. A future process owner must
+enforce a single pump for the lifetime of the process, including after disposal,
+until a separately verified cancellation or replacement contract exists. No
+guarantee is made that blocked I/O terminates. Both limitations block real
+integration; the current component does not enforce the single-pump contract.
 
 `windows/native/Tests/ClaudePump/ClaudePump.Tests.csproj` tests the pump with a
 dispatcher and synthetic files without opening a window. Its controlled races
 cover a disconnect before a background read, a connection change after a read,
-coalesced refreshes, snapshot isolation, partial inspection and disposal.
+an undelivered terminal result, connection loss during a locked source read,
+unchanged notifications, reentrant and continuous refreshes, snapshot
+isolation, partial inspection, stalled reads, late stops, bounded worker count
+per instance and disposal.
 The disposal test pauses after `Poll` returns and before the dispatcher applies
 its result; it does not block or test cancellation inside real file I/O. Run
 only on disposable hosted Windows with an isolated .NET 10 SDK and
