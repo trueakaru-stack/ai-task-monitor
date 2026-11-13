@@ -145,3 +145,5 @@ jobs:
             Assert-PathUnchanged
           }
           exit 0
+
+# Disposable CI verification for the native updater integration.
