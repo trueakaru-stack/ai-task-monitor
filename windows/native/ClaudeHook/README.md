@@ -45,7 +45,7 @@ synthetic `USERPROFILE`, `DOTNET_CLI_HOME`, app-data and temporary paths,
 The CI environment checks and path checks are not a security boundary against
 forged environment variables, path replacement, or hostile runners.
 
-The tests require execution in the stated CI environment; test code alone does
-not prove results. Real hook installation, live Claude behavior, concurrent
+The native-only checks passed in [Windows CI run 43460428875](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43460428875): 102 input-reader assertions and 66 translation/reader assertions. The PowerShell comparison was not run.
+Real hook installation, live Claude behavior, concurrent
 settings changes, production integration and installer remain unverified in
 this change. No `.NET` or GUI was run locally for this work.

@@ -95,3 +95,5 @@ fixture-root environment variable and is not a security boundary; invoke tests
 only through the runner in the trusted disposable CI environment. Symbolic-link
 coverage depends on the host; inspect output for skips. ACL access-denial
 tests, real sessions and profiles are not covered.
+
+The native-only writer checks passed 78 assertions in [Windows CI run 43460428875](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43460428875), including rejection of the synthetic symbolic links. The PowerShell comparison was not run.
