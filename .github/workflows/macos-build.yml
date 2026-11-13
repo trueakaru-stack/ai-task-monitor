@@ -134,14 +134,34 @@ jobs:
     if: ${{ !contains(github.event.head_commit.message, '[tests-only]') }}
     runs-on: ${{ contains(github.event.head_commit.message, '[macos26]') && 'macos-26' || 'macos-15' }}
     timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: ${{ contains(github.event.head_commit.message, '[macos26]') && '/Applications/Xcode.app/Contents/Developer' || '/Applications/Xcode_16.1.app/Contents/Developer' }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Select Xcode
-        if: ${{ !contains(github.event.head_commit.message, '[macos26]') }}
-        run: sudo xcode-select -s /Applications/Xcode_16.1.app/Contents/Developer
+      - name: Checkout exact commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test -d "$DEVELOPER_DIR"
+          test -z "$(ls -A "$GITHUB_WORKSPACE")"
+          mkdir -p "$RUNNER_TEMP/aitm-empty-template" "$RUNNER_TEMP/aitm-empty-hooks"
+          git -C "$GITHUB_WORKSPACE" -c init.templateDir="$RUNNER_TEMP/aitm-empty-template" \
+              -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" init
+          if ! git -C "$GITHUB_WORKSPACE" -c credential.helper= \
+              -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" fetch --no-tags --depth=1 \
+              "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"; then
+            git -C "$GITHUB_WORKSPACE" -c credential.helper= \
+                -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" fetch --no-tags --depth=1 \
+                "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_REF"
+          fi
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C "$GITHUB_WORKSPACE" -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" checkout --detach FETCH_HEAD
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$GITHUB_SHA"
       - name: Test
         working-directory: macos
-        run: swift test
+        run: bash ./scripts/run-swift-tests.sh
       - name: Build universal application
         working-directory: macos
         run: ./scripts/build-app.sh
