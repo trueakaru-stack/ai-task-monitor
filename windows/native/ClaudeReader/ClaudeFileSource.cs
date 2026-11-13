@@ -6,6 +6,7 @@ using System.Linq;
 using System.Security;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("ClaudeFileSource.Tests")]
 
@@ -33,6 +34,7 @@ public sealed class ClaudeFileSource
     private readonly DateTime observedSinceUtc;
     private readonly Action? afterReadBeforeSnapshot;
     private readonly Action<string>? afterFirstFileRead;
+    private readonly Func<SafeFileHandle, ClaudeFileIdentity?> readIdentity;
     private readonly SessionReader reader = new();
     private Task[] previous = [];
     private bool currentSeen, legacySeen;
@@ -47,7 +49,8 @@ public sealed class ClaudeFileSource
 
     // A synchronization seam for synthetic tests; production uses the public constructor.
     internal ClaudeFileSource(string currentPath, string? legacyPath, DateTime observedSinceUtc,
-        Action? afterReadBeforeSnapshot, Action<string>? afterFirstFileRead = null)
+        Action? afterReadBeforeSnapshot, Action<string>? afterFirstFileRead = null,
+        Func<SafeFileHandle, ClaudeFileIdentity?>? readIdentity = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(currentPath);
         if (!Path.IsPathFullyQualified(currentPath)) throw new ArgumentException("Current event path must be absolute.", nameof(currentPath));
@@ -58,6 +61,7 @@ public sealed class ClaudeFileSource
         this.observedSinceUtc = observedSinceUtc;
         this.afterReadBeforeSnapshot = afterReadBeforeSnapshot;
         this.afterFirstFileRead = afterFirstFileRead;
+        this.readIdentity = readIdentity ?? ClaudeFileIdentityReader.Read;
     }
 
     // Call as soon as the owner observes a change, including while a poll runs.
@@ -156,8 +160,8 @@ public sealed class ClaudeFileSource
             }
             try
             {
-                Tail? current = ReadOptional(currentPath, ref currentSeen, ref currentCursor, afterFirstFileRead);
-                Tail? legacy = legacyPath is null ? null : ReadOptional(legacyPath, ref legacySeen, ref legacyCursor, afterFirstFileRead);
+                Tail? current = ReadOptional(currentPath, ref currentSeen, ref currentCursor, afterFirstFileRead, readIdentity);
+                Tail? legacy = legacyPath is null ? null : ReadOptional(legacyPath, ref legacySeen, ref legacyCursor, afterFirstFileRead, readIdentity);
                 bool isPending = current?.Pending == true || legacy?.Pending == true;
                 if (current?.Discontinuity == true || legacy?.Discontinuity == true ||
                     current?.WindowMoved == true || legacy?.WindowMoved == true)
@@ -228,11 +232,12 @@ public sealed class ClaudeFileSource
     private readonly record struct Cursor(long Length, byte[] ObservedDigest, long FirstCompleteOffset);
     private readonly record struct Tail(string Text, bool Pending, Cursor Cursor, bool Discontinuity, bool WindowMoved);
 
-    private static Tail? ReadOptional(string path, ref bool seen, ref Cursor? cursor, Action<string>? afterFirstFileRead)
+    private static Tail? ReadOptional(string path, ref bool seen, ref Cursor? cursor, Action<string>? afterFirstFileRead,
+        Func<SafeFileHandle, ClaudeFileIdentity?> readIdentity)
     {
         try
         {
-            Tail text = ReadCompleteTail(path, cursor, afterFirstFileRead);
+            Tail text = ReadCompleteTail(path, cursor, afterFirstFileRead, readIdentity);
             seen = true;
             cursor = text.Cursor;
             return text;
@@ -243,8 +248,10 @@ public sealed class ClaudeFileSource
 
     // Read the bounded window twice through independently opened handles. An
     // append after the captured length may wait until the next poll, but a
-    // changed captured range or a replaced path records source loss.
-    private static Tail ReadCompleteTail(string path, Cursor? prior, Action<string>? afterFirstFileRead)
+    // changed captured range records source loss. Matching identities are
+    // required while both handles are open; identity is not kept across polls.
+    private static Tail ReadCompleteTail(string path, Cursor? prior, Action<string>? afterFirstFileRead,
+        Func<SafeFileHandle, ClaudeFileIdentity?> readIdentity)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
@@ -261,6 +268,17 @@ public sealed class ClaudeFileSource
         {
             using var verify = new FileStream(path, FileMode.Open, FileAccess.Read,
                 FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
+            ClaudeFileIdentity? capturedIdentity, verifiedIdentity;
+            try
+            {
+                capturedIdentity = readIdentity(stream.SafeFileHandle);
+                verifiedIdentity = readIdentity(verify.SafeFileHandle);
+            }
+            catch (Exception error) { throw new IOException("Event source identity could not be checked.", error); }
+            if (!capturedIdentity.HasValue || !verifiedIdentity.HasValue ||
+                !capturedIdentity.Value.IsUsable || !verifiedIdentity.Value.IsUsable ||
+                capturedIdentity.Value != verifiedIdentity.Value)
+                throw new IOException("Event source identity changed or could not be checked.");
             if (verify.Length < length) throw new IOException("Event source shortened during reading.");
             var repeated = new byte[captured.Length];
             verify.Seek(readStart, SeekOrigin.Begin);
