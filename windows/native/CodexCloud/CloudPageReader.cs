@@ -1,12 +1,20 @@
 using System.Globalization;
+using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
 namespace AITaskMonitor.CodexCloud;
 
-internal sealed record ParsedTask(string Id, string? Title, DateTimeOffset? UpdatedAt, bool Terminal);
-internal sealed record ParsedPage(IReadOnlyList<ParsedTask> Tasks, string? Cursor);
+internal sealed record ParsedTask(string Id, string? Title, DateTimeOffset? UpdatedAt, bool Terminal)
+{
+    public override string ToString() => "Codex Cloud parsed task";
+}
+
+internal sealed record ParsedPage(IReadOnlyList<ParsedTask> Tasks, string? Cursor)
+{
+    public override string ToString() => "Codex Cloud parsed page";
+}
 
 internal static class CloudPageReader
 {
@@ -92,7 +100,7 @@ internal static class CloudPageReader
         }
         catch (Exception error) when (error is JsonException or InvalidOperationException or
             ArgumentException or OverflowException or IOException or UnauthorizedAccessException or
-            NotSupportedException)
+            NotSupportedException or SecurityException)
         {
             return false;
         }

@@ -12,7 +12,12 @@ A caller explicitly enables a source and starts at most one scan. It supplies a 
 only in response to the current opaque request, follows the returned request, and
 reports failure or cancels when needed. Replayed, late, cross-source and
 previous-generation requests do not change published cards. Disabling the source
-invalidates the scan and clears only that instance.
+invalidates the scan and clears only that instance. Snapshots themselves carry
+no generation. A future UI owner must serialize snapshot capture and application
+with enable/disable changes and scan publications, or attach its own lifecycle
+generation and monotonic sequence and discard delayed snapshots. Otherwise a
+queued older snapshot could overwrite a newer result or be shown after the source
+has been disabled or re-enabled.
 
 A JSON page is at most 1 MiB and has at most 20 tasks. A scan accepts at most five
 pages, rejects duplicated IDs and cursor loops, and publishes only after a complete
@@ -28,7 +33,9 @@ evicting cards.
 Pending, missing and unrecognized statuses produce cards with Unconfirmed=true,
 Active=false, no progress and no confirmed plan. Ready and error are both
 terminal for the displayed list and do not establish success. IDs in snapshots
-are truncated SHA-256 digests, not the original IDs. Titles are intentionally
+are truncated SHA-256 digests, not the original IDs. This is not anonymization:
+guessable IDs can be matched by hashing candidates, and the same ID can be linked
+across scans. Treat the digests as sensitive data. Titles are intentionally
 available for display, whitespace/control characters are normalized, and titles
 are limited to 240 UTF-16 code units without splitting a surrogate pair. A missing
 title is null; a future UI adapter supplies its localized default. Unknown fields
@@ -39,10 +46,17 @@ are rejected conservatively.
 
 Requests expose their opaque cursor only for a future transport; the property is
 excluded from default JSON serialization, and ToString() does not reveal it.
-Callers must never log cursors, raw pages, credentials, command output or task
-titles. The parser takes a bounded copy of the provided bytes and clears that copy;
+Callers must never log cursors, raw pages, credentials, command output, task IDs
+(including their digests) or task titles. The parser takes a bounded copy of the
+provided bytes and clears that copy;
 the caller owns and must not mutate its buffer during the copy. Other managed
 strings and the caller's original buffer are not guaranteed to be erased.
+
+Recoverable errors while reading the supplied memory, including access errors,
+produce a failed scan. Unexpected exceptions such as OutOfMemoryException are not
+suppressed. The calling owner must cancel any unfinished scan after an unexpected
+exception when it is able to do so; recovery from actual memory exhaustion is not
+guaranteed.
 
 The CLI response can omit tasks outside its own scope, pagination window or
 permissions. Neither a successful scan nor an absent card confirms the status of

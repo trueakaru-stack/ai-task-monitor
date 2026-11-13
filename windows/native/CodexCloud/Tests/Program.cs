@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Collections;
+using System.Security;
 using System.Text;
 using System.Text.Json;
 using AITaskMonitor.CodexCloud;
@@ -40,6 +41,28 @@ internal static class Program
             new { id = "keep", title = "Previously visible", status = "pending" }
         ]));
         return source;
+    }
+
+    private static void InternalDiagnosticPrivacy()
+    {
+        Type reader = typeof(CodexCloudSource).Assembly.GetType(
+            "AITaskMonitor.CodexCloud.CloudPageReader", throwOnError: true)!;
+        var parse = reader.GetMethod("TryRead",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
+        object?[] arguments =
+        [
+            new ReadOnlyMemory<byte>(Page([
+                new { id = "synthetic-private-id", title = "synthetic-private-title", status = "pending" }
+            ], "synthetic-private-cursor")),
+            null
+        ];
+        bool accepted = (bool)parse.Invoke(null, arguments)!;
+        Check(accepted && arguments[1] is not null, "diagnostic fixture parses");
+        object page = arguments[1]!;
+        Check(page.ToString() == "Codex Cloud parsed page", "parsed page diagnostic text is redacted");
+        var tasks = (IEnumerable)page.GetType().GetProperty("Tasks")!.GetValue(page)!;
+        object task = tasks.Cast<object>().Single();
+        Check(task.ToString() == "Codex Cloud parsed task", "parsed task diagnostic text is redacted");
     }
 
     private static void BasicAndPrivacy()
@@ -268,18 +291,22 @@ internal static class Program
         Check(other.GetSnapshot().Tasks.Count == 1, "disconnect did not affect other source");
     }
 
+    private enum SyntheticFault { None, Io, Security, OutOfMemory }
+
     private sealed class SyntheticBuffer : MemoryManager<byte>
     {
         private readonly byte[] bytes;
         private bool disposed;
-        internal bool FailReads { get; set; }
+        internal SyntheticFault Fault { get; set; }
 
         internal SyntheticBuffer(byte[] value) => bytes = value;
 
         public override Span<byte> GetSpan()
         {
             if (disposed) throw new ObjectDisposedException(nameof(SyntheticBuffer));
-            if (FailReads) throw new IOException("Synthetic read failure");
+            if (Fault == SyntheticFault.Io) throw new IOException("Synthetic read failure");
+            if (Fault == SyntheticFault.Security) throw new SecurityException("Synthetic access failure");
+            if (Fault == SyntheticFault.OutOfMemory) throw new OutOfMemoryException("Synthetic exception; no memory was exhausted");
             return bytes;
         }
 
@@ -290,14 +317,14 @@ internal static class Program
 
     private static void InputReadFailures()
     {
-        foreach (bool disposeBeforeRead in new[] { true, false })
+        foreach (int mode in new[] { 0, 1, 2 })
         {
             CodexCloudSource source = Seed();
             CloudPageRequest request = Begin(source);
             using var manager = new SyntheticBuffer(Page([new { id = "unpublished" }]));
             ReadOnlyMemory<byte> memory = manager.Memory;
-            if (disposeBeforeRead) ((IDisposable)manager).Dispose();
-            else manager.FailReads = true;
+            if (mode == 0) ((IDisposable)manager).Dispose();
+            else manager.Fault = mode == 1 ? SyntheticFault.Io : SyntheticFault.Security;
 
             CloudPageResult result = source.AcceptPage(request, memory);
             CloudSnapshot snapshot = source.GetSnapshot();
@@ -311,6 +338,19 @@ internal static class Program
                 "source can recover after input read failure");
         }
 
+        CodexCloudSource fatalSource = Seed();
+        CloudPageRequest fatalRequest = Begin(fatalSource);
+        using var fatalBuffer = new SyntheticBuffer(Page([new { id = "unpublished" }]));
+        ReadOnlyMemory<byte> fatalMemory = fatalBuffer.Memory;
+        fatalBuffer.Fault = SyntheticFault.OutOfMemory;
+        bool propagated = false;
+        try { _ = fatalSource.AcceptPage(fatalRequest, fatalMemory); }
+        catch (OutOfMemoryException) { propagated = true; }
+        Check(propagated, "synthetic OutOfMemoryException is not suppressed");
+        Check(fatalSource.CancelScan(fatalRequest), "owner can cancel after an unexpected exception");
+        Check(fatalSource.GetSnapshot().Unavailable && fatalSource.GetSnapshot().Tasks.Single().Title == "Previously visible",
+            "owner cancellation after a synthetic exception retains cards");
+
         CodexCloudSource control = Seed();
         using var readable = new SyntheticBuffer(Page([new { id = "valid", title = "Readable" }]));
         Check(control.AcceptPage(Begin(control), readable.Memory).Disposition == CloudPageDisposition.Complete,
@@ -322,6 +362,7 @@ internal static class Program
     private static void Main()
     {
         BasicAndPrivacy();
+        InternalDiagnosticPrivacy();
         InvalidInputPreservesSnapshot();
         InputReadFailures();
         PagingAndAtomicity();
