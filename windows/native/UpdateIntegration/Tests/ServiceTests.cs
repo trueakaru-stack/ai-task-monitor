@@ -157,6 +157,10 @@ internal static class ServiceTests
             clock.Set(93599);
             Check(!await service.StartIfDueAsync() && handler.Requests == 2,
                 "The successful 200 response did not restore the daily schedule.");
+            clock.Set(93600);
+            CoordinatorSnapshot nextDay = await RunOnce(service);
+            Check(nextDay is { Failures: 0, HasSchedule: true, Available: null } && handler.Requests == 3,
+                "The successful 200 response was not rechecked after one day.");
         }
 
         handler = new FakeHandler((_, _) =>
