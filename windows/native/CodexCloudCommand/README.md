@@ -32,7 +32,12 @@ OS buffers cannot be guaranteed erased. Serialize payload use with disposal.
 The timeout starts before Process.Start. Process.Start itself is synchronous and
 cannot be interrupted here, so an unresponsive launch can exceed the deadline.
 Once it returns, cancellation or deadline triggers an attempted process-tree kill
-and up to two further seconds of waiting for the launched process. The result
+and up to two further seconds of waiting for the launched process. The limit
+applies to the asynchronous exit wait, not to the synchronous tree enumeration,
+kill calls or stream disposal; total cleanup time is not strictly bounded.
+An aggregate of expected termination errors triggers a direct-child kill attempt
+and still requires observing that child's exit; unexpected exceptions propagate.
+The result
 reports TerminationUnconfirmed if that process's exit cannot be observed. A
 positive ExitObserved pertains to the launched process only: descendant exit is not
 proven, especially if the parent already exited or a descendant escaped. The
@@ -83,7 +88,9 @@ On a disposable GitHub-hosted Windows runner with .NET 10:
 
 The tests cover argument boundaries, stdin EOF, concurrent output limits, invalid
 UTF-8, exit failure, pre-cancellation, and signalled child cancellation and timeout
-with an OS mutex observing the synthetic child's lifetime. They do not launch or
+with an OS mutex observing the synthetic child's lifetime. A separate injected
+termination test uses no process and checks expected aggregate failure, fallback,
+an unobserved exit, and propagation of an unexpected exception. They do not launch or
 authenticate a real CLI and do not establish actual backend compatibility, child
 tree termination in all races, or application readiness.
 

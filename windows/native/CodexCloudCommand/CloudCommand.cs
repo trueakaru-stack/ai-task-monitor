@@ -5,6 +5,8 @@ using System.Security;
 using System.Text;
 using System.Text.Json.Serialization;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("AITaskMonitor.CodexCloudCommand.Tests")]
+
 namespace AITaskMonitor.CodexCloudCommand;
 
 public enum CommandOutcome
@@ -161,7 +163,7 @@ public static class CloudCommand
         }
         finally
         {
-            // Cancellation wakes the stream readers; only the explicitly launched child is targeted.
+            // Cancellation wakes stream readers; termination can include the launched process tree.
             linked.Cancel();
             if (started && outcome != CommandOutcome.Success)
             {
@@ -263,26 +265,33 @@ public static class CloudCommand
         }
     }
 
-    private static async Task<bool> StopAsync(Process process)
+    private static Task<bool> StopAsync(Process process) => StopAsync(
+        () => process.HasExited,
+        entireTree => process.Kill(entireTree),
+        cancellation => process.WaitForExitAsync(cancellation));
+
+    // Injectable operations exercise termination failures without touching a process.
+    internal static async Task<bool> StopAsync(Func<bool> hasExited, Action<bool> kill,
+        Func<CancellationToken, Task> waitForExit)
     {
         using var cleanup = new CancellationTokenSource(CleanupLimit);
         try
         {
-            try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
-            catch (Exception error) when (Expected(error))
+            try { if (!hasExited()) kill(true); }
+            catch (Exception error) when (ExpectedStopFailure(error))
             {
-                try { if (!process.HasExited) process.Kill(); }
-                catch (Exception fallback) when (Expected(fallback)) { }
+                try { if (!hasExited()) kill(false); }
+                catch (Exception fallback) when (ExpectedStopFailure(fallback)) { }
             }
-            await process.WaitForExitAsync(cleanup.Token).ConfigureAwait(false);
-            return process.HasExited;
+            await waitForExit(cleanup.Token).ConfigureAwait(false);
+            return hasExited();
         }
         catch (OperationCanceledException) when (cleanup.IsCancellationRequested)
         {
-            try { return process.HasExited; }
-            catch (Exception error) when (Expected(error)) { return false; }
+            try { return hasExited(); }
+            catch (Exception error) when (ExpectedStopFailure(error)) { return false; }
         }
-        catch (Exception error) when (Expected(error))
+        catch (Exception error) when (ExpectedStopFailure(error))
         {
             return false;
         }
@@ -298,6 +307,10 @@ public static class CloudCommand
         error is IOException or InvalidOperationException or ArgumentException or
         UnauthorizedAccessException or SecurityException or NotSupportedException or
         Win32Exception or BadImageFormatException;
+
+    private static bool ExpectedStopFailure(Exception error) => error is AggregateException aggregate
+        ? aggregate.InnerExceptions.Count > 0 && aggregate.InnerExceptions.All(ExpectedStopFailure)
+        : Expected(error);
 
     private static void ObserveAndClear(Task<ReadResult>? task)
     {

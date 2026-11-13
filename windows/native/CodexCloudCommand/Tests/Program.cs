@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -164,6 +165,65 @@ internal static class Program
         }
     }
 
+    private static async Task StopFailures()
+    {
+        bool exited = false;
+        int treeAttempts = 0, directAttempts = 0, waits = 0;
+        bool observed = await CloudCommand.StopAsync(() => exited, entireTree =>
+        {
+            if (entireTree)
+            {
+                treeAttempts++;
+                throw new AggregateException(new AggregateException(new Win32Exception(5)));
+            }
+            directAttempts++;
+            exited = true;
+        }, _ => { waits++; return Task.CompletedTask; });
+        Check(observed && treeAttempts == 1 && directAttempts == 1 && waits == 1,
+            "aggregate tree failure retries and observes the explicitly launched process");
+
+        treeAttempts = 0; directAttempts = 0; waits = 0;
+        bool stopped = await CloudCommand.StopAsync(() => false, entireTree =>
+        {
+            if (entireTree)
+            {
+                treeAttempts++;
+                throw new AggregateException(new Win32Exception(5));
+            }
+            directAttempts++;
+            throw new Win32Exception(5);
+        }, async cancellation =>
+        {
+            waits++;
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellation);
+        }).WaitAsync(TimeSpan.FromSeconds(6));
+        Check(!stopped && treeAttempts == 1 && directAttempts == 1 && waits == 1,
+            "unobserved termination remains unconfirmed after cleanup deadline");
+
+        exited = false; treeAttempts = 0; directAttempts = 0;
+        observed = await CloudCommand.StopAsync(() => exited, entireTree =>
+        {
+            if (entireTree)
+            {
+                treeAttempts++;
+                exited = true;
+                throw new AggregateException(new Win32Exception(5));
+            }
+            directAttempts++;
+        }, _ => Task.CompletedTask);
+        Check(observed && treeAttempts == 1 && directAttempts == 0,
+            "already exited parent is not killed again after aggregate failure");
+
+        var unexpected = new AggregateException(new OutOfMemoryException("Synthetic exception."));
+        bool propagated = false;
+        try
+        {
+            _ = await CloudCommand.StopAsync(() => false, _ => throw unexpected, _ => Task.CompletedTask);
+        }
+        catch (AggregateException error) when (ReferenceEquals(error, unexpected)) { propagated = true; }
+        Check(propagated, "unexpected aggregate failure is not hidden");
+    }
+
     private static async Task<int> Main(string[] args)
     {
         try
@@ -174,6 +234,7 @@ internal static class Program
             await Bounds(fixture);
             await StopCase(fixture, true);
             await StopCase(fixture, false);
+            await StopFailures();
             Console.WriteLine("Codex Cloud command synthetic checks passed: " + checks);
             return 0;
         }
