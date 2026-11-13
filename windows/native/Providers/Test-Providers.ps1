@@ -67,6 +67,7 @@ function Invoke-Isolated([string]$executable, [string[]]$arguments) {
         SystemRoot = $env:SystemRoot; windir = $env:SystemRoot
         PATH = ($sdk + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot)
         DOTNET_ROOT = $sdk; DOTNET_MULTILEVEL_LOOKUP = '0'; DOTNET_CLI_HOME = (Join-Path $run 'home')
+        DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='0'
         DOTNET_CLI_TELEMETRY_OPTOUT = '1'; DOTNET_NOLOGO = '1'; DOTNET_GENERATE_ASPNET_CERTIFICATE = '0'
         DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE = '1'; DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
         NUGET_PACKAGES = (Join-Path $run 'nuget')

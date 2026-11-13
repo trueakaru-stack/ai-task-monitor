@@ -358,6 +358,7 @@ static class Fixtures
             "LOCALAPPDATA", "TEMP", "TMP", "PSModuleAnalysisCachePath", "AITM_LOG_TEST_ROOT", "ProgramFiles", "ProgramFiles(x86)",
             "ProgramW6432", "ProgramData", "ALLUSERSPROFILE", "SystemDrive", "ComSpec" })
             if (Environment.GetEnvironmentVariable(key) is string value) start.Environment[key] = value;
+        start.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "0";
         return start;
     }
 

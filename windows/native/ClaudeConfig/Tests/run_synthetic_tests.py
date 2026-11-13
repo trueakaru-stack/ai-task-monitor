@@ -56,6 +56,7 @@ env = {key: os.environ[key] for key in ("SystemRoot", "WINDIR", "ComSpec", "PATH
 env.update({
     "PATH": str(sdk) + os.pathsep + str(Path(os.environ["SystemRoot"]) / "System32"),
     "DOTNET_ROOT": str(sdk), "DOTNET_CLI_HOME": str(run / "dotnet"), "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+    "DOTNET_ADD_GLOBAL_TOOLS_TO_PATH": "0",
     "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1", "DOTNET_GENERATE_ASPNET_CERTIFICATE": "0", "DOTNET_NOLOGO": "1",
     "NUGET_PACKAGES": str(run / "packages"), "USERPROFILE": str(run / "profile"), "APPDATA": str(run / "appdata"),
     "LOCALAPPDATA": str(run / "localappdata"), "TEMP": str(run / "tmp"), "TMP": str(run / "tmp"),
