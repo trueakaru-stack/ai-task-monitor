@@ -263,7 +263,9 @@ namespace AITaskMonitor.Claude {
    bool sourceUncertain = priorLoss;
    List<Event> recent = Parse(current, 1, null, ref sourceUncertain);
    var ids = new HashSet<string>(recent.Where(item => item.Id.Length > 0).Select(item => item.Id), StringComparer.Ordinal);
-   List<Event> all = ids.Count == 0 ? new List<Event>() : Parse(legacy, 0, ids, ref sourceUncertain);
+   // Inspect the legacy source for loss even when no current IDs exist. The
+   // empty permitted set still prevents legacy-only cards from being created.
+   List<Event> all = Parse(legacy, 0, ids, ref sourceUncertain);
    all.AddRange(recent);
    observedLoss = sourceUncertain;
    // Retain evidence of a substantial backwards clock jump before sorting the

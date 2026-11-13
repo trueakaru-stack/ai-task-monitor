@@ -32,6 +32,7 @@ public sealed class ClaudeFileSource
     private readonly string? legacyPath;
     private readonly DateTime observedSinceUtc;
     private readonly Action? afterReadBeforeSnapshot;
+    private readonly Action<string>? afterFirstFileRead;
     private readonly SessionReader reader = new();
     private Task[] previous = [];
     private bool currentSeen, legacySeen;
@@ -45,7 +46,8 @@ public sealed class ClaudeFileSource
         : this(currentPath, legacyPath, observedSinceUtc, null) { }
 
     // A synchronization seam for synthetic tests; production uses the public constructor.
-    internal ClaudeFileSource(string currentPath, string? legacyPath, DateTime observedSinceUtc, Action? afterReadBeforeSnapshot)
+    internal ClaudeFileSource(string currentPath, string? legacyPath, DateTime observedSinceUtc,
+        Action? afterReadBeforeSnapshot, Action<string>? afterFirstFileRead = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(currentPath);
         if (!Path.IsPathFullyQualified(currentPath)) throw new ArgumentException("Current event path must be absolute.", nameof(currentPath));
@@ -55,6 +57,7 @@ public sealed class ClaudeFileSource
         this.legacyPath = legacyPath;
         this.observedSinceUtc = observedSinceUtc;
         this.afterReadBeforeSnapshot = afterReadBeforeSnapshot;
+        this.afterFirstFileRead = afterFirstFileRead;
     }
 
     // Call as soon as the owner observes a change, including while a poll runs.
@@ -83,6 +86,9 @@ public sealed class ClaudeFileSource
     {
         lock (signalGate) return new(signalledConnection, generation, signalLoss, generationExhausted);
     }
+
+    // Exposes the retained-loss marker to the synthetic test assembly only.
+    internal bool HasObservedSourceLoss => reader.SourceUncertain;
 
     private ClaudeSourceSnapshot Stamp(ClaudeSourceSnapshot snapshot, ConnectionSignal signal) =>
         snapshot with { Generation = signal.Generation, Owner = identity };
@@ -150,13 +156,11 @@ public sealed class ClaudeFileSource
             }
             try
             {
-                Tail? current = ReadOptional(currentPath, ref currentSeen, ref currentCursor);
-                if (current is null)
-                    return new ClaudeSourceSnapshot(Copy(previous, true), connectionLoss || connection == ClaudeConnection.Partial);
-                Tail? legacy = legacyPath is null ? null : ReadOptional(legacyPath, ref legacySeen, ref legacyCursor);
-                bool isPending = current.Value.Pending || legacy?.Pending == true;
-                if (current.Value.Discontinuity || legacy?.Discontinuity == true ||
-                    current.Value.WindowMoved || legacy?.WindowMoved == true)
+                Tail? current = ReadOptional(currentPath, ref currentSeen, ref currentCursor, afterFirstFileRead);
+                Tail? legacy = legacyPath is null ? null : ReadOptional(legacyPath, ref legacySeen, ref legacyCursor, afterFirstFileRead);
+                bool isPending = current?.Pending == true || legacy?.Pending == true;
+                if (current?.Discontinuity == true || legacy?.Discontinuity == true ||
+                    current?.WindowMoved == true || legacy?.WindowMoved == true)
                 {
                     reader.MarkSourceLoss();
                     if (pendingRead || isPending) pendingLoss = true;
@@ -166,7 +170,10 @@ public sealed class ClaudeFileSource
                     // Do not mutate the stateful reader until all visible input
                     // is complete: a Stop in the prefix can otherwise erase the
                     // retained card before a subsequent read failure or loss.
-                    Task[] provisional = Reader.Read(current.Value.Text, legacy?.Text ?? "", utcNow, observedSinceUtc);
+                    bool provisionalLoss;
+                    Task[] provisional = Reader.ReadWithSourceLoss(current?.Text ?? "", legacy?.Text ?? "",
+                        utcNow, observedSinceUtc, false, out provisionalLoss, null!, null!, null!, null!);
+                    if (provisionalLoss) { reader.MarkSourceLoss(); pendingLoss = true; }
                     previous = MergePending(previous, provisional, out bool overflow);
                     if (overflow) { reader.MarkSourceLoss(); pendingLoss = true; }
                     pendingRead = true;
@@ -175,7 +182,7 @@ public sealed class ClaudeFileSource
                     return new ClaudeSourceSnapshot(Copy(previous, true), unavailable);
                 }
                 bool sourceWasUncertain = reader.SourceUncertain;
-                Task[] parsed = reader.Read(current.Value.Text, legacy?.Text ?? "", utcNow, observedSinceUtc);
+                Task[] parsed = reader.Read(current?.Text ?? "", legacy?.Text ?? "", utcNow, observedSinceUtc);
                 // A newly rejected event can hide a relevant earlier record.
                 // Keep the previously visible cards until a recovery protocol exists.
                 if (!sourceWasUncertain && reader.SourceUncertain) pendingLoss = true;
@@ -218,14 +225,14 @@ public sealed class ClaudeFileSource
         }
     }
 
-    private readonly record struct Cursor(long Length, byte[] EndDigest, long FirstCompleteOffset);
+    private readonly record struct Cursor(long Length, byte[] ObservedDigest, long FirstCompleteOffset);
     private readonly record struct Tail(string Text, bool Pending, Cursor Cursor, bool Discontinuity, bool WindowMoved);
 
-    private static Tail? ReadOptional(string path, ref bool seen, ref Cursor? cursor)
+    private static Tail? ReadOptional(string path, ref bool seen, ref Cursor? cursor, Action<string>? afterFirstFileRead)
     {
         try
         {
-            Tail text = ReadCompleteTail(path, cursor);
+            Tail text = ReadCompleteTail(path, cursor, afterFirstFileRead);
             seen = true;
             cursor = text.Cursor;
             return text;
@@ -234,59 +241,75 @@ public sealed class ClaudeFileSource
         catch (DirectoryNotFoundException) when (!seen) { return null; }
     }
 
-    // Only complete newline-terminated records from a bounded snapshot are fed
-    // to the reader. Concurrent appends wait until the next poll.
-    private static byte[] DigestEnd(FileStream stream, long end)
-    {
-        int count = (int)Math.Min(128, end);
-        var buffer = new byte[count];
-        stream.Seek(end - count, SeekOrigin.Begin);
-        stream.ReadExactly(buffer);
-        return SHA256.HashData(buffer);
-    }
-
-    private static Tail ReadCompleteTail(string path, Cursor? prior)
+    // Read the bounded window twice through independently opened handles. An
+    // append after the captured length may wait until the next poll, but a
+    // changed captured range or a replaced path records source loss.
+    private static Tail ReadCompleteTail(string path, Cursor? prior, Action<string>? afterFirstFileRead)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
         long length = stream.Length;
-        bool discontinuity = prior is { } old && (length < old.Length ||
-            !CryptographicOperations.FixedTimeEquals(DigestEnd(stream, old.Length), old.EndDigest));
-        byte[] digest = DigestEnd(stream, length);
         int count = (int)Math.Min(length, MaximumTailBytes);
-        if (count == 0) return new Tail("", false, new Cursor(length, digest, 0), discontinuity, false);
         long start = length - count;
-        bool atLineBoundary = start == 0;
-        if (start > 0)
+        int prefix = start > 0 ? 1 : 0;
+        long readStart = start - prefix;
+        var captured = new byte[count + prefix];
+        stream.Seek(readStart, SeekOrigin.Begin);
+        stream.ReadExactly(captured);
+        afterFirstFileRead?.Invoke(path);
+        try
         {
-            stream.Seek(start - 1, SeekOrigin.Begin);
-            int precedingByte = stream.ReadByte();
-            if (precedingByte < 0) throw new EndOfStreamException("Could not verify the source tail boundary.");
-            atLineBoundary = precedingByte == '\n';
+            using var verify = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
+            if (verify.Length < length) throw new IOException("Event source shortened during reading.");
+            var repeated = new byte[captured.Length];
+            verify.Seek(readStart, SeekOrigin.Begin);
+            verify.ReadExactly(repeated);
+            if (verify.Length < length || !captured.AsSpan().SequenceEqual(repeated))
+                throw new IOException("Event source changed during reading.");
         }
-        stream.Seek(start, SeekOrigin.Begin);
-        var bytes = new byte[count];
-        stream.ReadExactly(bytes);
+        // Once the first open succeeded, a missing path is a read loss, not an
+        // optional source that has never existed.
+        catch (FileNotFoundException error) { throw new IOException("Event source disappeared during reading.", error); }
+        catch (DirectoryNotFoundException error) { throw new IOException("Event source disappeared during reading.", error); }
+
+        ReadOnlySpan<byte> bytes = captured.AsSpan(prefix, count);
+        bool atLineBoundary = start == 0 || captured[0] == '\n';
         int first = 0;
         if (!atLineBoundary)
         {
-            int boundary = Array.IndexOf(bytes, (byte)'\n');
+            int boundary = bytes.IndexOf((byte)'\n');
             if (boundary < 0) throw new IOException("No complete event fits in the source tail.");
             first = boundary + 1;
         }
-        int last = Array.LastIndexOf(bytes, (byte)'\n');
+        int last = bytes.LastIndexOf((byte)'\n');
         long firstCompleteOffset = start + first;
         // A first bounded read has no evidence about any omitted prefix. On
         // later reads, crossing a previously observed line has the same effect.
         bool windowMoved = prior is { } oldWindow
             ? firstCompleteOffset > oldWindow.FirstCompleteOffset
             : start > 0;
+        bool discontinuity = false;
+        if (prior is { } old)
+        {
+            if (length < old.Length || old.FirstCompleteOffset < start || old.FirstCompleteOffset > old.Length)
+                discontinuity = true;
+            else
+            {
+                int oldOffset = checked((int)(old.FirstCompleteOffset - start));
+                int oldCount = checked((int)(old.Length - old.FirstCompleteOffset));
+                byte[] oldDigest = SHA256.HashData(bytes.Slice(oldOffset, oldCount));
+                discontinuity = !CryptographicOperations.FixedTimeEquals(oldDigest, old.ObservedDigest);
+            }
+        }
+        byte[] digest = SHA256.HashData(bytes[first..]);
         var cursor = new Cursor(length, digest, firstCompleteOffset);
+        if (count == 0) return new Tail("", false, cursor, discontinuity, windowMoved);
         if (last < first)
         {
             return new Tail("", true, cursor, discontinuity, windowMoved);
         }
-        string text = StrictUtf8.GetString(bytes, first, last - first + 1);
+        string text = StrictUtf8.GetString(bytes.Slice(first, last - first + 1));
         return new Tail(text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text,
             last != bytes.Length - 1, cursor, discontinuity, windowMoved);
     }

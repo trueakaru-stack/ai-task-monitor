@@ -27,11 +27,19 @@ other aspect of a historic or independently produced event is trustworthy.
 limits each read to 4 MiB and only parses complete UTF-8 lines. If a bounded
 snapshot ends with an incomplete line, including after complete events, it
 retains known cards and step titles with unconfirmed activity and unknown step
-statuses. The incomplete snapshot does not advance the stateful session reader;
-a completed append can restore confirmation if no loss was detected. A read
-error, truncation, or changed tail at the previous file boundary instead records
-source loss and retains names as unconfirmed for this reader's lifetime. Moving
-the 4 MiB window past previously observed full records also records loss because
+statuses. An incomplete snapshot does not advance the stateful session reader,
+but source loss discovered in its complete lines is recorded immediately and
+survives later completion or truncation. A completed append can restore
+confirmation if no loss was detected. The legacy journal is inspected for
+source loss even with no current IDs, while legacy-only events cannot create
+cards. A read error, truncation, or change in the previously observed bounded
+window records source loss and retains names as unconfirmed for this reader's
+lifetime. Each poll reads that bounded window twice through separately opened
+handles, including the byte before its start when present, and compares the
+captured bytes. It also compares the previously observed range using a SHA-256
+digest, rather than checking only the last 128 bytes. A pure append after the
+captured length can wait for the next poll. Moving the 4 MiB window past
+previously observed full records also records loss because
 those records may contain needed plan evidence. A first read of a journal larger
 than 4 MiB likewise marks its unseen prefix as loss, even when the retained tail
 starts exactly at a line boundary. This conservatively keeps large-journal plans
@@ -63,14 +71,15 @@ An incomplete retained plan is flagged and retention overflow marks the source
 unavailable and unconfirmed rather than silently confirming a partial view.
 These bounds also apply to fallback cards after a failure during a pending read.
 
-The check describes the snapshot obtained during a poll: an append after that
-snapshot may only be seen on the next poll. A missing event or a replacement
-that preserves the checked file boundary may not be detected. The source cannot
-tell a live partial write from a permanently interrupted one, cannot guarantee a
-future completion or notice every writer failure, and its memory of loss does
-not survive a process restart. It does not discover a real profile, register
-hooks, or start itself in the application. Synthetic tests of bounded input and
-known failures do not establish behavior for a real Claude installation.
+These checks do not make a concurrent read atomic. Coordinated ABA changes,
+replacement after the last comparison, changes between checking the two files,
+or a writer that never records an event can remain undetected. An append after
+the captured length may only be seen on the next poll. The source cannot tell a
+live partial write from a permanently interrupted one, cannot guarantee a future
+completion or notice every writer failure, and its memory of loss does not
+survive a process restart. It does not discover a real profile, register hooks,
+or start itself in the application. Synthetic tests of bounded input and known
+failures do not establish behavior for a real Claude installation.
 
 The phase-aware format must not be passed to the old reader: an older monitor
 can misinterpret a phase event as a confirmed step. A separate journal and an

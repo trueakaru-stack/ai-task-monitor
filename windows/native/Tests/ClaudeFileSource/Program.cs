@@ -146,6 +146,168 @@ snapshot = oversizedLegacySource.Poll(ClaudeConnection.Connected, now);
 Check(snapshot.Unavailable && snapshot.Tasks.Single().Id == "observed" && snapshot.Tasks.Single().Unconfirmed,
     "An unsupported legacy identity must report loss without creating a card");
 
+string emptyCurrentPath = Path.Combine(work, "empty-current-with-legacy.jsonl");
+string emptyLegacyPath = Path.Combine(work, "empty-current-legacy.jsonl");
+File.WriteAllText(emptyCurrentPath, "", utf8);
+File.WriteAllText(emptyLegacyPath, SessionEvent("legacy-only"), utf8);
+var emptyLegacyControl = new ClaudeFileSource(emptyCurrentPath, emptyLegacyPath, DateTime.MinValue.ToUniversalTime());
+snapshot = emptyLegacyControl.Poll(ClaudeConnection.Connected, now);
+Check(!snapshot.Unavailable && snapshot.Tasks.Count == 0, "Valid legacy-only records must not create cards");
+File.WriteAllText(emptyLegacyPath, SessionEvent(new string('v', 129)), utf8);
+var emptyLegacyLoss = new ClaudeFileSource(emptyCurrentPath, emptyLegacyPath, DateTime.MinValue.ToUniversalTime());
+snapshot = emptyLegacyLoss.Poll(ClaudeConnection.Connected, now);
+Check(snapshot.Unavailable && snapshot.Tasks.Count == 0,
+    "An unsupported legacy identity must report loss even with an empty current journal");
+File.Delete(emptyCurrentPath);
+var absentCurrentLegacyLoss = new ClaudeFileSource(emptyCurrentPath, emptyLegacyPath, DateTime.MinValue.ToUniversalTime());
+snapshot = absentCurrentLegacyLoss.Poll(ClaudeConnection.Connected, now);
+Check(snapshot.Unavailable && snapshot.Tasks.Count == 0,
+    "An unsupported legacy identity must report loss even before the current journal exists");
+
+string SizedSessionEvent(string id, int padding) => JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = id, ["timestamp"] = now.ToString("O"), ["event"] = "UserPromptSubmit",
+    ["active"] = true, ["padding"] = new string('p', padding) }) + "\n";
+string pendingLossRecord = SessionEvent(new string('v', 129));
+int replacementPadding = utf8.GetByteCount(pendingLossRecord) - utf8.GetByteCount(SizedSessionEvent("safe", 0));
+Check(replacementPadding >= 0, "The equal-length replacement fixture cannot be constructed");
+string pendingSafeRecord = SizedSessionEvent("safe", replacementPadding);
+string pendingLaterRecord = SizedSessionEvent("later", 512);
+int pendingLaterCut = pendingLaterRecord.Length - 2;
+Check(utf8.GetByteCount(pendingLossRecord) == utf8.GetByteCount(pendingSafeRecord) &&
+    utf8.GetByteCount(pendingLaterRecord[..pendingLaterCut]) > 128,
+    "The pending-loss fixture must preserve the checked byte boundary");
+
+string windowPadding = SizedSessionEvent("window-padding", 512);
+foreach (bool mutateLegacy in new[] { false, true })
+{
+    string windowCurrent = Path.Combine(work, $"full-window-current-{mutateLegacy}.jsonl");
+    string windowLegacy = Path.Combine(work, $"full-window-legacy-{mutateLegacy}.jsonl");
+    string windowTarget = mutateLegacy ? windowLegacy : windowCurrent;
+    string originalWindow = mutateLegacy ? SessionEvent("unrelated") + windowPadding : complete + windowPadding;
+    string changedWindow = mutateLegacy
+        ? originalWindow.Replace("unrelated", "unrelAted", StringComparison.Ordinal)
+        : originalWindow.Replace("First step", "F1rst step", StringComparison.Ordinal);
+    byte[] originalWindowBytes = utf8.GetBytes(originalWindow), changedWindowBytes = utf8.GetBytes(changedWindow);
+    Check(originalWindowBytes.Length == changedWindowBytes.Length &&
+        originalWindowBytes.AsSpan(originalWindowBytes.Length - 128).SequenceEqual(changedWindowBytes.AsSpan(changedWindowBytes.Length - 128)) &&
+        !originalWindowBytes.AsSpan().SequenceEqual(changedWindowBytes),
+        "The early-rewrite fixture must change bytes while preserving length and the last 128 bytes");
+    File.WriteAllText(windowCurrent, mutateLegacy ? complete : originalWindow, utf8);
+    if (mutateLegacy) File.WriteAllText(windowLegacy, originalWindow, utf8);
+    var fullWindowSource = new ClaudeFileSource(windowCurrent, mutateLegacy ? windowLegacy : null, DateTime.MinValue.ToUniversalTime());
+    var fullWindowBefore = fullWindowSource.Poll(ClaudeConnection.Connected, now);
+    Check(!fullWindowBefore.Unavailable && fullWindowBefore.Tasks.Single(x => x.Id == "observed").PlanConfirmed,
+        "The early-rewrite fixture must start with a confirmed known plan");
+    File.WriteAllText(windowTarget, changedWindow, utf8);
+    snapshot = fullWindowSource.Poll(ClaudeConnection.Connected, now);
+    var fullWindowAfter = snapshot.Tasks.Single(x => x.Id == "observed");
+    Check(snapshot.Unavailable && fullWindowAfter.Unconfirmed && !fullWindowAfter.PlanConfirmed &&
+        fullWindowAfter.Steps.Any(x => x.title == "First step") && fullWindowAfter.Steps.All(x => x.status == "unknown"),
+        "Changing earlier bytes in either journal must preserve old names as unconfirmed");
+    Check(idLimitSource.Poll(ClaudeConnection.Connected, now).Tasks.All(x => !x.Unconfirmed),
+        "A different source must not inherit the changed-window loss");
+}
+
+foreach (bool atomicReplacement in new[] { false, true })
+{
+    string raceReadPath = Path.Combine(work, $"read-race-{atomicReplacement}.jsonl");
+    string replacementPath = Path.Combine(work, $"read-replacement-{atomicReplacement}.jsonl");
+    string readOriginal = complete + windowPadding;
+    string readChanged = readOriginal.Replace("First step", "F1rst step", StringComparison.Ordinal);
+    File.WriteAllText(raceReadPath, readOriginal, utf8);
+    int changeArmed = 0;
+    var readRaceSource = new ClaudeFileSource(raceReadPath, null, DateTime.MinValue.ToUniversalTime(), null, path =>
+    {
+        if (System.Threading.Interlocked.Exchange(ref changeArmed, 0) == 0) return;
+        if (atomicReplacement)
+        {
+            File.WriteAllText(replacementPath, readChanged, utf8);
+            File.Replace(replacementPath, path, null);
+        }
+        else File.WriteAllText(path, readChanged, utf8);
+    });
+    Check(readRaceSource.Poll(ClaudeConnection.Connected, now).Tasks.Single(x => x.Id == "observed").PlanConfirmed,
+        "The read-race fixture must begin with a confirmed plan");
+    System.Threading.Volatile.Write(ref changeArmed, 1);
+    snapshot = readRaceSource.Poll(ClaudeConnection.Connected, now);
+    var racedTask = snapshot.Tasks.Single(x => x.Id == "observed");
+    Check(snapshot.Unavailable && readRaceSource.HasObservedSourceLoss && racedTask.Unconfirmed &&
+        racedTask.Steps.Select(x => x.title).SequenceEqual(new[] { "First step", "Second step" }) &&
+        File.ReadAllText(raceReadPath, utf8) == readChanged,
+        "A changed or replaced path during reading must report loss and retain previous names");
+}
+
+string appendReadPath = Path.Combine(work, "append-during-read.jsonl");
+File.WriteAllText(appendReadPath, complete, utf8);
+int appendArmed = 0;
+var appendReadSource = new ClaudeFileSource(appendReadPath, null, DateTime.MinValue.ToUniversalTime(), null, path =>
+{
+    if (System.Threading.Interlocked.Exchange(ref appendArmed, 0) != 0) File.AppendAllText(path, SessionEvent("after-capture"), utf8);
+});
+_ = appendReadSource.Poll(ClaudeConnection.Connected, now);
+System.Threading.Volatile.Write(ref appendArmed, 1);
+snapshot = appendReadSource.Poll(ClaudeConnection.Connected, now);
+Check(!snapshot.Unavailable && !snapshot.Tasks.Any(x => x.Id == "after-capture") && !appendReadSource.HasObservedSourceLoss,
+    "A pure append after capture must be left for the next poll without a false loss");
+snapshot = appendReadSource.Poll(ClaudeConnection.Connected, now);
+Check(!snapshot.Unavailable && snapshot.Tasks.Any(x => x.Id == "after-capture" && !x.Unconfirmed),
+    "The next poll must see a pure append without losing confirmation");
+
+string vanishDuringRead = Path.Combine(work, "vanish-during-first-read.jsonl");
+File.WriteAllText(vanishDuringRead, SessionEvent("vanishing"), utf8);
+var vanishSource = new ClaudeFileSource(vanishDuringRead, null, DateTime.MinValue.ToUniversalTime(), null,
+    path => File.Delete(path));
+snapshot = vanishSource.Poll(ClaudeConnection.Connected, now);
+Check(snapshot.Unavailable && snapshot.Tasks.Count == 0 && vanishSource.HasObservedSourceLoss,
+    "A source disappearing after its first open must be loss, not an optional missing source");
+snapshot = vanishSource.Poll(ClaudeConnection.Connected, now);
+Check(snapshot.Unavailable && snapshot.Tasks.Count == 0,
+    "A source that vanished during its first read must remain unavailable while absent");
+
+foreach (bool pendingInLegacy in new[] { false, true })
+{
+    string pendingIdentityCurrent = Path.Combine(work, $"pending-identity-current-{pendingInLegacy}.jsonl");
+    string pendingIdentityLegacy = Path.Combine(work, $"pending-identity-legacy-{pendingInLegacy}.jsonl");
+    string target = pendingInLegacy ? pendingIdentityLegacy : pendingIdentityCurrent;
+    File.WriteAllText(pendingIdentityCurrent, pendingInLegacy ? SessionEvent("fresh") :
+        pendingLossRecord + pendingLaterRecord[..pendingLaterCut], utf8);
+    if (pendingInLegacy) File.WriteAllText(pendingIdentityLegacy, pendingLossRecord + pendingLaterRecord[..pendingLaterCut], utf8);
+    var pendingIdentitySource = new ClaudeFileSource(pendingIdentityCurrent, pendingInLegacy ? pendingIdentityLegacy : null,
+        DateTime.MinValue.ToUniversalTime());
+    snapshot = pendingIdentitySource.Poll(ClaudeConnection.Connected, now);
+    Check(snapshot.Unavailable && pendingIdentitySource.HasObservedSourceLoss && snapshot.Tasks.All(x => x.Unconfirmed),
+        "A complete oversized identity before a partial tail must immediately report loss");
+
+    // This replacement preserves the length and last 128 bytes. The complete
+    // replacement is confirmable for a fresh source; the assertion above checks
+    // that the pending read already recorded loss before this rewrite.
+    File.WriteAllText(target, pendingSafeRecord + pendingLaterRecord[..pendingLaterCut], utf8);
+    File.AppendAllText(target, pendingLaterRecord[pendingLaterCut..], utf8);
+    var cleanIdentityControl = new ClaudeFileSource(pendingIdentityCurrent, pendingInLegacy ? pendingIdentityLegacy : null,
+        DateTime.MinValue.ToUniversalTime());
+    var cleanIdentitySnapshot = cleanIdentityControl.Poll(ClaudeConnection.Connected, now);
+    Check(!cleanIdentitySnapshot.Unavailable && cleanIdentitySnapshot.Tasks.Count > 0 &&
+        cleanIdentitySnapshot.Tasks.All(x => !x.Unconfirmed), "The replaced journal must be confirmable without prior loss");
+    snapshot = pendingIdentitySource.Poll(ClaudeConnection.Connected, now);
+    Check(snapshot.Unavailable && snapshot.Tasks.Count > 0 && snapshot.Tasks.All(x => x.Unconfirmed),
+        "Finishing a partial tail must not forget the rejected identity");
+
+    string truncatedIdentityCurrent = Path.Combine(work, $"truncated-identity-current-{pendingInLegacy}.jsonl");
+    string truncatedIdentityLegacy = Path.Combine(work, $"truncated-identity-legacy-{pendingInLegacy}.jsonl");
+    string truncatedTarget = pendingInLegacy ? truncatedIdentityLegacy : truncatedIdentityCurrent;
+    File.WriteAllText(truncatedIdentityCurrent, pendingInLegacy ? SessionEvent("fresh") :
+        pendingLossRecord + pendingLaterRecord[..pendingLaterCut], utf8);
+    if (pendingInLegacy) File.WriteAllText(truncatedIdentityLegacy, pendingLossRecord + pendingLaterRecord[..pendingLaterCut], utf8);
+    var truncatedIdentitySource = new ClaudeFileSource(truncatedIdentityCurrent, pendingInLegacy ? truncatedIdentityLegacy : null,
+        DateTime.MinValue.ToUniversalTime());
+    Check(truncatedIdentitySource.Poll(ClaudeConnection.Connected, now).Unavailable,
+        "The truncation fixture must first observe source loss");
+    File.WriteAllText(truncatedTarget, pendingInLegacy ? "" : SessionEvent("safe"), utf8);
+    snapshot = truncatedIdentitySource.Poll(ClaudeConnection.Connected, now);
+    Check(snapshot.Unavailable && snapshot.Tasks.Count > 0 && snapshot.Tasks.All(x => x.Unconfirmed),
+        "Truncation after a partial tail must retain source uncertainty");
+}
+
 string oversizedWithKnownPath = Path.Combine(work, "oversized-with-known-session.jsonl");
 File.WriteAllText(oversizedWithKnownPath, complete, utf8);
 var oversizedWithKnownSource = new ClaudeFileSource(oversizedWithKnownPath, null, DateTime.MinValue.ToUniversalTime());
