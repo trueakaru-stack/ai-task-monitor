@@ -71,8 +71,9 @@ detected during the read produces a hidden or unconfirmed result and retains
 names from before the read. `IsCurrent` alone cannot make checking and UI
 presentation atomic: the owner must serialize notifications, the check and
 presentation, and serialize polls. A connection change never reported to the
-source cannot be detected. The existing prototype has not been connected to
-this signaling contract, so live in-flight protection remains unverified.
+source cannot be detected. The prototype pump uses this contract in synthetic
+tests, but the application entry point does not start it and live in-flight
+protection remains unverified.
 
 Pending snapshots use the session reader's existing retention rules: at most
 256 cards and 128 retained steps per card, with bounded step titles and IDs.
@@ -80,11 +81,15 @@ An incomplete retained plan is flagged and retention overflow marks the source
 unavailable and unconfirmed rather than silently confirming a partial view.
 These bounds also apply to fallback cards after a failure during a pending read.
 
-These checks do not make a concurrent read atomic. A replacement with the same
-captured bytes and an additional append can be mistaken for the original file;
-file identity is not compared. Coordinated ABA changes, replacement after the
-last comparison, changes between checking the two files,
-or a writer that never records an event can remain undetected. An append after
+During a poll, Windows `FILE_ID_INFO` is compared across the two simultaneously
+open handles; unsupported or invalid identities are treated as loss. When a
+journal exists, the file source also reports loss on non-Windows systems where
+this identity check is unavailable. Missing optional files do not request an
+identity; the separate event parser is not restricted by this check. This does
+not make a concurrent read atomic. A same-prefix replacement between polls, or
+after the second handle opens, can still go undetected. IDs can be reused, and
+coordinated ABA changes, changes between checking the two files, or a writer
+that never records an event can also remain undetected. An append after
 the captured length may only be seen on the next poll. The source cannot tell a
 live partial write from a permanently interrupted one, cannot guarantee a future
 completion or notice every writer failure, and its memory of loss does not
@@ -112,7 +117,9 @@ directory and accept no external event or fixture arguments. The
 `claude-file-source` job in `.github/workflows/windows-dotnet-path-safety.yml`
 runs them on disposable hosted Windows with a cleared child environment,
 synthetic temporary/profile directories and `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0`.
-The latest candidate passed 164 checks in [CI run 43476471021](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43476471021).
+The candidate passed 164 file-source checks and 22 file-identity checks in
+[CI run 43477294258](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43477294258),
+using synthetic files on one hosted Windows filesystem.
 
 The WPF file and title-retention checks require Windows and a similarly isolated
 test environment; they were not run by that job. Do not invoke old local test
