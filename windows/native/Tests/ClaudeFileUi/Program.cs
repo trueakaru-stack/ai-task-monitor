@@ -75,7 +75,7 @@ internal static class Program
         var source = new ClaudeFileSource(eventPath, null, DateTime.MinValue.ToUniversalTime());
         using var entered = new ManualResetEventSlim(false);
         using var release = new ManualResetEventSlim(false);
-        int mode = (int)ClaudeConnection.Connected, reads = 0, applied = 0;
+        int reads = 0, applied = 0;
         ClaudeSourceSnapshot? last = null;
         Dispatcher dispatcher = Dispatcher.CurrentDispatcher;
         using Stream layout = typeof(PrototypeWindow).Assembly.GetManifestResourceStream("AITaskMonitor.Prototype.PublishedWindow.xaml")!;
@@ -86,32 +86,32 @@ internal static class Program
         window.Show(); window.UpdateLayout();
         try
         {
-        using var pump = new ClaudeSourcePump(dispatcher, source, () =>
+        using var pump = new ClaudeSourcePump(dispatcher, source, ClaudeConnection.Connected,
+            snapshot => { Check(dispatcher.CheckAccess(), "Snapshot applied off UI dispatcher"); controller.ApplyClaudeSource(snapshot); last = snapshot; applied++; }, () =>
         {
-            var selected = (ClaudeConnection)Volatile.Read(ref mode);
             if (Interlocked.Increment(ref reads) == 1)
             {
                 entered.Set();
                 if (!release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Synthetic reader did not resume.");
             }
-            return selected;
-        }, snapshot => { Check(dispatcher.CheckAccess(), "Snapshot applied off UI dispatcher"); controller.ApplyClaudeSource(snapshot); last = snapshot; applied++; }, () => now,
-            TimeSpan.FromSeconds(30));
+            return now;
+        }, TimeSpan.FromSeconds(30));
         pump.Start();
         WaitUntil(() => entered.IsSet, "Background read did not start");
-        Volatile.Write(ref mode, (int)ClaudeConnection.Disconnected);
-        pump.RequestRefresh();
-        release.Set();
-        WaitUntil(() => applied != 0, "Refreshed snapshot did not arrive");
+        pump.NotifyConnection(ClaudeConnection.Disconnected);
         Check(applied == 1 && last is { Unavailable: false } && last.Tasks.Count == 0,
+            "Disconnect did not immediately hide the stale Claude snapshot");
+        release.Set();
+        WaitUntil(() => applied >= 2, "Refreshed snapshot did not arrive");
+        Check(last is { Unavailable: false } && last.Tasks.Count == 0,
             "An outdated connected snapshot appeared after disconnect");
         Check(reads >= 2, "Explicit refresh did not trigger a new read");
         Check(controller.CurrentTasks.Count == 1 && controller.CurrentTasks.Single().Provider == "codex", "Disconnect must retain only the unrelated task");
-        Volatile.Write(ref mode, (int)ClaudeConnection.Connected);
-        pump.RequestRefresh();
-        WaitUntil(() => applied == 2, "Connected file snapshot did not reach the window");
-        Check(controller.CurrentTasks.Count == 2 && controller.CurrentTasks.Single(x => x.Provider == "claude").Steps.Length == 2,
-            "Background file-to-window update did not show Claude steps");
+        pump.NotifyConnection(ClaudeConnection.Connected);
+        WaitUntil(() => applied >= 3, "Connected file snapshot did not reach the window");
+        Check(controller.CurrentTasks.Count == 2 && controller.CurrentTasks.Single(x => x.Provider == "claude") is { Status: "unknown", PlanConfirmed: false } &&
+            controller.CurrentTasks.Single(x => x.Provider == "claude").Steps.Length == 2,
+            "Reconnected Claude steps must remain unconfirmed");
         pump.Dispose();
         bool rejected = false;
         try { pump.RequestRefresh(); } catch (ObjectDisposedException) { rejected = true; }
