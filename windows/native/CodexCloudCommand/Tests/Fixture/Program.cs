@@ -28,6 +28,7 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        if (!OperatingSystem.IsWindows()) return 20;
         if (!Hosted() || (args.Length != 5 && args.Length != 6) ||
             args[0] != "cloud" || args[1] != "list" || args[2] != "--json" ||
             args[3] != "--limit" || args[4] != "20" ||
