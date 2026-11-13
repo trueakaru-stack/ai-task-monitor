@@ -69,6 +69,13 @@ internal sealed class ClaudeSourcePump : IDisposable
         connection = next;
         revision = new object();
         refreshInvalidatedSinceDelivery = true;
+        if (next != ClaudeConnection.Connected)
+        {
+            // An older in-flight read may have consumed a terminal event
+            // before its result reached the dispatcher. Preserve the last
+            // displayed source-owned names without waiting for the read lock.
+            source.NotifyUnavailable(lastSourceSnapshot);
+        }
         if (!started) return;
         if (inFlight) rerun = true;
         else StartPoll();

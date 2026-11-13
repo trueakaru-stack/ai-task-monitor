@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Security;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -91,41 +92,28 @@ public static class ClaudeConnectionInspector
     {
         ArgumentNullException.ThrowIfNull(openRead);
         ArgumentNullException.ThrowIfNull(commands);
+        OwnedRead? first = null;
+        OwnedRead? second = null;
         try
         {
-            byte[]? first = ReadBounded(openRead);
+            first = ReadBounded(openRead);
             if (first is null)
                 return Failure(RegistrationState.ReadError, InspectionNotes.SizeLimit);
-            byte[]? second = ReadBounded(openRead);
+            second = ReadBounded(openRead);
             if (second is null)
                 return Failure(RegistrationState.ReadError, InspectionNotes.SizeLimit);
-            if (!first.AsSpan().SequenceEqual(second))
+            if (!first.Bytes.Span.SequenceEqual(second.Bytes.Span))
                 return Failure(RegistrationState.ReadError, InspectionNotes.DifferentReads);
-            return InspectBytes(first, commands);
+            return InspectOwnedBytes(first.Bytes, commands);
         }
-        catch (IOException)
+        catch (Exception error) when (IsRecoverableReadError(error))
         {
             return Failure(RegistrationState.ReadError);
         }
-        catch (UnauthorizedAccessException)
+        finally
         {
-            return Failure(RegistrationState.ReadError);
-        }
-        catch (SecurityException)
-        {
-            return Failure(RegistrationState.ReadError);
-        }
-        catch (NotSupportedException)
-        {
-            return Failure(RegistrationState.ReadError);
-        }
-        catch (ObjectDisposedException)
-        {
-            return Failure(RegistrationState.ReadError);
-        }
-        catch (ArgumentException)
-        {
-            return Failure(RegistrationState.ReadError);
+            second?.Dispose();
+            first?.Dispose();
         }
     }
 
@@ -134,10 +122,31 @@ public static class ClaudeConnectionInspector
         ArgumentNullException.ThrowIfNull(commands);
         if (bytes.Length > MaximumDocumentBytes)
             return Failure(RegistrationState.InvalidConfiguration, InspectionNotes.SizeLimit);
-        if (bytes.Span.StartsWith(new byte[] { 0xef, 0xbb, 0xbf }))
-            bytes = bytes[3..];
+        byte[] owned = new byte[bytes.Length];
         try
         {
+            try
+            {
+                bytes.Span.CopyTo(owned);
+            }
+            catch (Exception error) when (IsRecoverableReadError(error))
+            {
+                return Failure(RegistrationState.ReadError);
+            }
+            return InspectOwnedBytes(owned, commands);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(owned);
+        }
+    }
+
+    private static InspectionResult InspectOwnedBytes(ReadOnlyMemory<byte> bytes, ExpectedCommands commands)
+    {
+        try
+        {
+            if (bytes.Span.StartsWith(new byte[] { 0xef, 0xbb, 0xbf }))
+                bytes = bytes[3..];
             _ = StrictUtf8.GetCharCount(bytes.Span);
             using JsonDocument document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 64 });
             JsonElement root = document.RootElement;
@@ -305,22 +314,55 @@ public static class ClaudeConnectionInspector
         return true;
     }
 
-    private static byte[]? ReadBounded(Func<Stream> openRead)
+    private static OwnedRead? ReadBounded(Func<Stream> openRead)
     {
-        using Stream stream = openRead() ?? throw new IOException("The supplied reader returned no stream.");
         byte[] buffer = new byte[MaximumDocumentBytes + 1];
-        int count = 0;
-        while (count < buffer.Length)
+        bool transferred = false;
+        try
         {
-            int read = stream.Read(buffer, count, buffer.Length - count);
-            if (read == 0)
-                break;
-            count += read;
+            int count = 0;
+            using (Stream stream = openRead() ?? throw new IOException("The supplied reader returned no stream."))
+            {
+                while (count < buffer.Length)
+                {
+                    int read = stream.Read(buffer, count, buffer.Length - count);
+                    if (read < 0 || read > buffer.Length - count)
+                        throw new IOException("The supplied stream returned an invalid byte count.");
+                    if (read == 0)
+                        break;
+                    count += read;
+                }
+            }
+            if (count > MaximumDocumentBytes)
+                return null;
+            var result = new OwnedRead(buffer, count);
+            transferred = true;
+            return result;
         }
-        if (count > MaximumDocumentBytes)
-            return null;
-        return buffer.AsSpan(0, count).ToArray();
+        finally
+        {
+            if (!transferred) CryptographicOperations.ZeroMemory(buffer);
+        }
     }
+
+    private sealed class OwnedRead : IDisposable
+    {
+        private readonly byte[] buffer;
+        private readonly int length;
+
+        public OwnedRead(byte[] buffer, int length)
+        {
+            this.buffer = buffer;
+            this.length = length;
+        }
+
+        public ReadOnlyMemory<byte> Bytes => buffer.AsMemory(0, length);
+        public void Dispose() => CryptographicOperations.ZeroMemory(buffer);
+    }
+
+    private static bool IsRecoverableReadError(Exception error)
+        => error is IOException or UnauthorizedAccessException or SecurityException
+            or NotSupportedException or InvalidOperationException or ArgumentException;
 
     private static InspectionResult Failure(RegistrationState state, InspectionNotes notes = InspectionNotes.None)
         => new(state, AlwaysUnknown | notes, 0, 0);

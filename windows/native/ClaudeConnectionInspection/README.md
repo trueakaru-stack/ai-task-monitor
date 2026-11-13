@@ -54,6 +54,16 @@ limitations, policy inspection and source-lifecycle handling block real
 integration. Results contain no paths, command strings, JSON, or exception
 messages; callers must also avoid logging their input paths and commands.
 
+`InspectBytes` copies the bounded caller-supplied memory before parsing and
+does not clear or modify the caller's memory. Recoverable access errors return
+`ReadError`. `InspectStreams` owns its read buffers. These owned byte buffers,
+including failed, oversized and different-read cases, are cleared in `finally`
+after inspection. Tests retain synthetic references to stream-read buffers and
+check this clearing. The memory copy itself is not an atomic snapshot if another
+thread writes the caller's memory concurrently. The CLR, JSON parser and input
+providers may retain other byte copies or managed strings, which this component
+cannot find or guarantee to erase.
+
 The matcher and policy limitations are based on the official
 [hooks reference](https://code.claude.com/docs/en/hooks) and
 [settings precedence](https://code.claude.com/docs/en/settings). Claude can

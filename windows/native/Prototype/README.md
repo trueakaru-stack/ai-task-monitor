@@ -41,9 +41,16 @@ result is being presented. Identical connection notifications have no effect.
 A refresh invalidates at most one in-flight result between presentations;
 further requests coalesce into a follow-up rather than starving every poll.
 A presented snapshot can therefore precede the latest refresh request, for
-which a follow-up is scheduled. Actual connection changes and timeouts always
-invalidate the previous result. The deadline is dispatched on the WPF thread
-and can itself be delayed if that thread is blocked; elapsed time is checked
+which a follow-up is scheduled; it is not guaranteed current at presentation.
+`RequestRefresh` only asks for another read. It must not be used as a signal
+that the connection changed or became unavailable: the owner must separately
+report a known disconnect or an uncertain inspection through `NotifyConnection`.
+Actual connection changes and timeouts always invalidate the previous result.
+When a connection becomes partial or disconnected, the pump passes its last
+source-owned snapshot as a bounded fallback without waiting for the read lock;
+this can preserve names after an undelivered terminal event. The deadline is
+dispatched on the WPF thread and can itself be delayed if that thread is
+blocked; elapsed time is checked
 again before a result is presented. The deadline does not cancel I/O.
 
 The worker limit applies to a single pump instance. `Dispose` prevents later
@@ -57,6 +64,7 @@ integration; the current component does not enforce the single-pump contract.
 `windows/native/Tests/ClaudePump/ClaudePump.Tests.csproj` tests the pump with a
 dispatcher and synthetic files without opening a window. Its controlled races
 cover a disconnect before a background read, a connection change after a read,
+an undelivered terminal result, connection loss during a locked source read,
 unchanged notifications, reentrant and continuous refreshes, snapshot
 isolation, partial inspection, stalled reads, late stops, bounded worker count
 per instance and disposal.

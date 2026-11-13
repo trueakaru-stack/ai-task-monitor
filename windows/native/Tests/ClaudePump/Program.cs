@@ -33,6 +33,8 @@ internal static class Program
             CheckContinuousRefresh(dispatcher, work, events, now);
             CheckDisconnectBeforeRead(dispatcher, work, events, now);
             CheckConnectionAfterRead(dispatcher, work, events, now);
+            CheckLossAfterCompletedRead(dispatcher, work, events, now);
+            CheckLossWhileReadLocked(dispatcher, work, events, now);
             CheckTimeoutDuringRead(dispatcher, work, events, now);
             CheckTimeoutAfterRead(dispatcher, work, events, now);
             CheckDelayedDispatcher(dispatcher, work, events, now);
@@ -313,6 +315,103 @@ internal static class Program
         WaitUntil(() => completed >= 3 && displayed.Count >= 3, "The post-transition poll did not finish.");
         Check(displayed.Count == 3 && displayed.Skip(1).All(x => x.Unavailable && x.Tasks.Single().Unconfirmed),
             "A result completed before the connection transition was applied afterwards.");
+    }
+
+    private static void CheckLossAfterCompletedRead(Dispatcher dispatcher, string work, string events, DateTime now)
+    {
+        foreach (ClaudeConnection transition in new[] { ClaudeConnection.Partial, ClaudeConnection.Disconnected })
+        {
+            string path = Path.Combine(work, "loss-after-stop-" + transition + ".jsonl");
+            File.WriteAllText(path, events, new UTF8Encoding(false));
+            var source = new ClaudeFileSource(path, null, DateTime.MinValue.ToUniversalTime());
+            using var resultReached = new ManualResetEventSlim();
+            using var resultRelease = new ManualResetEventSlim();
+            var displayed = new List<ClaudeSourceSnapshot>();
+            ClaudeSourceSnapshot? captured = null;
+            int armed = 0, completed = 0;
+            using var pump = new ClaudeSourcePump(dispatcher, source, ClaudeConnection.Connected,
+                snapshot => displayed.Add(snapshot), () => now.AddSeconds(2), TimeSpan.FromHours(1), snapshot =>
+                {
+                    if (Interlocked.Exchange(ref armed, 0) == 0) return;
+                    captured = snapshot;
+                    resultReached.Set();
+                    if (!resultRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException("The completed read did not resume.");
+                }, () => completed++);
+            try
+            {
+                pump.Start();
+                WaitUntil(() => displayed.Count == 1 && completed == 1, "Loss-after-stop setup did not finish.");
+                Check(displayed[0].Tasks.Single().PlanConfirmed &&
+                    displayed[0].Tasks.Single().Steps.Select(x => x.title).SequenceEqual(new[] { "First step", "Second step" }),
+                    "Loss-after-stop setup did not present both confirmed names.");
+                string stop = JsonSerializer.Serialize(new Dictionary<string, object> {
+                    ["session_id"] = "observed", ["timestamp"] = now.AddSeconds(1).ToString("O"), ["event"] = "Stop",
+                    ["active"] = false, ["stage_version"] = 1, ["stage_phase"] = "stop_clear" }) + "\n";
+                File.AppendAllText(path, stop, new UTF8Encoding(false));
+                Volatile.Write(ref armed, 1);
+                pump.RequestRefresh();
+                WaitUntil(() => resultReached.IsSet, "The completed stop was not read before delivery.");
+                Check(captured is not null && captured.Tasks.Count == 0, "The fixture did not produce a completed result.");
+                pump.NotifyConnection(transition);
+                Check(captured is not null && !source.IsCurrent(captured), "The old result remained current after connection loss.");
+                Check(displayed.Count == 2 && (transition == ClaudeConnection.Partial
+                        ? displayed[1].Unavailable && displayed[1].Tasks.Single().Unconfirmed
+                        : !displayed[1].Unavailable && displayed[1].Tasks.Count == 0),
+                    "Connection loss did not immediately show the expected state.");
+                pump.NotifyConnection(ClaudeConnection.Connected);
+                resultRelease.Set();
+                WaitUntil(() => completed >= 3 && displayed.Count >= 3, "The post-loss fallback did not arrive.");
+                ClaudeSourceSnapshot fallback = displayed[^1];
+                Check(displayed.Count == 3 && fallback.Unavailable && fallback.Tasks.Single().Unconfirmed &&
+                    !fallback.Tasks.Single().PlanConfirmed &&
+                    fallback.Tasks.Single().Steps.Select(x => x.title).SequenceEqual(new[] { "First step", "Second step" }),
+                    "A completed read lost previously displayed names after connection loss.");
+            }
+            finally { resultRelease.Set(); }
+        }
+    }
+
+    private static void CheckLossWhileReadLocked(Dispatcher dispatcher, string work, string events, DateTime now)
+    {
+        string path = Path.Combine(work, "loss-while-read-locked.jsonl");
+        File.WriteAllText(path, events, new UTF8Encoding(false));
+        using var readReached = new ManualResetEventSlim();
+        using var readRelease = new ManualResetEventSlim();
+        int armed = 0, completed = 0;
+        var source = new ClaudeFileSource(path, null, DateTime.MinValue.ToUniversalTime(), () =>
+        {
+            if (Interlocked.Exchange(ref armed, 0) == 0) return;
+            readReached.Set();
+            if (!readRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException("The locked source read did not resume.");
+        });
+        var displayed = new List<ClaudeSourceSnapshot>();
+        using var pump = new ClaudeSourcePump(dispatcher, source, ClaudeConnection.Connected,
+            snapshot => displayed.Add(snapshot), () => now.AddSeconds(2), TimeSpan.FromHours(1), null, () => completed++);
+        try
+        {
+            pump.Start();
+            WaitUntil(() => displayed.Count == 1 && completed == 1, "Locked-read setup did not finish.");
+            Check(displayed[0].Tasks.Single().PlanConfirmed, "Locked-read setup was not confirmed.");
+            string stop = JsonSerializer.Serialize(new Dictionary<string, object> {
+                ["session_id"] = "observed", ["timestamp"] = now.AddSeconds(1).ToString("O"), ["event"] = "Stop",
+                ["active"] = false, ["stage_version"] = 1, ["stage_phase"] = "stop_clear" }) + "\n";
+            File.AppendAllText(path, stop, new UTF8Encoding(false));
+            Volatile.Write(ref armed, 1);
+            pump.RequestRefresh();
+            WaitUntil(() => readReached.IsSet, "The source did not reach its locked read.");
+            var watch = Stopwatch.StartNew();
+            pump.NotifyConnection(ClaudeConnection.Partial);
+            Check(watch.Elapsed < TimeSpan.FromSeconds(3) && displayed.Count == 2 && displayed[1].Unavailable &&
+                displayed[1].Tasks.Single().Unconfirmed,
+                "Partial notification waited for the source read or lost the visible fallback.");
+            pump.NotifyConnection(ClaudeConnection.Connected);
+            readRelease.Set();
+            WaitUntil(() => completed >= 3 && displayed.Count >= 3, "The locked-read fallback did not arrive.");
+            Check(displayed.Count == 3 && displayed[^1].Unavailable && displayed[^1].Tasks.Single().Unconfirmed &&
+                displayed[^1].Tasks.Single().Steps.Select(x => x.title).SequenceEqual(new[] { "First step", "Second step" }),
+                "A locked read lost previously displayed names after a partial connection.");
+        }
+        finally { readRelease.Set(); }
     }
 
     private static void CheckTimeoutDuringRead(Dispatcher dispatcher, string work, string events, DateTime now)

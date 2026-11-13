@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using AiTaskMonitor.ClaudeConnectionInspection;
@@ -22,6 +23,7 @@ internal static class Program
         PolicyAndOtherSettings();
         InvalidDocuments();
         ReadFailuresAndBounds();
+        OwnedBufferHandling();
         SyntheticFileReads();
         Console.WriteLine($"Claude connection inspection: {checks} synthetic checks passed.");
     }
@@ -207,6 +209,118 @@ internal static class Program
             return new MemoryStream(valid, writable: false);
         }, Commands);
         State(secondFails, RegistrationState.ReadError, "second read failure");
+    }
+
+    private static void OwnedBufferHandling()
+    {
+        byte[] input = JsonSerializer.SerializeToUtf8Bytes(Document());
+        byte[] original = input.ToArray();
+        using var owner = new TrackingMemory(input);
+        ReadOnlyMemory<byte> memory = owner.Memory;
+        owner.Accesses = 0;
+        State(ClaudeConnectionInspector.InspectBytes(memory, Commands), RegistrationState.RegisteredInFile,
+            "caller-owned memory is copied before parsing");
+        Check(owner.Accesses == 1, "caller-owned memory must only be read to make the bounded copy");
+        Check(input.AsSpan().SequenceEqual(original), "successful inspection must not clear caller memory");
+        owner.Fail = true;
+        State(ClaudeConnectionInspector.InspectBytes(memory, Commands), RegistrationState.ReadError,
+            "unavailable caller-owned memory is a read error");
+        Check(input.AsSpan().SequenceEqual(original), "failed inspection must not clear caller memory");
+
+        var reads = new List<CapturingStream>();
+        InspectionResult full = ClaudeConnectionInspector.InspectStreams(() =>
+        {
+            var stream = new CapturingStream(input);
+            reads.Add(stream);
+            return stream;
+        }, Commands);
+        State(full, RegistrationState.RegisteredInFile, "captured synthetic streams");
+        Check(reads.Count == 2 && reads.All(IsCleared), "successful stream buffers must be cleared");
+        Check(input.AsSpan().SequenceEqual(original), "stream inspection must not clear stream-owned input");
+
+        reads.Clear();
+        InspectionResult changed = ClaudeConnectionInspector.InspectStreams(() =>
+        {
+            var stream = new CapturingStream(reads.Count == 0 ? input : Encoding.UTF8.GetBytes("{}"));
+            reads.Add(stream);
+            return stream;
+        }, Commands);
+        State(changed, RegistrationState.ReadError, "different captured streams");
+        Check(reads.Count == 2 && reads.All(IsCleared), "different-read buffers must be cleared");
+
+        reads.Clear();
+        InspectionResult failedSecondRead = ClaudeConnectionInspector.InspectStreams(() =>
+        {
+            var stream = new CapturingStream(input, failOnSecondRead: reads.Count == 1);
+            reads.Add(stream);
+            return stream;
+        }, Commands);
+        State(failedSecondRead, RegistrationState.ReadError, "second stream fails after copying bytes");
+        Check(reads.Count == 2 && reads.All(IsCleared), "buffers must be cleared after a read exception");
+
+        var disposalFailure = new CapturingStream(input, failOnDispose: true);
+        State(ClaudeConnectionInspector.InspectStreams(() => disposalFailure, Commands), RegistrationState.ReadError,
+            "stream disposal failure is a read error");
+        Check(IsCleared(disposalFailure), "buffer must be cleared when stream disposal fails");
+
+        byte[] large = new byte[ClaudeConnectionInspector.MaximumDocumentBytes + 1];
+        Array.Fill(large, (byte)'x');
+        var oversized = new CapturingStream(large);
+        State(ClaudeConnectionInspector.InspectStreams(() => oversized, Commands), RegistrationState.ReadError,
+            "oversized captured stream");
+        Check(IsCleared(oversized), "oversized stream buffer must be cleared");
+        Check(large[0] == (byte)'x' && large[^1] == (byte)'x', "oversized stream input must not be cleared");
+    }
+
+    private static bool IsCleared(CapturingStream stream)
+        => stream.Captured is not null && stream.Captured.All(value => value == 0);
+
+    private sealed class TrackingMemory : MemoryManager<byte>
+    {
+        private readonly byte[] input;
+        public int Accesses { get; set; }
+        public bool Fail { get; set; }
+
+        public TrackingMemory(byte[] input) => this.input = input;
+
+        public override Span<byte> GetSpan()
+        {
+            Accesses++;
+            if (Fail) throw new ObjectDisposedException(nameof(TrackingMemory));
+            return input;
+        }
+
+        public override MemoryHandle Pin(int elementIndex = 0) => throw new NotSupportedException();
+        public override void Unpin() { }
+        protected override void Dispose(bool disposing) { }
+    }
+
+    private sealed class CapturingStream : MemoryStream
+    {
+        private readonly bool failOnSecondRead;
+        private readonly bool failOnDispose;
+        private int readCalls;
+        public byte[]? Captured { get; private set; }
+
+        public CapturingStream(byte[] input, bool failOnSecondRead = false, bool failOnDispose = false)
+            : base(input, writable: false)
+        {
+            this.failOnSecondRead = failOnSecondRead;
+            this.failOnDispose = failOnDispose;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            Captured = buffer;
+            if (++readCalls == 2 && failOnSecondRead) throw new IOException("Synthetic read failure.");
+            return base.Read(buffer, offset, count);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing && failOnDispose) throw new IOException("Synthetic dispose failure.");
+        }
     }
 
     private static void SyntheticFileReads()
