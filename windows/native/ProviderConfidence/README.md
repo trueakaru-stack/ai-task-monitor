@@ -88,3 +88,5 @@ They do not rebuild a child environment; the CI job's flag is inherited. The
 platform compiler used by `Add-Type` has not been independently audited. Neither
 test demonstrates live-agent behavior, restart recovery, installer readiness
 or visual fidelity.
+
+The isolated experiment ran in [Windows CI run 43461323619](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43461323619): 828 in-memory checks passed, including the known eviction counterexample, and the runtime test reproduced the production group-stop loss. These results do not mean that reconnect recovery is fixed.
