@@ -11,8 +11,9 @@ Replace the released Windows PowerShell-hosted monitor with a standalone C# appl
 - [x] (2026-11-13 14:41Z) Integrated the published Windows 0.2.7-alpha source and the PATH-safe test launchers into the primary `windows` branch. The dedicated [CI run](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43445103177) passed the launcher guard and SDK first-use checks.
 - [x] (2026-11-13 14:56Z) Connected the native release selector and update coordinator in `windows/native/UpdateIntegration/`. A disposable Windows CI run built the code and passed 42 synthetic assertions; it has no connection to the application UI or a real network transport.
 - [x] (2026-11-13 15:05Z) Added continuity and delivery guidance to the project and Codex profile.
-- [x] (2026-11-13 15:44Z) Exercised the prototype invocation guard and the synthetic lock probe in disposable Windows CI; the guard passed 16 checks and neither job changed persistent PATH. Independent review and integration of the guard into the primary branch remain pending.
-- [ ] Establish a reliable Codex source path in C#, including bounded journal reading, lifecycle handling, lock observation, source errors, and uncertainty. A synthetic index-to-lifecycle slice and a separate disposable lock-probe experiment are in progress; real locks and profiles are not approved for unsafe probing.
+- [x] (2026-11-13 15:55Z) Independently reviewed and integrated the prototype invocation guard into `windows`. Its 28 synthetic checks and the primary-branch PATH safety workflow passed in disposable Windows CI.
+- [x] (2026-11-13 15:56Z) Independently reviewed and integrated the synthetic Codex index-to-lifecycle slice into `windows`; its isolated Windows CI build passed 667 assertions. The separate lock-probe experiment is also retained on the primary branch and can be run manually in hosted CI.
+- [ ] Establish a reliable Codex source path in C#, including bounded journal reading, lifecycle handling, lock observation, source errors, and uncertainty. The integrated slice is synthetic only; real locks and profiles are not approved for unsafe probing.
 - [ ] Resolve the provider-channel reconnection race and retain per-source and per-profile uncertainty without affecting healthy sources.
 - [ ] Integrate and verify the accepted Claude Code, OpenCode, DeepSeek, Hermes, Kimi, and available official cloud-monitoring behavior. Distinguish local and cloud support and do not invent unsupported statuses.
 - [ ] Wire real sources, settings, diagnostics, update checks, compact and expanded windows, and lifecycle management into the C# application.
@@ -63,7 +64,7 @@ Replace the released Windows PowerShell-hosted monitor with a standalone C# appl
 
 ## Outcomes & Retrospective
 
-The Windows source branch and test safety have been repaired, and the native update adapter is independently reviewed and covered by synthetic CI. The adapter is not wired into the product. Full native monitoring, preservation of the existing UI and features, a C# installer, real integration checks, and final visual acceptance remain open.
+The Windows source branch and test safety have been repaired. The native update adapter and a synthetic Codex source slice are independently reviewed and covered by CI; neither is wired into the product. Full native monitoring, preservation of the existing UI and features, a C# installer, real integration checks, and final visual acceptance remain open.
 
 ## Open Questions and Blockers
 
@@ -136,7 +137,7 @@ Use unique disposable fixture directories; inspect their resolved paths before a
 ## Artifacts and Notes
 
 - Windows PATH and update-adapter synthetic checks: [GitHub Actions run 43447567773](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43447567773).
-- Prototype invocation protection and one synthetic lock experiment: [GitHub Actions run 43455454275](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43455454275). This is not evidence of real agent monitoring or visual acceptance.
+- Prototype invocation protection and synthetic Codex source checks on the primary branch: [GitHub Actions run 43457124896](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43457124896). A separate [synthetic lock experiment](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43455454275) was performed on one Windows/NTFS environment. These are not evidence of real agent monitoring or visual acceptance.
 - A saved synthetic reproduction of the provider generation race is under `D:\Codex\AI Task Monitor Audit\windows-provider-channel-generation-fix-20261109\baseline-output.txt`; it is not evidence of a real user incident.
 - Previous published Windows and macOS artifacts are 0.2.7-alpha and 0.3.8-alpha, respectively. Their availability does not prove that the requested native Windows migration is complete.
 
@@ -159,3 +160,4 @@ The implementation uses C#/.NET 10 and WPF for Windows. The native Codex source 
 - 2026-11-13: Recorded the App Server instance-scope limitation and the distinction between `notLoaded` and task completion.
 - 2026-11-13: Added the previously requested tester-facing feature description to the final handoff.
 - 2026-11-13: Recorded disposable CI evidence for the invocation guard and lock experiment, and the missing Claude step-event contract in the native hook.
+- 2026-11-13: Recorded primary-branch integration and independent review of the test guard, synthetic Codex source, and lock experiment, including their remaining limitations.
