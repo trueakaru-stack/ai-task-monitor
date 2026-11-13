@@ -11,11 +11,12 @@ Replace the released Windows PowerShell-hosted monitor with a standalone C# appl
 - [x] (2026-11-13 14:41Z) Integrated the published Windows 0.2.7-alpha source and the PATH-safe test launchers into the primary `windows` branch. The dedicated [CI run](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43445103177) passed the launcher guard and SDK first-use checks.
 - [x] (2026-11-13 14:56Z) Connected the native release selector and update coordinator in `windows/native/UpdateIntegration/`. A disposable Windows CI run built the code and passed 42 synthetic assertions; it has no connection to the application UI or a real network transport.
 - [x] (2026-11-13 15:05Z) Added continuity and delivery guidance to the project and Codex profile.
-- [ ] Establish a reliable Codex source path in C#, including bounded journal reading, lifecycle handling, lock observation, source errors, and uncertainty. A synthetic index-to-lifecycle slice is in progress; real locks and profiles are not approved for unsafe probing.
+- [ ] Establish a reliable Codex source path in C#, including bounded journal reading, lifecycle handling, lock observation, source errors, and uncertainty. A synthetic index-to-lifecycle slice and a separate disposable lock-probe experiment are in progress; real locks and profiles are not approved for unsafe probing.
 - [ ] Resolve the provider-channel reconnection race and retain per-source and per-profile uncertainty without affecting healthy sources.
 - [ ] Integrate and verify the accepted Claude Code, OpenCode, DeepSeek, Hermes, Kimi, and available official cloud-monitoring behavior. Distinguish local and cloud support and do not invent unsupported statuses.
 - [ ] Wire real sources, settings, diagnostics, update checks, compact and expanded windows, and lifecycle management into the C# application.
 - [ ] Build, verify, and publish a Windows C# installer only when the agreed functionality and acceptance checks pass. Verify the requested visual material for Windows and macOS separately.
+- [ ] Prepare the requested accurate feature description for presenting the completed application to testers, including actual supported sources and limitations.
 
 ## Surprises & Discoveries
 
@@ -25,6 +26,7 @@ Replace the released Windows PowerShell-hosted monitor with a standalone C# appl
 - A synthetic provider-channel test reproduced an old reconnection race: a connection opened before a provider transition can be accepted under the new generation. A shared channel or source-wide gap must not invalidate an unrelated provider or a healthy profile.
 - The untracked `windows/native/CodexLock/` candidate in the older working copy can block a real Codex writer. Do not use it as a production lock observer without a noninterference design and evidence.
 - Current official Codex source uses a writer byte-range lock and permits shared file access; the old candidate's narrower sharing can interfere with the writer. No documented passive Win32 query for that lock was found in the reviewed sources. A held writer lock alone does not prove an active turn; absence or read failure must not be treated as task completion.
+- A potential read-only observation is being evaluated only with synthetic writer/observer processes and empty/nonempty temporary files in hosted Windows CI. Read behavior at EOF and byte-range locks is not sufficiently specified to infer a free lock from an empty read; any inconclusive result remains unknown, and one filesystem experiment is not a general Windows guarantee.
 - Independent review of the initial synthetic Codex source found that session discovery can match an ID that is a suffix of another ID, that dropping completed-session history can revive an old turn after truncation, and that a lock or read interruption cannot by itself justify confirming the old turn again. These cases must be corrected and tested before the slice is integrated.
 - A held or unavailable lock ID absent from the index must make the source incomplete; it must not invalidate unrelated confirmed sessions. The existing index/discovery caches can also grow across repeated calls, so per-call input limits alone are not a memory bound. Current official Codex source permits rollout filenames containing both a thread ID and a rollout ID after `thread/revert`; a simple filename suffix is not a sufficient identity contract.
 - Current Codex `session_meta.payload.id` identifies the thread, but a reverted thread can have multiple rollouts with that same ID; the official resolver uses live-writer information or SQLite rather than selecting the first match. Confirming session identity alone does not prove which rollout is current.
@@ -60,6 +62,13 @@ Replace the released Windows PowerShell-hosted monitor with a standalone C# appl
 
 The Windows source branch and test safety have been repaired, and the native update adapter is independently reviewed and covered by synthetic CI. The adapter is not wired into the product. Full native monitoring, preservation of the existing UI and features, a C# installer, real integration checks, and final visual acceptance remain open.
 
+## Open Questions and Blockers
+
+- A production Codex lock observer is blocked until a method is shown not to interfere with the writer and ambiguous results are handled as unknown. A disposable synthetic probe is being prepared; it must not be applied to user files merely because one CI run succeeds.
+- Choosing the current rollout after a revert requires reliable writer or state-database evidence. Matching `session_meta.payload.id` alone is insufficient when multiple rollouts belong to one thread. Synthetic source work may continue without connecting real profiles.
+- The original clipboard reference files are unavailable at their recorded paths. Existing screenshots are candidate evidence only until matched to the accepted design; final visual acceptance needs the authoritative references and actual Windows/macOS renderers.
+- A complete native installer build command and clean-machine acceptance evidence do not exist yet. Installer planning and isolated verification can continue without installing anything on the user's computer.
+
 ## Context and Orientation
 
 The original working copy at `D:\Codex\AI Task Monitor` has pre-existing tracked and untracked work. Preserve it. The clean managed worktree for the current Windows source is `C:\Users\truea\.codex\worktrees\windows-main-continuation\AI Task Monitor`, detached at the fetched `windows` revision; it is a workspace, not a replacement for the primary branch. Fetch and verify the remote branch before integrating any source change.
@@ -76,7 +85,7 @@ In parallel, investigate the shared provider channel's authorization-generation 
 
 Connect each source and its configuration to the WPF application only after its contract and tests are ready. Preserve the accepted full/compact layouts, themes, languages, task cards, progress uncertainty, update dialog, controls, diagnostics, and profile isolation. Use actual user-visible data only locally and with authorized sources; synthetic fixtures are not proof of real integration.
 
-Finally, integrate versioning, update transport and install/uninstall behavior, then produce the requested installer and visual-control material. Follow the user's existing publication authorization once acceptance is satisfied. Do not call an alpha package a release-ready C# application solely because it builds.
+Finally, integrate versioning, update transport and install/uninstall behavior, then produce the requested installer, visual-control material, and a truthful feature description for testers. Follow the user's existing publication authorization once acceptance is satisfied. Do not call an alpha package a release-ready C# application solely because it builds.
 
 ## Milestones
 
@@ -115,7 +124,7 @@ Required behavior evidence includes real supported agent tasks, settings persist
 
 Visual acceptance is separate: compare the final native renderer with the authoritative approved Windows reference at matching viewport and scale, including light/dark and expanded/compact states, typography, controls, corners, shadows, alignment and overflow. Review the reported Windows copy-icon alignment and check the Mac copy icon; match Windows tabs to the accepted Mac treatment; verify the task-card right margin without a scrollbar, full and compact corner contours, and the update-download button shadow. On Mac, give selectors equal width based on the widest selector and retain the existing log-button sizes. Localize application-generated labels and agreed sample text, while retaining source-supplied task text in its original language.
 
-The user-supplied screenshots in the conversation and the approved published application are the references. The original clipboard image files are currently unavailable at their recorded temporary paths; recover equivalent authoritative source images and obtain renderer access before claiming the affected comparison. Record any untested hover, keyboard, accessibility, high-DPI, or responsive state. The user's requested Windows and Mac visual-control video is a separate deliverable after suitable renderers and references are available.
+The user-supplied screenshots in the conversation and the approved published application are the references. The original clipboard image files are currently unavailable at their recorded temporary paths. Older macOS 0.3.1 captures exist under `D:\Codex\AI Task Monitor Previews\macos-0.3.1-reference-45f9db74a99247aaae172a11568c0993\files\docs\verification`, but their applicability to later accepted corrections is not yet established. Recover equivalent authoritative source images and obtain renderer access before claiming the affected comparison. Record any untested hover, keyboard, accessibility, high-DPI, or responsive state. The user's requested Windows and Mac visual-control video is a separate deliverable after suitable renderers and references are available.
 
 ## Idempotence and Recovery
 
@@ -141,3 +150,6 @@ The implementation uses C#/.NET 10 and WPF for Windows. The native Codex source 
 - 2026-11-13: Added missing-index lock IDs, cross-refresh cache bounds, and the current Codex rollout-filename variant to the source acceptance criteria.
 - 2026-11-13: Recorded the verified Codex writer-lock and session metadata contracts and the unresolved noninterfering lock observation and rollout selection requirements.
 - 2026-11-13: Recorded that first-seen long Codex journals need bounded recovery or an explicit unavailable-source state before real monitoring.
+- 2026-11-13: Located older macOS reference captures; they remain candidates rather than proof of the later approved appearance.
+- 2026-11-13: Started an isolated lock-probe experiment; it is not a production lock observer or evidence about the user's real files.
+- 2026-11-13: Added the previously requested tester-facing feature description to the final handoff.
