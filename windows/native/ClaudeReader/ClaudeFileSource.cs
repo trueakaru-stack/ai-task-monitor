@@ -26,6 +26,7 @@ public sealed class ClaudeFileSource
     private readonly SessionReader reader = new();
     private Task[] previous = [];
     private bool currentSeen, legacySeen;
+    private bool pendingRead, pendingLoss;
     private Cursor? currentCursor, legacyCursor;
 
     public ClaudeFileSource(string currentPath, string? legacyPath, DateTime observedSinceUtc)
@@ -48,6 +49,7 @@ public sealed class ClaudeFileSource
             if (connection == ClaudeConnection.Disconnected)
             {
                 previous = [];
+                pendingRead = false;
                 return new ClaudeSourceSnapshot([], false);
             }
             try
@@ -55,20 +57,43 @@ public sealed class ClaudeFileSource
                 Tail? current = ReadOptional(currentPath, ref currentSeen, ref currentCursor);
                 if (current is null)
                     return new ClaudeSourceSnapshot([], connection == ClaudeConnection.Partial);
-                if (current.Value.Discontinuity) reader.MarkSourceLoss();
-                if (current.Value.PendingOnly)
-                    return new ClaudeSourceSnapshot(Copy(previous, true), previous.Length != 0 || connection == ClaudeConnection.Partial);
                 Tail? legacy = legacyPath is null ? null : ReadOptional(legacyPath, ref legacySeen, ref legacyCursor);
-                if (legacy?.Discontinuity == true) reader.MarkSourceLoss();
-                if (legacy?.PendingOnly == true)
-                    return new ClaudeSourceSnapshot(Copy(previous, true), true);
+                bool isPending = current.Value.Pending || legacy?.Pending == true;
+                if (current.Value.Discontinuity || legacy?.Discontinuity == true ||
+                    current.Value.WindowMoved || legacy?.WindowMoved == true)
+                {
+                    reader.MarkSourceLoss();
+                    if (pendingRead || isPending) pendingLoss = true;
+                }
+                if (isPending)
+                {
+                    // Do not mutate the stateful reader until all visible input
+                    // is complete: a Stop in the prefix can otherwise erase the
+                    // retained card before a subsequent read failure or loss.
+                    Task[] provisional = Reader.Read(current.Value.Text, legacy?.Text ?? "", utcNow, observedSinceUtc);
+                    previous = MergePending(previous, provisional, out bool overflow);
+                    if (overflow) { reader.MarkSourceLoss(); pendingLoss = true; }
+                    pendingRead = true;
+                    bool unavailable = previous.Length != 0 || legacy?.Pending == true ||
+                        connection == ClaudeConnection.Partial || reader.RetentionOverflow || pendingLoss;
+                    return new ClaudeSourceSnapshot(Copy(previous, true), unavailable);
+                }
                 Task[] parsed = reader.Read(current.Value.Text, legacy?.Text ?? "", utcNow, observedSinceUtc);
+                if (pendingRead && reader.SourceUncertain) pendingLoss = true;
+                pendingRead = false;
+                if (pendingLoss)
+                {
+                    previous = MergePending(previous, parsed, out bool overflow);
+                    if (overflow) reader.MarkSourceLoss();
+                    return new ClaudeSourceSnapshot(Copy(previous, true), true);
+                }
                 bool uncertain = connection == ClaudeConnection.Partial;
                 previous = Copy(parsed, uncertain);
-                return new ClaudeSourceSnapshot(Copy(previous, false), uncertain || reader.RetentionOverflow);
+                return new ClaudeSourceSnapshot(Copy(previous, false), uncertain || reader.RetentionOverflow || reader.SourceUncertain);
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or SecurityException or DecoderFallbackException)
             {
+                if (pendingRead) pendingLoss = true;
                 reader.MarkSourceLoss();
                 previous = Copy(previous, true);
                 return new ClaudeSourceSnapshot(Copy(previous, false), true);
@@ -80,14 +105,15 @@ public sealed class ClaudeFileSource
     {
         lock (gate)
         {
+            if (pendingRead) pendingLoss = true;
             reader.MarkSourceLoss();
             previous = Copy(previous, true);
             return new ClaudeSourceSnapshot(Copy(previous, false), true);
         }
     }
 
-    private readonly record struct Cursor(long Length, byte[] EndDigest);
-    private readonly record struct Tail(string Text, bool PendingOnly, Cursor Cursor, bool Discontinuity);
+    private readonly record struct Cursor(long Length, byte[] EndDigest, long FirstCompleteOffset);
+    private readonly record struct Tail(string Text, bool Pending, Cursor Cursor, bool Discontinuity, bool WindowMoved);
 
     private static Tail? ReadOptional(string path, ref bool seen, ref Cursor? cursor)
     {
@@ -120,9 +146,9 @@ public sealed class ClaudeFileSource
         long length = stream.Length;
         bool discontinuity = prior is { } old && (length < old.Length ||
             !CryptographicOperations.FixedTimeEquals(DigestEnd(stream, old.Length), old.EndDigest));
-        var cursor = new Cursor(length, DigestEnd(stream, length));
+        byte[] digest = DigestEnd(stream, length);
         int count = (int)Math.Min(length, MaximumTailBytes);
-        if (count == 0) return new Tail("", false, cursor, discontinuity);
+        if (count == 0) return new Tail("", false, new Cursor(length, digest, 0), discontinuity, false);
         long start = length - count;
         bool atLineBoundary = start == 0;
         if (start > 0)
@@ -143,18 +169,52 @@ public sealed class ClaudeFileSource
             first = boundary + 1;
         }
         int last = Array.LastIndexOf(bytes, (byte)'\n');
+        long firstCompleteOffset = start + first;
+        // A first bounded read has no evidence about any omitted prefix. On
+        // later reads, crossing a previously observed line has the same effect.
+        bool windowMoved = prior is { } oldWindow
+            ? firstCompleteOffset > oldWindow.FirstCompleteOffset
+            : start > 0;
+        var cursor = new Cursor(length, digest, firstCompleteOffset);
         if (last < first)
         {
-            return new Tail("", true, cursor, discontinuity);
+            return new Tail("", true, cursor, discontinuity, windowMoved);
         }
         string text = StrictUtf8.GetString(bytes, first, last - first + 1);
-        return new Tail(text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text, false, cursor, discontinuity);
+        return new Tail(text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text,
+            last != bytes.Length - 1, cursor, discontinuity, windowMoved);
+    }
+
+    private static Task[] MergePending(IEnumerable<Task> prior, IEnumerable<Task> fresh, out bool overflow)
+    {
+        overflow = false;
+        var result = new List<Task>();
+        var positions = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (Task item in prior.Concat(fresh))
+        {
+            if (positions.TryGetValue(item.Id, out int index))
+            {
+                Task merged = SessionReader.Freeze(item, result[index], true);
+                if (merged.RetainedPlanIncomplete) overflow = true;
+                result[index] = merged;
+            }
+            else if (result.Count < SessionReader.MaximumRetained)
+            {
+                Task retained = SessionReader.Freeze(item, null!, true);
+                if (retained.RetainedPlanIncomplete) overflow = true;
+                positions.Add(item.Id, result.Count);
+                result.Add(retained);
+            }
+            else overflow = true;
+        }
+        return result.ToArray();
     }
 
     private static Task[] Copy(IEnumerable<Task> source, bool forceUnconfirmed) => source.Select(item =>
     {
         Step[] steps = item.Steps.Select(step => new Step { id = step.id, title = step.title,
-            status = step.status, generated = step.generated }).ToArray();
+            status = forceUnconfirmed ? "unknown" : step.status, generated = step.generated,
+            RetainedIdentity = step.RetainedIdentity }).ToArray();
         return new Task { Id = item.Id, Activity = forceUnconfirmed ? "" : item.Activity,
             Updated = item.Updated, Started = item.Started, StartKey = item.StartKey, Steps = steps,
             Unconfirmed = forceUnconfirmed || item.Unconfirmed,
