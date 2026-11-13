@@ -8,8 +8,11 @@ $syntheticScript = Join-Path ([IO.Path]::GetPathRoot($prototype)) 'AI Task Monit
 $otherScript = Join-Path ([IO.Path]::GetPathRoot($prototype)) 'AI Task Monitor fixture\other\Test-Prototype.ps1'
 $count = 0
 function Expect-Allowed([string[]]$arguments, [string]$executable = $syntheticHost) {
-    Assert-PrototypeIsolatedInvocation -ProcessArguments $arguments -ScriptPath $syntheticScript `
-        -ExecutablePath $executable -PowerShellRoot $syntheticRoot -Edition 'Desktop'
+    $confirmation = @(Assert-PrototypeIsolatedInvocation -ProcessArguments $arguments -ScriptPath $syntheticScript `
+        -ExecutablePath $executable -PowerShellRoot $syntheticRoot -Edition 'Desktop')
+    if ($confirmation.Count -ne 1 -or $confirmation[0] -isnot [bool] -or -not $confirmation[0]) {
+        throw 'A safe invocation did not receive exactly one positive confirmation.'
+    }
     $script:count++
 }
 function Expect-Rejected([string[]]$arguments, [string]$executable = $syntheticHost) {
@@ -72,7 +75,7 @@ if ($markerIndex -lt 0 -or $entryText.IndexOf($bodyMarker, $markerIndex + $bodyM
 $entryGuard = $entryText.Substring(0, $markerIndex) + "`r`nthrow 'RESET_REACHED'`r`n"
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('aitm-prototype-guard-' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
-foreach ($case in @('missing','empty','invalid')) {
+foreach ($case in @('missing','empty','invalid','no-op','false','extra')) {
     $fixture = Join-Path $fixtureRoot $case
     [IO.Directory]::CreateDirectory($fixture) | Out-Null
     $entry = Join-Path $fixture 'Test-Prototype.ps1'
@@ -80,6 +83,9 @@ foreach ($case in @('missing','empty','invalid')) {
     [IO.File]::WriteAllText($entry, $entryGuard, [Text.UTF8Encoding]::new($false))
     if ($case -eq 'empty') { [IO.File]::WriteAllText($helper, '', [Text.UTF8Encoding]::new($false)) }
     if ($case -eq 'invalid') { [IO.File]::WriteAllText($helper, 'function {', [Text.UTF8Encoding]::new($false)) }
+    if ($case -eq 'no-op') { [IO.File]::WriteAllText($helper, 'function Assert-PrototypeIsolatedInvocation {}', [Text.UTF8Encoding]::new($false)) }
+    if ($case -eq 'false') { [IO.File]::WriteAllText($helper, 'function Assert-PrototypeIsolatedInvocation { $false }', [Text.UTF8Encoding]::new($false)) }
+    if ($case -eq 'extra') { [IO.File]::WriteAllText($helper, 'function Assert-PrototypeIsolatedInvocation { $true; "unexpected" }', [Text.UTF8Encoding]::new($false)) }
     foreach ($mode in @('call','dot-source')) {
         $message = ''
         $priorPreference = $ErrorActionPreference

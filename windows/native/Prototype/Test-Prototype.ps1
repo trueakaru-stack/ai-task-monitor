@@ -13,9 +13,12 @@ try {
         $null = . (Join-Path $scriptDirectory 'Assert-PrototypeIsolatedInvocation.ps1')
         $currentProcess = [Diagnostics.Process]::GetCurrentProcess()
         try {
-            $null = Assert-PrototypeIsolatedInvocation -ProcessArguments ([Environment]::GetCommandLineArgs()) `
+            $confirmation = @(Assert-PrototypeIsolatedInvocation -ProcessArguments ([Environment]::GetCommandLineArgs()) `
                 -ScriptPath $scriptPath -ExecutablePath $currentProcess.MainModule.FileName `
-                -PowerShellRoot $PSHOME -Edition $PSVersionTable.PSEdition
+                -PowerShellRoot $PSHOME -Edition $PSVersionTable.PSEdition)
+            if ($confirmation.Count -ne 1 -or $confirmation[0] -isnot [bool] -or -not $confirmation[0]) {
+                throw 'The test safety helper did not confirm an isolated invocation.'
+            }
         } finally { $currentProcess.Dispose() }
         return $true
     } $PSCommandPath $PSScriptRoot

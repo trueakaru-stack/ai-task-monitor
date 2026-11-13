@@ -41,7 +41,7 @@ function Assert-PrototypeIsolatedInvocation {
                 $providerPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ProcessArguments[$index + 1])
                 $actualScript = [IO.Path]::GetFullPath($providerPath)
             } catch { throw $message }
-            if ([string]::Equals($expectedScript, $actualScript, [StringComparison]::OrdinalIgnoreCase)) { return }
+            if ([string]::Equals($expectedScript, $actualScript, [StringComparison]::OrdinalIgnoreCase)) { return $true }
         }
         throw $message
     }
