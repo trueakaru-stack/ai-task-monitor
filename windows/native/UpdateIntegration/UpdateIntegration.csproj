@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>AITaskMonitor.UpdateIntegration</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
+    <ProjectReference Include="..\ReleaseMetadata\ReleaseMetadata.csproj" />
+    <ProjectReference Include="..\UpdateController\UpdateController.csproj" />
+  </ItemGroup>
+</Project>
