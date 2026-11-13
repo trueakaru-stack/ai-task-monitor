@@ -1215,3 +1215,23 @@ jobs:
               }
             }
           }
+  synthetic-installer:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Check isolated synthetic installation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceRoot = Join-Path $env:RUNNER_TEMP ('aitm-installer-source-' + [guid]::NewGuid().ToString('N'))
+          $source = Join-Path $sourceRoot 'source'
+          $template = Join-Path $sourceRoot 'template'
+          $hooks = Join-Path $sourceRoot 'hooks'
+          New-Item -ItemType Directory -Path $source, $template, $hooks | Out-Null
+          git -c credential.helper= -c core.hooksPath="$hooks" -c init.defaultBranch=fixture init --quiet --template="$template" "$source"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot initialize source checkout.' }
+          git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch exact test revision.' }
+          git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot select test revision.' }
+          & (Join-Path $source 'windows/native/InstallerPrototype/Test-SyntheticInstaller.ps1')
