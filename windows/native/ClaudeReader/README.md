@@ -54,6 +54,15 @@ previously visible card. This uncertainty remains for this reader's lifetime;
 it does not affect a separate source instance. A first direct `Connected` poll
 without a previously observed interruption keeps its ordinary behavior.
 
+Conflicting active and stopped events for one session at the same instant are
+not ordered by their positions in either journal. The affected card remains
+visible and unconfirmed on repeated reads; other sessions are not downgraded.
+Different time-zone offsets representing that same instant are treated equally.
+While the conflict remains in the readable journal, a later clear stop does not
+resolve it. Equal-time events with matching active states do not cause this
+ambiguity; a strictly later clear stop in an otherwise unambiguous history can
+end its session normally.
+
 The future owner must call `NotifyConnection` promptly for every connection
 change, including while a poll is in progress, and then use `Poll(utcNow)` to
 read the latest signalled state. Each result carries a generation; `IsCurrent`
@@ -71,8 +80,10 @@ An incomplete retained plan is flagged and retention overflow marks the source
 unavailable and unconfirmed rather than silently confirming a partial view.
 These bounds also apply to fallback cards after a failure during a pending read.
 
-These checks do not make a concurrent read atomic. Coordinated ABA changes,
-replacement after the last comparison, changes between checking the two files,
+These checks do not make a concurrent read atomic. A replacement with the same
+captured bytes and an additional append can be mistaken for the original file;
+file identity is not compared. Coordinated ABA changes, replacement after the
+last comparison, changes between checking the two files,
 or a writer that never records an event can remain undetected. An append after
 the captured length may only be seen on the next poll. The source cannot tell a
 live partial write from a permanently interrupted one, cannot guarantee a future
@@ -80,6 +91,9 @@ completion or notice every writer failure, and its memory of loss does not
 survive a process restart. It does not discover a real profile, register hooks,
 or start itself in the application. Synthetic tests of bounded input and known
 failures do not establish behavior for a real Claude installation.
+
+Do not connect this reader to real profiles until the remaining file identity
+gap and the other documented integration limitations are handled.
 
 The phase-aware format must not be passed to the old reader: an older monitor
 can misinterpret a phase event as a confirmed step. A separate journal and an
@@ -98,7 +112,7 @@ directory and accept no external event or fixture arguments. The
 `claude-file-source` job in `.github/workflows/windows-dotnet-path-safety.yml`
 runs them on disposable hosted Windows with a cleared child environment,
 synthetic temporary/profile directories and `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0`.
-It passed 77 checks in [CI run 43465447532](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43465447532).
+The latest candidate passed 147 checks in [CI run 43474236228](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43474236228).
 
 The WPF file and title-retention checks require Windows and a similarly isolated
 test environment; they were not run by that job. Do not invoke old local test
