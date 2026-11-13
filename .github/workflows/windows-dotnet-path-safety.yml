@@ -396,3 +396,89 @@ jobs:
               }
             }
           }
+
+  provider-confidence-experiment:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: '1'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - name: Exercise synthetic provider confidence boundaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Read-PathState([string]$scope) {
+            $key = if ($scope -eq 'User') {
+              [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false)
+            } else {
+              [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment', $false)
+            }
+            try {
+              return [pscustomobject]@{
+                Value = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                Kind = [string]$key.GetValueKind('Path')
+              }
+            } finally { $key.Dispose() }
+          }
+          $beforeUser = Read-PathState 'User'
+          $beforeMachine = Read-PathState 'Machine'
+          try {
+            $root = Join-Path $env:RUNNER_TEMP 'aitm-provider-confidence'
+            $source = Join-Path $root 'source'
+            $template = Join-Path $root 'template'
+            $hooks = Join-Path $root 'hooks'
+            $fixture = Join-Path $root 'fixtures'
+            New-Item -ItemType Directory -Path $source, $template, $hooks, $fixture -Force | Out-Null
+            git -c credential.helper= -c core.hooksPath="$hooks" -c init.defaultBranch=integration init --quiet --template="$template" "$source"
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot initialize the synthetic source checkout.' }
+            git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$env:GITHUB_SHA"
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch the exact test revision.' }
+            git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot select the test revision.' }
+            $verifiedSources = @{
+              'windows/app/integrations/ProviderRuntime.ps1' = '43d06e3900530cae9a0769a1a9db0e8a675e9720'
+              'windows/native/Providers/SafeJsonDeserializer.cs' = '80d8b2a0787398e97d74267245809c2535867d19'
+            }
+            foreach ($relative in $verifiedSources.Keys) {
+              $actual = & git -C "$source" hash-object -- $relative
+              if ($LASTEXITCODE -ne 0 -or ([string]$actual).Trim() -cne $verifiedSources[$relative]) {
+                throw 'A reviewed provider dependency differs from the pinned source.'
+              }
+            }
+            $taskDir = Join-Path $root ('run-' + [guid]::NewGuid().ToString('N'))
+            $null = [IO.Directory]::CreateDirectory($taskDir)
+            $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH = '0'
+            $env:DOTNET_CLI_HOME = Join-Path $taskDir 'dotnet-cli'
+            $env:NUGET_PACKAGES = Join-Path $taskDir 'packages'
+            $env:TEMP = Join-Path $taskDir 'temp'
+            $env:TMP = $env:TEMP
+            $null = [IO.Directory]::CreateDirectory($env:TEMP)
+            $config = Join-Path $taskDir 'NuGet.Config'
+            [IO.File]::WriteAllText($config, '<configuration><packageSources><clear /></packageSources></configuration>', [Text.UTF8Encoding]::new($false))
+            $project = Join-Path $source 'windows/native/ProviderConfidence/ProviderConfidence.Tests.csproj'
+            $artifacts = Join-Path $taskDir 'artifacts'
+            dotnet restore $project --configfile $config --packages $env:NUGET_PACKAGES --artifacts-path $artifacts --disable-build-servers '-p:Configuration=Release'
+            if ($LASTEXITCODE -ne 0) { throw 'Synthetic provider restore failed.' }
+            dotnet build $project -c Release --no-restore --artifacts-path $artifacts --disable-build-servers
+            if ($LASTEXITCODE -ne 0) { throw 'Synthetic provider build failed.' }
+            $assembly = Join-Path $artifacts 'bin/ProviderConfidence.Tests/release/AITaskMonitor.ProviderConfidence.Tests.dll'
+            dotnet $assembly
+            if ($LASTEXITCODE -ne 0) { throw 'Synthetic provider state checks failed.' }
+            $powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+            $test = Join-Path $source 'windows/native/ProviderConfidence/Test-ProviderConfidenceRuntime.ps1'
+            & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $test
+            if ($LASTEXITCODE -ne 0) { throw 'Synthetic provider runtime checks failed.' }
+          } finally {
+            foreach ($scope in @('User', 'Machine')) {
+              $before = if ($scope -eq 'User') { $beforeUser } else { $beforeMachine }
+              $after = Read-PathState $scope
+              if ($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind) {
+                throw "$scope PATH changed during the integration test."
+              }
+            }
+          }
