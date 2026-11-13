@@ -552,7 +552,7 @@ namespace AITaskMonitor.Claude {
  // One instance belongs to one monitor source for the lifetime of the
  // monitor. A missing prefix cannot erase loss already observed by it.
  public sealed class SessionReader {
-  private const int MaximumRetained = 256;
+  internal const int MaximumRetained = 256;
   // Hooks limit titles to 240 and identifiers to 128 UTF-16 code units.
   // Cap retained data as well for old or independently produced records.
   private const int MaximumRetainedSteps = 128;
@@ -579,7 +579,7 @@ namespace AITaskMonitor.Claude {
    return title.Substring(0, count) + "\u2026";
   }
 
-  private static Task Freeze(Task item, Task previous, bool preserveConflictingNames) {
+  internal static Task Freeze(Task item, Task previous, bool preserveConflictingNames) {
    bool incomplete = item.RetainedPlanIncomplete || (previous != null && previous.RetainedPlanIncomplete);
    var steps = new List<Step>();
    // Earlier titles are useful when the readable suffix contains only part of

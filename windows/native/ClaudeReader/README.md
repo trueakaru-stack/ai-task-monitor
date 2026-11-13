@@ -14,11 +14,33 @@ also marks the retained plan incomplete. Values no longer present or observed
 cannot be recovered.
 
 `ClaudeFileSource` reads caller-supplied journal paths and connection state. It
-limits each read to 4 MiB, waits for complete UTF-8 lines, and keeps previous
-names when it detects a read error, truncation, or a changed tail at the previous
-file boundary. This detects particular changes, not every possible replacement
-or loss. Its memory of loss does not survive a process restart. It does not
-discover a real profile, register hooks, or start itself in the application.
+limits each read to 4 MiB and only parses complete UTF-8 lines. If a bounded
+snapshot ends with an incomplete line, including after complete events, it
+retains known cards and step titles with unconfirmed activity and unknown step
+statuses. The incomplete snapshot does not advance the stateful session reader;
+a completed append can restore confirmation if no loss was detected. A read
+error, truncation, or changed tail at the previous file boundary instead records
+source loss and retains names as unconfirmed for this reader's lifetime. Moving
+the 4 MiB window past previously observed full records also records loss because
+those records may contain needed plan evidence. A first read of a journal larger
+than 4 MiB likewise marks its unseen prefix as loss, even when the retained tail
+starts exactly at a line boundary. This conservatively keeps large-journal plans
+unconfirmed; names that were never observed cannot be reconstructed.
+
+Pending snapshots use the session reader's existing retention rules: at most
+256 cards and 128 retained steps per card, with bounded step titles and IDs.
+An incomplete retained plan is flagged and retention overflow marks the source
+unavailable and unconfirmed rather than silently confirming a partial view.
+These bounds also apply to fallback cards after a failure during a pending read.
+
+The check describes the snapshot obtained during a poll: an append after that
+snapshot may only be seen on the next poll. A missing event or a replacement
+that preserves the checked file boundary may not be detected. The source cannot
+tell a live partial write from a permanently interrupted one, cannot guarantee a
+future completion or notice every writer failure, and its memory of loss does
+not survive a process restart. It does not discover a real profile, register
+hooks, or start itself in the application. Synthetic tests of bounded input and
+known failures do not establish behavior for a real Claude installation.
 
 The phase-aware format must not be passed to the old reader: an older monitor
 can misinterpret a phase event as a confirmed step. A separate journal and an
