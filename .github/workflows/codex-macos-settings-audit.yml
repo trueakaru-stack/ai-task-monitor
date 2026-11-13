@@ -107,7 +107,22 @@ jobs:
                   before = json.loads((base / f"{stem}.json").read_text())
                   after = json.loads((candidate / f"{stem}.json").read_text())
                   assert before["baseline"] is True and after["baseline"] is False
+                  assert before["language"] == after["language"] == language
+                  assert before["theme"] == after["theme"] == theme
+                  assert before["hostBounds"] == after["hostBounds"]
+                  assert abs(before["windowBackingScale"] - after["windowBackingScale"]) < 0.001
                   assert len(before["menus"]) == len(after["menus"]) == 6
+                  old_captures = {entry["file"]: entry for entry in before["captures"]}
+                  new_captures = {entry["file"]: entry for entry in after["captures"]}
+                  assert old_captures.keys() == new_captures.keys()
+                  for name, old_capture in old_captures.items():
+                      new_capture = new_captures[name]
+                      assert len(old_capture["menus"]) == len(new_capture["menus"]) == 6
+                      for x, y in zip(old_capture["menus"], new_capture["menus"]):
+                          assert (x["row"], x["value"], x["selectedTitle"], x["enabled"]) == (y["row"], y["value"], y["selectedTitle"], y["enabled"]), (name, x, y)
+                  for report in (before, after):
+                      pixels = [x for x in report["pixelChecks"] if "skipped" not in x]
+                      assert pixels and all(max(x["changedPixelsTopOrigin"], x["changedPixelsBottomOrigin"]) > 2 for x in pixels)
                   b = {entry["title"]: entry for entry in before["journalButtons"]}
                   a = {entry["title"]: entry for entry in after["journalButtons"]}
                   assert len(a) == len(b) == 2 and a.keys() == b.keys()
