@@ -6,6 +6,27 @@ param(
     [Parameter(Mandatory=$true)][ValidateSet('ru','en')][string]$Language,
     [Parameter(Mandatory=$true)][ValidateSet('old-plan','gap','unknown','multi')][string]$Scene
 )
+try {
+    $isolatedInvocationConfirmed = & {
+        param([string]$scriptPath, [string]$scriptDirectory)
+        $ErrorActionPreference = 'Stop'
+        function Assert-PrototypeIsolatedInvocation { throw 'The test safety helper did not load.' }
+        $null = . (Join-Path $scriptDirectory '../Assert-PrototypeIsolatedInvocation.ps1')
+        $currentProcess = [Diagnostics.Process]::GetCurrentProcess()
+        try {
+            $confirmation = @(Assert-PrototypeIsolatedInvocation -ProcessArguments ([Environment]::GetCommandLineArgs()) `
+                -ScriptPath $scriptPath -ExecutablePath $currentProcess.MainModule.FileName `
+                -PowerShellRoot $PSHOME -Edition $PSVersionTable.PSEdition)
+            if ($confirmation.Count -ne 1 -or $confirmation[0] -isnot [bool] -or -not $confirmation[0]) {
+                throw 'The test safety helper did not confirm an isolated invocation.'
+            }
+        } finally { $currentProcess.Dispose() }
+        return $true
+    } $PSCommandPath $PSScriptRoot
+} catch { throw "Prototype safety guard failed: $($_.Exception.Message)" }
+if ($isolatedInvocationConfirmed -ne $true) { throw 'Prototype safety guard failed to confirm an isolated invocation.' }
+
+# Reference capture body starts below the invocation guard.
 $ErrorActionPreference = 'Stop'
 function IsWithin([string]$path, [string]$root) {
     $path = [IO.Path]::GetFullPath($path).TrimEnd('\','/')
