@@ -1,0 +1,65 @@
+name: macOS synthetic fixture check
+
+on:
+  push:
+    branches: [codex/macos-build-fixtures-20261113]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            developer-dir: /Applications/Xcode_16.1.app/Contents/Developer
+          - os: macos-26
+            developer-dir: /Applications/Xcode.app/Contents/Developer
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer-dir }}
+    steps:
+      - name: Fetch the exact test commit into an isolated directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test ! -e "$RUNNER_TEMP/aitm-fixture-source"
+          mkdir -p "$RUNNER_TEMP/aitm-empty-template" "$RUNNER_TEMP/aitm-empty-hooks"
+          git -c init.templateDir="$RUNNER_TEMP/aitm-empty-template" \
+              -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" init "$RUNNER_TEMP/aitm-fixture-source"
+          git -C "$RUNNER_TEMP/aitm-fixture-source" -c credential.helper= \
+              -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" fetch --no-tags --depth=1 \
+              "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git -C "$RUNNER_TEMP/aitm-fixture-source" -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/aitm-fixture-source" rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Run the build job's Swift tests
+        shell: bash
+        working-directory: ${{ runner.temp }}/aitm-fixture-source/macos
+        run: |
+          set -euo pipefail
+          test -z "${AITM_NODE-}${AITM_DSH_ANCHOR-}${AITM_PNPM_SCRIPT-}${AITM_HERMES_SOURCE-}"
+          for module in provider-observers.mjs provider-v2-sender.mjs provider-events.mjs provider-transport.mjs; do
+            cmp "integrations/$module" "../.github/provider-audit/v2-restart-20261109/macos/integrations/$module"
+          done
+          bash ./scripts/run-swift-tests.sh 2>&1 | tee "$RUNNER_TEMP/aitm-fixture-tests.log"
+          for test in \
+            testClaudeLossAndProviderReconnectRemainIsolatedWithV2Enabled \
+            testJavaScriptSenderUsesRealSocketWithoutProfileOrNetwork \
+            testTwoSyntheticProfilesUseRealLocalChannel \
+            testPythonAndSwiftUseTheSameMonotonicClock; do
+            grep -F "$test" "$RUNNER_TEMP/aitm-fixture-tests.log" | grep -F 'passed (' >/dev/null
+          done
+      - name: Build and smoke-test the application
+        shell: bash
+        working-directory: ${{ runner.temp }}/aitm-fixture-source/macos
+        run: |
+          set -euo pipefail
+          test ! -e dist
+          ./scripts/build-app.sh
+          ./scripts/smoke-test.sh 'dist/AI Task Monitor.app'
