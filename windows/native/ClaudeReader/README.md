@@ -55,19 +55,15 @@ Later observed activity can show the card again, with uncertainty retained
 where the source does not prove the full history.
 
 The synthetic file tests create a new directory inside the process temporary
-directory and accept no external event or fixture arguments. The WPF checks use
-the same checked-in fixture and require Windows. They do not launch a real agent
-or register hooks:
+directory and accept no external event or fixture arguments. The
+`claude-file-source` job in `.github/workflows/windows-dotnet-path-safety.yml`
+runs them on disposable hosted Windows with a cleared child environment,
+synthetic temporary/profile directories and `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0`.
+It passed 77 checks in [CI run 43465447532](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43465447532).
 
-```powershell
-dotnet run --project .\windows\native\Tests\ClaudeFileSource\ClaudeFileSource.Tests.csproj -c Release
-dotnet run --project .\windows\native\Tests\ClaudeFileUi\ClaudeFileUi.Tests.csproj -c Release
-dotnet run --project .\windows\native\Tests\ClaudeTitleRetention\ClaudeTitleRetention.Tests.csproj -c Release
-```
-
-Set the test process's temporary and profile directories to a disposable
-location when isolation is required. `Test-ClaudeReader.ps1` is the earlier
-source-identity check for the legacy embedded reader; the phase-aware native
-reader intentionally diverges, so that older check is not an acceptance test for
-this version. Real Claude sessions, final application integration and installer
-behavior remain unverified.
+The WPF file and title-retention checks require Windows and a similarly isolated
+test environment; they were not run by that job. Do not invoke old local test
+runners without reviewing their environment handling. `Test-ClaudeReader.ps1`
+is an earlier source-identity check for the legacy embedded reader, not an
+acceptance test for this version. Real Claude sessions, final application
+integration and installer behavior remain unverified.

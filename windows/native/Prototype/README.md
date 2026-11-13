@@ -27,12 +27,10 @@ real Claude connection. The file-to-window tests are documented in the
 The preview can also render a caller-supplied synthetic repeated-error warning
 and pass its dismissal back to that caller. It does not start the loop detector
 or hook, and the application entry point does not supply these warnings. A
-synthetic WPF test covers both layouts, languages and themes, focus retention
-and scrolling:
-
-```powershell
-dotnet run --project .\windows\native\Tests\LoopWarningUi\LoopWarningUi.Tests.csproj -c Release
-```
+synthetic WPF test in `windows/native/Tests/LoopWarningUi/` covers both layouts,
+languages and themes, focus retention and scrolling. Run it only on a disposable
+hosted Windows environment with isolated temporary/profile directories and
+`DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0` for every SDK process.
 
 The tests exercise programmatic WPF focus; a real active window, physical
 keyboard input, visible focus indication, and high-DPI behavior remain

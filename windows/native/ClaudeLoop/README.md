@@ -16,14 +16,12 @@ delayed across a settings change can lead to an incorrect warning; a known
 gap instead discards the affected batch. The detector is not a security or
 audit boundary.
 
-Run the synthetic Windows checks with:
-
-```powershell
-dotnet run --project .\windows\native\Tests\ClaudeLoop\ClaudeLoop.Tests.csproj -c Release
-```
-
-The tests use synthetic observations and unique local pipes; they do not open
-real Claude profiles or register hooks. They intentionally exercise the known
+The synthetic Windows checks in `windows/native/Tests/ClaudeLoop/` use
+synthetic observations and unique local pipes; they do not open real Claude
+profiles or register hooks. Run them only in a disposable hosted Windows
+environment with isolated temporary/profile directories and
+`DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0` for every SDK process. No dedicated CI run
+for these checks is claimed here. They intentionally exercise the known
 limitation that delayed events cannot be distinguished from new events. Real
 Claude sessions, the complete application, accessibility and the installer
 remain unverified.
