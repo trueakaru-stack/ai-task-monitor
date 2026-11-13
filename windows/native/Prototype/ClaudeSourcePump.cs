@@ -24,7 +24,7 @@ internal sealed class ClaudeSourcePump : IDisposable
     private ClaudeSourceSnapshot lastPresented = new([], false);
     private ClaudeSourceSnapshot? lastSourceSnapshot;
     private ClaudeConnection connection;
-    private bool started, inFlight, rerun, disposed, timedOut;
+    private bool started, inFlight, rerun, disposed, timedOut, refreshInvalidatedSinceDelivery;
     private long pollStarted;
     private object revision = new();
 
@@ -65,13 +65,13 @@ internal sealed class ClaudeSourcePump : IDisposable
         dispatcher.VerifyAccess();
         ObjectDisposedException.ThrowIf(disposed, this);
         source.NotifyConnection(next);
-        bool changed = connection != next;
+        if (connection == next) return;
         connection = next;
         revision = new object();
+        refreshInvalidatedSinceDelivery = true;
         if (!started) return;
         if (inFlight) rerun = true;
         else StartPoll();
-        if (!changed) return;
         if (next == ClaudeConnection.Disconnected) Present(new ClaudeSourceSnapshot([], false));
         else if (next == ClaudeConnection.Partial) Present(lastPresented, true);
     }
@@ -81,8 +81,19 @@ internal sealed class ClaudeSourcePump : IDisposable
         dispatcher.VerifyAccess();
         ObjectDisposedException.ThrowIf(disposed, this);
         if (!started) throw new InvalidOperationException("Start the source pump before requesting a refresh.");
+        if (inFlight)
+        {
+            // Invalidate at most one read between presentations. Further
+            // requests still schedule a follow-up, but cannot starve it.
+            if (!refreshInvalidatedSinceDelivery)
+            {
+                revision = new object();
+                refreshInvalidatedSinceDelivery = true;
+            }
+            rerun = true;
+            return;
+        }
         revision = new object();
-        if (inFlight) { rerun = true; return; }
         StartPoll();
     }
 
@@ -129,6 +140,7 @@ internal sealed class ClaudeSourcePump : IDisposable
         deadline = null;
         timedOut = true;
         revision = new object();
+        refreshInvalidatedSinceDelivery = true;
         rerun = true;
         // Only the lightweight signal runs on the dispatcher; it does not wait
         // for the potentially blocked file-read lock or create another worker.
@@ -149,7 +161,6 @@ internal sealed class ClaudeSourcePump : IDisposable
         }
         deadline?.Stop();
         deadline = null;
-        inFlight = false;
         try
         {
             if (result.IsFaulted) _ = result.Exception;
@@ -158,15 +169,23 @@ internal sealed class ClaudeSourcePump : IDisposable
                 if (result.Status == System.Threading.Tasks.TaskStatus.RanToCompletion && source.IsCurrent(result.Result))
                 {
                     lastSourceSnapshot = result.Result;
+                    refreshInvalidatedSinceDelivery = false;
                     Present(result.Result);
                 }
                 else if (result.Status != System.Threading.Tasks.TaskStatus.RanToCompletion)
+                {
+                    refreshInvalidatedSinceDelivery = false;
                     Present(connection == ClaudeConnection.Disconnected ? new ClaudeSourceSnapshot([], false) : lastPresented,
                         connection != ClaudeConnection.Disconnected);
+                }
             }
         }
         finally
         {
+            // Presentation can synchronously request another refresh. Keep the
+            // current poll reserved through that callback, then coalesce all
+            // requests into a single subsequent worker.
+            inFlight = false;
             if (!disposed && rerun) { rerun = false; StartPoll(); }
         }
     }

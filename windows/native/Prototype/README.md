@@ -35,17 +35,31 @@ in-flight file read has physically stopped. A poll has a configurable deadline
 immediately marks the displayed result unconfirmed, signals source loss without
 waiting for the file lock, and discards that poll's late result. It retains the
 last source-owned snapshot as a bounded fallback for previously shown names,
-including when a late stop was already read. Only one poll worker is allowed;
-repeated refreshes do not start more while it is blocked. A new poll can start
-only after that worker finishes. The deadline is dispatched on the WPF thread
+including when a late stop was already read. Each pump allows only one poll
+worker; repeated refreshes do not start more while it is blocked or while its
+result is being presented. Identical connection notifications have no effect.
+A refresh invalidates at most one in-flight result between presentations;
+further requests coalesce into a follow-up rather than starving every poll.
+A presented snapshot can therefore precede the latest refresh request, for
+which a follow-up is scheduled. Actual connection changes and timeouts always
+invalidate the previous result. The deadline is dispatched on the WPF thread
 and can itself be delayed if that thread is blocked; elapsed time is checked
 again before a result is presented. The deadline does not cancel I/O.
+
+The worker limit applies to a single pump instance. `Dispose` prevents later
+presentation but cannot stop a permanently blocked read; constructing another
+pump can therefore add another blocked worker. A future process owner must
+enforce a single pump for the lifetime of the process, including after disposal,
+until a separately verified cancellation or replacement contract exists. No
+guarantee is made that blocked I/O terminates. Both limitations block real
+integration; the current component does not enforce the single-pump contract.
 
 `windows/native/Tests/ClaudePump/ClaudePump.Tests.csproj` tests the pump with a
 dispatcher and synthetic files without opening a window. Its controlled races
 cover a disconnect before a background read, a connection change after a read,
-coalesced refreshes, snapshot isolation, partial inspection, stalled reads,
-late stops, bounded worker count and disposal.
+unchanged notifications, reentrant and continuous refreshes, snapshot
+isolation, partial inspection, stalled reads, late stops, bounded worker count
+per instance and disposal.
 The disposal test pauses after `Poll` returns and before the dispatcher applies
 its result; it does not block or test cancellation inside real file I/O. Run
 only on disposable hosted Windows with an isolated .NET 10 SDK and

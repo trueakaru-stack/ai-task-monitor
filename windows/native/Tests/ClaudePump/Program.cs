@@ -28,6 +28,9 @@ internal static class Program
             Dispatcher dispatcher = Dispatcher.CurrentDispatcher;
             CheckPartialAndIsolation(dispatcher, work, events, now);
             CheckInspectionErrorAfterDisconnect(dispatcher, work, events, now);
+            CheckUnchangedConnection(dispatcher, work, events, now);
+            CheckReentrantRefresh(dispatcher, work, events, now);
+            CheckContinuousRefresh(dispatcher, work, events, now);
             CheckDisconnectBeforeRead(dispatcher, work, events, now);
             CheckConnectionAfterRead(dispatcher, work, events, now);
             CheckTimeoutDuringRead(dispatcher, work, events, now);
@@ -103,6 +106,143 @@ internal static class Program
         Check(displayed[^1].Unavailable && displayed[^1].Tasks.Single().Unconfirmed &&
             !displayed[^1].Tasks.Single().PlanConfirmed,
             "A partial inspection must not confirm old events after disconnect.");
+    }
+
+    private static void CheckUnchangedConnection(Dispatcher dispatcher, string work, string events, DateTime now)
+    {
+        var source = Source(work, "unchanged-connection", events);
+        var displayed = new List<ClaudeSourceSnapshot>();
+        using var resultReached = new ManualResetEventSlim();
+        using var resultRelease = new ManualResetEventSlim();
+        int reads = 0, results = 0, completed = 0;
+        using var pump = new ClaudeSourcePump(dispatcher, source, ClaudeConnection.Connected,
+            snapshot => displayed.Add(snapshot), () => { Interlocked.Increment(ref reads); return now; },
+            TimeSpan.FromHours(1), _ =>
+            {
+                if (Interlocked.Increment(ref results) != 1) return;
+                resultReached.Set();
+                if (!resultRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException("The unchanged-connection fixture did not resume.");
+            }, () => completed++);
+        try
+        {
+            pump.Start();
+            WaitUntil(() => resultReached.IsSet, "The initial result was not reached.");
+            for (int i = 0; i < 50; i++) pump.NotifyConnection(ClaudeConnection.Connected);
+            resultRelease.Set();
+            WaitUntil(() => completed >= 1 && displayed.Count >= 1, "The unchanged connection starved the first result.");
+            for (int i = 0; i < 10; i++) pump.NotifyConnection(ClaudeConnection.Connected);
+            var watch = Stopwatch.StartNew();
+            WaitUntil(() => watch.Elapsed >= TimeSpan.FromMilliseconds(250), "The unchanged-connection observation did not complete.");
+            Check(Volatile.Read(ref reads) == 1 && completed == 1 && displayed.Count == 1 &&
+                displayed[0].Tasks.Single().PlanConfirmed,
+                "Repeated unchanged notifications invalidated a result or started a redundant worker.");
+            pump.RequestRefresh();
+            WaitUntil(() => completed >= 2 && displayed.Count >= 2, "An explicit refresh did not schedule a poll.");
+            Check(Volatile.Read(ref reads) == 2, "An explicit refresh did not retain its scheduling behavior.");
+        }
+        finally { resultRelease.Set(); }
+    }
+
+    private static void CheckReentrantRefresh(Dispatcher dispatcher, string work, string events, DateTime now)
+    {
+        var source = Source(work, "reentrant-refresh", events);
+        var displayed = new List<ClaudeSourceSnapshot>();
+        using var nextReached = new ManualResetEventSlim();
+        using var nextRelease = new ManualResetEventSlim();
+        int reads = 0, active = 0, overlap = 0, completed = 0;
+        ThreadPool.GetMinThreads(out int originalWorkers, out int originalIo);
+        ThreadPool.SetMinThreads(Math.Max(originalWorkers, 4), originalIo);
+        ClaudeSourcePump? pump = null;
+        try
+        {
+            pump = new ClaudeSourcePump(dispatcher, source, ClaudeConnection.Connected, snapshot =>
+            {
+                displayed.Add(snapshot);
+                if (displayed.Count == 1)
+                {
+                    pump!.RequestRefresh();
+                    pump.RequestRefresh();
+                }
+            }, () =>
+            {
+                if (Interlocked.Increment(ref active) > 1) Interlocked.Exchange(ref overlap, 1);
+                if (Interlocked.Increment(ref reads) == 2)
+                {
+                    nextReached.Set();
+                    if (!nextRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException("The reentrant poll did not resume.");
+                }
+                return now;
+            }, TimeSpan.FromHours(1), _ => Interlocked.Decrement(ref active), () => completed++);
+            pump.Start();
+            WaitUntil(() => nextReached.IsSet, "The coalesced reentrant poll did not start.");
+            var watch = Stopwatch.StartNew();
+            WaitUntil(() => watch.Elapsed >= TimeSpan.FromMilliseconds(1200), "The reentrant worker observation did not complete.");
+            Check(Volatile.Read(ref reads) == 2 && Volatile.Read(ref overlap) == 0 && displayed.Count == 1,
+                "A reentrant presentation created overlapping or redundant workers.");
+            nextRelease.Set();
+            WaitUntil(() => completed >= 2 && displayed.Count >= 2, "The reentrant follow-up did not finish.");
+            Check(Volatile.Read(ref reads) == 2 && Volatile.Read(ref overlap) == 0 && Volatile.Read(ref active) == 0,
+                "Reentrant requests did not coalesce into exactly one worker.");
+        }
+        finally
+        {
+            nextRelease.Set();
+            pump?.Dispose();
+            ThreadPool.SetMinThreads(originalWorkers, originalIo);
+        }
+    }
+
+    private static void CheckContinuousRefresh(Dispatcher dispatcher, string work, string events, DateTime now)
+    {
+        var source = Source(work, "continuous-refresh", events);
+        var displayed = new List<ClaudeSourceSnapshot>();
+        using var secondReached = new ManualResetEventSlim();
+        using var secondRelease = new ManualResetEventSlim();
+        using var thirdReached = new ManualResetEventSlim();
+        using var thirdRelease = new ManualResetEventSlim();
+        int reads = 0, completed = 0, requests = 0;
+        using var pump = new ClaudeSourcePump(dispatcher, source, ClaudeConnection.Connected,
+            snapshot => displayed.Add(snapshot), () =>
+            {
+                int call = Interlocked.Increment(ref reads);
+                if (call == 2)
+                {
+                    secondReached.Set();
+                    if (!secondRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException("The second poll did not resume.");
+                }
+                else if (call == 3)
+                {
+                    thirdReached.Set();
+                    if (!thirdRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException("The third poll did not resume.");
+                }
+                return now;
+            }, TimeSpan.FromHours(1), null, () => completed++);
+        var requestsTimer = new DispatcherTimer(DispatcherPriority.Normal, dispatcher) { Interval = TimeSpan.FromMilliseconds(5) };
+        requestsTimer.Tick += (_, _) => { requests++; pump.RequestRefresh(); };
+        try
+        {
+            pump.Start();
+            WaitUntil(() => completed == 1 && displayed.Count == 1, "Continuous-refresh setup did not finish.");
+            pump.RequestRefresh();
+            WaitUntil(() => secondReached.IsSet, "The second poll did not start.");
+            requestsTimer.Start();
+            WaitUntil(() => requests >= 10, "Repeated requests were not delivered during the second poll.");
+            secondRelease.Set();
+            WaitUntil(() => thirdReached.IsSet, "The invalidated poll did not schedule a follow-up.");
+            Check(displayed.Count == 1, "The first explicitly invalidated result was presented.");
+            int previousRequests = requests;
+            WaitUntil(() => requests >= previousRequests + 10, "Repeated requests were not delivered during the follow-up.");
+            thirdRelease.Set();
+            WaitUntil(() => completed >= 3 && displayed.Count >= 2, "Continuous requests starved all further results.");
+            Check(displayed[1].Tasks.Single().PlanConfirmed && requests >= 20,
+                "A follow-up under continuous refresh failed to present its valid snapshot.");
+        }
+        finally
+        {
+            requestsTimer.Stop();
+            secondRelease.Set();
+            thirdRelease.Set();
+        }
     }
 
     private static void CheckDisconnectBeforeRead(Dispatcher dispatcher, string work, string events, DateTime now)
