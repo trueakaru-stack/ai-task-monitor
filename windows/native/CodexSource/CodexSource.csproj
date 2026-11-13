@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>AITaskMonitor.CodexSource</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Tests\**\*.cs" />
+    <ProjectReference Include="..\Codex\Codex.csproj" />
+    <ProjectReference Include="..\CodexIndex\CodexIndex.csproj" />
+    <ProjectReference Include="..\CodexDiscovery\CodexDiscovery.csproj" />
+  </ItemGroup>
+</Project>
