@@ -22,9 +22,23 @@ $hook=Join-Path $install 'ClaudeTaskHook.ps1'
 $compiler=Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $stage=Join-Path $install 'ClaudeStageObservation.dll'
 $stageSource=Join-Path $repo 'windows\app\ClaudeStageObservation.cs'
-$global:LASTEXITCODE=0
-& $compiler '/nologo' '/target:library' '/platform:anycpu' '/reference:System.Web.Extensions.dll' ('/out:'+$stage) $stageSource
-if($LASTEXITCODE -ne 0 -or -not [IO.File]::Exists($stage)){throw 'Synthetic helper compilation failed.'}
+$compilerStart=[Diagnostics.ProcessStartInfo]::new($compiler)
+$compilerStart.UseShellExecute=$false
+$compilerStart.CreateNoWindow=$true
+$compilerStart.RedirectStandardOutput=$true
+$compilerStart.RedirectStandardError=$true
+foreach($item in @('/nologo','/target:library','/platform:anycpu','/reference:System.Web.Extensions.dll',('/out:'+$stage),$stageSource)){
+    [void]$compilerStart.ArgumentList.Add($item)
+}
+$compileProcess=[Diagnostics.Process]::Start($compilerStart)
+try {
+    $compileOutput=$compileProcess.StandardOutput.ReadToEndAsync()
+    $compileError=$compileProcess.StandardError.ReadToEndAsync()
+    if(-not $compileProcess.WaitForExit(15000)){$compileProcess.Kill($true);throw 'Synthetic compiler timed out.'}
+    if($compileProcess.ExitCode -ne 0 -or -not [IO.File]::Exists($stage)){
+        throw ('Synthetic helper compilation failed: '+$compileOutput.Result+$compileError.Result)
+    }
+} finally {$compileProcess.Dispose()}
 function Invoke-Synthetic([string[]]$arguments,[string]$payload,[bool]$capture,[bool]$addPowerShellPath){
     $start=[Diagnostics.ProcessStartInfo]::new()
     $psDirectory=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0'
