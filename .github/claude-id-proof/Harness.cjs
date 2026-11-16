@@ -70,6 +70,11 @@ async function run() {
         return;
       }
       requests++;
+      if (requests > 12) {
+        res.writeHead(429, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Synthetic request limit' } }));
+        return;
+      }
       let request;
       try { request = JSON.parse(body); } catch { res.writeHead(400); res.end(); return; }
       const messages = request.messages || [];
@@ -77,7 +82,8 @@ async function run() {
       for (let i = 0; i < messages.length; i++) {
         const m = messages[i];
         if (m.role === 'user' && (typeof m.content === 'string' ||
-            (Array.isArray(m.content) && m.content.some(c => c && c.type === 'text')))) lastPrompt = i;
+            (Array.isArray(m.content) && m.content.some(c => c && c.type === 'text') &&
+             !m.content.some(c => c && c.type === 'tool_result')))) lastPrompt = i;
       }
       const messageHasToolResult = messages.slice(lastPrompt + 1).some(m =>
         Array.isArray(m.content) && m.content.some(c => c && c.type === 'tool_result'));
