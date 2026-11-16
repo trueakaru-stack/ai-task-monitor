@@ -66,6 +66,49 @@ using (var preStartEvidence = new ClaudeFileSource(preStartPath, null, now.AddSe
         !preStartSnapshot.ObservedPromptIds.Contains("observed"),
         "Activity after startup must not make a prior prompt evidence for current progress.");
 }
+
+string UnsafeEvent(string session, DateTime time, string name, string tool = "", string phase = "",
+    string id = "", string subject = "", string status = "", string previous = "", string requested = "")
+{
+    var item = new Dictionary<string, object> {
+        ["session_id"] = session, ["timestamp"] = time.ToString("O"), ["event"] = name,
+        ["active"] = true, ["tool_name"] = tool, ["task_id"] = id,
+        ["task_subject"] = subject, ["task_status"] = status
+    };
+    if (phase.Length != 0) { item["stage_phase"] = phase; item["stage_version"] = 1; }
+    if (previous.Length != 0) item["stage_previous_status"] = previous;
+    if (requested.Length != 0) { item["stage_requested_status"] = requested; item["stage_task_id"] = id; item["task_id"] = ""; }
+    return JsonSerializer.Serialize(item) + "\n";
+}
+bool CandidateAccepts(string name, bool oldAttempt, bool includeAttempt, bool equalStageTime, bool equalBoundary)
+{
+    string session = "counterexample-" + name;
+    DateTime prompt = now.AddSeconds(-10);
+    DateTime boundary = equalBoundary ? prompt : prompt.AddSeconds(-3);
+    var data = new StringBuilder();
+    if (oldAttempt) data.Append(UnsafeEvent(session, prompt.AddSeconds(-1), "PreToolUse", "TaskCreate", "create_attempt", subject: "old step"));
+    data.Append(UnsafeEvent(session, prompt, "UserPromptSubmit"));
+    if (includeAttempt) data.Append(UnsafeEvent(session, equalStageTime ? prompt : prompt.AddMilliseconds(10),
+        "PreToolUse", "TaskCreate", "create_attempt", subject: "old step"));
+    data.Append(UnsafeEvent(session, prompt.AddSeconds(1), "PostToolUse", "TaskCreate", "create_observed", "old", "old step"));
+    data.Append(UnsafeEvent(session, prompt.AddSeconds(2), "PreToolUse", "TaskUpdate", "update_attempt", "old", requested: "completed"));
+    data.Append(UnsafeEvent(session, prompt.AddSeconds(3), "PostToolUse", "TaskUpdate", "update_observed", "old", status: "completed", previous: "pending"));
+    string path = Path.Combine(work, "counterexample-" + name + ".jsonl");
+    File.WriteAllText(path, data.ToString(), utf8);
+    using var candidate = new ClaudeFileSource(path, null, boundary);
+    var result = candidate.Poll(ClaudeConnection.Connected, now);
+    var task = result.Tasks.Single();
+    Check(!result.Unavailable && task.KnownStepCount == 1, "The counterexample did not reach the proposed progress gate.");
+    return result.ObservedPromptIds.Contains(session);
+}
+bool crossedAttempt = CandidateAccepts("crossed", true, false, false, false);
+bool unpairedResult = CandidateAccepts("unpaired", false, false, false, false);
+bool sameTimestamp = CandidateAccepts("same-time", false, true, true, false);
+bool equalBoundary = CandidateAccepts("boundary", false, true, false, true);
+Console.WriteLine($"Synthetic unsafe eligibility: crossed={crossedAttempt}, unpaired={unpairedResult}, same-time={sameTimestamp}, boundary={equalBoundary}");
+Check(!crossedAttempt && !unpairedResult && !sameTimestamp && !equalBoundary,
+    "Uncorrelated or equal-boundary evidence must not authorize progress.");
+
 string firstTitle = observed.Steps[0].title;
 observed.Steps[0].title = "externally modified";
 snapshot = source.Poll(ClaudeConnection.Connected, now);
