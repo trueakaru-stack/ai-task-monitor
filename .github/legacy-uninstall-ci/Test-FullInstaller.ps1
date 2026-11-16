@@ -43,7 +43,7 @@ $runnerProfile=[IO.Path]::GetFullPath($env:USERPROFILE)
 Check ([string]::Equals($runnerProfile,[IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)),[StringComparison]::OrdinalIgnoreCase)) 'The disposable runner profile identity is inconsistent.'
 $values=@{}
 foreach($key in $ProcessValues.Keys){$values[$key]=$ProcessValues[$key]}
-$profile=Join-Path $FixtureRoot 'full-profile';$local=Join-Path $FixtureRoot 'full-local';$roaming=Join-Path $FixtureRoot 'full-roaming';$tmp=Join-Path $FixtureRoot 'full-temp'
+$profile=Join-Path $FixtureRoot 'full-profile';$local=Join-Path $profile 'AppData\Local';$roaming=Join-Path $profile 'AppData\Roaming';$tmp=Join-Path $FixtureRoot 'full-temp'
 foreach($dir in @($profile,$local,$roaming,$tmp)){[void][IO.Directory]::CreateDirectory($dir)}
 [void][IO.Directory]::CreateDirectory((Join-Path $roaming 'Microsoft\Windows\Start Menu\Programs'))
 $values.USERPROFILE=$profile;$values.LOCALAPPDATA=$local;$values.APPDATA=$roaming;$values.TEMP=$tmp;$values.TMP=$tmp
