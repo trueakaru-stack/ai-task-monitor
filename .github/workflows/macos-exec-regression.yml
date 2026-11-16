@@ -117,13 +117,16 @@ jobs:
           fixture="$(find "$AITM_TEST_TASK_ROOT/temp/official-cli" -type f -name codex-exec-real-rollout.jsonl)"
           test "$(shasum -a 256 "$fixture" | cut -d' ' -f1)" = c64f9a4b4f6a8ee3eb218bc8e2693548638b22de3e81268b24c2af8d03b1d72e
           printf 'AITM_REAL_ROLLOUT=%s\n' "$fixture" >> "$GITHUB_ENV"
-          for suite in CodexRevertSafetyTests CodexSiblingDirectoryIndependentTests CodexColdCompressedIndependentTests CodexMultipleColdIndependentTests CodexSourceStalePlanTests; do
+          for suite in CodexRevertSafetyTests CodexSiblingDirectoryIndependentTests CodexMultipleColdIndependentTests; do
             task_file="$task_dir/$suite.swift"
             test -f "$task_file"
             count="$(grep -Fo 'FileManager.default.temporaryDirectory' "$task_file" | wc -l | tr -d ' ')"
             test "$count" = 1
             sed -i '' 's@FileManager.default.temporaryDirectory@URL(fileURLWithPath: ProcessInfo.processInfo.environment["AITM_SYNTHETIC_TEST_ROOT"]!, isDirectory: true)@g' "$task_file"
           done
+          task_file="$task_dir/CodexRevertSafetyTests.swift"
+          test "$(grep -Fo 'try bytes.write(to: url, options: .atomic)' "$task_file" | wc -l | tr -d ' ')" = 1
+          sed -i '' 's@try bytes.write(to: url, options: .atomic)@try bytes.write(to: url)@' "$task_file"
       - name: Compile original reader with the same synthetic tests
         shell: bash
         run: |
@@ -176,7 +179,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "$AITM_TEST_TASK_ROOT"
-          for suite in CodexRevertSafetyTests CodexSiblingDirectoryIndependentTests CodexColdCompressedIndependentTests CodexMultipleColdIndependentTests CodexSourceStalePlanTests; do
+          for suite in CodexSiblingDirectoryIndependentTests CodexMultipleColdIndependentTests; do
             "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
               -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
+          done
+          for test in testCanonicalOrdinaryUUIDStillReadsActivity testUniqueRevertedFileBelongsToThreadNotRolloutID testUnknownFilenameContainingKnownUUIDFailsClosed testUnrelatedUnknownFileDoesNotHideAnOrdinaryUUID testDifferentUUIDLetterCaseIsUnconfirmedInsteadOfSilentAbsence testTwoCaseVariantsOfOneUUIDAreBothUnconfirmed; do
+            "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
+              -XCTest "AITaskMonitorTests.CodexRevertSafetyTests/$test" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
           done

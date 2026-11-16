@@ -35,25 +35,38 @@ struct CodexTaskReader {
         let index = codexHome.appendingPathComponent("session_index.jsonl")
         if !fileManager.fileExists(atPath: codexHome.path) { return CodexTaskSnapshot() }
         let sessions: [String: [String: Any]]
-        var indexUnavailable = false
+        var indexFailure: Error?
         do {
             sessions = try indexCache.read(from: index)
             execDiscovery.noteIndexAvailable()
         } catch {
-            indexUnavailable = !Self.pathIsMissing(index) || execDiscovery.hasSeenIndex()
+            if !Self.pathIsMissing(index) || execDiscovery.hasSeenIndex() { indexFailure = error }
             sessions = [:]
         }
 
         let indexedIDs = Set(sessions.keys)
-        let extra = try unindexedOwners(excluding: indexedIDs, now: now, observedSince: observedSince,
+        let extra: (ids: Set<String>, fastFiles: [String: URL], verifiedFiles: [String: URL], isPartial: Bool)
+        do {
+            extra = try unindexedOwners(excluding: indexedIDs, now: now, observedSince: observedSince,
                                         previouslyObserved: previouslyObserved)
+        } catch {
+            guard !indexedIDs.isEmpty else { throw error }
+            extra = ([], [:], [:], true)
+        }
         let discovered = try sessionFiles(for: indexedIDs, now: now, observedSince: observedSince,
                                           previouslyObserved: previouslyObserved)
-        let extraFiles = try sessionFiles(for: extra.ids, now: now, observedSince: observedSince,
+        let extraFiles: (files: [String: URL], isPartial: Bool, didHitLimit: Bool)
+        do {
+            extraFiles = try sessionFiles(for: extra.ids, now: now, observedSince: observedSince,
                                           previouslyObserved: previouslyObserved, maximumVisited: 256)
+        } catch {
+            guard !indexedIDs.isEmpty else { throw error }
+            extraFiles = ([:], true, false)
+        }
         let files = discovered.files
         var result = CodexTaskSnapshot()
-        result.isPartial = indexUnavailable || discovered.isPartial || extra.isPartial || extraFiles.isPartial
+        result.isPartial = indexFailure != nil || discovered.isPartial || extra.isPartial || extraFiles.isPartial
+        var recognizedExecSource = false
         for session in sessions.values {
             let id = session.string("id")
             let title = session.string("thread_name")
@@ -124,6 +137,7 @@ struct CodexTaskReader {
             guard let file = available[id] else { continue }
             do {
                 guard let record = try readUnindexedExec(file, id: id) else { continue }
+                recognizedExecSource = true
                 var lateWithWriterFile = false
                 if let observedSince, record.modified < observedSince && !previouslyObserved.contains(id) {
                     switch writerLockStatus(for: id) {
@@ -143,7 +157,11 @@ struct CodexTaskReader {
                     // A partial filename scan may have missed a competing
                     // rollout. Do not close a previously observed task then.
                     if extraFiles.didHitLimit {
-                        guard previouslyObserved.contains(id),
+                        // A completed turn is not the only possible rollout for
+                        // this ID. Wait for the writer file to disappear and
+                        // a full sweep to confirm the same previously seen file.
+                        guard case .absent = writerLockStatus(for: id),
+                              previouslyObserved.contains(id),
                               extra.verifiedFiles[id]?.standardizedFileURL == file.standardizedFileURL,
                               execDiscovery.matchesObserved(id: id, file: file, device: record.device,
                                                             inode: record.inode, startKey: state.startKey) else {
@@ -196,6 +214,7 @@ struct CodexTaskReader {
                 result.isPartial = true
             }
         }
+        if let indexFailure, !recognizedExecSource { throw indexFailure }
         result.tasks.sort { $0.updatedAt > $1.updatedAt }
         return result
     }

@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import AITaskMonitor
 
@@ -52,8 +53,18 @@ final class CodexExecDiscoveryTests: XCTestCase {
             data.append(try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]))
             data.append(0x0a)
         }
-        try data.write(to: url, options: .atomic)
+        try writeFixture(data, to: url)
         return url
+    }
+
+    private func writeFixture(_ data: Data, to url: URL) throws {
+        let descriptor = url.path.withCString {
+            open($0, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, mode_t(S_IRUSR | S_IWUSR))
+        }
+        guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        try handle.write(contentsOf: data)
     }
 
     private func append(_ event: String, to file: URL) throws {
@@ -74,7 +85,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         let row: [String: Any] = ["id": id, "thread_name": "Indexed synthetic task"]
         var data = try JSONSerialization.data(withJSONObject: row)
         data.append(0x0a)
-        try data.write(to: root.appendingPathComponent("session_index.jsonl"))
+        try writeFixture(data, to: root.appendingPathComponent("session_index.jsonl"))
     }
 
     func testExecWithoutIndexIsVisibleWithoutCreatingIndex() throws {
@@ -164,7 +175,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         let reader = CodexTaskReader(codexHome: root)
         let before = try reader.readSnapshot(observedSince: observedSince)
         XCTAssertEqual(Set(before.tasks.map(\.id)), Set([first, second]))
-        try Data(repeating: 0x78, count: 1_048_577).write(to: root.appendingPathComponent("session_index.jsonl"))
+        try writeFixture(Data(repeating: 0x78, count: 1_048_577), to: root.appendingPathComponent("session_index.jsonl"))
         let after = try reader.readSnapshot(observedSince: observedSince, previouslyObserved: Set(before.tasks.map(\.id)))
         let merged = TaskSnapshotMerger.merge(previous: before.tasks, current: after.tasks, terminalIDs: after.terminalIDs)
         XCTAssertTrue(after.isPartial)
@@ -220,7 +231,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertEqual(payload["source"] as? String, "exec")
         let root = try makeRoot()
         let file = root.appendingPathComponent("sessions/2026/11/16").appendingPathComponent(rolloutName(id))
-        try data.write(to: file, options: .atomic)
+        try writeFixture(data, to: file)
         let snapshot = try CodexTaskReader(codexHome: root).readSnapshot(now: timestamp.addingTimeInterval(2),
                                                                         observedSince: timestamp.addingTimeInterval(-1))
         let task = try XCTUnwrap(snapshot.tasks.first { $0.id == id })
@@ -468,5 +479,58 @@ final class CodexExecDiscoveryTests: XCTestCase {
             XCTAssertTrue(after.isPartial)
             XCTAssertFalse(after.terminalIDs.contains(first))
         }
+    }
+
+    @MainActor
+    func testBrokenIndexWithoutReadableExecStaysFullyUnavailable() throws {
+        let root = try makeRoot()
+        try writeFixture(Data(repeating: 0x78, count: 1_048_577), to: root.appendingPathComponent("session_index.jsonl"))
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: root),
+                              claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("unused")),
+                              journal: DiagnosticJournal(directory: root.appendingPathComponent("journal")))
+        store.refresh()
+        XCTAssertTrue(store.unavailableSources.contains(.codex))
+        XCTAssertFalse(store.codexPartiallyUnavailable)
+    }
+
+    func testPagedCompletionWaitsForWriterFileToDisappear() throws {
+        let root = try makeRoot()
+        let old = root.appendingPathComponent("sessions/2001/01/01", isDirectory: true)
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        for _ in 0..<300 {
+            let path = old.appendingPathComponent("rollout-2001-01-01T00-00-00-\(UUID().uuidString.lowercased()).jsonl")
+            guard FileManager.default.createFile(atPath: path.path, contents: Data()) else { throw CocoaError(.fileWriteUnknown) }
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: path.path)
+        }
+        let original = try rollout(root, fileID: first)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let date = calendar.dateComponents([.year, .month, .day], from: Date())
+        let today = root.appendingPathComponent(String(format: "sessions/%04d/%02d/%02d",
+            try XCTUnwrap(date.year), try XCTUnwrap(date.month), try XCTUnwrap(date.day)), isDirectory: true)
+        try FileManager.default.createDirectory(at: today, withIntermediateDirectories: true)
+        let file = today.appendingPathComponent(original.lastPathComponent)
+        if file.standardizedFileURL != original.standardizedFileURL { try FileManager.default.moveItem(at: original, to: file) }
+        let locks = root.appendingPathComponent("thread-writer-locks", isDirectory: true)
+        try FileManager.default.createDirectory(at: locks, withIntermediateDirectories: false)
+        let marker = locks.appendingPathComponent(first + ".lock")
+        guard FileManager.default.createFile(atPath: marker.path, contents: Data()) else { throw CocoaError(.fileWriteUnknown) }
+        let reader = CodexTaskReader(codexHome: root)
+        let since = Date().addingTimeInterval(-60)
+        let before = try reader.readSnapshot(observedSince: since)
+        XCTAssertTrue(try XCTUnwrap(before.tasks.first { $0.id == first }).isUnconfirmed)
+        try append("task_complete", to: file)
+        for _ in 0..<8 {
+            let after = try reader.readSnapshot(observedSince: since, previouslyObserved: [first])
+            XCTAssertFalse(after.terminalIDs.contains(first))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+        }
+        try FileManager.default.removeItem(at: marker)
+        var finished = false
+        for _ in 0..<12 {
+            let after = try reader.readSnapshot(observedSince: since, previouslyObserved: [first])
+            if after.terminalIDs.contains(first) { finished = true; break }
+        }
+        XCTAssertTrue(finished)
     }
 }
