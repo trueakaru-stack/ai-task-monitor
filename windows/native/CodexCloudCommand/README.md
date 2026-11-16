@@ -12,7 +12,22 @@ selecting and validating the genuine official executable and its installation.
 A fully qualified .exe path is a syntax check, not an authenticity, identity or
 race-free filesystem check. As with a normal child process, the executable inherits
 the parent's environment and working directory and can access anything allowed to
-that account. The caller must trust it and consider the working directory. Cursors
+that account. The transport's own lack of logging does not constrain the child.
+
+The official Codex CLI source for
+[rust-v0.169.0-alpha.11.1](https://github.com/openai/codex/blob/rust-v0.169.0-alpha.11.1/codex-rs/cloud-tasks/src/util.rs)
+appends to a relative error.log. That version's cloud code can write an account
+identifier and input/output pagination cursors there
+([authentication](https://github.com/openai/codex/blob/rust-v0.169.0-alpha.11.1/codex-rs/cloud-tasks/src/lib.rs),
+[listing](https://github.com/openai/codex/blob/rust-v0.169.0-alpha.11.1/codex-rs/cloud-tasks-client/src/http.rs)).
+This is a source inspection, not a real authenticated test or a statement about
+other CLI versions. The current transport does not isolate the working directory.
+
+Before connecting a real CLI, the owner must provide and validate an isolated
+working directory, define safe handling and retention for any child-created
+files, and test that account identifiers, cursors and other sensitive material
+do not leak into user projects or unintended logs. It must also verify that the
+chosen working directory does not change the intended cloud listing. Cursors
 are passed as command-line arguments and may be observable to other local processes;
 they must not be logged.
 
