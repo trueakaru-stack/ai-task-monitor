@@ -2528,19 +2528,19 @@ function Codex-IndexCandidates {
  return @($sessionMap.Values)
 }
 
-function Codex-UnindexedCandidates {
+function Codex-UnindexedCandidates([bool]$HasIndexedHistory=$false) {
  # A rollout is evidence of a session, never evidence that its writer is live.
  # Keep a resumable directory cursor so a full page cannot hide later files.
  $now=[Diagnostics.Stopwatch]::GetTimestamp()
  $cached=Get-Variable -Scope Script -Name unindexedScan -ErrorAction SilentlyContinue
  if($null -ne $cached -and $null -ne $cached.Value -and
-    [string]::Equals([string]$cached.Value.Root,[string]$sessionsDirectory,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([string]$cached.Value.Root,[string]$sessionsDirectory,[StringComparison]::OrdinalIgnoreCase) -and -not [bool]$cached.Value.RootMissing -and
     ($now-[long]$cached.Value.Tick) -ge 0 -and ($now-[long]$cached.Value.Tick) -lt ([long][Diagnostics.Stopwatch]::Frequency*5)){
   $script:codexDiscoveryFailed=[bool]$cached.Value.Failed
   return @($cached.Value.Items)
  }
  $found=@{};$ambiguous=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
- $count=0;$bytesRead=[long]0;$failed=$false;$completedRound=$false
+ $count=0;$bytesRead=[long]0;$failed=$false;$completedRound=$false;$rootMissing=$false
  $uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
  $cursorVariable=Get-Variable -Scope Script -Name unindexedCursor -ErrorAction SilentlyContinue
  $cursor=if($null -ne $cursorVariable){$cursorVariable.Value}else{$null}
@@ -2621,8 +2621,15 @@ function Codex-UnindexedCandidates {
    }
   }
  }catch{
-  $failed=$true
+  $exception=$_.Exception
+  while($null -ne $exception.InnerException){$exception=$exception.InnerException}
+  $rootMissing=($exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException])
+  if($rootMissing){
+   $previous=Get-Variable -Scope Script -Name lastCodexTasks -ErrorAction SilentlyContinue
+   $failed=$HasIndexedHistory -or ($null -ne $previous -and @($previous.Value|Where-Object {$null -ne $_}).Count -gt 0)
+  }else{$failed=$true}
   if($null -ne $cursor -and $null -ne $cursor.Enumerator){try{$cursor.Enumerator.Dispose()}catch{};$cursor.Enumerator=$null}
+  if($rootMissing){$cursor=$null;$script:unindexedCursor=$null}
  }
  if($null -ne $cursor){
   $cursor.PassFailed=[bool]$cursor.PassFailed -or $failed
@@ -2631,7 +2638,7 @@ function Codex-UnindexedCandidates {
  }
  $items=@($found.Values)
  $script:codexDiscoveryFailed=$failed
- $script:unindexedScan=[PSCustomObject]@{Root=$sessionsDirectory;Tick=$now;Items=$items;CheckedFiles=$count;BytesRead=$bytesRead;Failed=$failed}
+ $script:unindexedScan=[PSCustomObject]@{Root=$sessionsDirectory;Tick=$now;Items=$items;CheckedFiles=$count;BytesRead=$bytesRead;Failed=$failed;RootMissing=$rootMissing}
  return $items
 }
 
@@ -2659,7 +2666,7 @@ function Codex-Tasks {
   $indexed[$id]=$true
   if($id){[void]$script:unindexedPaths.Remove($id)}
  }
- foreach($candidate in @(Codex-UnindexedCandidates)){
+ foreach($candidate in @(Codex-UnindexedCandidates -HasIndexedHistory ($sessions.Count -gt 0))){
   $id=[string]$candidate.id
   if($indexed.ContainsKey($id)){continue}
   if($script:unindexedPaths.ContainsKey($id) -and

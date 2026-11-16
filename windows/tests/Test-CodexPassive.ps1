@@ -63,6 +63,49 @@ function New-Session([string]$id,[string]$turn){
  return $path
 }
 
+# A new profile can have no sessions directory. Losing a directory after a
+# visible task is different and must preserve the card with a read warning.
+$originalHome=$codexHome;$originalIndex=$sessionIndex;$originalSessions=$sessionsDirectory;$originalLocks=$lockDirectory
+$originalUnindexed=Get-Variable -Scope Script -Name unindexedPaths -ErrorAction SilentlyContinue
+try{
+ $codexHome=Join-Path $fixture 'fresh-codex-profile'
+ $sessionIndex=Join-Path $codexHome 'session_index.jsonl'
+ $sessionsDirectory=Join-Path $codexHome 'sessions'
+ $lockDirectory=Join-Path $codexHome 'thread-writer-locks'
+ [void][IO.Directory]::CreateDirectory($codexHome)
+ $script:lastCodexTasks=@();$script:unindexedPaths=@{};$script:unindexedScan=$null
+ $fresh=Source-Snapshot
+ Require (@($fresh.Tasks).Count -eq 0 -and $fresh.CodexIncomplete -and @($fresh.PartialData) -cnotcontains 'Codex') 'A fresh profile without sessions was reported as a read failure.'
+ $day=Join-Path (Join-Path (Join-Path $sessionsDirectory ([DateTime]::UtcNow.ToString('yyyy'))) ([DateTime]::UtcNow.ToString('MM'))) ([DateTime]::UtcNow.ToString('dd'))
+ [void][IO.Directory]::CreateDirectory($day)
+ [void][IO.Directory]::CreateDirectory($lockDirectory)
+ $freshId='30000000-0000-0000-0000-000000000001'
+ $freshPath=Join-Path $day ('rollout-'+[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH-mm-ss')+'-'+$freshId+'.jsonl')
+ $freshMeta=@{type='session_meta';payload=@{id=$freshId}}|ConvertTo-Json -Compress
+ [IO.File]::WriteAllText($freshPath,($freshMeta+"`n"),[Text.UTF8Encoding]::new($false))
+ Write-Event $freshPath 'task_started' 'fresh-turn'
+ [IO.File]::WriteAllText((Join-Path $lockDirectory ($freshId+'.lock')),'',[Text.UTF8Encoding]::new($false))
+ $freshActive=Source-Snapshot
+ Require (@($freshActive.Tasks|Where-Object {$_.Id -eq $freshId -and -not $_.Active}).Count -eq 1) 'The new profile did not show its first synthetic task.'
+ $moved=$sessionsDirectory+'.moved'
+ [IO.Directory]::Move($sessionsDirectory,$moved)
+ $lost=Source-Snapshot
+ Require (@($lost.PartialData) -ccontains 'Codex' -and @($lost.Tasks|Where-Object {$_.Id -eq $freshId -and -not $_.Active}).Count -eq 1) 'A missing sessions directory lost its prior task or warning.'
+ [IO.Directory]::Move($moved,$sessionsDirectory)
+ $returned=Source-Snapshot
+ Require ($returned.CodexIncomplete -and @($returned.PartialData) -cnotcontains 'Codex' -and @($returned.Tasks|Where-Object Id -eq $freshId).Count -eq 1) 'The restored sessions directory did not recover.'
+ Write-Index @((Record $freshId))
+ $script:lastCodexTasks=@()
+ [IO.Directory]::Move($sessionsDirectory,$moved)
+ $indexedMissing=Source-Snapshot
+ Require (@($indexedMissing.PartialData) -ccontains 'Codex') 'An index with a missing sessions directory hid the read failure.'
+}finally{
+ if($null -ne $script:unindexedCursor -and $null -ne $script:unindexedCursor.Enumerator){try{$script:unindexedCursor.Enumerator.Dispose()}catch{}}
+ $codexHome=$originalHome;$sessionIndex=$originalIndex;$sessionsDirectory=$originalSessions;$lockDirectory=$originalLocks
+ $script:lastCodexTasks=@();$script:unindexedPaths=if($null -ne $originalUnindexed){$originalUnindexed.Value}else{@{}}
+ $script:unindexedScan=$null;$script:unindexedCursor=$null
+}
+
 # A lock entry alone is not a task, and an uncertain source cannot say empty.
 Write-Index @((Record 'no-event'))
 [IO.File]::WriteAllText((Join-Path $lockDirectory 'no-event.lock'),'')
