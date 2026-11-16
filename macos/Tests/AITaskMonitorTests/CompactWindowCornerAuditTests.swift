@@ -95,74 +95,82 @@ final class CompactWindowCornerAuditTests: XCTestCase {
         return result
     }
 
-    private func cornerSamples(_ bitmap: NSBitmapImageRep) -> [[String: Any]] {
-        let width = bitmap.pixelsWide, height = bitmap.pixelsHigh
-        return [0, 2, 4, 8, 12, 16].flatMap { inset -> [[String: Any]] in
-            guard width > inset * 2, height > inset * 2 else { return [] }
-            return [(inset, inset), (width - 1 - inset, inset),
-                    (inset, height - 1 - inset), (width - 1 - inset, height - 1 - inset)].map { point in
-                let (x, y) = point
-                var value: [String: Any] = ["x": x, "y": y]
-                if let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) {
-                    value["rgba"] = [Double(color.redComponent), Double(color.greenComponent),
-                                     Double(color.blueComponent), Double(color.alphaComponent)]
-                }
-                return value
-            }
-        }
+    @MainActor private func syntheticWindow(_ output: URL, dark: Bool) async throws -> (NSWindow, NSHostingView<AnyView>) {
+        let item = MonitoredTask(id: "deepseek:synthetic", provider: .deepseek,
+            title: tr("Проверка задачи", "Synthetic task"),
+            activity: tr("Статус не подтверждён", "Status unconfirmed"), isActive: false,
+            progress: nil, progressKind: .none, steps: [], updatedAt: Date(), isUnconfirmed: true)
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: output.appendingPathComponent("fake-codex")),
+                              claudeReader: ClaudeTaskReader(eventFile: output.appendingPathComponent("fake-events")),
+                              previewTasks: [item])
+        store.testSetExternalAvailability(previous: [item],
+            unavailable: [.codex, .claude, .kimi, .deepseek, .hermes, .opencode],
+            partiallyUnavailable: [.deepseek, .hermes, .opencode])
+        store.isCompact = true
+        let view = AnyView(RootView().environmentObject(store).environment(\.colorScheme, dark ? .dark : .light))
+        let host = NSHostingView(rootView: view)
+        host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        host.frame = NSRect(x: 0, y: 0, width: 372, height: 206)
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 372, height: 206),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.contentView = host
+        window.orderFrontRegardless()
+        host.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        host.layoutSubtreeIfNeeded()
+        return (window, host)
     }
 
     @MainActor
-    func testCaptureCompactWindowCorners() async throws {
+    func testRenderCompactHostOnContrastingBackground() async throws {
         let output = try makeOutput()
         NSApplication.shared.setActivationPolicy(.prohibited)
         AppLanguage.previewOverride = .ru
         defer { AppLanguage.previewOverride = nil }
-        var report: [[String: Any]] = []
+        var rows: [[String: Any]] = []
         for dark in [false, true] {
-            let item = MonitoredTask(id: "deepseek:synthetic", provider: .deepseek,
-                title: tr("Проверка задачи", "Synthetic task"),
-                activity: tr("Статус не подтверждён", "Status unconfirmed"), isActive: false,
-                progress: nil, progressKind: .none, steps: [], updatedAt: Date(), isUnconfirmed: true)
-            let store = TaskStore(codexReader: CodexTaskReader(codexHome: output.appendingPathComponent("fake-codex")),
-                                  claudeReader: ClaudeTaskReader(eventFile: output.appendingPathComponent("fake-events")),
-                                  previewTasks: [item])
-            store.testSetExternalAvailability(previous: [item],
-                unavailable: [.codex, .claude, .kimi, .deepseek, .hermes, .opencode],
-                partiallyUnavailable: [.deepseek, .hermes, .opencode])
-            store.isCompact = true
-            let view = RootView().environmentObject(store).environment(\.colorScheme, dark ? .dark : .light)
-            let host = NSHostingView(rootView: view)
-            host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-            host.frame = NSRect(x: 0, y: 0, width: 372, height: 206)
-            let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 372, height: 206),
-                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                backing: .buffered, defer: false)
-            window.isReleasedWhenClosed = false
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            window.contentView = host
-            window.orderFrontRegardless()
-            host.layoutSubtreeIfNeeded()
-            window.displayIfNeeded()
-            try await Task.sleep(nanoseconds: 1_000_000_000)
-            host.layoutSubtreeIfNeeded()
-            let hostBitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-            host.cacheDisplay(in: host.bounds, to: hostBitmap)
+            let (window, host) = try await syntheticWindow(output, dark: dark)
             let mode = dark ? "dark" : "light"
-            try save(hostBitmap, name: "host-\(mode)-transparent.png", in: output)
-            try save(onCyan(hostBitmap), name: "host-\(mode)-cyan.png", in: output)
-            var row: [String: Any] = [
-                "mode": mode, "hostPixels": [hostBitmap.pixelsWide, hostBitmap.pixelsHigh],
-                "windowSizePoints": [Double(window.frame.width), Double(window.frame.height)],
-                "windowHasShadow": window.hasShadow, "windowIsOpaque": window.isOpaque,
-                "hostCorners": cornerSamples(hostBitmap),
-                "preflightScreenCaptureAccess": CGPreflightScreenCaptureAccess(),
-                "windowCapture": "unavailable"
-            ]
+            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            try save(bitmap, name: "host-\(mode)-transparent.png", in: output)
+            try save(onCyan(bitmap), name: "host-\(mode)-cyan.png", in: output)
+            rows.append(["mode": mode, "hostPixels": [bitmap.pixelsWide, bitmap.pixelsHigh],
+                         "windowSizePoints": [Double(window.frame.width), Double(window.frame.height)],
+                         "windowHasShadow": window.hasShadow, "windowIsOpaque": window.isOpaque,
+                         "backingScale": Double(window.backingScaleFactor)])
+            window.close()
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["modes": rows], options: [.prettyPrinted, .sortedKeys])
+        try write(data, name: "host-report.json", in: output)
+        XCTAssertEqual(rows.count, 2)
+    }
+
+    @MainActor
+    func testCaptureOnlyOwnCompactWindow() async throws {
+        let output = try makeOutput()
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        AppLanguage.previewOverride = .ru
+        defer { AppLanguage.previewOverride = nil }
+        var rows: [[String: Any]] = []
+        for dark in [false, true] {
+            let (window, _) = try await syntheticWindow(output, dark: dark)
+            let mode = dark ? "dark" : "light"
+            var row: [String: Any] = ["mode": mode, "windowHasShadow": window.hasShadow,
+                                      "windowCapture": "not_attempted"]
+            let attempt = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
+            try write(attempt, name: "system-attempt-\(mode).json", in: output)
+            FileHandle.standardError.write(Data("Own-window capture attempt: \(mode)\n".utf8))
             #if compiler(>=6.2)
-            if #available(macOS 14.4, *), CGPreflightScreenCaptureAccess(), window.windowNumber > 0 {
+            if #available(macOS 14.4, *), window.windowNumber > 0 {
                 do {
+                    // currentProcess cannot enumerate other applications; the
+                    // filter is further restricted to this window and PID.
                     let available = try await SCShareableContent.currentProcess
                     let ownID = CGWindowID(window.windowNumber)
                     let ownPID = ProcessInfo.processInfo.processIdentifier
@@ -191,27 +199,23 @@ final class CompactWindowCornerAuditTests: XCTestCase {
                         try save(onCyan(withoutShadow), name: "window-\(mode)-no-system-shadow-cyan.png", in: output)
                         row["windowCapture"] = "captured"
                         row["windowCapturePixels"] = [withShadow.pixelsWide, withShadow.pixelsHigh]
-                        row["systemWithShadowCorners"] = cornerSamples(withShadow)
-                        row["systemWithoutShadowCorners"] = cornerSamples(withoutShadow)
                     } else {
                         row["windowCapture"] = "own_window_not_shareable"
                     }
                 } catch {
                     row["windowCapture"] = "capture_failed"
                 }
-            } else if !CGPreflightScreenCaptureAccess() {
-                row["windowCapture"] = "screen_capture_permission_unavailable"
             } else {
                 row["windowCapture"] = "window_not_available"
             }
             #else
             row["windowCapture"] = "sdk_unavailable"
             #endif
-            report.append(row)
+            rows.append(row)
             window.close()
         }
-        let data = try JSONSerialization.data(withJSONObject: ["modes": report], options: [.prettyPrinted, .sortedKeys])
-        try write(data, name: "corner-report.json", in: output)
-        XCTAssertEqual(report.count, 2)
+        let data = try JSONSerialization.data(withJSONObject: ["modes": rows], options: [.prettyPrinted, .sortedKeys])
+        try write(data, name: "capture-report.json", in: output)
+        XCTAssertEqual(rows.count, 2)
     }
 }

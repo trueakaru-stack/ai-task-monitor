@@ -107,18 +107,27 @@ jobs:
           {
             echo '### Compact window corner diagnostic'
             echo 'An actual RootView is rendered in a synthetic NSWindow and over a contrasting background.'
-            echo 'System-window capture is attempted only with existing screen-capture permission; see corner-report.json for availability.'
+            echo 'System-window capture is restricted to the test process window; see capture-report.json for availability.'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Render compact window corner diagnostic
-        id: render
+      - name: Render compact host on contrasting background
+        id: host
         shell: bash
         run: |
           set -euo pipefail
           "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
-            -XCTest AITaskMonitorTests.CompactWindowCornerAuditTests/testCaptureCompactWindowCorners \
+            -XCTest AITaskMonitorTests.CompactWindowCornerAuditTests/testRenderCompactHostOnContrastingBackground \
+            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
+      - name: Capture only the test process's own window
+        if: ${{ !cancelled() && steps.host.outcome == 'success' }}
+        id: native
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
+            -XCTest AITaskMonitorTests.CompactWindowCornerAuditTests/testCaptureOnlyOwnCompactWindow \
             "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
       - name: Save synthetic corner diagnostic
-        if: ${{ !cancelled() && steps.render.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.host.outcome != 'skipped' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: compact-window-corner-audit
