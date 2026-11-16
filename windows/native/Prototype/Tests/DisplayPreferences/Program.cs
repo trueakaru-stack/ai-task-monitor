@@ -91,6 +91,11 @@ var unavailable = new DisplayPreferenceService(unavailableTarget, unavailableLeg
 Check(unavailable.Load().Status == PreferenceStatus.Unavailable &&
     unavailable.SaveTheme("light") == PreferenceStatus.Unavailable && unavailableTarget.Content is null,
     "An unavailable legacy source was treated as empty.");
+var defaultStatus = new DisplayPreferenceService(new MemoryTarget(),
+    new MemoryLegacy(legacyBytes) { Status = default });
+Check(defaultStatus.Load().Status == PreferenceStatus.Unavailable &&
+    defaultStatus.SaveTheme("light") == PreferenceStatus.Unavailable,
+    "An unspecified legacy status was treated as a confirmed snapshot.");
 var nativeTarget = new MemoryTarget(Utf8("{\"theme\":\"dark\",\"language\":\"ru\",\"other\":12}"));
 var existingNative = new DisplayPreferenceService(nativeTarget, deferredLegacy);
 Check(existingNative.Load().Modes == new DisplayModes("dark", "ru") &&

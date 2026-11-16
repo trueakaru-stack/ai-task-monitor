@@ -8,7 +8,7 @@ namespace AITaskMonitor.Prototype.Settings;
 
 internal enum PreferenceStatus { Success, InvalidMode, InvalidDocument, Conflict, Unavailable, MigrationDeferred }
 internal enum PreferenceCommit { Success, Conflict, Unavailable }
-internal enum LegacyPreferenceStatus { Confirmed, Deferred, Unavailable }
+internal enum LegacyPreferenceStatus { Unavailable, Deferred, Confirmed }
 internal sealed record DisplayModes(string Theme, string Language);
 internal readonly record struct PreferenceSnapshot(object Revision, byte[]? Content);
 internal sealed record PreferenceLoad(PreferenceStatus Status, DisplayModes? Modes, bool FromLegacy);
