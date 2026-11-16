@@ -35,3 +35,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw '.NET PATH safety guard failed.' }
           & (Join-Path $source '.github/legacy-uninstall-ci/Run.ps1')
           & (Join-Path $source 'windows/tests/Test-UninstallPreservesData.ps1')
+
+      - name: Save the exact verified setup
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-windows-setup-${{ github.sha }}
+          path: ${{ runner.temp }}/aitm-verified-setup-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 3

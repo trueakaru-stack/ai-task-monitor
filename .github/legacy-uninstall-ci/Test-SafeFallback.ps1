@@ -117,6 +117,7 @@ public static class FallbackTestNative
     public static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
 }
 '@
+    & (Join-Path $PSScriptRoot 'Test-FullInstaller.ps1') -Installer $exe -FixtureRoot $root -ProcessValues $values -SystemPowerShell $ps
     foreach($culture in @('en-US','ru-RU')){
         $start=New-IsolatedPS
         $literal=$uninstaller.Replace("'","''")
@@ -159,6 +160,26 @@ public static class FallbackTestNative
     }
     Check ([IO.File]::Exists($uninstaller) -and [IO.Directory]::Exists($install) -and [IO.Directory]::Exists($junction)) 'Installation files or the synthetic link were removed.'
     Write-Output ('Safe uninstall fallback: explanatory dialog, non-success exit, and {0} synthetic files including modified, unrelated and redirected data preserved.' -f $items.Count)
+    Check ($env:GITHUB_SHA -cmatch '^[a-f0-9]{40}
+}finally{
+    foreach($scope in @('User','Machine')){
+        $before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine};$after=PathState $scope
+        if($before.Value -cne $after.Value -or $before.Kind -cne $after.Kind){throw "$scope PATH changed."}
+    }
+    if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}
+}
+) 'The source revision is missing.'
+    $artifactRoot=[IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP ('aitm-verified-setup-'+$env:GITHUB_SHA)))
+    Check ([string]::Equals([IO.Directory]::GetParent($artifactRoot).FullName,[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\'),[StringComparison]::OrdinalIgnoreCase) -and -not [IO.Directory]::Exists($artifactRoot) -and -not [IO.File]::Exists($artifactRoot)) 'Unsafe artifact directory.'
+    [void][IO.Directory]::CreateDirectory($artifactRoot)
+    $artifactExe=Join-Path $artifactRoot 'AITaskMonitorSetup.exe'
+    [IO.File]::Copy($exe,$artifactExe,$false)
+    $digest=(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash
+    Check ((Get-FileHash -LiteralPath $artifactExe -Algorithm SHA256).Hash -ceq $digest) 'The artifact differs from the tested setup.'
+    [IO.File]::WriteAllText((Join-Path $artifactRoot 'SHA256SUMS-windows.txt'),($digest.ToLowerInvariant()+'  AITaskMonitorSetup.exe'+[Environment]::NewLine),[Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText((Join-Path $artifactRoot 'SOURCE-REVISION.txt'),($env:GITHUB_SHA+[Environment]::NewLine),[Text.Encoding]::ASCII)
+    Write-Output ('Verified setup SHA-256: '+$digest+'; source: '+$env:GITHUB_SHA)
+
 }finally{
     foreach($scope in @('User','Machine')){
         $before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine};$after=PathState $scope
