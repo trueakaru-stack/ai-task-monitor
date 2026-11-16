@@ -38,6 +38,25 @@ internal static class Program
         using var output = new FileStream(Path.Combine(root, name + ".png"), FileMode.CreateNew, FileAccess.Write, FileShare.None);
         encoder.Save(output);
     }
+    private static void CaptureSettingsEnd(Window window, string root, string stem)
+    {
+        ScrollViewer scroll = Find<ScrollViewer>(window, "SettingsScroll");
+        scroll.ScrollToEnd();
+        window.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(() => { }));
+        window.UpdateLayout();
+        RichTextBox box = Find<RichTextBox>(window, "FeedbackEmailBox");
+        var link = Find<System.Windows.Documents.Hyperlink>(window, "FeedbackEmailLink");
+        Rect first = link.ContentStart.GetCharacterRect(System.Windows.Documents.LogicalDirection.Forward);
+        Rect last = link.ContentEnd.GetCharacterRect(System.Windows.Documents.LogicalDirection.Backward);
+        Check(box.ActualWidth >= 100 && Math.Abs(first.Top - last.Top) <= 1 && box.ActualHeight <= 28,
+            "The feedback address wrapped or expanded the settings scroller.");
+        Console.WriteLine($"Feedback layout {stem}: width={box.ActualWidth:F2}, height={box.ActualHeight:F2}, extent={scroll.ExtentHeight:F2}, viewport={scroll.ViewportHeight:F2}, offset={scroll.VerticalOffset:F2}");
+        Capture(window, root, "end-" + stem);
+        scroll.ScrollToVerticalOffset(0);
+        window.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(() => { }));
+        window.UpdateLayout();
+    }
+
     private static (Window Window, PrototypeWindow Controller) Open(PreferenceFiles files, Func<bool?>? systemTheme = null)
     {
         using Stream layout = typeof(PrototypeWindow).Assembly.GetManifestResourceStream(
@@ -98,6 +117,7 @@ internal static class Program
             !Find<Button>(window, "AboutSettingsButton").IsEnabled,
             "Claude registration or unfinished actions were presented incorrectly.");
         Capture(window, root, "settings-dark-ru");
+        CaptureSettingsEnd(window, root, "dark-ru");
 
         Click(window, "LightThemeButton");
         using (JsonDocument saved = ReadTarget(target))
@@ -107,6 +127,7 @@ internal static class Program
             ((SolidColorBrush)window.Resources["Surface"]).Color == (Color)ColorConverter.ConvertFromString("#F6F6F6"),
             "Theme selection changed legacy settings or the window did not update.");
         Capture(window, root, "settings-light-ru");
+        CaptureSettingsEnd(window, root, "light-ru");
         var sourceTask = new AITaskMonitor.Claude.Task
         {
             Id = "custom", Activity = "Пользовательский текст", Updated = DateTime.UtcNow, Started = DateTime.UtcNow,
@@ -131,8 +152,10 @@ internal static class Program
         Check(retained.Activity == "Пользовательский текст" && retained.Steps.Single().Title == "Название от источника" &&
             retained.Title == "Claude Code task", "Changing language altered source text or failed to relocalize a generated title.");
         Capture(window, root, "settings-light-en");
+        CaptureSettingsEnd(window, root, "light-en");
         Click(window, "DarkThemeButton");
         Capture(window, root, "settings-dark-en");
+        CaptureSettingsEnd(window, root, "dark-en");
         Click(window, "SystemThemeButton");
         Click(window, "SystemLanguageButton");
         using (JsonDocument saved = ReadTarget(target))

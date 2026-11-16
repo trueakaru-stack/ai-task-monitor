@@ -37,6 +37,7 @@ try{
   $values=@{
    SystemRoot=$env:SystemRoot;windir=$env:SystemRoot
    PATH=($sdk+';'+(Join-Path $env:SystemRoot 'System32')+';'+$env:SystemRoot)
+   PSModulePath=((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules')+';'+(Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'))
    DOTNET_ROOT=$sdk;DOTNET_MULTILEVEL_LOOKUP='0';DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='0'
    DOTNET_CLI_HOME=(Join-Path $root 'dotnet');DOTNET_CLI_TELEMETRY_OPTOUT='1'
    DOTNET_GENERATE_ASPNET_CERTIFICATE='0';DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE='1'
@@ -74,6 +75,7 @@ try{
  Check ([IO.File]::Exists($hostAssembly)) 'The display-host test assembly is missing.'
  Invoke-Isolated @($hostAssembly,$root)
  Check (@(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File).Count -eq 4) 'The four synthetic frames are missing.'
+ Check (@(Get-ChildItem -LiteralPath $root -Filter 'end-*.png' -File).Count -eq 4) 'The four settings-end frames are missing.'
  $viewProject=Join-Path $repository 'windows/native/Prototype/Tests/Prototype.Tests.csproj'
  Invoke-Isolated @('build',$viewProject,'-c','Release','--configfile',$config,'--artifacts-path',$artifacts,'-p:NuGetAudit=false','--nologo')
  $viewAssembly=Join-Path $artifacts 'bin/Prototype.Tests/release/AITaskMonitor.Prototype.Tests.dll'
@@ -88,14 +90,14 @@ try{
   $stem=$theme+'-'+$language
   $settings=Join-Path $root ('released-'+$stem+'.png')
   $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',$releasedScript,
-   '-PreviewActiveTasks','1','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,
+   '-PreviewActiveTasks','1','-PreviewOffscreen','-PreviewSettingsEnd','-ThemeOverride',$theme,'-LanguageOverride',$language,
    '-PreferencesFile',(Join-Path $root ('temp/released-'+$stem+'.json')),
    '-DiagnosticDirectory',(Join-Path $root ('temp/diagnostic-'+$stem)),
    '-SnapshotFile',(Join-Path $root ('temp/main-'+$stem+'.png')),'-SettingsSnapshotFile',$settings)
   Invoke-Isolated -arguments $arguments -executable $shell
   Check ([IO.File]::Exists($settings)) 'The published settings frame is missing.'
  }}
- foreach($path in @(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File)+@(Get-ChildItem -LiteralPath $root -Filter 'released-*.png' -File)){
+ foreach($path in @(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File)+@(Get-ChildItem -LiteralPath $root -Filter 'end-*.png' -File)+@(Get-ChildItem -LiteralPath $root -Filter 'released-*.png' -File)){
   $bytes=[IO.File]::ReadAllBytes($path.FullName)
   Check ($bytes.Length -ge 24) 'A rendered frame is too short.'
   $width=([int]$bytes[16] -shl 24) -bor ([int]$bytes[17] -shl 16) -bor ([int]$bytes[18] -shl 8) -bor [int]$bytes[19]
