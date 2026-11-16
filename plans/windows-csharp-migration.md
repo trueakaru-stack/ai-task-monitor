@@ -222,6 +222,10 @@ The implementation uses C#/.NET 10 and WPF for Windows. The native Codex source 
 
 - The macOS provider-bundle test fixture omitted the sender imported by the real DeepSeek plugin. The one-line fixture correction was independently reviewed and passed on macOS 15 and 26 in [43840222431](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43840222431); it was integrated into `macos` at `2b2722a518fa5833ac5b55398449e17d1d75038e`. This verifies the targeted fixture only, not the full `tests-only` suite or live-agent behavior.
 
+- The extended Windows PATH safety guard checks three known C# child-process launchers after their environment resets, as well as the Claude log-writer handoff. Seven read-only checks and 31 independently reviewed in-memory mutation cases passed; the guard is a static check of known patterns, not proof for arbitrary aliases, third-party processes or registry behavior.
+- Released update selection and retry behavior for Windows 0.2.6/0.2.7 and macOS 0.3.7/0.3.8 passed synthetic checks in [43841883824](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43841883824). The older versions wait 24 hours after success or failure; the newer versions retry a first ordinary failure after one hour. The installed version, network result, compact mode and cause of the user's missed notification remain unknown.
+- After the Mac fixture fix, primary build [43840499041](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43840499041) passed and produced a CI-only disk image with the existing version. The narrower isolated retry [43841644728](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43841644728) failed before executing five tests because its sandbox blocked a synthetic socket directory. The image was not published as a release.
+
 ## Revision Note
 
 - 2026-11-13: Created the plan from the user's accepted C# migration, test-safety decisions, published source state, and verified synthetic evidence.
@@ -267,3 +271,4 @@ The implementation uses C#/.NET 10 and WPF for Windows. The native Codex source 
 - 2026-11-16: Recorded the guarded WPF preview installer, feedback snapshots and the repeated synthetic macOS click-test failure. These are not release acceptance.
 - 2026-11-16: Recorded the synthetic Codex hook transport, the constrained scope of its security checks, and the remaining integration limitations.
 - 2026-11-16: Recorded the self-contained preview installer experiment and the independently identified blockers in the initial provider-capacity candidate.
+- 2026-11-16: Extended the known child-process PATH safety guard, recorded its independent mutation review, and updated Mac build and updater-diagnosis evidence.

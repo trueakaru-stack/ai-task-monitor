@@ -4,8 +4,8 @@ This check only reads source files. It does not start .NET or change the registr
 Python checks cover top-level environment dictionaries and recognized subprocess
 calls; PowerShell checks cover $values tables and direct & $dotnet launches.
 Workflow checks cover job-level and explicit step-level environment in .yml
-and .yaml files; the C# check covers the known ClaudeLogWriter child. The check
-does not prove arbitrary aliases, control flow, dynamic environment mutations,
+and .yaml files; the C# check covers three known child-process launchers. The
+check does not prove arbitrary aliases, control flow, dynamic environment mutations,
 third-party process safety, or actual registry behavior.
 """
 
@@ -206,6 +206,168 @@ def is_workflow_file(path):
     return path.suffix.lower() in (".yml", ".yaml")
 
 
+def csharp_without_comments(source):
+    """Mask ordinary C# comments while preserving strings and line positions.
+
+    Raw string literals are outside the known launcher patterns and fail closed.
+    This is not a complete C# lexer or a proof of arbitrary process safety.
+    """
+    result = []
+    index = 0
+    state = "code"
+    while index < len(source):
+        char = source[index]
+        pair = source[index:index + 2]
+        if state == "code":
+            if source.startswith('"""', index):
+                raise ValueError("C# raw strings are not covered by this safety check")
+            if pair == "//":
+                result.extend("  ")
+                index += 2
+                state = "line"
+                continue
+            if pair == "/*":
+                result.extend("  ")
+                index += 2
+                state = "block"
+                continue
+            if pair == '@"':
+                result.extend(pair)
+                index += 2
+                state = "verbatim"
+                continue
+            if char == '"':
+                state = "string"
+            elif char == "'":
+                state = "char"
+            result.append(char)
+        elif state == "line":
+            result.append(char if char in "\r\n" else " ")
+            if char == "\n":
+                state = "code"
+        elif state == "block":
+            if pair == "*/":
+                result.extend("  ")
+                index += 2
+                state = "code"
+                continue
+            result.append(char if char in "\r\n" else " ")
+        elif state == "verbatim":
+            if pair == '""':
+                result.extend(pair)
+                index += 2
+                continue
+            result.append(char)
+            if char == '"':
+                state = "code"
+        else:
+            result.append(char)
+            if char == "\\" and index + 1 < len(source):
+                index += 1
+                result.append(source[index])
+            elif (state == "string" and char == '"') or (state == "char" and char == "'"):
+                state = "code"
+        index += 1
+    if state not in ("code", "line"):
+        raise ValueError("Unterminated C# comment or string in launcher")
+    return "".join(result)
+
+
+def known_other_environment_key(expression):
+    """Accept only a simple literal key known not to be the Windows opt-out."""
+    match = re.fullmatch(r'"([^"\\\r\n]+)"', expression.strip())
+    return match is not None and match.group(1).casefold() != OPT_OUT.casefold()
+
+
+def csharp_code_only(source):
+    """Mask comments and literals while retaining positions for known anchors."""
+    result = [char if char in "\r\n" else " " for char in source]
+    index = 0
+    while index < len(source):
+        if source.startswith("//", index):
+            end = source.find("\n", index + 2)
+            index = len(source) if end < 0 else end
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            if end < 0:
+                raise ValueError("Unterminated C# block comment")
+            index = end + 2
+            continue
+        if source.startswith('"""', index):
+            count = 0
+            while index + count < len(source) and source[index + count] == '"':
+                count += 1
+            delimiter = '"' * count
+            end = source.find(delimiter, index + count)
+            if end < 0:
+                raise ValueError("Unterminated C# raw string")
+            index = end + count
+            continue
+        if source.startswith('@"', index):
+            index += 2
+            while index < len(source):
+                if source.startswith('""', index):
+                    index += 2
+                elif source[index] == '"':
+                    index += 1
+                    break
+                else:
+                    index += 1
+            else:
+                raise ValueError("Unterminated C# verbatim string")
+            continue
+        if source[index] in ('"', "'"):
+            delimiter = source[index]
+            index += 1
+            while index < len(source):
+                if source[index] == "\\":
+                    index += 2
+                elif source[index] == delimiter:
+                    index += 1
+                    break
+                else:
+                    index += 1
+            else:
+                raise ValueError("Unterminated C# literal")
+            continue
+        result[index] = source[index]
+        index += 1
+    return "".join(result)
+
+
+def csharp_launcher_issues(source, variable):
+    """Check the known environment reset and explicit opt-out in one launcher."""
+    try:
+        fragment = csharp_without_comments(source)
+    except ValueError:
+        return ["the C# launcher uses syntax not covered by the guard"]
+    environment = re.escape(variable) + r'\.Environment(?:Variables)?'
+    resets = list(re.finditer(environment + r'\.Clear\s*\(\s*\)\s*;', fragment))
+    if not resets:
+        return ["the known child environment reset was not found"]
+    assignments = list(re.finditer(environment + r'\[\s*"(?i:' + OPT_OUT +
+                                   r')"\s*\]\s*=(?!=)\s*([^;\r\n]+);', fragment))
+    if not assignments:
+        return ["the child PATH opt-out was not assigned"]
+    protection = assignments[-1]
+    issues = []
+    if protection.group(1).strip() != '"0"' or protection.start() <= resets[-1].start():
+        issues.append("the final child PATH opt-out is not zero after the last reset")
+    later = fragment[protection.end():]
+    if re.search(environment + r'\.Clear\s*\(', later):
+        issues.append("the child environment was cleared after protection")
+    for removal in re.finditer(environment + r'\.Remove\s*\(([^)]*)\)', later):
+        if not known_other_environment_key(removal.group(1)):
+            issues.append("the child PATH opt-out may be removed")
+    for assignment in re.finditer(environment + r'\[([^\]]*)\]\s*(?:\?\?=|[+\-*/%&|^]=|=(?!=)|\+\+|--)', later):
+        if not known_other_environment_key(assignment.group(1)):
+            issues.append("the child PATH opt-out may be overwritten")
+    if re.search(r'\b' + re.escape(variable) + r'\s*=(?!=|>)', later):
+        issues.append("the protected child start object was replaced")
+    return issues
+
+
 class DotnetPathSafety(unittest.TestCase):
     def test_checks_detect_unprotected_examples(self):
         self.assertTrue(python_issues('env = {"DOTNET_CLI_HOME": "fixture"}'))
@@ -235,6 +397,36 @@ class DotnetPathSafety(unittest.TestCase):
         self.assertFalse(workflow_issues("jobs:\n  safe:\n    env:\n"
                                          "      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'\n"
                                          "    steps:\n      - run: dotnet build\n"))
+
+    def test_csharp_child_guard_detects_comments_and_environment_mutations(self):
+        safe = ('info.Environment.Clear();\n'
+                'info.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "0";\n')
+        self.assertFalse(csharp_launcher_issues(safe + 'info.Environment.Remove("OTHER-KEY");', "info"))
+        self.assertFalse(csharp_launcher_issues(safe + 'if (info == null) throw new Exception();', "info"))
+        self.assertFalse(csharp_launcher_issues(safe + 'if (info.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] == "0") return;', "info"))
+        self.assertTrue(csharp_launcher_issues('// ' + safe.replace('\n', '\n// '), "info"))
+        self.assertTrue(csharp_launcher_issues(safe.replace('info.Environment["DOTNET',
+                                                           '// info.Environment["DOTNET'), "info"))
+        for mutation in (
+            'info.Environment["dotnet_add_global_tools_to_path"] = "1";',
+            'info.EnvironmentVariables["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "1";',
+            'info.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] += "1";',
+            'info.EnvironmentVariables.Clear();',
+            'info.Environment.Remove("DoTnEt_AdD_GlObAl_ToOlS_To_PaTh");',
+            'info.Environment[key] = "1";',
+            'info = new ProcessStartInfo();',
+        ):
+            with self.subTest(mutation=mutation):
+                self.assertTrue(csharp_launcher_issues(safe + mutation, "info"))
+        self.assertFalse(csharp_launcher_issues(safe + 'var url = "https://example.invalid";', "info"))
+        self.assertTrue(csharp_launcher_issues(safe + 'var raw = """unsupported""";', "info"))
+        decoys = ('// Process.Start(info)\n/* Process.Start(info) */\n'
+                  'var a = "Process.Start(info)";\n'
+                  'var b = @"Process.Start(info)";\n'
+                  'var c = """Process.Start(info)""";\nProcess.Start(info);')
+        code = csharp_code_only(decoys)
+        self.assertEqual(len(code), len(decoys))
+        self.assertEqual(code.count("Process.Start(info)"), 1)
 
     def test_checks_detect_aliases_removals_and_step_overrides(self):
         self.assertTrue(python_issues('SDK = Path("dotnet.exe")\n'
@@ -279,15 +471,32 @@ class DotnetPathSafety(unittest.TestCase):
         self.assertFalse(REQUIRED_RUNNERS - inspected,
                          "Expected tracked runners were not inspected: " + ", ".join(sorted(REQUIRED_RUNNERS - inspected)))
 
-    def test_nested_dotnet_worker_restores_the_opt_out_after_environment_reset(self):
+    def test_nested_workers_restore_the_opt_out_after_environment_reset(self):
+        launchers = (
+            ("windows/native/ClaudeLogWriter/Tests/Program.cs",
+             "private static ProcessStartInfo StartInfo(", "return start;", "start"),
+            ("windows/native/ClaudeHook/Tests/Program.cs",
+             "private static LegacyResult InvokeLegacy(", "Process.Start(start)", "start"),
+            ("windows/native/CodexHookTransport/Tests/Program.cs",
+             "> RunHelper(", "Process.Start(info)", "info"),
+        )
+        for path, start_marker, end_marker, variable in launchers:
+            with self.subTest(path=path):
+                source = (ROOT / path).read_text(encoding="utf-8-sig")
+                code = csharp_code_only(source)
+                begin = code.index(start_marker)
+                end = code.index(end_marker, begin)
+                self.assertFalse(csharp_launcher_issues(source[begin:end], variable))
+
         source = (ROOT / "windows/native/ClaudeLogWriter/Tests/Program.cs").read_text(encoding="utf-8-sig")
-        start = source.index("private static ProcessStartInfo StartInfo(")
-        end = source.index("return start;", start)
-        fragment = source[start:end]
-        reset = fragment.index("start.Environment.Clear();")
-        protection = re.search(r'start\.Environment\["' + OPT_OUT + r'"\]\s*=\s*"0";', fragment)
-        self.assertIsNotNone(protection)
-        self.assertGreater(protection.start(), reset)
+        code = csharp_code_only(source)
+        begin = code.index("private static Process StartWorker(")
+        assignment = "var start = StartInfo(dotnet);"
+        initialized = code.index(assignment, begin) + len(assignment)
+        launched = code.index("Process.Start(start)", initialized)
+        handoff = code[initialized:launched]
+        self.assertNotRegex(handoff, r'\bstart\.Environment(?:Variables)?\b')
+        self.assertNotRegex(handoff, r'\bstart\s*=(?!=|>)')
 
 
 if __name__ == "__main__":
