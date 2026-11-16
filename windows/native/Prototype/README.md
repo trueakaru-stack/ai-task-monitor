@@ -2,9 +2,11 @@
 
 This is an isolated WPF preview, not a replacement for the released application.
 It uses fixed synthetic events or two hard-coded sample tasks, or an empty list. It does not read agent
-profiles, monitor activity, connect providers, save preferences, implement
-settings, manage diagnostics or update the installed application. The settings
-button is intentionally inactive. No installer is modified.
+profiles, monitor activity, connect providers, manage diagnostics or update the
+installed application. The existing settings controls can be enabled by an
+explicitly injected display-preference service; the application entry point
+does not yet inject one and its settings button remains inactive. Other settings
+are not connected. No installer is modified.
 
 Without explicit preview arguments the window opens with an empty task list,
 not the built-in example cards, and says that no sources are connected.

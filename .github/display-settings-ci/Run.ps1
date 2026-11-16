@@ -68,6 +68,12 @@ try{
  Invoke-Isolated @($assembly,(Join-Path $root 'fixtures'))
  $prototype=Join-Path $repository 'windows/native/Prototype/Prototype.csproj'
  Invoke-Isolated @('build',$prototype,'-c','Release','--configfile',$config,'--artifacts-path',$artifacts,'-p:NuGetAudit=false','--nologo')
+ $hostProject=Join-Path $repository 'windows/native/Tests/DisplayHost/DisplayHost.Tests.csproj'
+ Invoke-Isolated @('build',$hostProject,'-c','Release','--configfile',$config,'--artifacts-path',$artifacts,'-p:NuGetAudit=false','--nologo')
+ $hostAssembly=Join-Path $artifacts 'bin/DisplayHost.Tests/release/AITaskMonitor.Prototype.Tests.dll'
+ Check ([IO.File]::Exists($hostAssembly)) 'The display-host test assembly is missing.'
+ Invoke-Isolated @($hostAssembly,$root)
+ Check (@(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File).Count -eq 4) 'The four synthetic frames are missing.'
 }finally{
  foreach($scope in @('User','Machine')){
   $before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine}
