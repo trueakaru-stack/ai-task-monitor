@@ -1,19 +1,17 @@
-$ErrorActionPreference = "SilentlyContinue"
-$installDirectory = $PSScriptRoot
-$expectedInstallDirectory = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "AITaskMonitor")).TrimEnd('\')
-$actualInstallDirectory = [IO.Path]::GetFullPath($installDirectory).TrimEnd('\')
-if (-not [string]::Equals($actualInstallDirectory, $expectedInstallDirectory, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "Uninstaller can run only from the AI task monitor installation directory."
+﻿$ErrorActionPreference = "Stop"
+
+# Do not remove installation files without a trustworthy inventory. A partial
+# removal could delete unrelated or changed files in the installation folder.
+Add-Type -AssemblyName System.Windows.Forms
+if ([Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq "ru") {
+    $message = "Удаление не выполнено. Файлы приложения, ярлык и подключения сохранены.`n`nЧтобы удалить приложение, сначала отключите источники в настройках AI task monitor или по инструкциям этих источников. Затем закройте приложение и вручную проверьте и удалите нужные файлы и ярлык."
+} else {
+    $message = "Uninstallation was not performed. Application files, shortcut and connections were preserved.`n`nTo remove the application, first disconnect sources in AI task monitor settings or follow each source's instructions. Then close the application and manually review and remove the relevant files and shortcut."
 }
-$integration = Join-Path $installDirectory "Configure-ClaudeIntegration.ps1"
-if (Test-Path -LiteralPath $integration) { & $integration -Mode Remove }
-$openCodeIntegration = Join-Path $installDirectory "Configure-OpenCodeIntegration.ps1"
-if (Test-Path -LiteralPath $openCodeIntegration) {
-    try { & $openCodeIntegration -Mode Remove } catch { }
-}
-$shortcutPath = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\AI task monitor.lnk"
-Remove-Item -LiteralPath $shortcutPath -Force
-$literalTarget = $installDirectory.Replace("'", "''")
-$cleanupCommand = "Start-Sleep -Seconds 2; Remove-Item -LiteralPath '$literalTarget' -Recurse -Force"
-$encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cleanupCommand))
-Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @("-NoProfile", "-EncodedCommand", $encodedCommand)
+[void][System.Windows.Forms.MessageBox]::Show(
+    $message,
+    "AI task monitor",
+    [System.Windows.Forms.MessageBoxButtons]::OK,
+    [System.Windows.Forms.MessageBoxIcon]::Warning
+)
+exit 1

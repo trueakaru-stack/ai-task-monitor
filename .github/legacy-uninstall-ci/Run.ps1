@@ -31,12 +31,12 @@ Check ([string]::Equals([IO.Directory]::GetParent($root).FullName, $runnerTemp, 
 $beforeUser=PathState 'User'; $beforeMachine=PathState 'Machine'; $beforeProcess=[Environment]::GetEnvironmentVariable('Path','Process')
 try {
     [void][IO.Directory]::CreateDirectory($root)
-    $source = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\windows\app\Uninstall-CodexProgress.ps1'))
+    $source = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Released-Uninstall-v0.2.7.ps1'))
     Check ([IO.File]::Exists($source)) 'Legacy uninstaller source is missing.'
-    # Compare the checked-out script with the blob in the released v0.2.7-alpha source.
-    # This does not inspect an installer extracted from the release.
+    # Compare the test fixture with the blob in the released v0.2.7-alpha source.
+    # The separate published EXE check verifies the embedded release resource.
     $repository=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-    $blob=(git -C $repository hash-object -- windows/app/Uninstall-CodexProgress.ps1).Trim()
+    $blob=(git -C $repository hash-object -- .github/legacy-uninstall-ci/Released-Uninstall-v0.2.7.ps1).Trim()
     Check ($LASTEXITCODE -eq 0 -and $blob -ceq '7896cf57683b9ba76243640532c83d930844a2ca') 'Legacy uninstaller differs from the pinned release source.'
     $sourceHash=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
     $powershell=[IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'))
