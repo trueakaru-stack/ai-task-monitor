@@ -16,6 +16,8 @@ if (process.argv[2] === 'hook') {
       const e = JSON.parse(data);
       const clean = value => typeof value === 'string' && /^[A-Za-z0-9_.-]{1,128}$/.test(value) ? value : null;
       const entry = { event: clean(e.hook_event_name), prompt: clean(e.prompt_id),
+        promptField: Object.prototype.hasOwnProperty.call(e, 'prompt_id'),
+        promptType: typeof e.prompt_id,
         session: clean(e.session_id), tool: clean(e.tool_name), toolUse: clean(e.tool_use_id) };
       fs.writeFileSync(path.join(process.env.AITM_EVENT_DIR, crypto.randomUUID() + '.json'),
         JSON.stringify(entry), { flag: 'wx' });
@@ -213,7 +215,9 @@ async function run() {
         throw Error('Synthetic tool calls were not assigned to the expected turn.');
     }
     console.log('Synthetic identifier checks: version=' + versionExpected +
-      ' toolPairs=unique promptIds=' + (promptIdsPresent ? 'present-and-matched' : 'absent'));
+      ' toolPairs=unique promptIds=' + (promptIdsPresent ? 'present-and-matched' : 'unusable') +
+      ' promptFieldsPresent=' + idRows.filter(x => x.promptField).length + '/' + idRows.length +
+      ' promptTypes=' + [...new Set(idRows.map(x => x.promptType))].sort().join(','));
     if (versionExpected === '2.1.273' && !promptIdsPresent) throw Error('Expected prompt identifiers were absent.');
   } finally {
     await new Promise(resolve => server.close(resolve));
