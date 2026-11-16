@@ -60,6 +60,7 @@ try {
             SystemRoot=$env:SystemRoot; windir=$env:SystemRoot
             PATH=((Split-Path -Parent $powershell) + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot)
             USERPROFILE=$profile; APPDATA=$appdata; LOCALAPPDATA=$local; TEMP=$temp; TMP=$temp
+            PSModulePath=((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules') + ';' + (Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'))
             DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='0'
         }
         foreach ($name in @('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','SystemDrive','ComSpec','PATHEXT')) {
@@ -79,27 +80,30 @@ try {
             Check ($probeProcess.ExitCode -eq 0) 'Synthetic PowerShell startup failed.'
         } finally { $probeProcess.Dispose() }
         Write-Output 'Synthetic PowerShell startup succeeded.'
-        $wrapper=Join-Path $case 'trace-wrapper.ps1'
-        [IO.File]::WriteAllLines($wrapper, @('Set-PSDebug -Trace 1','$taskScript = $args[0]','& $taskScript'), [Text.UTF8Encoding]::new($false))
-        $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
-        foreach ($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$wrapper,$uninstaller)) { [void]$start.ArgumentList.Add($arg) }
+        foreach ($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$uninstaller)) { [void]$start.ArgumentList.Add($arg) }
         $process=[Diagnostics.Process]::Start($start)
-        $outTask=$process.StandardOutput.ReadToEndAsync(); $errTask=$process.StandardError.ReadToEndAsync()
         try {
             if (-not $process.WaitForExit(20000)) {
                 $children=@(Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $process.Id) | ForEach-Object { $_.Name })
                 Write-Output ('Timed-out synthetic process children: ' + ($children -join ','))
                 $process.Kill($true)
-                $null=$process.WaitForExit(5000)
-                if ($outTask.Wait(2000)) { Write-Output ('Synthetic trace: ' + $outTask.Result) }
-                if ($errTask.Wait(2000)) { Write-Output ('Synthetic stderr: ' + $errTask.Result) }
                 throw 'Synthetic uninstaller timed out.'
             }
             $exit=$process.ExitCode
         } finally { $process.Dispose() }
-        $deadline=[DateTime]::UtcNow.AddSeconds(15)
-        while ([IO.File]::Exists($uninstaller) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
-        Start-Sleep -Milliseconds 500
+        # The released script launches this command asynchronously. Identify and wait for
+        # that exact synthetic cleanup, rather than guessing that it finished after a delay.
+        $literalTarget=$install.Replace("'","''")
+        $cleanupCommand="Start-Sleep -Seconds 2; Remove-Item -LiteralPath '$literalTarget' -Recurse -Force"
+        $cleanupEncoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cleanupCommand))
+        $cleanup=@(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($cleanupEncoded) })
+        Check ($cleanup.Count -eq 1) 'The synthetic cleanup process could not be identified.'
+        try { $cleanupProcess=[Diagnostics.Process]::GetProcessById([int]$cleanup[0].ProcessId) }
+        catch { throw 'The synthetic cleanup exited before it could be observed.' }
+        try {
+            if (-not $cleanupProcess.WaitForExit(20000)) { $cleanupProcess.Kill($true); throw 'The synthetic cleanup timed out.' }
+        } finally { $cleanupProcess.Dispose() }
+        Check (-not [IO.Directory]::Exists($install)) 'The synthetic installation directory was not removed.'
         $preserved=[IO.File]::Exists($sentinel)
         if ($preserved) { $preserved=[Convert]::ToBase64String([IO.File]::ReadAllBytes($sentinel)) -ceq [Convert]::ToBase64String($sentinelBytes) }
         $results.Add([pscustomobject]@{ Scenario=$scenario; Exit=$exit; ExternalPreserved=$preserved })
