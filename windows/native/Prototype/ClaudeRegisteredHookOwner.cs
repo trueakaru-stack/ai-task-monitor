@@ -188,7 +188,7 @@ internal sealed class ClaudeRegisteredHookOwner : IDisposable
         {
             // This owner covers only the legacy global standalone hook. Other
             // Claude settings and sources may still exist.
-            if (pump is not null) pump.NotifyConnection(ClaudeConnection.Disconnected);
+            if (pump is not null) pump.DisconnectAndForget();
             else if (everUnavailable) apply(new ClaudeSourceSnapshot([], false));
             return;
         }

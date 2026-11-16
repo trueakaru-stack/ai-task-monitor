@@ -109,6 +109,7 @@ public sealed class ClaudeFileSource : IDisposable
     {
         lock (signalGate)
         {
+            if (disposed) return;
             if (fallback is not null && ReferenceEquals(fallback.Owner, identity) &&
                 fallback.ForgetVersion == forgetVersion && fallback.RetainedFallback is { Length: > 0 } && pendingFallback is null)
                 pendingFallback = fallback.RetainedFallback;
@@ -292,11 +293,13 @@ public sealed class ClaudeFileSource : IDisposable
     {
         lock (signalGate)
         {
+            if (disposed) return new ClaudeSourceSnapshot([], true);
             signalLoss = true;
             AdvanceGeneration();
         }
         lock (gate)
         {
+            if (System.Threading.Volatile.Read(ref disposed)) return new ClaudeSourceSnapshot([], true);
             ConnectionSignal signal = Signal();
             ApplyPendingForget(signal);
             MarkConnectionLoss();

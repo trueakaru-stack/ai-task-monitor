@@ -110,8 +110,11 @@ profile, register hooks, or start itself in the application. Synthetic tests
 of bounded input and known failures do not establish behavior for a real Claude
 installation.
 
-Do not connect this reader to real profiles until the remaining read race,
-connection and lifecycle limitations are handled.
+The remaining read races, connection and lifecycle limitations prevent this
+reader from establishing confirmed current activity. The experimental WPF
+owner therefore presents all observations as unconfirmed, preserves an
+unavailable state on detected loss and does not claim complete coverage. It
+does not turn a registration check into proof that a hook ran.
 
 An explicit disconnect can record a UTC boundary and asynchronously forget
 retained cards and names. After reconnecting, only activity observed at or after

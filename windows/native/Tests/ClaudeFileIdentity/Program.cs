@@ -57,6 +57,10 @@ Check(firstHandle is { IsClosed: true } && !handlesSource.IsCurrent(snapshot), "
 bool disposedRejected = false;
 try { handlesSource.Poll(ClaudeConnection.Connected, now); } catch (ObjectDisposedException) { disposedRejected = true; }
 Check(disposedRejected, "A disposed source must reject new polls.");
+handlesSource.NotifyUnavailable(snapshot);
+ClaudeSourceSnapshot afterDispose = handlesSource.ReportUnavailable();
+Check(afterDispose.Unavailable && afterDispose.Tasks.Count == 0 && !handlesSource.IsCurrent(afterDispose),
+    "A disposed source must not publish retained cards.");
 
 var failures = new (string Name, ClaudeFileIdentity? First, ClaudeFileIdentity? Second)[] {
     ("first-unavailable", null, valid),
