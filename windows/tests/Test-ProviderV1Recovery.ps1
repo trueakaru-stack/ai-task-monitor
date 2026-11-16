@@ -15,6 +15,7 @@ if($null -eq $mapper){throw 'Application task mapper not found.'}
 . ([scriptblock]::Create($mapper.Extent.Text))
 function Assert($value,[string]$message){if(-not $value){throw $message}}
 function Receive-DeepSeekRuntimeRequest {param($Request) return $Request.Reply}
+function Start-DeepSeekRuntimeRequest {param($Context,$Action,$Profile) return [PSCustomObject]@{Action=$Action;Profile=$Profile;Reply=$null}}
 function Feed-DeepSeek($controller,[object[]]$items,[bool]$ok=$true){
  $reply=[PSCustomObject]@{Ok=$ok;Error=$(if($ok){''}else{'synthetic-error'});Action='list';Profile='';Result=$items}
  $controller.Request=[PSCustomObject]@{Action='list';Profile='';Reply=$reply}
@@ -43,6 +44,11 @@ $a='a'*32;$b='b'*32;$c='c'*32
 $deep=New-DeepSeekMonitorController -AppRoot $appRoot
 Feed-DeepSeek $deep @((Profile 'A' 'connected' $a),(Profile 'B' 'connected' $b))
 Assert (@(Get-DeepSeekAllowedScopes $deep).Count -eq 2) 'Valid profiles were not connected.'
+$deep.Context=[PSCustomObject]@{}
+Request-DeepSeekProfileConnection -Controller $deep -Profile 'A' -Connect $false
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a -and
+        @(Get-DeepSeekAllowedScopes $deep) -ccontains $b) 'A disconnect request claimed a confirmed scope or degraded B.'
+$deep.Request=$null
 Feed-DeepSeek $deep @((Profile 'A' 'partial'),(Profile 'B' 'connected' $b))
 Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a) 'Partial profile was treated as disconnected.'
 Feed-DeepSeek $deep @((Profile 'B' 'connected' $b))
@@ -50,14 +56,15 @@ Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-
 Feed-DeepSeek $deep @() $false
 Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0) 'An error was treated as a disconnect.'
 Feed-DeepSeek $deep @((Profile 'A' 'disconnected'),(Profile 'B' 'connected' $b))
-Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep) -ccontains $a -and @(Get-DeepSeekAllowedScopes $deep) -ccontains $b) 'A unique disconnect was not isolated.'
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a -and
+        @(Get-DeepSeekAllowedScopes $deep) -ccontains $b) 'An unlocked disconnected listing was treated as proof.'
 Feed-DeepSeek $deep @((Profile 'A' 'partial'),(Profile 'B' 'connected' $b))
 Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a -and
         (Get-DeepSeekMonitorConnectionState $deep) -eq 'connected-degraded') 'A stale disconnect was reused after the profile became partial.'
 Feed-DeepSeek $deep @((Profile 'B' 'connected' $b))
 Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a) 'A stale disconnect was reused after the profile disappeared.'
 Feed-DeepSeek $deep @((Profile 'A' 'disconnected'),(Profile 'B' 'connected' $b))
-Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep) -ccontains $a) 'A current unique disconnect was not confirmed again.'
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a) 'A repeated unlocked listing was treated as proof.'
 $lostRoster=New-DeepSeekMonitorController -AppRoot $appRoot
 Feed-DeepSeek $lostRoster @((Profile 'A' 'connected' $a))
 Feed-DeepSeek $lostRoster @((Profile 'A' 'disconnected'))
@@ -102,7 +109,8 @@ try{
  $connections.deepseek='connected';$scopes.deepseek=@($a,$b);$uncertain.deepseek=@()
  Poll-Group
  Assert ($state.Unavailable -contains 'DeepSeek Harness' -and $state.Tasks.Count -eq 256) 'Recovery forgot the scoped loss.'
- $scopes.deepseek=@($b);$confirmed.deepseek=@(Get-DeepSeekConfirmedDisconnectedScopes $deep)
+ # Synthetic proof exercises the reducer contract; the current bridge emits no such proof.
+ $scopes.deepseek=@($b);$confirmed.deepseek=@($a)
  Poll-Group
  Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_one')}).Count -eq 0 -and
          @($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*') -and $_.Active}).Count -eq 254 -and
