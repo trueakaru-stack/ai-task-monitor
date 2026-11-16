@@ -770,28 +770,36 @@ final class ExternalCapacityRegressionTests: XCTestCase {
                                from: .zero, operation: .sourceOver, fraction: 1)
                 context.flushGraphics()
                 NSGraphicsContext.restoreGraphicsState()
-                let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                let destination = output.appendingPathComponent("hint-example-\(language.rawValue)-\(dark ? "dark" : "light").png").path
-                guard destination.hasPrefix(output.path + "/") else { throw FixtureFailure.unsafeRoot }
-                let descriptor = destination.withCString {
-                    open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
-                }
-                guard descriptor >= 0 else { throw FixtureFailure.writeFailed }
-                defer { close(descriptor) }
-                var written = 0
-                while written < png.count {
-                    let count = png.withUnsafeBytes { buffer in
-                        Darwin.write(descriptor, buffer.baseAddress!.advanced(by: written), png.count - written)
+                let example = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                let reference = try XCTUnwrap(appBitmap.representation(using: .png, properties: [:]))
+                let mode = dark ? "dark" : "light"
+                let outputs: [(String, Data)] = [
+                    ("hint-example-\(language.rawValue)-\(mode).png", example),
+                    ("warning-reference-\(language.rawValue)-\(mode).png", reference)
+                ]
+                for (name, png) in outputs {
+                    let destination = output.appendingPathComponent(name).path
+                    guard destination.hasPrefix(output.path + "/") else { throw FixtureFailure.unsafeRoot }
+                    let descriptor = destination.withCString {
+                        open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
                     }
-                    if count < 0 && errno == EINTR { continue }
-                    guard count > 0 else { throw FixtureFailure.writeFailed }
-                    written += count
+                    guard descriptor >= 0 else { throw FixtureFailure.writeFailed }
+                    defer { close(descriptor) }
+                    var written = 0
+                    while written < png.count {
+                        let count = png.withUnsafeBytes { buffer in
+                            Darwin.write(descriptor, buffer.baseAddress!.advanced(by: written), png.count - written)
+                        }
+                        if count < 0 && errno == EINTR { continue }
+                        guard count > 0 else { throw FixtureFailure.writeFailed }
+                        written += count
+                    }
                 }
                 panel.close()
                 window.close()
             }
         }
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path).count, 4)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path).count, 8)
     }
     #endif
 }
