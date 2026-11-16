@@ -1,0 +1,173 @@
+name: Diagnose macOS synthetic file fixtures
+on:
+  push:
+    branches: ['codex/macos-five-assertion-diagnosis-20261116']
+    paths: ['.github/workflows/macos-five-assertion-diagnosis-20261116.yml']
+permissions:
+  contents: read
+jobs:
+  isolated:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            developer: /Applications/Xcode_16.1.app/Contents/Developer
+          - runner: macos-26
+            developer: /Applications/Xcode.app/Contents/Developer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer }}
+    steps:
+      - name: Create disposable test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          task_profile="$(/usr/bin/python3 -I -S -B -c 'import os,pwd; print(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))')"
+          case "$task_profile" in /Users/*) ;; *) echo 'Unexpected runner profile.' >&2; exit 1;; esac
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-diagnosis.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-deny.XXXXXXXX")"
+          case "$task_marker" in "$task_profile"/*) ;; *) echo 'Unexpected marker location.' >&2; exit 1;; esac
+          printf 'synthetic-only\n' > "$task_marker"
+          task_uid="$(id -u)"
+          [[ "$task_uid" =~ ^[0-9]+$ ]]
+          task_temp="$(/usr/bin/python3 -I -S -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)")"
+          [[ "$task_temp" =~ ^/private/var/folders/[a-zA-Z0-9_]+/[a-zA-Z0-9_]+/T$ ]]
+          test -d "$task_temp"
+          if compgen -G "/private/tmp/aitm-loop-$task_uid-*" >/dev/null; then echo 'Unexpected existing channel fixture.' >&2; exit 1; fi
+          if compgen -G "$task_temp/release-synthetic-*" >/dev/null; then echo 'Unexpected existing release fixture.' >&2; exit 1; fi
+          if compgen -G "$task_temp/release-reboot-*" >/dev/null; then echo 'Unexpected existing reboot fixture.' >&2; exit 1; fi
+          task_path="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin:$DEVELOPER_DIR/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" "$task_root/swift-cache" "$task_root/swift-config" "$task_root/swift-security" "$task_root/clang-cache"
+          /usr/bin/env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -c credential.helper= -c core.hooksPath="$task_root/hooks" -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
+          /usr/bin/env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          /usr/bin/env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C "$task_root/source" hash-object macos/Tests/AITaskMonitorTests/ClaudeLoopChannelTests.swift)" = fefa288980d5921d6778638f778408a39c0f45b9
+          test "$(git -C "$task_root/source" hash-object macos/Tests/AITaskMonitorTests/ReleaseRetryScheduleTests.swift)" = 55e6aee817b9290610b163e9ceb233763198fa69
+          test "$(git -C "$task_root/source" hash-object macos/Sources/AITaskMonitor/ClaudeLoopChannel.swift)" = 6e249be669aa13dfde8e46bc51ca1ebaa2e9d252
+          test "$(git -C "$task_root/source" hash-object macos/Sources/AITaskMonitor/ReleaseRetrySchedule.swift)" = 34bc8e9a523382519a6e034eb12275c286bb0699
+          test "$(git -C "$task_root/source" hash-object macos/Sources/AITaskMonitor/ReleaseScheduleFileStore.swift)" = 980dc6900fc271e0a6aec6aad6bd72eb1743efac
+          cat > "$task_root/profile.sb" <<PROFILE
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath (param "TASK_PROFILE")))
+          (allow file-read-metadata)
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny mach-lookup (global-name "com.apple.bsd.dirhelper"))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write* (regex #"^/private/tmp/aitm-loop-$task_uid-[0-9a-f]{16}(/|$)"))
+          (allow file-write* (regex #"^$task_temp/release-(synthetic|reboot)-[0-9A-F-]{36}(/|$)"))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          PROFILE
+          cat > "$task_root/run-isolated" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS \
+            /usr/bin/sandbox-exec -D "TASK_PROFILE=$AITM_TASK_PROFILE" -D "TASK_ROOT=$AITM_TASK_ROOT" -f "$AITM_TASK_ROOT/profile.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-isolated"
+          { printf 'AITM_TASK_ROOT=%s\n' "$task_root"; printf 'AITM_TASK_MARKER=%s\n' "$task_marker"; printf 'AITM_TASK_PROFILE=%s\n' "$task_profile"; printf 'AITM_TASK_SYSTEM_TEMP=%s\n' "$task_temp"; printf 'AITM_TASK_PATH=%s\n' "$task_path"; printf 'AITM_TASK_UID=%s\n' "$task_uid"; } >> "$GITHUB_ENV"
+      - name: Check sandbox boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TASK_ROOT/run-isolated"
+          "$task_run" /usr/bin/true
+          if "$task_run" /bin/cat "$AITM_TASK_MARKER" >"$AITM_TASK_ROOT/out" 2>"$AITM_TASK_ROOT/err"; then echo 'Profile read was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TASK_MARKER" >"$AITM_TASK_ROOT/out" 2>"$AITM_TASK_ROOT/err"; then echo 'Profile write was not denied.' >&2; exit 1; fi
+          /bin/ln -s "$AITM_TASK_MARKER" "$AITM_TASK_ROOT/denied-link"
+          if "$task_run" /bin/cat "$AITM_TASK_ROOT/denied-link" >"$AITM_TASK_ROOT/out" 2>"$AITM_TASK_ROOT/err"; then echo 'Profile read via link was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TASK_ROOT/denied-link" >"$AITM_TASK_ROOT/out" 2>"$AITM_TASK_ROOT/err"; then echo 'Profile write via link was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "/private/tmp/aitm-forbidden-$AITM_TASK_UID" >"$AITM_TASK_ROOT/out" 2>"$AITM_TASK_ROOT/err"; then echo 'Unexpected write outside synthetic paths.' >&2; exit 1; fi
+          "$task_run" /usr/bin/env | /usr/bin/awk -F= '$1=="HOME" || $1=="CODEX_HOME" {exit 1}'
+      - name: Probe Foundation and POSIX fixture creation
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TASK_ROOT/run-isolated"
+          task_suffix="$(/usr/bin/uuidgen | /usr/bin/tr -d '-' | /usr/bin/cut -c1-16 | /usr/bin/tr '[:upper:]' '[:lower:]')"
+          [[ "$task_suffix" =~ ^[0-9a-f]{16}$ ]]
+          task_probe="/private/tmp/aitm-loop-$AITM_TASK_UID-$task_suffix"
+          test ! -e "$task_probe" && test ! -L "$task_probe"
+          "$task_run" /bin/mkdir -m 700 "$task_probe"
+          cat > "$AITM_TASK_ROOT/probe.swift" <<'SWIFT'
+          import Foundation
+          import Darwin
+
+          let manager = FileManager.default
+          let path = CommandLine.arguments[1]
+          let expectedTemp = CommandLine.arguments[2]
+          let payload = Data("synthetic-only".utf8)
+          var checksPassed = true
+
+          func report(_ label: String, _ passed: Bool, _ detail: String = "") {
+              print("\(label): \(passed ? "passed" : "failed") \(detail)")
+              if !passed { checksPassed = false }
+          }
+
+          let variables = ProcessInfo.processInfo.environment
+          report("Environment excludes HOME and CODEX_HOME", variables["HOME"] == nil && variables["CODEX_HOME"] == nil)
+          let posixPath = path + "/posix"
+          let fd = posixPath.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY, mode_t(0o600)) }
+          let openError = errno
+          if fd >= 0 { close(fd) }
+          report("POSIX create in channel directory", fd >= 0, "errno=\(openError)")
+          errno = 0
+          let created = manager.createFile(atPath: path + "/foundation", contents: payload)
+          let createError = errno
+          report("Foundation createFile in channel directory", created, "errno snapshot=\(createError)")
+          do {
+              try payload.write(to: URL(fileURLWithPath: path + "/foundation-data"))
+              report("Foundation Data.write in channel directory", true)
+          } catch {
+              let ns = error as NSError
+              let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+              report("Foundation Data.write in channel directory", false, "error=\(ns.domain):\(ns.code) underlying=\(underlying?.domain ?? "none"):\(underlying?.code ?? 0)")
+          }
+          let temp = manager.temporaryDirectory.resolvingSymlinksInPath().standardizedFileURL
+          report("Foundation temp matches allowed system temp", temp.path == expectedTemp)
+          let release = temp.appendingPathComponent("release-synthetic-" + UUID().uuidString, isDirectory: true)
+          do {
+              try manager.createDirectory(at: release, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+              try payload.write(to: release.appendingPathComponent("probe"))
+              report("Foundation release fixture creation", true)
+          } catch {
+              let ns = error as NSError
+              let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+              report("Foundation release fixture creation", false, "error=\(ns.domain):\(ns.code) underlying=\(underlying?.domain ?? "none"):\(underlying?.code ?? 0)")
+          }
+          exit(checksPassed ? 0 : 1)
+          SWIFT
+          /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 swiftc "$AITM_TASK_ROOT/probe.swift" -o "$AITM_TASK_ROOT/probe"
+          "$task_run" "$AITM_TASK_ROOT/probe" "$task_probe" "$AITM_TASK_SYSTEM_TEMP"
+      - name: Build unchanged XCTest bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TASK_ROOT/source/macos"
+          task_compiler=(/usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 swift)
+          "${task_compiler[@]}" build --build-tests --cache-path "$AITM_TASK_ROOT/swift-cache" --config-path "$AITM_TASK_ROOT/swift-config" --security-path "$AITM_TASK_ROOT/swift-security"
+          task_bin="$("${task_compiler[@]}" build --show-bin-path --cache-path "$AITM_TASK_ROOT/swift-cache" --config-path "$AITM_TASK_ROOT/swift-config" --security-path "$AITM_TASK_ROOT/swift-security")"
+          test -d "$task_bin/AITaskMonitorPackageTests.xctest"
+          printf 'AITM_TASK_BIN=%s\n' "$task_bin" >> "$GITHUB_ENV"
+      - name: Run only five unchanged XCTest cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TASK_ROOT/run-isolated"
+          bundle="$AITM_TASK_BIN/AITaskMonitorPackageTests.xctest"
+          for test_case in \
+            AITaskMonitorTests.ClaudeLoopChannelTests/testForeignFileAtSocketPathIsPreserved \
+            AITaskMonitorTests.ClaudeLoopChannelTests/testSymlinkAtSocketPathIsNotFollowedOrRemoved \
+            AITaskMonitorTests.ClaudeLoopChannelTests/testOwnershipLockSymlinkIsNotFollowed \
+            AITaskMonitorTests.ReleaseRetryScheduleTests/testSharedLeasePreservesRateLimitAcrossIndependentSchedules \
+            AITaskMonitorTests.ReleaseRetryScheduleTests/testSharedClockResetAfterRebootExtendsRatherThanShortensWait
+          do
+            "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "$test_case" "$bundle"
+          done
