@@ -479,9 +479,19 @@ internal sealed class PrototypeWindow
         if (visible.Length > 1) for (int i = 0; i < visible.Length; i++) AddDot(i, visible[i]);
         int remaining = Math.Max(0, samples.Count - 3);
         compactMore.Visibility = remaining > 0 ? Visibility.Visible : Visibility.Collapsed;
-        compactMore.Text = remaining > 0 ? (options.Language == "en" ? $"{remaining} more tasks" : $"Ещё {remaining} задач") : "";
+        compactMore.Text = CompactMoreText(remaining, options.Language);
         if (compact) window.Height = CompactHeight();
         if (focusedWarning is not null) RestoreWarningFocus(focusedWarning, oldTaskOffset, oldWarningOrder);
+    }
+
+    private static string CompactMoreText(int count, string language)
+    {
+        if (count <= 0) return "";
+        if (language == "en") return $"{count} more {(count == 1 ? "task" : "tasks")}";
+        int lastTwo = count % 100, last = count % 10;
+        string word = lastTwo is >= 11 and <= 14 ? "задач"
+            : last == 1 ? "задача" : last is >= 2 and <= 4 ? "задачи" : "задач";
+        return $"Ещё {count} {word}";
     }
 
     private static IEnumerable<Button> DescendantButtons(DependencyObject root)

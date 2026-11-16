@@ -3,6 +3,7 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Automation;
@@ -177,6 +178,11 @@ internal static class Program
             window.UpdateLayout();
             Check(view.SelectedProvider == "codex" && !HasText(window, language == "en" ? "Claude Code task" : "Задача Claude Code"),
                 "Codex filter keeps cloud and local together");
+            var taskScroll = (ScrollViewer)window.FindName("TasksScroll");
+            taskScroll.ScrollToEnd();
+            window.UpdateLayout();
+            Check(taskScroll.ScrollableHeight > 0 && taskScroll.VerticalOffset > 0, "expanded cloud cards are scrolled into view");
+            Capture(window, "cloud-" + language + "-" + theme + "-expanded-cloud.png");
             ((Button)window.FindName("MinimizeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             window.UpdateLayout();
             var dots = ((StackPanel)window.FindName("CompactDotsPanel")).Children.OfType<Button>();
@@ -256,6 +262,61 @@ internal static class Program
                 "Claude recovery keeps both Codex sources");
         }
         finally { window.Close(); }
+    }
+
+    private static CloudSnapshot CloudTasks(int count)
+    {
+        var source = new CodexCloudSource();
+        source.SetEnabled(true);
+        CloudPageRequest request = source.BeginScan()!;
+        int firstCount = Math.Min(count, 20);
+        var first = Enumerable.Range(0, firstCount)
+            .Select(index => new { id = "compact-" + index, title = "Fixture " + index, status = "pending" }).ToArray();
+        CloudPageResult result = source.AcceptPage(request,
+            JsonSerializer.SerializeToUtf8Bytes(new { tasks = first, cursor = count > 20 ? "next" : null }));
+        if (count > 20)
+        {
+            Check(result.Disposition == CloudPageDisposition.NextPage && result.NextRequest is not null,
+                "compact-count fixture requests another page");
+            var second = Enumerable.Range(20, count - 20)
+                .Select(index => new { id = "compact-" + index, title = "Fixture " + index, status = "pending" }).ToArray();
+            result = source.AcceptPage(result.NextRequest!, JsonSerializer.SerializeToUtf8Bytes(new { tasks = second, cursor = (string?)null }));
+        }
+        Check(result.Disposition == CloudPageDisposition.Complete && source.GetSnapshot().Tasks.Count == count,
+            "compact-count fixture produces requested tasks");
+        return source.GetSnapshot();
+    }
+
+    private static void CompactCountGrammar()
+    {
+        var cases = new (int Count, string Russian)[]
+        {
+            (1, "задача"), (2, "задачи"), (3, "задачи"), (4, "задачи"), (5, "задач"),
+            (11, "задач"), (12, "задач"), (13, "задач"), (14, "задач"),
+            (21, "задача"), (22, "задачи"), (25, "задач")
+        };
+        foreach (string language in new[] { "ru", "en" })
+        {
+            var (window, view) = Open("active", language, "dark");
+            try
+            {
+                ((Button)window.FindName("MinimizeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                foreach (var item in cases)
+                {
+                    // Two local cards plus count + 1 cloud cards leave count past the first three.
+                    view.ApplyCloudSource(CloudTasks(item.Count + 1));
+                    window.UpdateLayout();
+                    var more = (TextBlock)window.FindName("CompactMoreText");
+                    string expected = language == "en"
+                        ? $"{item.Count} more {(item.Count == 1 ? "task" : "tasks")}"
+                        : $"Ещё {item.Count} {item.Russian}";
+                    Check(more.IsVisible && more.Text == expected, "compact task-count grammar");
+                    if (item.Count is 1 or 21)
+                        Capture(window, $"compact-count-{language}-{item.Count}.png");
+                }
+            }
+            finally { window.Close(); }
+        }
     }
 
     private static void LateAfterReconnect()
@@ -628,6 +689,7 @@ internal static class Program
                     Flow(language, theme);
             EmptyCoverage();
             CloudAndClaudeIsolation();
+            CompactCountGrammar();
             LateAfterReconnect();
             DeadlineAndSlot();
             AnotherOwnerCannotOverlap();
