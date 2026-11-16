@@ -86,7 +86,7 @@ internal static class CodexProgressInstaller
                     claudeSetupAttempted = true;
                     Process setup = Process.Start(new ProcessStartInfo
                     {
-                        FileName = "powershell.exe",
+                        FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"),
                         Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + Path.Combine(installDirectory, "Configure-ClaudeIntegration.ps1") + "\" -Mode Install",
                         WorkingDirectory = installDirectory,
                         UseShellExecute = false,

@@ -1532,7 +1532,9 @@ function Claude-ConnectionState {
  $legacy='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'+$hookPath+'"'
  $hookScript="& '"+$hookPath.Replace("'","''")+"'"
  $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hookScript))
- $expected='powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$encoded
+ $legacyEncoded='powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$encoded
+ $systemPowerShell=[IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'WindowsPowerShell\v1.0\powershell.exe')
+ $expected='"'+$systemPowerShell+'" -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$encoded
  if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'store-channel.marker') -PathType Leaf){
   . (Join-Path $PSScriptRoot 'StoreClaudeHook.ps1')
   $expected=Get-StoreClaudeHookCommand $PSScriptRoot
@@ -1561,7 +1563,7 @@ function Claude-ConnectionState {
     foreach($propertyName in $hook.PSObject.Properties.Name){if($propertyName -notin @("type","command","timeout")){$hasExtraProperties=$true;break}}
     if($hasExtraProperties){continue}
     $command=([string]$hook.command).Trim()
-    if([string]::Equals($command,$expected,[StringComparison]::Ordinal) -or [string]::Equals($command,$legacy,[StringComparison]::OrdinalIgnoreCase)){[void]$connectedEvents.Add($eventProperty.Name)}
+    if([string]::Equals($command,$expected,[StringComparison]::Ordinal) -or [string]::Equals($command,$legacyEncoded,[StringComparison]::Ordinal) -or [string]::Equals($command,$legacy,[StringComparison]::OrdinalIgnoreCase)){[void]$connectedEvents.Add($eventProperty.Name)}
    }
   }
  }

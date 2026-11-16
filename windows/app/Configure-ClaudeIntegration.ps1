@@ -8,7 +8,9 @@ $hookPath=Join-Path $PSScriptRoot "ClaudeTaskHook.ps1"
 $legacyHookCommand='powershell.exe -NoProfile -ExecutionPolicy Bypass -File "'+$hookPath+'"'
 $hookScript="& '"+$hookPath.Replace("'","''")+"'"
 $encodedHook=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hookScript))
-$hookCommand='powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$encodedHook
+$legacyEncodedHookCommand='powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$encodedHook
+$systemPowerShell=[IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'WindowsPowerShell\v1.0\powershell.exe')
+$hookCommand='"'+$systemPowerShell+'" -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$encodedHook
 if(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'store-channel.marker') -PathType Leaf){
  . (Join-Path $PSScriptRoot 'StoreClaudeHook.ps1')
  $hookCommand=Get-StoreClaudeHookCommand $PSScriptRoot
@@ -22,7 +24,7 @@ function Is-OurHook($hook) {
  if($null -eq $hook.PSObject.Properties["command"]){return $false}
  if($null -ne $hook.PSObject.Properties["args"]){return $false}
  $command=([string]$hook.command).Trim()
- return [string]::Equals($command,$hookCommand,[StringComparison]::Ordinal) -or [string]::Equals($command,$legacyHookCommand,[StringComparison]::OrdinalIgnoreCase)
+ return [string]::Equals($command,$hookCommand,[StringComparison]::Ordinal) -or [string]::Equals($command,$legacyEncodedHookCommand,[StringComparison]::Ordinal) -or [string]::Equals($command,$legacyHookCommand,[StringComparison]::OrdinalIgnoreCase)
 }
 
 function Is-CurrentHook($hook) {
@@ -288,6 +290,11 @@ namespace AITaskMonitor.LegacyClaude
 
         public static PatchResult Apply(string json, string current, string legacy, bool install, string[] expectedEvents)
         {
+            return Apply(json, current, legacy, null, install, expectedEvents);
+        }
+
+        public static PatchResult Apply(string json, string current, string legacy, string legacyEncoded, bool install, string[] expectedEvents)
+        {
             if (json == null || string.IsNullOrWhiteSpace(current) || string.IsNullOrWhiteSpace(legacy) ||
                 expectedEvents == null)
                 throw new ArgumentException("Missing settings or command");
@@ -295,7 +302,7 @@ namespace AITaskMonitor.LegacyClaude
             foreach (string name in expectedEvents)
                 if (!SafeEventName(name) || !wanted.Add(name))
                     throw new ArgumentException("Unexpected or duplicate hook event");
-            ValidateUtf16(current); ValidateUtf16(legacy);
+            ValidateUtf16(current); ValidateUtf16(legacy); if (legacyEncoded != null) ValidateUtf16(legacyEncoded);
             bool bom = json.Length > 0 && json[0] == '\uFEFF';
             string source = bom ? json.Substring(1) : json;
             if (string.IsNullOrWhiteSpace(source)) source = "{}";
@@ -314,7 +321,7 @@ namespace AITaskMonitor.LegacyClaude
                 hooks = Object(expectedEvents.Select(name => Quote(name) + ":" + Array(new[] { NewGroup(current) })));
                 changed = true;
             }
-            else hooks = PatchHooks(source, existing.Value, current, legacy, install, wanted, expectedEvents, out changed);
+            else hooks = PatchHooks(source, existing.Value, current, legacy, legacyEncoded, install, wanted, expectedEvents, out changed);
             if (!changed) return new PatchResult { Json = json, Changed = false };
             List<string> rootParts = new List<string>();
             foreach (Property property in root.Properties)
@@ -323,7 +330,7 @@ namespace AITaskMonitor.LegacyClaude
             return new PatchResult { Json = (bom ? "\uFEFF" : "") + Object(rootParts), Changed = true };
         }
 
-        private static string PatchHooks(string source, Node hooks, string current, string legacy,
+        private static string PatchHooks(string source, Node hooks, string current, string legacy, string legacyEncoded,
                                          bool install, HashSet<string> wanted, string[] expectedEvents, out bool changed)
         {
             Unique(hooks);
@@ -358,7 +365,7 @@ namespace AITaskMonitor.LegacyClaude
                     {
                         if (hook.Kind != '{') throw new FormatException("Hook must be an object");
                         Unique(hook);
-                        int ownership = Owned(hook, current, legacy);
+                        int ownership = Owned(hook, current, legacy, legacyEncoded);
                         if (ownership == 2) exists = true;
                         bool remove = install ? ownership == 1 : ownership != 0;
                         if (remove) { groupChanged = true; eventChanged = true; }
@@ -382,7 +389,7 @@ namespace AITaskMonitor.LegacyClaude
             return Object(output);
         }
 
-        private static int Owned(Node hook, string current, string legacy)
+        private static int Owned(Node hook, string current, string legacy, string legacyEncoded)
         {
             foreach (Property property in hook.Properties)
             {
@@ -398,7 +405,8 @@ namespace AITaskMonitor.LegacyClaude
                 command == null || command.Value.Kind != '"') return 0;
             string value = command.Value.Text.Trim();
             if (string.Equals(value, current, StringComparison.Ordinal)) return 2;
-            return string.Equals(value, legacy, StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+            return string.Equals(value, legacy, StringComparison.OrdinalIgnoreCase) ||
+                (legacyEncoded != null && string.Equals(value, legacyEncoded, StringComparison.Ordinal)) ? 1 : 0;
         }
         private static void Unique(Node node)
         {
@@ -459,7 +467,7 @@ namespace AITaskMonitor.LegacyClaude
 '@
  Add-Type -TypeDefinition $patchSource -ReferencedAssemblies 'System.Core.dll'
 }
-$patch=[AITaskMonitor.LegacyClaude.ClaudeConfigRawPatch]::Apply($originalText,$hookCommand,$legacyHookCommand,($Mode -eq "Install"),[string[]]$events)
+$patch=[AITaskMonitor.LegacyClaude.ClaudeConfigRawPatch]::Apply($originalText,$hookCommand,$legacyHookCommand,$legacyEncodedHookCommand,($Mode -eq "Install"),[string[]]$events)
 if($Mode -eq "Install" -and $hasSettings){
  $backup=$settingsPath+".codex-tasks-backup-"+(Get-Date -Format "yyyyMMdd-HHmmss-fffffff")
  Copy-Item -LiteralPath $settingsPath -Destination $backup

@@ -1,4 +1,4 @@
-param([switch]$RequireSymbolicLink,[string]$ApplicationDirectory='')
+﻿param([switch]$RequireSymbolicLink,[string]$ApplicationDirectory='')
 $ErrorActionPreference = "Stop"
 $root = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ("ai-task-monitor-integration-" + [Guid]::NewGuid().ToString("N"))))
 $prefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
@@ -28,7 +28,9 @@ try {
     $assertDisconnected = [scriptblock]::Create($connectionDefinition + "`n" + 'if (Claude-HookConnected) { throw "An unrelated hook was recognized as the app hook." }')
     $legacy = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $hook + '"'
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& '" + $hook.Replace("'", "''") + "'"))
-    $owned = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    $legacyEncoded = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    $systemPowerShell = [IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'WindowsPowerShell\v1.0\powershell.exe')
+    $owned = '"' + $systemPowerShell + '" -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
     $directory = Join-Path $root ".claude"
     [void][IO.Directory]::CreateDirectory($directory)
     $settingsPath = Join-Path $directory "settings.json"
@@ -60,8 +62,20 @@ try {
     if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash -ne $originalHash) { throw "Removing an absent hook must not rewrite unrelated settings." }
     & $assertDisconnected
 
+    # Either prior standalone form can also be removed directly.
+    foreach($priorCommand in @($legacy,$legacyEncoded)){
+        $onePrior = $original | ConvertFrom-Json
+        $onePrior.hooks.PreToolUse[0].hooks = @($onePrior.hooks.PreToolUse[0].hooks) + [PSCustomObject]@{type="command";command=$priorCommand}
+        [IO.File]::WriteAllText($settingsPath, ($onePrior | ConvertTo-Json -Depth 100), [Text.UTF8Encoding]::new($false))
+        & $assertPartial
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setup -Mode Remove
+        if ($LASTEXITCODE -ne 0) { throw "Removing a prior app hook failed." }
+        $remaining = Get-Content -Raw -Encoding UTF8 -LiteralPath $settingsPath | ConvertFrom-Json
+        if (($remaining | ConvertTo-Json -Depth 100) -cne (($original | ConvertFrom-Json) | ConvertTo-Json -Depth 100)) { throw "Removing a prior hook changed unrelated settings or hooks." }
+    }
+
     $withLegacy = $original | ConvertFrom-Json
-    $withLegacy.hooks.PreToolUse[0].hooks = @($withLegacy.hooks.PreToolUse[0].hooks) + [PSCustomObject]@{type="command";command=$legacy}
+    $withLegacy.hooks.PreToolUse[0].hooks = @($withLegacy.hooks.PreToolUse[0].hooks) + @([PSCustomObject]@{type="command";command=$legacy},[PSCustomObject]@{type="command";command=$legacyEncoded})
     [IO.File]::WriteAllText($settingsPath, ($withLegacy | ConvertTo-Json -Depth 100), [Text.UTF8Encoding]::new($false))
     & $assertPartial
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setup -Mode Install
@@ -91,14 +105,33 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Installing a hook from a special-character path failed." }
     $special = Get-Content -Raw -Encoding UTF8 -LiteralPath $settingsPath | ConvertFrom-Json
     $registered = [string]$special.hooks.UserPromptSubmit[0].hooks[0].command
-    $prefixCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand '
+    $prefixCommand = '"' + $systemPowerShell + '" -NoProfile -ExecutionPolicy Bypass -EncodedCommand '
     if (-not $registered.StartsWith($prefixCommand) -or $registered.Contains('$') -or $registered.Contains("'")) { throw "The hook command exposes shell-sensitive path characters." }
     $encodedSpecial = $registered.Substring($prefixCommand.Length)
     $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encodedSpecial))
     $expectedScript = "& '" + (Join-Path $specialDirectory "ClaudeTaskHook.ps1").Replace("'", "''") + "'"
     if ($decoded -cne $expectedScript) { throw "The encoded hook did not preserve the exact script path." }
-    '{"hook_event_name":"UserPromptSubmit","session_id":"synthetic-special"}' | & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedSpecial
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $root 'CodexTaskProgress\claude-events-v2.jsonl'))) { throw "The encoded hook did not receive input and write its synthetic event." }
+    # Run the actual registered command through the Windows shell with a PATH
+    # that has no PowerShell directory; all state remains in the fixture.
+    $hookStart = New-Object Diagnostics.ProcessStartInfo
+    $hookStart.FileName = [IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'cmd.exe')
+    $hookStart.Arguments = '/d /s /c "' + $registered + '"'
+    $hookStart.WorkingDirectory = $root
+    $hookStart.UseShellExecute = $false
+    $hookStart.CreateNoWindow = $true
+    $hookStart.RedirectStandardInput = $true
+    $hookStart.RedirectStandardOutput = $true
+    $hookStart.RedirectStandardError = $true
+    $hookStart.EnvironmentVariables['PATH'] = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+    $hookProcess = [Diagnostics.Process]::Start($hookStart)
+    try {
+        $hookOut=$hookProcess.StandardOutput.ReadToEndAsync();$hookErr=$hookProcess.StandardError.ReadToEndAsync()
+        $hookProcess.StandardInput.WriteLine('{"hook_event_name":"UserPromptSubmit","session_id":"synthetic-special"}')
+        $hookProcess.StandardInput.Close()
+        if (-not $hookProcess.WaitForExit(30000)) { throw 'The synthetic hook timed out.' }
+        if ($hookProcess.ExitCode -ne 0) { throw ('The registered hook failed without PowerShell on PATH: '+$hookOut.Result+' '+$hookErr.Result) }
+    } finally { $hookProcess.Dispose() }
+    if (-not (Test-Path -LiteralPath (Join-Path $root 'CodexTaskProgress\claude-events-v2.jsonl'))) { throw "The registered hook did not receive input and write its synthetic event." }
 
     $invalid = '[1, 2, 3]'
     [IO.File]::WriteAllText($settingsPath, $invalid, [Text.UTF8Encoding]::new($false))

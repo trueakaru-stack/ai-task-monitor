@@ -193,8 +193,8 @@ foreach($mode in @('hidden','normal')){
 }
 Check ([bool]$controlResults['normal']) 'The disposable runner WPF positive control did not show a window.'
 
-# Exercise the error after a synthetic Claude setup has changed test-only
-# settings. The shim replaces the new synthetic launcher, never a user file.
+# Exercise the error after the real Claude setup changes fixture settings.
+# Hold only the synthetic launcher so its subsequent start fails safely.
 $claudeDirectories=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 [void]$claudeDirectories.Add([IO.Path]::GetFullPath((Join-Path $knownProfile '.claude')))
 [void]$claudeDirectories.Add([IO.Path]::GetFullPath((Join-Path $profile '.claude')))
@@ -209,30 +209,12 @@ foreach($dir in $claudeDirectories){
 }
 $fakeSettings=Join-Path $profile '.claude\settings.json'
 [IO.File]::WriteAllText($fakeSettings,'{"user":"preserved"}')
-$shimDir=Join-Path $FixtureRoot 'synthetic-claude-shim'
-[void][IO.Directory]::CreateDirectory($shimDir)
-$shimSource=Join-Path $PSScriptRoot 'SyntheticClaudeSetup.cs'
-$shim=Join-Path $shimDir 'powershell.exe'
-$compiler=Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-Check ([IO.File]::Exists($compiler) -and [IO.File]::Exists($shimSource)) 'The synthetic setup compiler or source is missing.'
-$compile=New-IsolatedStart $compiler $values
-$compile.RedirectStandardOutput=$true;$compile.RedirectStandardError=$true
-foreach($arg in @('/nologo','/target:exe',('/out:'+$shim),$shimSource)){[void]$compile.ArgumentList.Add($arg)}
-$compilerProcess=[Diagnostics.Process]::Start($compile)
-try{
-    $compilerOut=$compilerProcess.StandardOutput.ReadToEndAsync();$compilerErr=$compilerProcess.StandardError.ReadToEndAsync()
-    if(-not $compilerProcess.WaitForExit(30000)){throw 'Synthetic setup shim compilation timed out.'}
-    if($compilerProcess.ExitCode -ne 0){Write-Warning ($compilerOut.Result+' '+$compilerErr.Result);throw 'Synthetic setup shim did not compile.'}
-}finally{$compilerProcess.Dispose()}
 $partialValues=@{}
 foreach($key in $values.Keys){$partialValues[$key]=$values[$key]}
-$partialValues.PATH=$shimDir+';'+$values.PATH
-$partialValues.AITM_TEST_LOCAL=$knownLocal
-$partialValues.AITM_TEST_INSTALL=$install
-$partialValues.AITM_TEST_PROFILE=$profile
-$partialValues.AITM_TEST_FIXTURE=$FixtureRoot
-$partialMarker=Join-Path $FixtureRoot 'synthetic-claude-marker'
-$partialValues.AITM_TEST_MARKER=$partialMarker
+# This process-local test PATH does not contain the PowerShell directory.
+$partialValues.PATH=(Join-Path $env:SystemRoot 'System32')+';'+$env:SystemRoot
+$fixtureLauncher=Join-Path $install 'AI task monitor.exe'
+$launcherLock=$null
 $partialSetup=$null
 try{
     $start=New-IsolatedStart $Installer $partialValues
@@ -242,11 +224,24 @@ try{
     $promptNames=Get-Names $prompt
     Check (@($promptNames|Where-Object {$_.Contains('Connect Claude Code?') -and $_.Contains('2.1.101')}).Count -gt 0) 'The English synthetic Claude connection prompt was not shown.'
     Invoke-DialogButton $prompt $partialSetup @('Yes','Да')
-    $clock=[Diagnostics.Stopwatch]::StartNew();$failure=$null
+    $lockClock=[Diagnostics.Stopwatch]::StartNew()
+    while($null -eq $launcherLock -and $lockClock.Elapsed.TotalSeconds -lt 30 -and -not $partialSetup.HasExited){
+        if([IO.File]::Exists($fixtureLauncher)){
+            try{$launcherLock=[IO.File]::Open($fixtureLauncher,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)}catch [IO.IOException]{}
+        }
+        if($null -eq $launcherLock){Start-Sleep -Milliseconds 20}
+    }
+    Check ($null -ne $launcherLock) 'The synthetic launcher could not be held before the real Claude setup finished.'
+    $clock=[Diagnostics.Stopwatch]::StartNew();$failure=$null;$systemClaudeSetupObserved=$false
     $idCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,$partialSetup.Id)
     $nameCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,'AI task monitor')
     $condition=[Windows.Automation.AndCondition]::new($idCondition,$nameCondition)
-    while($null -eq $failure -and $clock.Elapsed.TotalSeconds -lt 30){
+    while($null -eq $failure -and $clock.Elapsed.TotalSeconds -lt 60){
+        $children=@(Get-CimInstance Win32_Process -Filter ('ParentProcessId = '+$partialSetup.Id) -Property ExecutablePath,CommandLine)
+        foreach($child in $children){
+            if($child.CommandLine -and $child.CommandLine.Contains('Configure-ClaudeIntegration.ps1') -and
+                [string]::Equals([string]$child.ExecutablePath,$SystemPowerShell,[StringComparison]::OrdinalIgnoreCase)){$systemClaudeSetupObserved=$true}
+        }
         if($partialSetup.HasExited){throw 'The synthetic partial setup exited without its warning.'}
         $window=[Windows.Automation.AutomationElement]::RootElement.FindFirst([Windows.Automation.TreeScope]::Children,$condition)
         if($null -ne $window){
@@ -257,12 +252,20 @@ try{
     }
     Check ($null -ne $failure) 'The synthetic partial setup did not warn about Claude settings.'
     Save-DialogScreenshot $failure $partialSetup 'partial-install-warning-en'
-    Check ([IO.File]::Exists($partialMarker) -and [IO.File]::ReadAllText($fakeSettings) -ceq '{"user":"preserved","fixture_hook":"synthetic"}') 'The synthetic Claude setup did not reach the intended side effect.'
+    Check $systemClaudeSetupObserved 'The Claude configuration process was not observed at the system PowerShell path.'
+    $configured=[IO.File]::ReadAllText($fakeSettings)|ConvertFrom-Json
+    $expectedHookPath=Join-Path $install 'ClaudeTaskHook.ps1'
+    $expectedScript="& '"+$expectedHookPath.Replace("'","''")+"'"
+    $expectedEncoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($expectedScript))
+    $expectedCommand='"'+$SystemPowerShell+'" -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$expectedEncoded
+    Check ($configured.user -ceq 'preserved' -and
+        [string]$configured.hooks.UserPromptSubmit[0].hooks[0].command -ceq $expectedCommand) 'The real Claude setup did not safely write the expected system-PowerShell hook to fixture settings.'
     $failureNames=Get-Names $failure
     Check (@($failureNames|Where-Object {$_.Contains($install)}).Count -gt 0) 'The partial-install warning omitted the actual installation path.'
     Dismiss-Dialog $failure $partialSetup
     Check ($partialSetup.WaitForExit(10000) -and $partialSetup.ExitCode -eq 1) 'The synthetic partial setup did not fail as expected.'
 }finally{
+    if($null -ne $launcherLock){$launcherLock.Dispose()}
     if($null -ne $partialSetup){if(-not $partialSetup.HasExited){$partialSetup.Kill();[void]$partialSetup.WaitForExit(10000)};$partialSetup.Dispose()}
 }
 $backup=[IO.Path]::GetFullPath($install+'.synthetic-partial')
@@ -284,7 +287,7 @@ if([IO.File]::Exists($shortcut)){
 }
 Check ((Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash -ceq $oldShortcutHash -and
     [IO.File]::ReadAllText($oldSentinel) -ceq 'synthetic user data') 'Synthetic partial setup changed pre-existing data.'
-Write-Output 'Synthetic Claude setup warning verified after a simulated settings change and launcher failure; no real account or settings used.'
+Write-Output 'Real system PowerShell configured only fixture Claude settings with PATH lacking PowerShell; a locked fixture launcher produced the expected partial-install warning.'
 
 $setup=$null;$monitor=$null
 try{
@@ -450,11 +453,46 @@ try{
     $setup=[Diagnostics.Process]::Start($removal)
     $question=Find-DialogText $setup @('Disconnect Claude Code and remove') 30
     Save-DialogScreenshot $question $setup 'removal-confirmation-en'
-    Invoke-DialogButton $question $setup @('Yes','Да')
-    $result=Find-DialogText $setup @('Claude Code disconnection was checked.') 40
-    Save-DialogScreenshot $result $setup 'removal-result-en'
-    Dismiss-Dialog $result $setup
-    Check ($setup.WaitForExit(10000) -and $setup.ExitCode -eq 0) 'The installed uninstaller did not complete its verified removal.'
+    Invoke-DialogButton $question $setup @('No','Нет')
+    Check ($setup.WaitForExit(10000) -and $setup.ExitCode -eq 0 -and [IO.File]::Exists($launcher)) 'Refusing English removal changed the synthetic installation.'
+    $setup.Dispose();$setup=$null
+
+    # Execute the installed CMD itself with no PowerShell directory on its
+    # child PATH. Observe the actual system PowerShell and its own dialog.
+    $cmdValues=@{}
+    foreach($key in $values.Keys){$cmdValues[$key]=$values[$key]}
+    $cmdValues.PATH=$tmp
+    $commandPath=Join-Path $install 'Uninstall-CodexProgress.cmd'
+    $cmdPath=Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $cmdStart=New-IsolatedStart $cmdPath $cmdValues
+    $cmdStart.Arguments='/d /s /c ""'+$commandPath+'""'
+    $setup=[Diagnostics.Process]::Start($cmdStart)
+    $childClock=[Diagnostics.Stopwatch]::StartNew();$removalChild=$null
+    while($null -eq $removalChild -and $childClock.Elapsed.TotalSeconds -lt 30){
+        if($setup.HasExited){throw 'The installed removal CMD exited before starting PowerShell.'}
+        $children=@(Get-CimInstance Win32_Process -Filter ('ParentProcessId = '+$setup.Id) -Property ProcessId,ExecutablePath,CommandLine)
+        foreach($child in $children){
+            if($child.CommandLine -and $child.CommandLine.Contains('Uninstall-CodexProgress.ps1') -and
+                [string]::Equals([string]$child.ExecutablePath,$SystemPowerShell,[StringComparison]::OrdinalIgnoreCase)){
+                $removalChild=[Diagnostics.Process]::GetProcessById([int]$child.ProcessId);break
+            }
+        }
+        if($null -eq $removalChild){Start-Sleep -Milliseconds 100}
+    }
+    Check ($null -ne $removalChild) 'The installed removal CMD did not start system PowerShell without PATH.'
+    try{
+        $question=Find-DialogText $removalChild @('Disconnect Claude Code and remove') 30
+        Invoke-DialogButton $question $removalChild @('Yes','Да')
+        $result=Find-DialogText $removalChild @('Claude Code disconnection was checked.') 40
+        Save-DialogScreenshot $result $removalChild 'removal-result-en'
+        Dismiss-Dialog $result $removalChild
+        Check ($removalChild.WaitForExit(10000) -and $removalChild.ExitCode -eq 0) 'The installed uninstaller did not complete its verified removal.'
+    }finally{
+        if(-not $removalChild.HasExited){$removalChild.Kill();[void]$removalChild.WaitForExit(10000)}
+        $removalChild.Dispose()
+    }
+    Check ($setup.WaitForExit(10000) -and $setup.ExitCode -eq 0) 'The installed removal CMD did not exit successfully.'
+    Write-Output 'Installed removal CMD started system PowerShell with no PowerShell on PATH and completed verified removal.'
     Check (-not [IO.File]::Exists($launcher) -and -not [IO.File]::Exists($appScript) -and
         [IO.File]::ReadAllText($modified) -ceq 'synthetic user modification' -and
         [IO.File]::ReadAllText($foreign) -ceq 'synthetic unrelated file' -and

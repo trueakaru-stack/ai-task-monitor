@@ -80,6 +80,19 @@ try {
         if($engineProcess.ExitCode -ne 0){Write-Output $engineOut.Result;Write-Output $engineErr.Result;throw 'The installer assembly guard test failed.'}
         Write-Output $engineOut.Result
     }finally{$engineProcess.Dispose()}
+    foreach($testName in @('Test-ClaudeConnectionState.ps1','Test-ClaudeIntegrationSafety.ps1')){
+        $test=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot ('..\..\windows\tests\'+$testName)))
+        $start=New-IsolatedPS
+        foreach($arg in @('-File',$test)){[void]$start.ArgumentList.Add($arg)}
+        $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+        $testProcess=[Diagnostics.Process]::Start($start)
+        try{
+            $testOut=$testProcess.StandardOutput.ReadToEndAsync();$testErr=$testProcess.StandardError.ReadToEndAsync()
+            if(-not $testProcess.WaitForExit(180000)){throw ($testName+' timed out.')}
+            if($testProcess.ExitCode -ne 0){Write-Output $testOut.Result;Write-Output $testErr.Result;throw ($testName+' failed.')}
+            Write-Output $testOut.Result
+        }finally{$testProcess.Dispose()}
+    }
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -TypeDefinition @'
 using System;
