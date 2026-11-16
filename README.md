@@ -12,9 +12,9 @@ AI Task Monitor — бесплатное приложение для Windows 11 
 - Компактное окно можно держать поверх других окон и переключать задачи; настройки доступны в развёрнутом режиме.
 - Локальный диагностический журнал и предупреждение о возможном цикле помогают следить за работой. Предупреждение приблизительное и не останавливает задачу.
 
-### Установка и статус
+### Установка
 
-Приложение находится в стадии альфа-тестирования. Сборки для Windows и macOS доступны в [Releases](https://github.com/trueakaru-stack/ai-task-monitor/releases); перед установкой проверьте прилагаемую контрольную сумму SHA-256.
+Сборки для Windows и macOS доступны в [Releases](https://github.com/trueakaru-stack/ai-task-monitor/releases); перед установкой проверьте прилагаемую контрольную сумму SHA-256.
 
 Установщик Windows не подписан доверенным сертификатом, поэтому SmartScreen может показать предупреждение. Сборка macOS подписана ad hoc и не нотарифицирована Apple; Gatekeeper может предупредить или заблокировать запуск.
 
@@ -38,9 +38,9 @@ AI Task Monitor is a free Windows 11 and macOS app for following Codex and Claud
 - A compact window can stay above other windows and switch between tasks; settings are available in the expanded view.
 - A local diagnostic journal and a possible-loop warning help monitor activity. The warning is heuristic and does not stop a task.
 
-### Installation and status
+### Installation
 
-The app is in alpha. Windows and macOS packages are available in [Releases](https://github.com/trueakaru-stack/ai-task-monitor/releases); verify the accompanying SHA-256 checksum before installation.
+Windows and macOS packages are available in [Releases](https://github.com/trueakaru-stack/ai-task-monitor/releases); verify the accompanying SHA-256 checksum before installation.
 
 The Windows installer does not have a trusted code signature, so SmartScreen may display a warning. The macOS build is ad-hoc signed and not notarized by Apple; Gatekeeper may warn or block it.
 
