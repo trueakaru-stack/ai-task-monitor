@@ -284,11 +284,11 @@ public sealed class ClaudeFileSource : IDisposable
                 }
                 bool uncertain = connection == ClaudeConnection.Partial;
                 previous = Copy(parsed, uncertain);
-                bool unavailable = uncertain || reader.RetentionOverflow || reader.SourceUncertain;
+                bool sourceUnavailable = uncertain || reader.RetentionOverflow || reader.SourceUncertain;
                 Task[] output = Copy(previous, false);
-                IReadOnlyList<string> prompts = unavailable ? Array.Empty<string>() :
+                IReadOnlyList<string> prompts = sourceUnavailable ? Array.Empty<string>() :
                     ObservedPrompts(current?.Text ?? "", legacy?.Text ?? "", output, observedSinceUtc, utcNow);
-                return new ClaudeSourceSnapshot(output, unavailable) { ObservedPromptIds = prompts };
+                return new ClaudeSourceSnapshot(output, sourceUnavailable) { ObservedPromptIds = prompts };
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or SecurityException or DecoderFallbackException)
             {
