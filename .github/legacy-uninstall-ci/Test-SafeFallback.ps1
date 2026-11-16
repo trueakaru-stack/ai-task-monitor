@@ -65,8 +65,13 @@ try{
     $builder=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\windows\app\Build-Installer-v2.ps1'))
     $start=New-IsolatedPS
     foreach($arg in @('-File',$builder,'-OutputDirectory',$output,'-BuildTempDirectory',$build)){[void]$start.ArgumentList.Add($arg)}
+    $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
     $compiler=[Diagnostics.Process]::Start($start)
-    try{Check ($compiler.WaitForExit(90000) -and $compiler.ExitCode -eq 0) 'Candidate installer did not compile.'}finally{$compiler.Dispose()}
+    try{
+        $compilerOut=$compiler.StandardOutput.ReadToEndAsync();$compilerErr=$compiler.StandardError.ReadToEndAsync()
+        if(-not $compiler.WaitForExit(90000)){throw 'Candidate installer compilation timed out.'}
+        if($compiler.ExitCode -ne 0){Write-Output $compilerOut.Result;Write-Output $compilerErr.Result;throw 'Candidate installer did not compile.'}
+    }finally{$compiler.Dispose()}
     $exe=Join-Path $output 'AITaskMonitorSetup.exe'
     Check ([IO.File]::Exists($exe)) 'Compiled installer is missing.'
     $extractor=Join-Path $root 'extract.ps1'
