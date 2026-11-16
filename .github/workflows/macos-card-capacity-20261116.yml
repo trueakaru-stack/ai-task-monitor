@@ -125,3 +125,11 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testKimiTemporaryInspectionFailureRetainsCardUntilExplicitDisconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
+      - name: Run synthetic partial scope retention regression
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: '"$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testPartialScopeKeepsPriorCardAndHealthyNeighbourAfterReconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
+      - name: Run synthetic Hermes scope isolation regression
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: '"$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testReclaimingHermesTerminalDoesNotDegradeOtherScope "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'

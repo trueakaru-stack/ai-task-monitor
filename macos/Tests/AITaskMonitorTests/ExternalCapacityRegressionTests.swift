@@ -81,6 +81,21 @@ final class ExternalCapacityRegressionTests: XCTestCase {
         XCTAssertTrue(store.capacityLimitedProviders.contains("deepseek"))
     }
 
+    func testReclaimingHermesTerminalDoesNotDegradeOtherScope() {
+        let store = ExternalProviderStateStore()
+        store.retainProviders(["hermes", "kimi"])
+        store.retainSessionScopes(provider: "hermes", scopes: [scopeA, scopeB])
+        let tick = Int64(clamping: DispatchTime.now().uptimeNanoseconds)
+        XCTAssertTrue(store.apply(event("hermes", scopeA + "_finished", "started", tick: tick, epoch: tick), now: now))
+        XCTAssertTrue(store.apply(event("hermes", scopeA + "_finished", "completed", tick: tick + 1, epoch: tick), now: now.addingTimeInterval(1)))
+        XCTAssertTrue(store.apply(event("hermes", scopeB + "_healthy", "started", tick: tick + 2, epoch: tick + 2), now: now.addingTimeInterval(2)))
+        for index in 0..<254 {
+            XCTAssertTrue(store.apply(event("kimi", scopeA + "_k\(index)"), now: now.addingTimeInterval(Double(index + 3))))
+        }
+        XCTAssertTrue(store.apply(event("kimi", scopeA + "_new"), now: now.addingTimeInterval(300)))
+        XCTAssertEqual(store.snapshot(now: now.addingTimeInterval(300)).first { $0.session == scopeB + "_healthy" }?.status, "active")
+    }
+
     func testHermesWaitsForAnObserverStartedAfterMonitoring() {
         let store = ExternalProviderStateStore()
         store.retainProviders(["hermes"])
@@ -205,6 +220,37 @@ final class ExternalCapacityRegressionTests: XCTestCase {
     }
 
     #if DEBUG
+    @MainActor
+    func testPartialScopeKeepsPriorCardAndHealthyNeighbourAfterReconnect() throws {
+        let path = try directory("scope")
+        let seed = ExternalProviderStateStore()
+        seed.retainProviders(["deepseek"])
+        seed.retainSessionScopes(provider: "deepseek", scopes: [scopeA, scopeB])
+        XCTAssertTrue(seed.apply(event("deepseek", scopeB + "_healthy"), now: now))
+        let runtime = ExternalProviderRuntime(channel: try ExternalProviderChannel(directory: path))
+        runtime.adoptState(seed)
+        defer { runtime.stop(); try? FileManager.default.removeItem(atPath: path) }
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: URL(fileURLWithPath: path + "/codex")),
+                              claudeReader: ClaudeTaskReader(eventFile: URL(fileURLWithPath: path + "/events")),
+                              previewTasks: [], openCodeConnection: { .disconnected },
+                              additionalExternalConnections: [.kimi: { .disconnected }, .hermes: { .disconnected }],
+                              makeExternalRuntime: { runtime })
+        let a = MonitoredTask(id: "deepseek:" + scopeA + "_previous", provider: .deepseek, title: "Synthetic A",
+                              activity: "", isActive: true, progress: nil, progressKind: .none, steps: [], updatedAt: now)
+        let b = MonitoredTask(id: "deepseek:" + scopeB + "_healthy", provider: .deepseek, title: "Synthetic B",
+                              activity: "", isActive: true, progress: nil, progressKind: .none, steps: [], updatedAt: now)
+        let connected = [DeepSeekProfile(name: "A", state: "connected", scope: scopeA, error: nil),
+                         DeepSeekProfile(name: "B", state: "connected", scope: scopeB, error: nil)]
+        let partial = [DeepSeekProfile(name: "A", state: "partial", scope: nil, error: "synthetic"),
+                       DeepSeekProfile(name: "B", state: "connected", scope: scopeB, error: nil)]
+        let degraded = store.testExternalFallback(previous: [a, b], deepSeekRosters: [connected, partial])
+        XCTAssertTrue(degraded.0.contains { $0.id == a.id && $0.isUnconfirmed && !$0.isActive })
+        XCTAssertTrue(degraded.0.contains { $0.id == b.id && $0.isActive && !$0.isUnconfirmed })
+        let recovered = store.testExternalFallback(previous: degraded.0, deepSeekRosters: [connected])
+        XCTAssertTrue(recovered.0.contains { $0.id == a.id && $0.isUnconfirmed && !$0.isActive })
+        XCTAssertTrue(recovered.0.contains { $0.id == b.id && $0.isActive && !$0.isUnconfirmed })
+    }
+
     @MainActor
     func testTaskStoreKeepsCapacityWarningAfterPartialAndReconnect() throws {
         let seed = ExternalProviderStateStore()
