@@ -6,10 +6,11 @@ still allowing that directory to be used as the child's working directory.
 It uses a fresh runner-temp directory and a synthetic child executable; it does
 not start Codex, read credentials, access cloud accounts or contact a network.
 
-The experiment also holds the directory without delete sharing, tests an
-attempted rename and removes the empty directory through its open handle. It is
-not the product implementation: the convenience CreateDirectory API can return
-an existing directory, ancestry and substitution races are not fully addressed,
+The experiment also creates the workspace atomically relative to an open parent
+directory, rejects an existing directory, holds the new directory without delete
+sharing, tests an attempted rename and removes the empty directory through its
+open handle. It is not the product implementation: ancestry and substitution
+races around process working-directory resolution are not fully addressed,
 and permission and filesystem behavior on other Windows installations is
 unverified. Directory ownership, atomic creation, cleanup on abnormal shutdown,
 external processes and .NET Framework compatibility still require design and

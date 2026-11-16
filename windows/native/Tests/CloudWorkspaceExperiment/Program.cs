@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -22,6 +23,75 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int infoClass,
         ref byte value, uint size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct UnicodeString { internal ushort Length, MaximumLength; internal IntPtr Buffer; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ObjectAttributes
+    {
+        internal int Length;
+        internal IntPtr RootDirectory, ObjectName;
+        internal uint Attributes;
+        internal IntPtr SecurityDescriptor, SecurityQualityOfService;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoStatusBlock { internal IntPtr Status; internal UIntPtr Information; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct HandleFileInfo
+    {
+        internal uint Attributes;
+        internal System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
+        internal uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
+    [DllImport("ntdll.dll")]
+    private static extern int NtCreateFile(out SafeFileHandle handle, uint access, ref ObjectAttributes attributes,
+        out IoStatusBlock status, IntPtr allocationSize, uint fileAttributes, uint sharing, uint disposition,
+        uint options, IntPtr eaBuffer, uint eaLength);
+    [DllImport("ntdll.dll")]
+    private static extern uint RtlNtStatusToDosError(int status);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out HandleFileInfo info);
+
+    private static SafeFileHandle AtomicCreate(SafeFileHandle parent, string name, DirectorySecurity security)
+    {
+        byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
+        GCHandle pinned = GCHandle.Alloc(descriptor, GCHandleType.Pinned);
+        IntPtr text = Marshal.StringToHGlobalUni(name);
+        IntPtr unicodePtr = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
+        try
+        {
+            var unicode = new UnicodeString
+            {
+                Length = checked((ushort)(name.Length * 2)),
+                MaximumLength = checked((ushort)((name.Length + 1) * 2)),
+                Buffer = text
+            };
+            Marshal.StructureToPtr(unicode, unicodePtr, false);
+            var attributes = new ObjectAttributes
+            {
+                Length = Marshal.SizeOf<ObjectAttributes>(),
+                RootDirectory = parent.DangerousGetHandle(),
+                ObjectName = unicodePtr,
+                Attributes = 0x40,
+                SecurityDescriptor = pinned.AddrOfPinnedObject()
+            };
+            int result = NtCreateFile(out SafeFileHandle handle, DeleteAccess | ReadAttributes | 0x20 | 0x00100000,
+                ref attributes, out _, IntPtr.Zero, 0x10, ShareReadWrite, 2, 1 | 0x20 | OpenReparse,
+                IntPtr.Zero, 0);
+            if (result < 0)
+            {
+                handle?.Dispose();
+                throw new Win32Exception(unchecked((int)RtlNtStatusToDosError(result)));
+            }
+            return handle;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(unicodePtr);
+            Marshal.FreeHGlobal(text);
+            pinned.Free();
+        }
+    }
 
     private static void Check(bool value, string message)
     {
@@ -74,7 +144,8 @@ internal static class Program
 
     private static void MainTest(string root)
     {
-        string directory = Path.Combine(root, "sandbox-" + Guid.NewGuid().ToString("N"));
+        string name = "sandbox-" + Guid.NewGuid().ToString("N");
+        string directory = Path.Combine(root, name);
         Check(!Directory.Exists(directory) && !File.Exists(directory), "Synthetic workspace must be new.");
         SecurityIdentifier user = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("Identity unavailable.");
         var security = new DirectorySecurity();
@@ -84,12 +155,24 @@ internal static class Program
             InheritanceFlags.None, PropagationFlags.None, AccessControlType.Deny));
         security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.ReadAndExecute | FileSystemRights.Delete,
             InheritanceFlags.None, PropagationFlags.None, AccessControlType.Allow));
-        security.CreateDirectory(directory); // Experiment only: this API accepts an existing path.
+        using SafeFileHandle parent = CreateFileW(root, 0x00000006 | ReadAttributes | 0x00100000,
+            ShareReadWrite, IntPtr.Zero, OpenExisting, BackupSemantics | OpenReparse, IntPtr.Zero);
+        Check(!parent.IsInvalid, "Could not hold the synthetic parent.");
+        string occupied = Path.Combine(root, "occupied");
+        Directory.CreateDirectory(occupied);
+        string sentinel = Path.Combine(occupied, "sentinel.txt");
+        File.WriteAllText(sentinel, "synthetic-keep");
+        bool collisionRejected = false;
+        try { using SafeFileHandle ignored = AtomicCreate(parent, "occupied", security); }
+        catch (Win32Exception error) when (error.NativeErrorCode is 80 or 183) { collisionRejected = true; }
+        Check(collisionRejected && File.ReadAllText(sentinel) == "synthetic-keep",
+            "Atomic creation altered an existing directory.");
+        using SafeFileHandle handle = AtomicCreate(parent, name, security);
+        Check(!handle.IsInvalid && GetFileInformationByHandle(handle, out HandleFileInfo metadata) &&
+              (metadata.Attributes & 0x10) != 0 && (metadata.Attributes & 0x400) == 0,
+            "The new workspace handle is not a regular directory.");
         Check(Directory.Exists(directory) && (File.GetAttributes(directory) & FileAttributes.ReparsePoint) == 0,
             "Synthetic workspace was not a real directory.");
-        using SafeFileHandle handle = CreateFileW(directory, DeleteAccess | ReadAttributes, ShareReadWrite, IntPtr.Zero,
-            OpenExisting, BackupSemantics | OpenReparse, IntPtr.Zero);
-        Check(!handle.IsInvalid, "Could not hold the synthetic workspace.");
         bool moved = false;
         try { Directory.Move(directory, directory + "-moved"); moved = true; }
         catch (IOException) { }
