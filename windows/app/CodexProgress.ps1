@@ -3206,6 +3206,8 @@ function Render-CompactTasks($tasks) {
    $warning.Margin=New-Object Windows.Thickness(12,0,0,6)
    $warning.Tag='source-warning'
    if($HintSnapshotFile -and $PreviewActiveTasks -ge 0){
+    $warning.TextWrapping="NoWrap"
+    $warning.TextTrimming="CharacterEllipsis"
     $warning.ToolTip=New-CursorHint $warning $warningText
     $script:previewHintTarget=$warning
    }
