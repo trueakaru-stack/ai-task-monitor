@@ -5,8 +5,9 @@ using System.Security;
 
 namespace AITaskMonitor.Prototype.Settings;
 
-// Explicit paths only. The old file is a read-only migration source; the new
-// file and its lock are separate. This is not a filesystem sandbox: callers
+// Explicit paths only. Reading the old file is deferred until a stable,
+// non-interfering snapshot is available; the new file and its lock are separate.
+// This is not a filesystem sandbox: callers
 // must supply trusted directories without concurrent link/path replacement.
 internal sealed class PreferenceFiles
 {
@@ -24,18 +25,18 @@ internal sealed class PreferenceFiles
         string targetDirectory = Path.GetDirectoryName(newFile) ?? throw new ArgumentException("Target directory is missing.");
         if (!Directory.Exists(targetDirectory)) throw new ArgumentException("Target directory must already exist.");
         Target = new FileTarget(newFile, lockFile, oldFile, temporaryToken ?? (() => Guid.NewGuid().ToString("N")));
-        Service = new DisplayPreferenceService(Target, new LegacyFile(oldFile));
+        Service = new DisplayPreferenceService(Target, new DeferredLegacyFile());
     }
 
     private static bool Same(string left, string right) => string.Equals(left, right,
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
-    private sealed class LegacyFile(string path) : ILegacyPreferenceSource
+    private sealed class DeferredLegacyFile : ILegacyPreferenceSource
     {
-        public bool TryRead(out byte[]? content)
+        public LegacyPreferenceStatus Read(out byte[]? content)
         {
-            try { content = Read(path); return true; }
-            catch (Exception error) when (IsStorageError(error)) { content = null; return false; }
+            content = null;
+            return LegacyPreferenceStatus.Deferred;
         }
     }
 
@@ -146,3 +147,4 @@ internal sealed class PreferenceFiles
     private static bool IsStorageError(Exception error) => error is IOException or UnauthorizedAccessException or
         SecurityException or NotSupportedException or ArgumentException;
 }
+

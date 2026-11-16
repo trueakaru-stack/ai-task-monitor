@@ -6,8 +6,9 @@ using System.Text.Json;
 
 namespace AITaskMonitor.Prototype.Settings;
 
-internal enum PreferenceStatus { Success, InvalidMode, InvalidDocument, Conflict, Unavailable }
+internal enum PreferenceStatus { Success, InvalidMode, InvalidDocument, Conflict, Unavailable, MigrationDeferred }
 internal enum PreferenceCommit { Success, Conflict, Unavailable }
+internal enum LegacyPreferenceStatus { Confirmed, Deferred, Unavailable }
 internal sealed record DisplayModes(string Theme, string Language);
 internal readonly record struct PreferenceSnapshot(object Revision, byte[]? Content);
 internal sealed record PreferenceLoad(PreferenceStatus Status, DisplayModes? Modes, bool FromLegacy);
@@ -21,11 +22,12 @@ internal interface IPreferenceTarget
     PreferenceCommit TryCommit(object expectedRevision, byte[] content);
 }
 
-// A null document means the old settings file does not exist. This interface
-// is intentionally read-only; it cannot mutate the legacy settings source.
+// Confirmed permits a synthetic or otherwise verified snapshot; a null
+// document under that status means absence has been confirmed. Deferred and
+// Unavailable must never be interpreted as an empty settings document.
 internal interface ILegacyPreferenceSource
 {
-    bool TryRead(out byte[]? content);
+    LegacyPreferenceStatus Read(out byte[]? content);
 }
 
 internal sealed class DisplayPreferenceService(IPreferenceTarget target, ILegacyPreferenceSource legacy)
@@ -39,7 +41,11 @@ internal sealed class DisplayPreferenceService(IPreferenceTarget target, ILegacy
             bool fromLegacy = false;
             if (content is null)
             {
-                if (!legacy.TryRead(out content)) return new(PreferenceStatus.Unavailable, null, false);
+                LegacyPreferenceStatus legacyStatus = legacy.Read(out content);
+                if (legacyStatus == LegacyPreferenceStatus.Deferred)
+                    return new(PreferenceStatus.MigrationDeferred, null, false);
+                if (legacyStatus != LegacyPreferenceStatus.Confirmed)
+                    return new(PreferenceStatus.Unavailable, null, false);
                 fromLegacy = content is not null;
                 // Do not return old preferences if a new target appeared while
                 // the legacy source was being read.
@@ -64,7 +70,12 @@ internal sealed class DisplayPreferenceService(IPreferenceTarget target, ILegacy
         {
             if (!target.TryRead(out PreferenceSnapshot snapshot)) return PreferenceStatus.Unavailable;
             byte[]? content = snapshot.Content;
-            if (content is null && !legacy.TryRead(out content)) return PreferenceStatus.Unavailable;
+            if (content is null)
+            {
+                LegacyPreferenceStatus legacyStatus = legacy.Read(out content);
+                if (legacyStatus == LegacyPreferenceStatus.Deferred) return PreferenceStatus.MigrationDeferred;
+                if (legacyStatus != LegacyPreferenceStatus.Confirmed) return PreferenceStatus.Unavailable;
+            }
             if (!DisplayPreferenceDocument.TryUpdate(content, name, mode, out byte[]? updated))
                 return PreferenceStatus.InvalidDocument;
             return target.TryCommit(snapshot.Revision, updated!) switch
@@ -210,3 +221,4 @@ internal static class DisplayPreferenceDocument
         return IsValidMode(name, mode) ? mode : "system";
     }
 }
+
