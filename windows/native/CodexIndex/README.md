@@ -83,8 +83,10 @@ executable rejects non-hosted environments, output outside a unique temporary
 root, a nonempty output directory, mismatched synthetic profiles, redirected
 ancestors and unsafe fixture names before writing test data. It does not claim
 to be a sandbox against spoofed environment variables or concurrent path
-replacement. The historical `Test-CodexIndex.ps1` is not the launcher for this
-hosted-only executable and is not supported for this check.
+replacement. The historical `Test-CodexIndex.ps1` is disabled and fails
+before inspecting paths, launching an SDK or changing the environment. The
+hosted check verifies its fail-fast behavior with an instrumented synthetic SDK
+and compares the temporary directory before and after invocation.
 
 The hosted runner requires reference SHA-256
 `DD9A401DFABDFC68623A8503746EF7808F154C0E606588CE9143F07A31FEDDB8`,
@@ -101,7 +103,8 @@ protection, concurrent calls and 150 synthetic replacements. Windows may
 recalculate the descriptor's auto-inherited bit during restoration.
 The bounded hosted check additionally exercises a complete UTF-8 tail after
 more than 8 MiB of unrelated history, oversized UTF-8 and UTF-16/32 inputs,
-the ID limit and an append after opening the file. Its profile and temporary
+the ID limit, an append after opening the file and a continuously appending
+synthetic writer. Its profile and temporary
 files are synthetic; passing it does not establish live Codex compatibility.
 The intentional failed-cache and noncanonical differences are asserted
 separately. The native long-tail test uses a row above 1 MiB; the reference

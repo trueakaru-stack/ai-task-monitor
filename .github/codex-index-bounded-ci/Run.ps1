@@ -51,6 +51,7 @@ try {
             DOTNET_SKIP_FIRST_TIME_EXPERIENCE='1'; DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE='1'; DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER='1'
             NUGET_PACKAGES=(Join-Path $root 'nuget'); USERPROFILE=(Join-Path $root 'profile')
             APPDATA=(Join-Path $root 'appdata'); LOCALAPPDATA=(Join-Path $root 'localappdata'); TEMP=(Join-Path $root 'temp'); TMP=(Join-Path $root 'temp')
+            AITM_SYNTHETIC_SDK_MARKER=(Join-Path $root 'unexpected-sdk-launch.txt')
             CI=$env:CI; GITHUB_ACTIONS=$env:GITHUB_ACTIONS; RUNNER_ENVIRONMENT=$env:RUNNER_ENVIRONMENT; RUNNER_OS=$env:RUNNER_OS; RUNNER_TEMP=$env:RUNNER_TEMP
             PSModulePath=((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules')+';'+(Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'))
         }
@@ -74,6 +75,37 @@ try {
         } finally { $process.Dispose() }
     }
     Write-Output ((Invoke-Isolated $python @('-B',(Join-Path $repository 'windows\tests\Test-DotnetPathSafety.py'))).TrimEnd())
+    # Give the retired launcher an instrumented synthetic SDK. If it starts
+    # that executable, the probe writes a marker inside this disposable root.
+    $fakeSdk=Join-Path $root 'fake-sdk'
+    [void][IO.Directory]::CreateDirectory($fakeSdk)
+    $probeSource=Join-Path $root 'sdk-probe.cs'
+    $probe=@'
+using System;
+using System.IO;
+internal static class SdkProbe {
+    private static int Main() {
+        File.WriteAllText(Environment.GetEnvironmentVariable("AITM_SYNTHETIC_SDK_MARKER"), "invoked");
+        return 0;
+    }
+}
+'@
+    [IO.File]::WriteAllText($probeSource,$probe,[Text.UTF8Encoding]::new($false))
+    $compiler=Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    $fakeDotnet=Join-Path $fakeSdk 'dotnet.exe'
+    Check ([IO.File]::Exists($compiler)) 'The synthetic SDK probe compiler is missing.'
+    $null=Invoke-Isolated $compiler @('/nologo','/target:exe',('/out:'+$fakeDotnet),$probeSource)
+    Check ([IO.File]::Exists($fakeDotnet)) 'The synthetic SDK probe was not built.'
+    $beforeLauncher=@(Get-ChildItem -LiteralPath $root -Recurse -Force | ForEach-Object { $_.FullName } | Sort-Object)
+    $forbiddenWork=Join-Path $root 'launcher-must-not-create'
+    $legacyLauncher=Join-Path $repository 'windows\native\CodexIndex\Test-CodexIndex.ps1'
+    $null=Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$legacyLauncher,
+        '-SdkRoot',$fakeSdk,'-WorkDirectory',$forbiddenWork,'-ReferenceSource',$reference) 'The legacy Codex index test launcher is disabled'
+    $afterLauncher=@(Get-ChildItem -LiteralPath $root -Recurse -Force | ForEach-Object { $_.FullName } | Sort-Object)
+    Check (($beforeLauncher -join "`n") -ceq ($afterLauncher -join "`n") -and
+        -not [IO.File]::Exists((Join-Path $root 'unexpected-sdk-launch.txt')) -and
+        -not [IO.Directory]::Exists($forbiddenWork)) 'The retired launcher created data or started the synthetic SDK.'
+    Write-Output 'Retired launcher refused before creating files or starting the synthetic SDK.'
     $project=Join-Path $repository 'windows\native\CodexIndex\Tests\CodexIndex.Tests.csproj'
     $artifacts=Join-Path $root 'artifacts'
     $build=Invoke-Isolated $dotnet @('build',$project,'-c','Release','--configfile',$config,'--artifacts-path',$artifacts,'-p:NuGetAudit=false','--nologo')

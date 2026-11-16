@@ -281,6 +281,41 @@ Check(appended, "The synthetic writer did not append while the reader was open."
 CodexIndexReadResult afterAppend = appendingReader.Read(["bounded-0"], []);
 Check(afterAppend.Entries.Any(item => item.Id == "appended") && afterAppend.Entries.Any(item => item.Id == "bounded-0"),
     "A later stable read did not recover after the append.");
+
+// Keep a bounded synthetic writer running until the read returns. This checks
+// that a reader never follows an actively growing line indefinitely.
+File.WriteAllLines(source, boundedRows, new UTF8Encoding(false));
+using var writerStarted = new ManualResetEventSlim();
+using var writerStop = new ManualResetEventSlim();
+Task? appender = null;
+var growingReader = new CodexIndexReader(source, () =>
+{
+    appender = Task.Run(() =>
+    {
+        using var output = new FileStream(source, FileMode.Append, FileAccess.Write,
+            FileShare.ReadWrite | FileShare.Delete);
+        byte[] chunk = Enumerable.Repeat((byte)' ', 1024).ToArray();
+        for (int i = 0; i < 5000 && !writerStop.IsSet; i++)
+        {
+            output.Write(chunk);
+            output.Flush();
+            writerStarted.Set();
+            Thread.Sleep(2);
+        }
+    });
+    if (!writerStarted.Wait(TimeSpan.FromSeconds(4))) throw new InvalidOperationException("Synthetic writer did not start.");
+});
+try
+{
+    CheckThrows<CodexIndexUnavailableException>(() => growingReader.Read([], []),
+        "A continuously growing index was returned as a complete list.");
+    Check(appender is not null && !appender.IsCompleted, "The read waited for the synthetic writer to stop.");
+}
+finally
+{
+    writerStop.Set();
+    appender?.GetAwaiter().GetResult();
+}
 currentCase = "extra";
 
 // One reader serializes its cache while callers concurrently use immutable data.
