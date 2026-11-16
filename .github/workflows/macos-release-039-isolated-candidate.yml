@@ -11,8 +11,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
-            developer: /Applications/Xcode_16.1.app/Contents/Developer
           - runner: macos-26
             developer: /Applications/Xcode.app/Contents/Developer
     runs-on: ${{ matrix.runner }}
@@ -58,6 +56,7 @@ jobs:
           test "$(task_git -C "$task_root/source" hash-object macos/Package.swift)" = 144202dfc5f413e896867b219af2e0c3dc621897
           test "$(task_git -C "$task_root/source" hash-object macos/scripts/build-app.sh)" = 24bd6fa45808ea1c7bd8bc33b5931051e7baaa0c
           test "$(task_git -C "$task_root/source" hash-object macos/scripts/create-dmg.sh)" = e396e4895bfd228b605eeb42201313267ca73f48
+          test "$(task_git -C "$task_root/source" hash-object .github/macos-final-build-20261109/verify-dmg-contents.py)" = dba112a7e2bfbac2f7adfa550e24920c170c158c
           test -z "$(find "$task_root/source/macos" -type l -print)"
           test ! -e "$task_root/source/macos/dist"
           test ! -L "$task_root/source/macos/dist"
@@ -315,41 +314,211 @@ jobs:
           set -euo pipefail
           cd "$AITM_TEST_TASK_ROOT/source/macos"
           "$AITM_TEST_TASK_ROOT/run-isolated" /bin/bash ./scripts/smoke-test.sh "dist/AI Task Monitor.app"
+      - name: Render candidate example with synthetic tasks
+        if: ${{ matrix.runner == 'macos-26' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          mkdir -p "$AITM_TEST_TASK_ROOT/previews"
+          task_binary="$AITM_TEST_TASK_ROOT/source/macos/dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
+          "$AITM_TEST_TASK_ROOT/run-isolated" "$task_binary" --render-previews "$AITM_TEST_TASK_ROOT/previews" \
+            > "$AITM_TEST_TASK_ROOT/out/preview-render.log" 2>&1 &
+          task_pid=$!
+          cleanup_preview() { kill -TERM "$task_pid" 2>/dev/null || true; wait "$task_pid" 2>/dev/null || true; }
+          trap cleanup_preview EXIT
+          for task_attempt in $(jot 80); do
+            if test -s "$AITM_TEST_TASK_ROOT/previews/expanded-dark.png" && test -s "$AITM_TEST_TASK_ROOT/previews/expanded-light.png"; then break; fi
+            if ! kill -0 "$task_pid" 2>/dev/null; then echo 'Synthetic preview process exited early.' >&2; exit 1; fi
+            sleep 0.5
+          done
+          test -s "$AITM_TEST_TASK_ROOT/previews/expanded-dark.png"
+          test -s "$AITM_TEST_TASK_ROOT/previews/expanded-light.png"
+          /bin/cp "$AITM_TEST_TASK_ROOT/previews/expanded-dark.png" "$AITM_TEST_TASK_ROOT/out/synthetic-expanded-dark.png"
+          /bin/cp "$AITM_TEST_TASK_ROOT/previews/expanded-light.png" "$AITM_TEST_TASK_ROOT/out/synthetic-expanded-light.png"
+          echo 'Saved built-in preview of the exact app with synthetic tasks; this is not a capture of a real session.'
       - name: Create and verify candidate disk image
-        if: ${{ matrix.runner == 'macos-15' }}
+        if: ${{ matrix.runner == 'macos-26' }}
         id: image
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
           cd "$AITM_TEST_TASK_ROOT/source/macos"
-          "$AITM_TEST_TASK_ROOT/run-isolated" /bin/bash ./scripts/create-dmg.sh
-          cd dist
-          /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt
-          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
-          task_dmg="$PWD/AITaskMonitor-macOS-0.3.9-alpha.dmg"
-          "$task_run" /usr/bin/hdiutil verify "$task_dmg"
-          "$task_run" /bin/cp "$task_dmg" "$PWD/SHA256SUMS-macOS.txt" "$AITM_TEST_TASK_ROOT/out/"
-          printf '%s\n' 'TEST CANDIDATE ONLY: ad-hoc signature; not notarized; not a published release.' > "$AITM_TEST_TASK_ROOT/out/NOT-A-RELEASE.txt"
-          task_mount="$AITM_TEST_TASK_ROOT/mount"
-          test -z "$(ls -A "$task_mount")"
-          "$task_run" /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$task_mount" "$task_dmg"
-          attached=1
-          cleanup_mount() {
-            if test "$attached" = 1; then "$task_run" /usr/bin/hdiutil detach "$task_mount" || true; fi
+          test "$(pwd -P)" = "$AITM_TEST_TASK_ROOT/source/macos"
+          test -d dist
+          test ! -L dist
+          test -d "dist/AI Task Monitor.app"
+          test ! -L "dist/AI Task Monitor.app"
+          test ! -e "dist/AITaskMonitor-macOS-0.3.9-alpha.dmg"
+          test ! -L "dist/AITaskMonitor-macOS-0.3.9-alpha.dmg"
+          mkdir -p "$AITM_TEST_TASK_ROOT/system-home"
+          test ! -L "$AITM_TEST_TASK_ROOT/system-home"
+          profile='(version 1) (allow default) (deny network*) (allow network* (local unix-socket)) (allow network-outbound (remote unix-socket))'
+          run_dmg_system() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "DEVELOPER_DIR=$DEVELOPER_DIR" \
+              "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "CFFIXED_USER_HOME=$AITM_TEST_TASK_ROOT/system-home" \
+              "AITM_TEST_TASK_ROOT=$AITM_TEST_TASK_ROOT" "RUNNER_TEMP=$RUNNER_TEMP" \
+              CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS \
+              /usr/bin/sandbox-exec -p "$profile" "$@"
           }
-          trap cleanup_mount EXIT
-          test -d "$task_mount/AI Task Monitor.app"
-          test ! -L "$task_mount/AI Task Monitor.app"
-          test "$("$task_run" /usr/bin/readlink "$task_mount/Applications")" = /Applications
-          "$task_run" /usr/bin/cmp "$task_mount/AI Task Monitor.app/Contents/Info.plist" "$AITM_TEST_TASK_ROOT/source/macos/Info.plist"
-          "$task_run" /usr/bin/cmp "$task_mount/AI Task Monitor.app/Contents/MacOS/AITaskMonitor" "$AITM_TEST_TASK_ROOT/source/macos/dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
-          "$task_run" /usr/bin/cmp "$task_mount/AI Task Monitor.app/Contents/Resources/AppIcon.icns" "$AITM_TEST_TASK_ROOT/icons/icon.icns"
-          "$task_run" /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_mount/AI Task Monitor.app"
-          "$task_run" /usr/bin/hdiutil detach "$task_mount"
-          attached=0
-          trap - EXIT
-          echo 'Mounted DMG matches the verified candidate bundle.'
+          run_dmg_system /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          run_dmg_system /bin/bash ./scripts/create-dmg.sh
+          cd dist
+          run_dmg_system /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt
+          task_dmg="$PWD/AITaskMonitor-macOS-0.3.9-alpha.dmg"
+          test -f "$task_dmg"
+          test ! -L "$task_dmg"
+          run_dmg_system /usr/bin/hdiutil verify "$task_dmg"
+          /bin/cp "$task_dmg" "$PWD/SHA256SUMS-macOS.txt" "$AITM_TEST_TASK_ROOT/out/"
+          printf '%s\n' 'TEST CANDIDATE ONLY: ad-hoc signature; not notarized; not a published release.' > "$AITM_TEST_TASK_ROOT/out/NOT-A-RELEASE.txt"
+          cat > "$AITM_TEST_TASK_ROOT/dmg-owner.py" <<'PY'
+          """Mount and inspect only this job's test image, cleaning up even on attach failure."""
+          import os
+          from pathlib import Path
+          import plistlib
+          import re
+          import signal
+          import subprocess
+          import sys
+          
+          
+          def hdi_info():
+              result = subprocess.run(["/usr/bin/hdiutil", "info", "-plist"], check=True,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+              value = plistlib.loads(result.stdout)
+              images = value.get("images")
+              if not isinstance(images, list):
+                  raise RuntimeError("Unexpected hdiutil info format")
+              return images
+          
+          
+          def matching_attachment(images, image_path, mount_path):
+              """Return only an unambiguous attachment of our exact image, or None."""
+              own = []
+              for image in images:
+                  if not isinstance(image, dict) or not isinstance(image.get("system-entities", []), list):
+                      raise RuntimeError("Unexpected hdiutil image entry")
+                  entities = image.get("system-entities", [])
+                  if not all(isinstance(entity, dict) for entity in entities):
+                      raise RuntimeError("Unexpected hdiutil entity")
+                  mounted = [Path(entity["mount-point"]).resolve() for entity in entities
+                             if isinstance(entity.get("mount-point"), str)]
+                  path = image.get("image-path")
+                  is_ours = isinstance(path, str) and Path(path).resolve() == image_path
+                  if mount_path in mounted and not is_ours:
+                      raise RuntimeError("Synthetic mount point belongs to another image")
+                  if is_ours:
+                      if any(point != mount_path for point in mounted):
+                          raise RuntimeError("Test image has an unexpected mount point")
+                      roots = {entity.get("dev-entry") for entity in entities
+                               if isinstance(entity.get("dev-entry"), str)
+                               and re.fullmatch(r"/dev/disk[0-9]+", entity["dev-entry"])}
+                      own.append((mounted, roots))
+              if len(own) > 1:
+                  raise RuntimeError("More than one attachment for the test image")
+              return own[0] if own else None
+          
+          
+          def detach_owned(image_path, mount_path):
+              """Use the verified mount point or, for an unmounted partial attach, its whole disk."""
+              attachment = matching_attachment(hdi_info(), image_path, mount_path)
+              if attachment is None:
+                  if os.path.ismount(mount_path):
+                      raise RuntimeError("Mount point is occupied by an unknown device")
+                  return "No test attachment remained"
+              mounted, roots = attachment
+              if mounted:
+                  target = str(mount_path)
+              elif len(roots) == 1:
+                  target = next(iter(roots))
+              else:
+                  raise RuntimeError("Cannot safely identify partially attached whole disk")
+              subprocess.run(["/usr/bin/hdiutil", "detach", target, "-quiet"], check=True, timeout=60)
+              if matching_attachment(hdi_info(), image_path, mount_path) is not None or os.path.ismount(mount_path):
+                  raise RuntimeError("Test image remained attached after detach")
+              return "Detached verified test image"
+          
+          
+          def run_logged(command, log_path, timeout):
+              try:
+                  with log_path.open("xb") as log:
+                      subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=timeout)
+              finally:
+                  if log_path.is_file():
+                      print(log_path.read_text(encoding="utf-8", errors="replace"), end="", flush=True)
+          
+          
+          def main():
+              if (sys.platform != "darwin" or os.environ.get("GITHUB_ACTIONS") != "true" or
+                  os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or os.environ.get("RUNNER_OS") != "macOS" or
+                  "HOME" in os.environ or "CODEX_HOME" in os.environ):
+                  raise SystemExit("A disposable hosted runner with a clean environment is required.")
+              if len(sys.argv) != 1:
+                  raise SystemExit("Unexpected DMG owner arguments")
+              root = Path(os.environ["AITM_TEST_TASK_ROOT"])
+              if (re.fullmatch(r"/Users/runner/work/_temp/aitm-release-039\.[A-Za-z0-9]{8}", str(root)) is None or
+                      root.resolve(strict=True) != root):
+                  raise SystemExit("Unexpected synthetic task root")
+              temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
+              if root.parent != temp:
+                  raise SystemExit("Synthetic task root is outside runner temp")
+              home = root / "system-home"
+              if home.is_symlink() or home.resolve(strict=True) != home or os.environ.get("CFFIXED_USER_HOME") != str(home):
+                  raise SystemExit("Unexpected synthetic preferences directory")
+              work = root / "source/macos"
+              app = work / "dist/AI Task Monitor.app"
+              expected_image = work / "dist/AITaskMonitor-macOS-0.3.9-alpha.dmg"
+              mount = root / "mount"
+              output = root / "out"
+              inputs = root / "source/.github/macos-final-build-20261109"
+              image = expected_image.resolve(strict=True)
+              for path in (work, app, mount, output, inputs):
+                  if path.is_symlink() or path.resolve(strict=True) != path or not path.is_dir():
+                      raise SystemExit("Unexpected synthetic input or output directory")
+              if image != expected_image or not image.is_file() or expected_image.is_symlink():
+                  raise SystemExit("Unexpected synthetic DMG")
+              if any(mount.iterdir()) or os.path.ismount(mount):
+                  raise SystemExit("Synthetic mount point is not empty")
+              if matching_attachment(hdi_info(), image, mount) is not None:
+                  raise SystemExit("Synthetic image was already attached")
+              mounted_app = mount / "AI Task Monitor.app"
+              verifier = inputs / "verify-dmg-contents.py"
+              if verifier.is_symlink() or not verifier.is_file():
+                  raise SystemExit("Missing checked DMG verifier")
+              def interrupt(signum, frame):
+                  raise InterruptedError("DMG owner received termination")
+              previous = signal.signal(signal.SIGTERM, interrupt)
+              try:
+                  try:
+                      run_logged(["/usr/bin/hdiutil", "attach", "-plist", "-readonly", "-nobrowse", "-noautoopen",
+                                  "-mountpoint", str(mount), str(image)], output / "mount.log", 180)
+                      attachment = matching_attachment(hdi_info(), image, mount)
+                      if attachment is None or mount not in attachment[0] or not os.path.ismount(mount):
+                          raise RuntimeError("Mounted image identity was not confirmed")
+                      checks = [
+                          ("dmg-contents.log", ["/usr/bin/python3", "-I", "-S", "-B", str(verifier), str(app), str(mount)]),
+                          ("mounted-signature.log", ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", str(mounted_app)]),
+                      ]
+                      for name, command in checks:
+                          run_logged(command, output / name, 180)
+                          print(name + ": verified", flush=True)
+                  finally:
+                      print(detach_owned(image, mount), flush=True)
+              finally:
+                  signal.signal(signal.SIGTERM, previous)
+          
+          
+          if __name__ == "__main__":
+              main()
+          PY
+          run_dmg_system /usr/bin/python3 -I -S -B "$AITM_TEST_TASK_ROOT/dmg-owner.py"
+          echo 'The owned image contents and ad-hoc signature were checked and detached.'
       - name: Build synthetic source and version tests
         id: test_build
         shell: bash
@@ -357,6 +526,25 @@ jobs:
           set -euo pipefail
           cd "$AITM_TEST_TASK_ROOT/source/macos"
           test ! -e Tests/AITaskMonitorTests/ReleaseCandidateAuditTests.swift
+          "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/python3 -I -S -B - <<'PY'
+          import hashlib
+          from pathlib import Path
+          path = Path("Tests/AITaskMonitorTests/ClaudeIntegrationSafetyTests.swift")
+          if path.is_symlink():
+              raise SystemExit("Unexpected linked synthetic test.")
+          data = path.read_bytes()
+          blob = hashlib.sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
+          if blob != "f805f855c96c2361331d268e4ea658d005026413":
+              raise SystemExit("Unexpected Claude test source.")
+          text = data.decode("utf-8")
+          old = "            XCTAssertTrue(errors.fileHandleForReading.readDataToEndOfFile().isEmpty)"
+          new = ('            let hookError = errors.fileHandleForReading.readDataToEndOfFile()\n'
+                 '            XCTAssertTrue(hookError.isEmpty, "Synthetic hook stderr: \\(String(decoding: hookError, as: UTF8.self).prefix(2048))")')
+          if text.count(old) != 1:
+              raise SystemExit("Unexpected Claude stderr assertion.")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          print("Preserved the empty-stderr assertion and added its synthetic diagnostic message.")
+          PY
           cat > Tests/AITaskMonitorTests/ReleaseCandidateAuditTests.swift <<'SWIFT'
           import Foundation
           import XCTest
@@ -390,9 +578,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
           "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
             -XCTest AITaskMonitorTests.ReleaseCandidateAuditTests/testPriorAlphaDetectsCandidateButCandidateDoesNotOfferItself \
-            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" | tee "$AITM_TEST_TASK_ROOT/out/update-test.log"
+            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/out/update-test.log"
           grep -F 'Executed 1 test, with 0 failures' "$AITM_TEST_TASK_ROOT/out/update-test.log"
       - name: Verify Claude generated hook and reader
         id: claude_test
@@ -400,11 +589,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
           task_binary="$AITM_TEST_TASK_ROOT/source/macos/dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
           "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/env "AITM_CLAUDE_TEST_EXECUTABLE=$task_binary" \
             "$DEVELOPER_DIR/usr/bin/xctest" \
             -XCTest AITaskMonitorTests.ClaudeIntegrationSafetyTests/testGeneratedHookCommandRunsExecutableAndUpdatesReader \
-            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" | tee "$AITM_TEST_TASK_ROOT/out/claude-test.log"
+            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/out/claude-test.log"
           grep -F 'Executed 1 test, with 0 failures' "$AITM_TEST_TASK_ROOT/out/claude-test.log"
       - name: Verify Codex synthetic session reading
         id: codex_test
@@ -412,9 +602,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
           "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
             -XCTest AITaskMonitorTests.CodexRevertSafetyTests/testCanonicalOrdinaryUUIDStillReadsActivity \
-            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" | tee "$AITM_TEST_TASK_ROOT/out/codex-test.log"
+            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/out/codex-test.log"
           grep -F 'Executed 1 test, with 0 failures' "$AITM_TEST_TASK_ROOT/out/codex-test.log"
       - name: Save candidate and diagnostics
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -438,4 +629,4 @@ jobs:
           test "$UPDATE_OUTCOME" = success
           test "$CLAUDE_OUTCOME" = success
           test "$CODEX_OUTCOME" = success
-          if test "$RUNNER_KIND" = macos-15; then test "$IMAGE_OUTCOME" = success; fi
+          if test "$RUNNER_KIND" = macos-26; then test "$IMAGE_OUTCOME" = success; fi
