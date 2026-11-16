@@ -1,7 +1,7 @@
 name: Synthetic provider V1 recovery
 on:
   push:
-    branches: [codex/windows-provider-v1-safe-20261116]
+    branches: [codex/windows-provider-v1-independent-20261116]
 permissions:
   contents: read
 jobs:

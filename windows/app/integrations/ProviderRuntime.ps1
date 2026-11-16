@@ -34,7 +34,7 @@ function Read-ExternalProviderSnapshot {
   $uncertain=@($UncertainProfileScopes[$provider] | Where-Object {$_ -cmatch '^[a-f0-9]{32}$'} | Select-Object -Unique)
   $scoped[$provider]=$valid
   $Store.RetainSessionScopes([string]$provider,[string[]]@($valid+$uncertain))
-  $Store.MarkSessionScopesGap([string]$provider,[string[]]$uncertain)
+  if($provider -ceq 'deepseek'){$Store.MarkSessionScopesGap([string]$provider,[string[]]$uncertain)}
  }
  $batch=$Channel.Drain()
  if($Channel.IsStopped){$Store.MarkGap();throw 'External provider channel stopped.'}
@@ -68,6 +68,7 @@ function Stop-ExternalProviderController {
   if(-not $KnownIdle -and $null -ne $Controller.Store){$Controller.Store.MarkGap()}
   try{$Controller.Channel.Dispose()}finally{$Controller.Channel=$null}
  }
+ if($null -ne $Controller.Store){$Controller.Store.RetainOnlyV1Providers()}
  $Controller.DegradedProviders.Clear()
 }
 
@@ -97,7 +98,7 @@ function Read-ManagedExternalProviderSnapshot {
   }
   if($null -eq $Controller.Store){$Controller.Store=[AITaskMonitor.ExternalProviders.StateStore]::new()}
   try{$Controller.Channel=[AITaskMonitor.ExternalProviders.EventChannel]::new($Controller.PipeName)}
-  catch{foreach($provider in $allowed){$Controller.Store.MarkProviderGap([string]$provider)};throw}
+  catch{foreach($provider in $allowed){if($provider -in @('deepseek','opencode')){$Controller.Store.MarkProviderGap([string]$provider)}};throw}
  }
  return @(Read-ExternalProviderSnapshot -Channel $Controller.Channel -Store $Controller.Store -AllowedProviders $allowed -RetainedProviders $RetainedProviders -UncertainProviders $UncertainProviders -ProfileScopes $ProfileScopes -UncertainProfileScopes $UncertainProfileScopes -ConfirmedDisconnectedProfileScopes $ConfirmedDisconnectedProfileScopes -Language $Language -Now $Now)
 }
@@ -127,14 +128,14 @@ function Read-ExternalProviderGroupSnapshot {
  }
  foreach($provider in $names.Keys){
   if(-not $Connections.ContainsKey($provider)){
-   if($Seen.ContainsKey($provider)){$uncertain.Add($provider);$unavailable.Add($names[$provider])}
+   if($provider -in @('deepseek','opencode') -and $Seen.ContainsKey($provider)){$uncertain.Add($provider);$unavailable.Add($names[$provider])}
    continue
   }
   switch([string]$Connections[$provider]){
    'connected' {$Seen[$provider]=$true;$allowed.Add($provider)}
    'connected-degraded' {
     $Seen[$provider]=$true;$allowed.Add($provider);$unavailable.Add($names[$provider])
-    $partialConnection.Add($names[$provider])
+    if($provider -in @('deepseek','opencode')){$partialConnection.Add($names[$provider])}
     if(-not $ProfileScopes.ContainsKey($provider) -and -not $Controller.DegradedProviders.ContainsKey($provider)){$newGaps.Add($provider);$Controller.DegradedProviders[$provider]=$true}
    }
    'partial' {$uncertain.Add($provider);$unavailable.Add($names[$provider])}
@@ -149,11 +150,12 @@ function Read-ExternalProviderGroupSnapshot {
   -not ($_.Provider -ceq 'deepseek' -and $id -cmatch '^deepseek:([a-f0-9]{32})_' -and $confirmed -ccontains $Matches[1])
  })
  $retained=@(Unconfirmed-ExternalTasks @($eligiblePrevious|Where-Object {$_.Provider -in $uncertain}))
- $keep=[string[]]@($allowed.ToArray()+$uncertain.ToArray() | Select-Object -Unique)
+ $retainedV1=@($uncertain | Where-Object {$_ -in @('deepseek','opencode')})
+ $keep=[string[]]@($allowed.ToArray()+$retainedV1 | Select-Object -Unique)
  if($allowed.Count -eq 0){
   if($null -ne $Controller.Store){
    $Controller.Store.RetainProviders($keep)
-   foreach($provider in $uncertain){$Controller.Store.MarkProviderGap([string]$provider)}
+   foreach($provider in $retainedV1){$Controller.Store.MarkProviderGap([string]$provider)}
    $Controller.Store.ConfirmDeepSeekDisconnectedScopes([string[]]$confirmed)
    $stored=@(Convert-ExternalProviderStates -States @($Controller.Store.Snapshot([DateTimeOffset]::UtcNow)) -Language $Language)
    $merged=[ordered]@{}
@@ -164,7 +166,13 @@ function Read-ExternalProviderGroupSnapshot {
   return [PSCustomObject]@{Tasks=$retained;Unavailable=$unavailable.ToArray();PartialConnection=@();PartialData=@()}
  }
  try{
-  $current=@(Read-ManagedExternalProviderSnapshot -Controller $Controller -AllowedProviders $allowed.ToArray() -RetainedProviders $keep -UncertainProviders ([string[]]@($uncertain.ToArray()+$newGaps.ToArray())) -ProfileScopes $ProfileScopes -UncertainProfileScopes $UncertainProfileScopes -ConfirmedDisconnectedProfileScopes $ConfirmedDisconnectedProfileScopes -Language $Language)
+  $v1Gaps=[string[]]@(($uncertain.ToArray()+$newGaps.ToArray()) | Where-Object {$_ -in @('deepseek','opencode')})
+  $current=@(Read-ManagedExternalProviderSnapshot -Controller $Controller -AllowedProviders $allowed.ToArray() -RetainedProviders $keep -UncertainProviders $v1Gaps -ProfileScopes $ProfileScopes -UncertainProfileScopes $UncertainProfileScopes -ConfirmedDisconnectedProfileScopes $ConfirmedDisconnectedProfileScopes -Language $Language)
+  $otherGaps=@($newGaps | Where-Object {$_ -notin @('deepseek','opencode')})
+  if($otherGaps.Count -gt 0 -and $null -ne $Controller.Store){
+   foreach($provider in $otherGaps){$Controller.Store.MarkProviderGap([string]$provider)}
+   $current=@(Convert-ExternalProviderStates -States @($Controller.Store.Snapshot([DateTimeOffset]::UtcNow)) -Language $Language)
+  }
   if($null -ne $Controller.Store){
    foreach($provider in @($Controller.Store.CapacityLimitedProviders)+@($Controller.Store.LossAffectedProviders)){
     if($keep -ccontains [string]$provider -and $names.Contains([string]$provider)){

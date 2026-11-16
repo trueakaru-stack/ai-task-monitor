@@ -54,7 +54,7 @@ try {
     Assert (@($state.Tasks | Where-Object { $_.Id -eq 'opencode:one' -and $_.Active }).Count -eq 1) 'A profile error must not interrupt another provider.'
     Send-Event $name '{"version":1,"provider":"hermes","session":"healthy","kind":"started"}'
     $state = Read-ExternalProviderGroupSnapshot -Controller $controller -Connections $connections -Seen $seen -PreviousTasks $state.Tasks
-    Assert (@($state.Tasks | Where-Object { $_.Id -eq 'hermes:healthy' }).Count -eq 0) 'An unidentified Hermes loss must wait for a confirmed restart.'
+    Assert (@($state.Tasks | Where-Object { $_.Id -eq 'hermes:healthy' -and $_.Active }).Count -eq 1) 'A healthy profile must keep reporting while a sibling is unavailable.'
     Assert ($state.Unavailable.Count -eq 1 -and $state.Unavailable[0] -eq 'Hermes Agent') 'A degraded profile must remain visible as unavailable.'
 
     $connections.hermes = 'partial'
@@ -74,11 +74,11 @@ try {
     Assert (@($state.Tasks | Where-Object Provider -eq 'hermes').Count -eq 0) 'Reconnect must not revive old tasks.'
     Send-Event $name '{"version":1,"provider":"hermes","session":"new","kind":"started"}'
     $state = Read-ExternalProviderGroupSnapshot -Controller $controller -Connections $connections -Seen $seen -PreviousTasks $state.Tasks
-    Assert (@($state.Tasks | Where-Object { $_.Id -eq 'hermes:new' }).Count -eq 0) 'A new event alone must not prove a Hermes restart.'
+    Assert (@($state.Tasks | Where-Object { $_.Id -eq 'hermes:new' -and $_.Active }).Count -eq 1) 'A new event must restore the reconnected source.'
     $connections.opencode = 'error'
     $state = Read-ExternalProviderGroupSnapshot -Controller $controller -Connections $connections -Seen $seen -PreviousTasks $state.Tasks
-    Assert (@($state.Tasks | Where-Object { $_.Id -eq 'hermes:new' }).Count -eq 0) 'A different source error must not invent Hermes activity.'
-    Assert ($state.Unavailable -contains 'OpenCode' -and $state.Unavailable -contains 'Hermes Agent') 'Both independently known source losses must remain reported.'
+    Assert (@($state.Tasks | Where-Object { $_.Id -eq 'hermes:new' -and $_.Active }).Count -eq 1) 'A different source error must not stop Hermes.'
+    Assert ($state.Unavailable.Count -eq 1 -and $state.Unavailable[0] -eq 'OpenCode') 'A known source error must be reported independently.'
     Write-Output 'External sources: isolated failures, continued events, disconnect and reconnect verified.'
 } finally {
     Stop-ExternalProviderController $controller

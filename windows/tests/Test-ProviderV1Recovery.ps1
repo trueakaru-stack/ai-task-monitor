@@ -179,4 +179,40 @@ try{
  Poll-Group
  Assert ($state.Tasks.Count -eq 255 -and $state.Unavailable -contains 'DeepSeek Harness' -and $state.Unavailable -contains 'OpenCode') 'Restarted channel hid prior transport uncertainty.'
 }finally{Stop-ExternalProviderController $controller -KnownIdle}
+
+# Check the existing Hermes behavior through the real group flow while a
+# DeepSeek source stays healthy. A new epoch is synthetic, not proof that all
+# older Hermes processes have stopped.
+$pipe='AITaskMonitor.Test.'+[Guid]::NewGuid().ToString('N')
+$controller=New-ExternalProviderController -PipeName $pipe
+$seen=@{};$connections=@{deepseek='connected';opencode='disconnected';kimi='disconnected';hermes='connected'}
+$scopes=@{deepseek=@($a);hermes=@($c)};$uncertain=@{deepseek=@();hermes=@()};$confirmed=@{}
+$state=[PSCustomObject]@{Tasks=@()}
+function Send-Hermes([string]$session,[string]$kind){
+ $ticks=[Diagnostics.Stopwatch]::GetTimestamp();$frequency=[Diagnostics.Stopwatch]::Frequency
+ $epoch=[long]([Math]::Floor(($ticks/$frequency)*1000000000))
+ $payload=[ordered]@{version=1;provider='hermes';session=$session;kind=$kind;turn='fixture';tick=$epoch;epoch=$epoch} | ConvertTo-Json -Compress
+ Send $pipe $payload
+}
+try{
+ Poll-Group
+ Start-Sleep -Milliseconds 10
+ Send-Hermes ($c+'_first') 'started'
+ Send-Event 'deepseek' ($a+'_healthy') 'active'
+ Poll-Group
+ Assert (@($state.Tasks | Where-Object {$_.Id -eq ('hermes:'+$c+'_first') -and $_.Active}).Count -eq 1 -and
+         @($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_healthy') -and $_.Active}).Count -eq 1) 'The mixed-source fixture did not start.'
+ $connections.hermes='partial'
+ Poll-Group
+ Assert (@($state.Tasks | Where-Object {$_.Id -eq ('hermes:'+$c+'_first') -and -not $_.Active}).Count -eq 1 -and
+         @($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_healthy') -and $_.Active}).Count -eq 1) 'The Hermes fallback or the healthy DeepSeek profile changed.'
+ $connections.hermes='connected'
+ Poll-Group
+ Assert (@($state.Tasks | Where-Object {$_.Provider -eq 'hermes'}).Count -eq 0) 'An old Hermes fallback survived the original reconnect behavior.'
+ Start-Sleep -Milliseconds 10
+ Send-Hermes ($c+'_next') 'started'
+ Poll-Group
+ Assert (@($state.Tasks | Where-Object {$_.Id -eq ('hermes:'+$c+'_next') -and $_.Active}).Count -eq 1 -and
+         @($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_healthy') -and $_.Active}).Count -eq 1) 'A new Hermes observer did not follow the existing behavior.'
+}finally{Stop-ExternalProviderController $controller -KnownIdle}
 'Provider V1 recovery: real group, scoped disconnect, loss and synthetic channel checks passed.'

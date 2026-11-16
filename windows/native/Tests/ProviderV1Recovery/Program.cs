@@ -36,29 +36,27 @@ var now = DateTimeOffset.UtcNow;
 string a = new('a', 32), b = new('b', 32), c = new('c', 32);
 
 var store = new StateStore();
-store.RetainProviders(["deepseek", "opencode", "kimi"]);
+store.RetainProviders(["deepseek", "opencode"]);
 store.RetainSessionScopes("deepseek", [a, b]);
 Check(store.Apply(Frame("deepseek", a + "_first", "active"), now), "A frame was rejected.");
 Check(store.Apply(Frame("opencode", "open", "active"), now), "OpenCode was rejected.");
-Check(store.Apply(Frame("kimi", c + "_task", "active"), now), "Kimi was rejected.");
-for (int i = 0; i < 253; i++)
+for (int i = 0; i < 254; i++)
     Check(store.Apply(Frame("deepseek", b + "_" + i, "active"), now), "A bounded task was rejected.");
-Check(store.Snapshot(now).Length == 256 && store.Snapshot(now).Count(x => x.Status == "active") == 255 &&
-    store.Snapshot(now).Single(x => x.Provider == "kimi").Status == "unknown",
-    "Normal V1 startup or Kimi's unconfirmed policy changed.");
+Check(store.Snapshot(now).Length == 256 && store.Snapshot(now).Count(x => x.Status == "active") == 256,
+    "Normal V1 startup changed.");
 Check(!store.Apply(Frame("deepseek", a + "_overflow", "active"), now), "Overflow was silently admitted.");
 Check(store.Snapshot(now).Length == 256 && store.CapacityLimitedScopes("deepseek").SequenceEqual([a]) &&
     store.CapacityLimitedProviders.SequenceEqual(["deepseek"]) && store.LossAffectedProviders.SequenceEqual(["deepseek"]),
     "A scoped loss was not recorded.");
 Check(store.Snapshot(now).Single(x => x.Session == a + "_first").Status == "unknown" &&
-    store.Snapshot(now).Count(x => x.Session.StartsWith(b + "_", StringComparison.Ordinal) && x.Status == "active") == 253 &&
+    store.Snapshot(now).Count(x => x.Session.StartsWith(b + "_", StringComparison.Ordinal) && x.Status == "active") == 254 &&
     store.Snapshot(now).Single(x => x.Provider == "opencode").Status == "active",
     "A scoped loss degraded an unrelated profile or provider.");
 Check(store.Apply(Frame("deepseek", a + "_first", "completed"), now) &&
     store.Apply(Frame("deepseek", a + "_first", "active"), now) &&
     store.Snapshot(now).Single(x => x.Session == a + "_first").Status == "unknown", "A late event changed an unconfirmed card.");
-Check(store.Snapshot(now).Count(x => x.Session.StartsWith(b + "_", StringComparison.Ordinal)) == 253 &&
-    store.Snapshot(now).Any(x => x.Provider == "kimi") && store.Snapshot(now).Any(x => x.Provider == "opencode"),
+Check(store.Snapshot(now).Count(x => x.Session.StartsWith(b + "_", StringComparison.Ordinal)) == 254 &&
+    store.Snapshot(now).Any(x => x.Provider == "opencode"),
     "Capacity displaced a neighboring visible card.");
 store.ConfirmDeepSeekDisconnectedScopes([a]);
 Check(store.CapacityLimitedProviders.Length == 0 && store.LossAffectedProviders.Length == 0 && store.Snapshot(now).Length == 255 &&
@@ -104,58 +102,27 @@ Check((int)retiredScopes.GetType().GetProperty("Count")!.GetValue(retiredScopes)
     bounded.LossAffectedProviders.Contains("deepseek"), "Reconnect history was unbounded or silently lost.");
 
 var hermes = new StateStore();
-hermes.RetainProviders(["hermes"]);
-Thread.Sleep(2);
-Event priorScopeBarrier = Hermes(b + "_too_old", "started");
-Thread.Sleep(2);
+hermes.RetainProviders(["hermes", "deepseek"]);
 hermes.RetainSessionScopes("hermes", [a, b]);
 Thread.Sleep(2);
 Check(hermes.Apply(Hermes(a + "_one", "started"), now) && hermes.Apply(Hermes(b + "_two", "started"), now),
     "Hermes observations were rejected.");
-Check(hermes.Snapshot(now).Count(x => x.Status == "active") == 2, "Fresh observer fixtures did not establish the initial state.");
 Check(hermes.Apply(Hermes(a + "_one", "gap"), now), "A scoped Hermes gap was rejected.");
 Check(hermes.Snapshot(now).Single(x => x.Session == a + "_one").Status == "unknown" &&
     hermes.Snapshot(now).Single(x => x.Session == b + "_two").Status == "active", "A Hermes gap affected a neighbor.");
 Thread.Sleep(2);
-Check(hermes.Apply(Hermes(a + "_one", "completed"), now) && hermes.Apply(Hermes(a + "_one", "started"), now) &&
-    hermes.Snapshot(now).Single(x => x.Session == a + "_one").Status == "unknown", "A later Hermes event restored confidence.");
 Check(hermes.Apply(Hermes(a + "_new", "started"), now) &&
-    hermes.Snapshot(now).All(x => x.Session != a + "_new"), "A new permanent Hermes card was invented after loss.");
-for (int i = 0; i < 300; i++)
-    Check(hermes.Apply(Hermes(i.ToString("x32") + "_gap", "gap"), now), "A bounded Hermes gap was rejected.");
-Check(hermes.Snapshot(now).Single(x => x.Session == b + "_two").Status == "active", "Bounded loss history degraded a healthy profile.");
-Check(!hermes.Apply(priorScopeBarrier, now) && hermes.Snapshot(now).All(x => x.Session != b + "_too_old"),
-    "Barrier overflow admitted an event older than an already authorized scope.");
-foreach (string field in new[] { "hermesLostScopes", "hermesTrustedAtOverflow", "hermesScopeBarriers" })
-{
-    object value = typeof(StateStore).GetField(field, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(hermes)!;
-    int count = (int)value.GetType().GetProperty("Count")!.GetValue(value)!;
-    Check(count <= 256, "Hermes loss history exceeded its bound.");
-}
-
-var eviction = new StateStore();
-eviction.RetainProviders(["hermes", "opencode"]);
-eviction.RetainSessionScopes("hermes", [a, b]);
+    hermes.Snapshot(now).Any(x => x.Session == a + "_new" && x.Status == "active"),
+    "Existing Hermes handling of a later observer changed.");
+// This fixture tests old behavior only; a new epoch does not establish that
+// every older Hermes process has stopped.
+var sharedCapacity = new StateStore();
+sharedCapacity.RetainProviders(["hermes", "opencode"]);
+sharedCapacity.RetainSessionScopes("hermes", [a]);
+for (int i = 0; i < 255; i++) Check(sharedCapacity.Apply(Frame("opencode", "shared" + i, "active"), now), "Could not fill V1 capacity.");
+sharedCapacity.MarkProviderGap("opencode");
 Thread.Sleep(2);
-Check(eviction.Apply(Hermes(a + "_closed", "started"), now) &&
-    eviction.Apply(Hermes(a + "_closed", "completed"), now) &&
-    eviction.Apply(Hermes(b + "_live", "started"), now), "Hermes eviction fixture could not start.");
-for (int i = 0; i < 254; i++) Check(eviction.Apply(Frame("opencode", "evict" + i, "active"), now), "Eviction fixture could not fill the store.");
-Check(eviction.Apply(Frame("opencode", "next", "active"), now), "A terminal Hermes entry could not be evicted.");
-Check(eviction.Snapshot(now).Single(x => x.Session == b + "_live").Status == "active" &&
-    eviction.LossAffectedProviders.Contains("hermes"), "Terminal Hermes eviction degraded a healthy scope or hid the loss.");
-Thread.Sleep(2);
-Check(eviction.Apply(Hermes(a + "_closed", "started"), now) &&
-    eviction.Snapshot(now).All(x => x.Session != a + "_closed"), "A stale Hermes event revived the evicted scope.");
-var unscopedEviction = new StateStore();
-unscopedEviction.RetainProviders(["hermes", "opencode"]);
-unscopedEviction.RetainSessionScopes("hermes", [b]);
-Thread.Sleep(2);
-Check(unscopedEviction.Apply(Hermes("legacy_closed", "started"), now) &&
-    unscopedEviction.Apply(Hermes("legacy_closed", "completed"), now) &&
-    unscopedEviction.Apply(Hermes(b + "_live", "started"), now), "Unscoped eviction fixture could not start.");
-for (int i = 0; i < 254; i++) Check(unscopedEviction.Apply(Frame("opencode", "unscoped" + i, "active"), now), "Unscoped fixture could not fill the store.");
-Check(unscopedEviction.Apply(Frame("opencode", "after_unscoped", "active"), now) &&
-    unscopedEviction.Snapshot(now).Single(x => x.Session == b + "_live").Status == "unknown" &&
-    unscopedEviction.LossAffectedProviders.Contains("hermes"), "Unknown Hermes scope did not trigger the global fallback.");
+Check(sharedCapacity.Apply(Hermes(a + "_live", "started"), now), "Hermes fixture could not start.");
+Check(!sharedCapacity.Apply(Hermes(a + "_overflow", "started"), now) && sharedCapacity.Snapshot(now).Length == 256,
+    "The shared capacity boundary was not exercised.");
 Console.WriteLine($"Provider V1 recovery: {checks} synthetic checks passed.");
