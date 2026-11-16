@@ -3784,6 +3784,10 @@ function Update-View {
    $previewTitles=@((Preview-Text 'Создать индикатор прогресса задач' 'Create a task progress indicator'),(Preview-Text 'Задача Claude Code' 'Claude Code task'),(Preview-Text 'Задача Claude Code' 'Claude Code task'),(Preview-Text 'Задача DeepSeek Harness' 'DeepSeek Harness task'),(Preview-Text 'Задача Hermes Agent' 'Hermes Agent task'),(Preview-Text 'Задача OpenCode' 'OpenCode task'))
    $previewActivities=@((Preview-Text 'Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний' 'Checking plan cards, source filters, scrolling, the light theme and long descriptions before release'),(Preview-Text 'Запускаю визуальную проверку' 'Running visual checks'),(Preview-Text 'Собираю данные для переноса' 'Preparing migration data'),(Preview-Text 'Проверяю план' 'Checking the plan'),(Preview-Text 'Проверяю данные' 'Checking data'),(Preview-Text 'Выполняю действие' 'Performing an action'))
    $previewProgress=@(50,33,$null,$null,$null,$null);$previewKinds=@("exact","exact","none","none","none","none");$previewProviders=@("codex","claude","claude","deepseek","hermes","opencode");$previewProviderNames=@("Codex","Claude Code","Claude Code","DeepSeek Harness","Hermes Agent","OpenCode")
+   if($PreviewSourceWarning){
+    $previewProviders[0]='deepseek';$previewProviderNames[0]='DeepSeek Harness'
+    $previewTitles[0]=Preview-Text 'Задача DeepSeek Harness' 'DeepSeek Harness task'
+   }
    if($PreviewManyProviders){
     $previewProviders[2]='kimi';$previewProviderNames[2]='Kimi Code'
     foreach($previewIndex in 2..5){

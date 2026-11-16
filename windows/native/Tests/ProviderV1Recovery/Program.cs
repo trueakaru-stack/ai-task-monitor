@@ -18,6 +18,9 @@ Event Frame(string provider, string session, string kind) =>
 Event Plan(string provider, string session) =>
     EventParser.Parse(JsonSerializer.Serialize(new { version = 1, provider, session, kind = "plan", steps = new[] { new { title = "One", status = "pending" } } }))
     ?? throw new InvalidOperationException("Invalid synthetic plan.");
+Event ToolFinished(string provider, string session) =>
+    EventParser.Parse(JsonSerializer.Serialize(new { version = 1, provider, session, kind = "tool_finished", call = "call" }))
+    ?? throw new InvalidOperationException("Invalid synthetic tool event.");
 long Nano()
 {
     long ticks = Stopwatch.GetTimestamp(), frequency = Stopwatch.Frequency;
@@ -81,8 +84,8 @@ Check(closed.Apply(Frame("opencode", "closed", "active"), now) &&
     "Terminal fixture did not close.");
 closed.MarkProviderGap("opencode");
 Check(closed.Apply(Frame("opencode", "closed", "completed"), now) &&
-    closed.Apply(Plan("opencode", "closed"), now) && closed.Snapshot(now).Length == 0,
-    "Delayed terminal or plan revived a previously closed card after loss.");
+    closed.Apply(Plan("opencode", "closed"), now) && closed.Apply(ToolFinished("opencode", "closed"), now) &&
+    closed.Snapshot(now).Length == 0, "Delayed terminal, plan or tool completion revived a closed card after loss.");
 Check(closed.Apply(Frame("opencode", "closed", "started"), now) &&
     closed.Snapshot(now).Single().Status == "unknown", "A later start after loss was treated as confirmed.");
 

@@ -124,7 +124,7 @@ jobs:
                   foreach ($mode in @('expanded','compact')) {
                   $stem = "$warning-$theme-$language-$mode"
                   $arguments = @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',
-                    (Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewUnconfirmed',
+                    (Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1',
                     '-PreviewSourceWarning',$warning,'-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,
                     '-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),
                     '-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),
