@@ -67,3 +67,55 @@ try {
     Check ((Read-Held $held2) -ceq 'synthetic-old') 'Held deleted handle lost its synthetic content.'
     Write-Output ('File.Delete while held: ' + $delete + '; same-name CreateNew while held: ' + $create)
 } finally { $held2.Dispose() }
+
+$metadataSource=@'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class SyntheticMetadataAnchor {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Identity { public ulong Volume, First, Second; }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security,
+        uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int kind, out Identity identity, uint size);
+    public static SafeFileHandle Open(string path) {
+        SafeFileHandle h=CreateFileW(path,0x80,7,IntPtr.Zero,3,0x00200000,IntPtr.Zero);
+        if(h.IsInvalid){int error=Marshal.GetLastWin32Error(); h.Dispose(); throw new Win32Exception(error);}
+        return h;
+    }
+    public static bool Same(SafeFileHandle held, string path) {
+        using(SafeFileHandle current=Open(path)) {
+            Identity a,b;
+            if(!GetFileInformationByHandleEx(held,18,out a,(uint)Marshal.SizeOf(typeof(Identity))) ||
+               !GetFileInformationByHandleEx(current,18,out b,(uint)Marshal.SizeOf(typeof(Identity))))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            return a.Volume==b.Volume && a.First==b.First && a.Second==b.Second && (a.First!=0 || a.Second!=0);
+        }
+    }
+}
+'@
+Add-Type -TypeDefinition $metadataSource
+$metadataPath = Join-Path $case 'metadata-anchor.jsonl'
+$metadataNext = Join-Path $case 'metadata-replacement.jsonl'
+[IO.File]::WriteAllText($metadataPath, 'synthetic-same', $utf8)
+[IO.File]::WriteAllText($metadataNext, 'synthetic-same', $utf8)
+$metadata = [SyntheticMetadataAnchor]::Open($metadataPath)
+try {
+    Check ([SyntheticMetadataAnchor]::Same($metadata, $metadataPath)) 'Metadata identity comparison failed.'
+    $exclusiveOutcome = 'not attempted'
+    try {
+        $exclusive = [IO.FileStream]::new($metadataPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        try { $exclusiveOutcome = 'succeeded' } finally { $exclusive.Dispose() }
+    } catch { $exclusiveOutcome = 'blocked: ' + $_.Exception.GetType().Name }
+    $replacementOutcome = 'not attempted'
+    try {
+        [IO.File]::Replace($metadataNext, $metadataPath, [System.Management.Automation.Language.NullString]::Value)
+        $replacementOutcome = 'succeeded'
+    } catch { $replacementOutcome = 'blocked: ' + $_.Exception.GetType().Name }
+    $different = if ($replacementOutcome -ceq 'succeeded') { -not [SyntheticMetadataAnchor]::Same($metadata, $metadataPath) } else { $false }
+    Write-Output ('Metadata-only anchor: exclusive open ' + $exclusiveOutcome +
+        '; File.Replace ' + $replacementOutcome + '; identical replacement detected ' + $different)
+} finally { $metadata.Dispose() }
