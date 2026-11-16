@@ -116,8 +116,10 @@ finally
 {
     if (applied)
     {
-        FileSecurity restored = fileInfo.GetAccessControl(AccessControlSections.Access);
-        restored.RemoveAccessRuleSpecific(denyRead);
+        // Restore the exact captured access descriptor, including inherited
+        // rules that may be canonicalized when an explicit deny is added.
+        var restored = new FileSecurity();
+        restored.SetSecurityDescriptorSddlForm(originalSddl, AccessControlSections.Access);
         fileInfo.SetAccessControl(restored);
         Check(string.Equals(originalSddl, fileInfo.GetAccessControl(AccessControlSections.Access)
             .GetSecurityDescriptorSddlForm(AccessControlSections.Access), StringComparison.Ordinal), "The synthetic ACL was not restored.");
