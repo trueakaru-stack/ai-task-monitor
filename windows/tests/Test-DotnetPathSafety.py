@@ -18,6 +18,20 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 PROFILE = "DOTNET_CLI_HOME"
 OPT_OUT = "DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"
+RETIRED_INDEX_LAUNCHER = "windows/native/CodexIndex/Test-CodexIndex.ps1"
+# This exact source contains only inert parameters and an unconditional throw.
+# Any additional code, including code hidden after the throw, fails the guard.
+RETIRED_INDEX_SOURCE = (
+    "param(\n"
+    "    [string]$SdkRoot,\n"
+    "    [string]$WorkDirectory,\n"
+    "    [string]$ReferenceSource,\n"
+    "    [string]$WindowsPowerShell\n"
+    ")\n\n"
+    "# This legacy launcher cannot satisfy the hosted-only test executable's\n"
+    "# isolation contract. Fail before touching any supplied paths or environment.\n"
+    "throw 'The legacy Codex index test launcher is disabled. Use the disposable hosted workflow codex-index-bounded-synthetic-20261116.yml.'\n"
+)
 REQUIRED_RUNNERS = {
     "windows/native/Claude/Test-Claude.ps1",
     "windows/native/ClaudeHook/Test-ClaudeHook.ps1",
@@ -38,6 +52,12 @@ REQUIRED_RUNNERS = {
     ".github/workflows/windows-claude-reader-safe-audit-20261109.yml",
     ".github/workflows/windows-visible-tab-count-audit-20261109.yml",
 }
+
+
+def retired_index_launcher_issues(source):
+    if source.replace("\r\n", "\n") != RETIRED_INDEX_SOURCE:
+        return ["the retired index launcher is not the exact side-effect-free fail-fast form"]
+    return []
 
 
 def dictionary_values(node):
@@ -369,6 +389,18 @@ def csharp_launcher_issues(source, variable):
 
 
 class DotnetPathSafety(unittest.TestCase):
+    def test_retired_index_launcher_rejects_added_code(self):
+        self.assertFalse(retired_index_launcher_issues(RETIRED_INDEX_SOURCE))
+        for unsafe in (
+            "& $dotnet --version\n" + RETIRED_INDEX_SOURCE,
+            RETIRED_INDEX_SOURCE + "Start-Process $SdkRoot\n",
+            RETIRED_INDEX_SOURCE + "Set-Content $WorkDirectory 'data'\n",
+            RETIRED_INDEX_SOURCE.replace("throw '", "Write-Output '", 1),
+            "$env:PATH='changed'\n" + RETIRED_INDEX_SOURCE,
+        ):
+            with self.subTest(unsafe=unsafe):
+                self.assertTrue(retired_index_launcher_issues(unsafe))
+
     def test_checks_detect_unprotected_examples(self):
         self.assertTrue(python_issues('env = {"DOTNET_CLI_HOME": "fixture"}'))
         self.assertFalse(python_issues('env = {"DOTNET_CLI_HOME": "fixture", "DOTNET_ADD_GLOBAL_TOOLS_TO_PATH": "0"}'))
@@ -461,9 +493,16 @@ class DotnetPathSafety(unittest.TestCase):
         inspected = set()
         for path in candidates:
             source = path.read_text(encoding="utf-8-sig")
+            relative = path.relative_to(ROOT).as_posix()
+            if relative == RETIRED_INDEX_LAUNCHER:
+                inspected.add(relative)
+                for issue in retired_index_launcher_issues(source):
+                    with self.subTest(path=relative):
+                        self.fail(issue)
+                continue
             if PROFILE not in source and not re.search(r"\bdotnet(?:\.exe)?\b", source, re.I):
                 continue
-            inspected.add(path.relative_to(ROOT).as_posix())
+            inspected.add(relative)
             check = python_issues if path.suffix == ".py" else powershell_issues if path.suffix == ".ps1" else workflow_issues
             for issue in check(source):
                 with self.subTest(path=str(path.relative_to(ROOT))):

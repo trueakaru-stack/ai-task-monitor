@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="Tests\**\*.cs" />
+    <InternalsVisibleTo Include="AITaskMonitor.CodexIndex.Tests" />
   </ItemGroup>
 </Project>

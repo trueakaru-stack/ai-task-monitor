@@ -2,13 +2,18 @@ using System.Text;
 using System.Text.Json;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Reflection;
+using System.Text.RegularExpressions;
 using AITaskMonitor.CodexIndex;
 
-if (args.Length != 2) throw new ArgumentException("Synthetic fixture and output roots are required.");
-string fixturePath = Path.GetFullPath(args[0]);
-string root = Path.GetFullPath(args[1]);
-Directory.CreateDirectory(root);
+// Fail before writing anything when invoked outside the disposable hosted job.
+(string fixturePath, string root) = RequireSyntheticInputs(args);
 Fixture[] fixtures = JsonSerializer.Deserialize<Fixture[]>(File.ReadAllText(fixturePath)) ?? throw new InvalidOperationException();
+var fixtureNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+foreach (Fixture fixture in fixtures)
+    if (fixture.Name is null || !Regex.IsMatch(fixture.Name, @"\A[A-Za-z0-9_-]{1,128}\z", RegexOptions.CultureInvariant) ||
+        fixture.Name.Equals("extra", StringComparison.OrdinalIgnoreCase) || !fixtureNames.Add(fixture.Name))
+        throw new InvalidOperationException("A synthetic fixture name is invalid or duplicated.");
 int assertions = 0, reads = 0, unsupported = 0, intentionalDifferences = 0;
 string currentCase = "setup";
 void Check(bool condition, string message)
@@ -16,6 +21,16 @@ void Check(bool condition, string message)
     assertions++;
     if (!condition) throw new InvalidOperationException(currentCase + ": " + message);
 }
+
+string guardTarget = Path.Combine(root, "guard-target");
+string guardNested = Path.Combine(guardTarget, "nested");
+Directory.CreateDirectory(guardNested);
+string guardLink = Path.Combine(root, "guard-link");
+Directory.CreateSymbolicLink(guardLink, guardTarget);
+bool rejectedLink = false;
+try { RequirePlainDirectories(Path.Combine(guardLink, "nested")); }
+catch (InvalidOperationException) { rejectedLink = true; }
+Check(rejectedLink, "A redirected output ancestor was accepted.");
 
 foreach (Fixture fixture in fixtures)
 {
@@ -100,6 +115,7 @@ Check(lockedReader.Read([], [null!]).HasUnsupportedRows, "A missing lock ID was 
 var fileInfo = new FileInfo(source);
 FileSecurity originalAccess = fileInfo.GetAccessControl(AccessControlSections.Access);
 string originalSddl = originalAccess.GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+byte[] originalAcl = AccessList(originalAccess);
 FileSecurity restricted = fileInfo.GetAccessControl(AccessControlSections.Access);
 using WindowsIdentity identity = WindowsIdentity.GetCurrent();
 SecurityIdentifier user = identity.User ?? throw new InvalidOperationException("The synthetic ACL identity is unavailable.");
@@ -116,11 +132,16 @@ finally
 {
     if (applied)
     {
-        FileSecurity restored = fileInfo.GetAccessControl(AccessControlSections.Access);
-        restored.RemoveAccessRuleSpecific(denyRead);
+        // Restore the captured access rules, including inherited entries.
+        var restored = new FileSecurity();
+        restored.SetSecurityDescriptorSddlForm(originalSddl, AccessControlSections.Access);
         fileInfo.SetAccessControl(restored);
-        Check(string.Equals(originalSddl, fileInfo.GetAccessControl(AccessControlSections.Access)
-            .GetSecurityDescriptorSddlForm(AccessControlSections.Access), StringComparison.Ordinal), "The synthetic ACL was not restored.");
+        FileSecurity actualAccess = fileInfo.GetAccessControl(AccessControlSections.Access);
+        // Windows may recalculate the descriptor's auto-inherited bit even
+        // with the same access rules. Compare ACE bytes and protection itself.
+        Check(originalAcl.AsSpan().SequenceEqual(AccessList(actualAccess)) &&
+            originalAccess.AreAccessRulesProtected == actualAccess.AreAccessRulesProtected,
+            "The synthetic access rules or inheritance protection were not restored.");
     }
 }
 Check(lockedReader.Read([], []).Entries.Count == 1, "A source did not recover after ACL restoration.");
@@ -201,6 +222,101 @@ File.WriteAllText(source, "{\"id\":\"large\",\"thread_name\":\"" + largeTitle +
     "\",\"updated_at\":\"2026-11-05\"}\n", new UTF8Encoding(false));
 CodexIndexEntry largeEntry = new CodexIndexReader(source).Read([], []).Entries.Single();
 Check(largeEntry.Title.Length == largeTitle.Length, "A valid large tail row was rejected.");
+
+// The tail may be read from a large UTF-8 index without examining unrelated
+// earlier bytes, but a requested history scan must fit its complete budget.
+currentCase = "bounded-index";
+const int scanBytes = 8 * 1024 * 1024;
+string[] boundedRows = Enumerable.Range(0, 55).Select(i =>
+    "{\"id\":\"bounded-" + i + "\",\"thread_name\":\"Synthetic\"}").ToArray();
+using (var output = new FileStream(source, FileMode.Create, FileAccess.Write, FileShare.Read))
+{
+    byte[] old = Enumerable.Repeat((byte)'x', scanBytes + 32).ToArray();
+    output.Write(old);
+    output.WriteByte((byte)'\n');
+    byte[] tail = new UTF8Encoding(false).GetBytes(string.Join("\n", boundedRows) + "\n");
+    output.Write(tail);
+}
+var boundedReader = new CodexIndexReader(source);
+CodexIndexReadResult recent = boundedReader.Read([], []);
+Check(recent.Entries.Count == 50 && recent.Entries.Any(item => item.Id == "bounded-5") &&
+    recent.Entries.All(item => item.Id != "bounded-4"), "A complete 50-line UTF-8 tail was not retained.");
+CheckThrows<CodexIndexUnavailableException>(() => boundedReader.Read(["unknown"], []),
+    "A history scan beyond its budget returned a partial result.");
+
+File.WriteAllText(source, new string('x', scanBytes + 1), new UTF8Encoding(false));
+CheckThrows<CodexIndexUnavailableException>(() => new CodexIndexReader(source).Read([], []),
+    "An oversized unterminated UTF-8 line returned a partial result.");
+File.WriteAllText(source, new string('x', 2 * 1_048_576 + 1), new UTF8Encoding(false));
+CheckThrows<CodexIndexUnavailableException>(() => new CodexIndexReader(source).Read([], []),
+    "An over-budget tail line was accepted.");
+foreach (Encoding wide in new Encoding[] {
+    new UnicodeEncoding(false, true), new UnicodeEncoding(true, true),
+    new UTF32Encoding(false, true), new UTF32Encoding(true, true) })
+{
+    File.WriteAllText(source, new string('x', scanBytes / 2) + "\n", wide);
+    CheckThrows<CodexIndexUnavailableException>(() => new CodexIndexReader(source).Read([], []),
+        "An oversized wide-encoding forward scan was accepted.");
+}
+
+File.WriteAllLines(source, boundedRows, new UTF8Encoding(false));
+string[] atLimit = Enumerable.Range(0, 512).Select(i => "requested-" + i).ToArray();
+Check(new CodexIndexReader(source).Read(atLimit, []).Entries.Count == 50,
+    "The bounded requested-ID limit rejected an in-budget index.");
+CheckThrows<CodexIndexUnavailableException>(() => new CodexIndexReader(source).Read(atLimit, ["one-more"]),
+    "An over-budget requested-ID sequence was accepted.");
+
+// Force an append after opening and measuring the file, without blocking the
+// writer. A failed read must not publish a cache or return the original tail.
+bool appended = false;
+var appendingReader = new CodexIndexReader(source, () =>
+{
+    if (appended) return;
+    appended = true;
+    File.AppendAllText(source, "{\"id\":\"appended\",\"thread_name\":\"Synthetic\"}\n", new UTF8Encoding(false));
+});
+CheckThrows<CodexIndexUnavailableException>(() => appendingReader.Read(["bounded-0"], []),
+    "A growing index returned a stale or partially scanned list.");
+Check(appended, "The synthetic writer did not append while the reader was open.");
+CodexIndexReadResult afterAppend = appendingReader.Read(["bounded-0"], []);
+Check(afterAppend.Entries.Any(item => item.Id == "appended") && afterAppend.Entries.Any(item => item.Id == "bounded-0"),
+    "A later stable read did not recover after the append.");
+
+// Keep a bounded synthetic writer running until the read returns. This checks
+// that a reader never follows an actively growing line indefinitely.
+File.WriteAllLines(source, boundedRows, new UTF8Encoding(false));
+using var writerStarted = new ManualResetEventSlim();
+using var writerStop = new ManualResetEventSlim();
+Task? appender = null;
+var growingReader = new CodexIndexReader(source, () =>
+{
+    appender = Task.Run(() =>
+    {
+        using var output = new FileStream(source, FileMode.Append, FileAccess.Write,
+            FileShare.ReadWrite | FileShare.Delete);
+        byte[] chunk = Enumerable.Repeat((byte)' ', 1024).ToArray();
+        for (int i = 0; i < 5000 && !writerStop.IsSet; i++)
+        {
+            output.Write(chunk);
+            output.Flush();
+            writerStarted.Set();
+            Thread.Sleep(2);
+        }
+    });
+    if (!writerStarted.Wait(TimeSpan.FromSeconds(4))) throw new InvalidOperationException("Synthetic writer did not start.");
+});
+try
+{
+    CheckThrows<CodexIndexUnavailableException>(() => growingReader.Read([], []),
+        "A continuously growing index was returned as a complete list.");
+    Check(appender is not null && !appender.IsCompleted, "The read waited for the synthetic writer to stop.");
+}
+finally
+{
+    writerStop.Set();
+    appender?.GetAwaiter().GetResult();
+}
+currentCase = "extra";
 
 // One reader serializes its cache while callers concurrently use immutable data.
 string[] rows = Enumerable.Range(0, 80).Select(i => "{\"id\":\"i-" + i +
@@ -285,6 +401,59 @@ static Encoding MakeEncoding(string name) => name switch
     "utf32be" => new UTF32Encoding(true, true),
     _ => throw new InvalidOperationException("Unsupported synthetic encoding.")
 };
+
+static byte[] AccessList(FileSecurity security)
+{
+    var descriptor = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
+    RawAcl acl = descriptor.DiscretionaryAcl ?? throw new InvalidOperationException("Synthetic DACL is missing.");
+    var bytes = new byte[acl.BinaryLength];
+    acl.GetBinaryForm(bytes, 0);
+    return bytes;
+}
+
+static (string Fixture, string Root) RequireSyntheticInputs(string[] arguments)
+{
+    if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("CI") != "true" ||
+        Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
+        Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") != "github-hosted" ||
+        Environment.GetEnvironmentVariable("RUNNER_OS") != "Windows" ||
+        Environment.GetEnvironmentVariable("DOTNET_ADD_GLOBAL_TOOLS_TO_PATH") != "0" ||
+        Environment.GetEnvironmentVariable("HOME") is not null || Environment.GetEnvironmentVariable("CODEX_HOME") is not null ||
+        arguments.Length != 2 || !Path.IsPathFullyQualified(arguments[0]) || !Path.IsPathFullyQualified(arguments[1]))
+        throw new InvalidOperationException("Disposable hosted Windows and absolute synthetic paths are required.");
+
+    string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(arguments[1]));
+    string fixture = Path.GetFullPath(arguments[0]);
+    string runner = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Environment.GetEnvironmentVariable("RUNNER_TEMP") ?? ""));
+    DirectoryInfo? baseDirectory = Directory.GetParent(root);
+    if (baseDirectory is null || !string.Equals(baseDirectory.Parent?.FullName, runner, StringComparison.OrdinalIgnoreCase) ||
+        !Regex.IsMatch(baseDirectory.Name, @"\Aaitm-codex-index-[0-9a-f]{32}\z", RegexOptions.CultureInvariant) ||
+        !string.Equals(root, Path.Combine(baseDirectory.FullName, "fixtures"), StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(fixture, Path.Combine(baseDirectory.FullName, "synthetic-fixtures.json"), StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(Path.GetFullPath(Assembly.GetExecutingAssembly().Location),
+            Path.Combine(baseDirectory.FullName, "artifacts", "bin", "CodexIndex.Tests", "release", "AITaskMonitor.CodexIndex.Tests.dll"), StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("Fixture, assembly and output must belong to the same unique temporary root.");
+    foreach (string name in new[] { "USERPROFILE", "APPDATA", "LOCALAPPDATA" })
+    {
+        string suffix = name == "USERPROFILE" ? "profile" : name == "APPDATA" ? "appdata" : "localappdata";
+        if (!string.Equals(Path.GetFullPath(Environment.GetEnvironmentVariable(name) ?? ""),
+            Path.Combine(baseDirectory.FullName, suffix), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("A synthetic profile is required.");
+    }
+    RequirePlainDirectories(root);
+    var input = new FileInfo(fixture);
+    if (!input.Exists || (input.Attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0 ||
+        input.Length > 4 * 1024 * 1024 || Directory.EnumerateFileSystemEntries(root).Any())
+        throw new InvalidOperationException("A plain bounded fixture and empty output directory are required.");
+    return (fixture, root);
+}
+
+static void RequirePlainDirectories(string path)
+{
+    for (DirectoryInfo? directory = new(path); directory is not null; directory = directory.Parent)
+        if (!directory.Exists || (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("A synthetic directory is missing or redirected.");
+}
 
 sealed record Fixture(string Name, Step[] Steps);
 sealed record Step(string Operation, string? Content, string? Encoding, int Version, string[]? Observed,

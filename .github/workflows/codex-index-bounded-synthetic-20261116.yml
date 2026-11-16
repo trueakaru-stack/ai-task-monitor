@@ -1,0 +1,42 @@
+name: Synthetic bounded Codex index
+on:
+  push:
+    branches: [windows, codex/codex-index-bounded-20261116]
+permissions:
+  contents: read
+jobs:
+  bounded-index:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - name: Run bounded index checks in an isolated profile
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:RUNNER_TEMP ('aitm-codex-index-source-'+[guid]::NewGuid().ToString('N'))
+          $source=Join-Path $root 'source'
+          $reference=Join-Path $root 'reference'
+          $template=Join-Path $root 'template'
+          $hooks=Join-Path $root 'hooks'
+          New-Item -ItemType Directory -Path $source,$reference,$template,$hooks | Out-Null
+          $env:GIT_CONFIG_NOSYSTEM='1'
+          $env:GIT_CONFIG_GLOBAL=Join-Path $root 'empty.gitconfig'
+          [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL,'')
+          $env:GIT_TERMINAL_PROMPT='0'
+          foreach($checkout in @($source,$reference)) {
+            git -c credential.helper= -c core.hooksPath="$hooks" init --quiet --template="$template" "$checkout"
+            if($LASTEXITCODE -ne 0){throw 'Cannot initialize synthetic source checkout.'}
+          }
+          git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$env:GITHUB_SHA"
+          if($LASTEXITCODE -ne 0){throw 'Cannot fetch test revision.'}
+          git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+          if($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:GITHUB_SHA){throw 'Cannot select exact test revision.'}
+          git -C "$reference" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" 'c8690cc877d4ecc768fb0781e04c9ee48e5912c9'
+          if($LASTEXITCODE -ne 0){throw 'Cannot fetch pinned historical reference.'}
+          git -C "$reference" -c credential.helper= -c core.hooksPath="$hooks" -c core.autocrlf=true checkout --quiet --detach FETCH_HEAD
+          if($LASTEXITCODE -ne 0 -or (git -C "$reference" rev-parse HEAD).Trim() -cne 'c8690cc877d4ecc768fb0781e04c9ee48e5912c9'){throw 'Cannot select pinned historical reference.'}
+          & (Join-Path $source '.github/codex-index-bounded-ci/Run.ps1') -ReferenceSource (Join-Path $reference 'windows/app/CodexProgress.ps1')
