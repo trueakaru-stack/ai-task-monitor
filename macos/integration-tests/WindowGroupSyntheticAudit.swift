@@ -166,6 +166,8 @@ enum SyntheticWindowGroupAudit {
         var row: [String: Any] = ["mode": mode, "variant": variant, "scenario": scenario, "stage": stage,
             "isCompact": store.isCompact, "toggleMethod": toggleMethod,
             "windowHasShadow": window.hasShadow, "windowIsOpaque": window.isOpaque,
+            "windowLevel": window.level.rawValue, "movableByBackground": window.isMovableByWindowBackground,
+            "fullSizeContent": window.styleMask.contains(.fullSizeContentView),
             "backingScale": Double(window.backingScaleFactor),
             "windowFrame": [Double(window.frame.minX), Double(window.frame.minY),
                             Double(window.frame.width), Double(window.frame.height)],
