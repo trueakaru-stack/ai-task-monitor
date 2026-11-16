@@ -10,7 +10,7 @@ namespace AITaskMonitor.Prototype;
 // The pump owns its source and disposes it off the dispatcher.
 // The owner must report connection changes through this pump on the dispatcher.
 // Polling runs off that thread; verification and presentation stay ordered with
-// connection notifications on it. The application entry point does not start it.
+// connection notifications on it. The application owner controls its lifetime.
 internal sealed class ClaudeSourcePump : IDisposable
 {
     private readonly Dispatcher dispatcher;
@@ -82,6 +82,18 @@ internal sealed class ClaudeSourcePump : IDisposable
         else StartPoll();
         if (next == ClaudeConnection.Disconnected) Present(new ClaudeSourceSnapshot([], false));
         else if (next == ClaudeConnection.Partial) Present(lastPresented, true);
+    }
+
+    // Clear this owner's retained history on an explicit disconnect. The
+    // source records the boundary without waiting for a blocked read.
+    internal void DisconnectAndForget()
+    {
+        dispatcher.VerifyAccess();
+        ObjectDisposedException.ThrowIf(disposed, this);
+        NotifyConnection(ClaudeConnection.Disconnected);
+        lastSourceSnapshot = null;
+        lastPresented = new ClaudeSourceSnapshot([], false);
+        source.ForgetBefore(utcNow());
     }
 
     public void RequestRefresh()
@@ -203,6 +215,8 @@ internal sealed class ClaudeSourcePump : IDisposable
         lastPresented = Copy(snapshot, unconfirmed);
         apply(Copy(lastPresented, false));
     }
+
+    internal static ClaudeSourceSnapshot AsUnconfirmed(ClaudeSourceSnapshot snapshot) => Copy(snapshot, true);
 
     private static ClaudeSourceSnapshot Copy(ClaudeSourceSnapshot snapshot, bool unconfirmed)
     {

@@ -19,6 +19,7 @@ public sealed record ClaudeSourceSnapshot(IReadOnlyList<Task> Tasks, bool Unavai
 {
     public long Generation { get; internal init; }
     internal object? Owner { get; init; }
+    internal long ForgetVersion { get; init; }
     internal Task[]? RetainedFallback { get; init; }
 }
 
@@ -33,11 +34,11 @@ public sealed class ClaudeFileSource : IDisposable
     private readonly object identity = new();
     private readonly string currentPath;
     private readonly string? legacyPath;
-    private readonly DateTime observedSinceUtc;
+    private DateTime observedSinceUtc;
     private readonly Action? afterReadBeforeSnapshot;
     private readonly Action<string>? afterFirstFileRead;
     private readonly Func<SafeFileHandle, ClaudeFileIdentity?> readIdentity;
-    private readonly SessionReader reader = new();
+    private SessionReader reader = new();
     private Task[] previous = [];
     private bool currentSeen, legacySeen;
     private bool pendingRead, pendingLoss, connectionLoss;
@@ -45,7 +46,8 @@ public sealed class ClaudeFileSource : IDisposable
     private SafeFileHandle? currentAnchor, legacyAnchor;
     private bool disposed;
     private ClaudeConnection? signalledConnection;
-    private long generation;
+    private long generation, forgetVersion, appliedForgetVersion;
+    private DateTime forgetBeforeUtc;
     private bool signalLoss, generationExhausted;
     private Task[]? pendingFallback;
 
@@ -84,14 +86,32 @@ public sealed class ClaudeFileSource : IDisposable
         }
     }
 
+    // Explicit disconnection clears retained task history without waiting for
+    // a potentially blocked file read. Old in-flight results are invalidated.
+    internal void ForgetBefore(DateTime boundaryUtc)
+    {
+        if (boundaryUtc.Kind != DateTimeKind.Utc) throw new ArgumentException("Boundary must be UTC.", nameof(boundaryUtc));
+        lock (signalGate)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (forgetVersion == long.MaxValue) { generationExhausted = true; return; }
+            forgetVersion++;
+            forgetBeforeUtc = boundaryUtc;
+            pendingFallback = null;
+            signalLoss = true;
+            AdvanceGeneration();
+        }
+    }
+
     // Does not wait for the file-read lock. A source-owned snapshot may be
     // retained as an unconfirmed fallback after the in-flight read finishes.
     public void NotifyUnavailable(ClaudeSourceSnapshot? fallback)
     {
         lock (signalGate)
         {
+            if (disposed) return;
             if (fallback is not null && ReferenceEquals(fallback.Owner, identity) &&
-                fallback.RetainedFallback is { Length: > 0 } && pendingFallback is null)
+                fallback.ForgetVersion == forgetVersion && fallback.RetainedFallback is { Length: > 0 } && pendingFallback is null)
                 pendingFallback = fallback.RetainedFallback;
             signalLoss = true;
             AdvanceGeneration();
@@ -106,10 +126,11 @@ public sealed class ClaudeFileSource : IDisposable
     }
 
     private readonly record struct ConnectionSignal(ClaudeConnection? Connection, long Generation, bool Loss, bool Exhausted,
-        Task[]? Fallback);
+        Task[]? Fallback, long ForgetVersion, DateTime ForgetBeforeUtc);
     private ConnectionSignal Signal()
     {
-        lock (signalGate) return new(signalledConnection, generation, signalLoss, generationExhausted, pendingFallback);
+        lock (signalGate) return new(signalledConnection, generation, signalLoss, generationExhausted, pendingFallback,
+            forgetVersion, forgetBeforeUtc);
     }
 
     // Exposes the retained-loss marker to the synthetic test assembly only.
@@ -120,7 +141,8 @@ public sealed class ClaudeFileSource : IDisposable
         // Freeze bounded names while already off the UI thread. The deadline
         // signal can then retain this private copy without taking the file lock.
         Task[] fallback = MergePending([], snapshot.Tasks, out _);
-        return snapshot with { Generation = signal.Generation, Owner = identity, RetainedFallback = fallback };
+        return snapshot with { Generation = signal.Generation, Owner = identity, RetainedFallback = fallback,
+            ForgetVersion = signal.ForgetVersion };
     }
 
     // The owner must serialize this check with presentation and notifications.
@@ -147,12 +169,17 @@ public sealed class ClaudeFileSource : IDisposable
             if (System.Threading.Volatile.Read(ref disposed)) throw new ObjectDisposedException(nameof(ClaudeFileSource));
             ConnectionSignal start = Signal();
             if (start.Connection is null) throw new InvalidOperationException("A connection must be signalled before polling.");
+            ApplyPendingForget(start);
             Task[] before = previous;
             if (start.Loss || start.Exhausted) MarkConnectionLoss();
             ConsumeFallback(start.Fallback);
             ClaudeSourceSnapshot result = PollLocked(start.Connection.Value, utcNow);
             afterReadBeforeSnapshot?.Invoke();
             ConnectionSignal end = Signal();
+            // A forget signal supersedes any fallback captured by this read.
+            // Do not publish old cards under the new connection generation.
+            if (end.ForgetVersion != start.ForgetVersion)
+                return Stamp(new ClaudeSourceSnapshot([], true), end);
             if (end.Generation != start.Generation || end.Exhausted)
             {
                 if (end.Loss || end.Exhausted)
@@ -168,6 +195,17 @@ public sealed class ClaudeFileSource : IDisposable
             }
             return Stamp(result, end);
         }
+    }
+
+    // Caller holds the read gate; a forget signal itself never waits on it.
+    private void ApplyPendingForget(ConnectionSignal signal)
+    {
+        if (signal.ForgetVersion == appliedForgetVersion) return;
+        if (signal.ForgetBeforeUtc > observedSinceUtc) observedSinceUtc = signal.ForgetBeforeUtc;
+        reader = new SessionReader();
+        previous = [];
+        pendingRead = pendingLoss = connectionLoss = false;
+        appliedForgetVersion = signal.ForgetVersion;
     }
 
     private void MarkConnectionLoss()
@@ -255,13 +293,16 @@ public sealed class ClaudeFileSource : IDisposable
     {
         lock (signalGate)
         {
+            if (disposed) return new ClaudeSourceSnapshot([], true);
             signalLoss = true;
             AdvanceGeneration();
         }
         lock (gate)
         {
-            MarkConnectionLoss();
+            if (System.Threading.Volatile.Read(ref disposed)) return new ClaudeSourceSnapshot([], true);
             ConnectionSignal signal = Signal();
+            ApplyPendingForget(signal);
+            MarkConnectionLoss();
             ConsumeFallback(signal.Fallback);
             ClaudeSourceSnapshot result = signal.Connection == ClaudeConnection.Disconnected
                 ? new ClaudeSourceSnapshot([], false)

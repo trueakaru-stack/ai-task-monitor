@@ -1,20 +1,41 @@
 # Windows C# prototype
 
-This is an isolated WPF preview, not a replacement for the released application.
-It uses fixed synthetic events or two hard-coded sample tasks, or an empty list. It does not read agent
-profiles, monitor activity, connect providers, save preferences, implement
-settings, manage diagnostics or update the installed application. The settings
-button is intentionally inactive. No installer is modified.
+This WPF prototype is not a replacement for the released application. The
+normal entry point attempts to detect the previously configured standalone
+Windows Claude hook and read its local event journal. Preview and screenshot
+scenarios use synthetic data and do not start this detection. In the normal
+standalone launch the existing settings screen can read the old theme and
+language choices and save explicit display changes to a separate file. Source
+actions, About, diagnostics and installed-app updates remain disabled or absent.
 
-Without explicit preview arguments the window opens with an empty task list,
-not the built-in example cards, and says that no sources are connected.
+The preference factory performs filesystem checks and the window constructor
+loads preferences synchronously on the UI thread. A slow or inaccessible data
+location can delay startup; the hosted tests use local synthetic files and do
+not establish behavior for stalled filesystem I/O. Moving that work off the UI
+thread remains unfinished.
+
+The detection reads the existing global Claude settings and the standalone
+monitor journal without changing them. It recognizes only the expected hook at
+`%LOCALAPPDATA%\AITaskMonitor\ClaudeTaskHook.ps1`; Store hooks, other profile
+paths, local project settings and managed policy are not covered. Registration
+does not prove effective policy, event delivery or live activity, so every
+Claude card is presented as unconfirmed. The settings screen shows an
+unconfirmed registration status for an observed or absent global hook and
+"No data" for a read error or invalid settings. It does not infer that other
+scopes are disconnected. An empty source reports that task status is
+unconfirmed rather than claiming that all tasks are absent. A task whose only
+known activity predates this monitor launch is not displayed until an eligible
+later active event arrives; earlier records may then contribute context. Other
+integrations remain synthetic or disabled. The current presentation also suppresses
+all step status and progress, including some observations the reader may know;
+showing progress over known steps with an incomplete-plan label remains unfinished.
+The user must already have authorized and configured the old hook; this prototype
+neither installs nor runs it.
+
 There is no local Codex source owner in this preview. A future application
 must track the actual connection and confidence of every source when choosing
 the empty-state message; the preview's scene-based fallback is not a usable
 connected-source status and is not final application behavior.
-An injected empty Claude snapshot does not distinguish a disconnected source
-from a connected one; this preview therefore reports the task status as
-unconfirmed until a future owner supplies a verified connection state.
 `CloudSourcePump` is created with no runner
 and remains disabled in the normal entry point. The cloud-to-WPF test injects
 only its own synthetic executable on a disposable hosted runner; it does not
@@ -65,13 +86,13 @@ permission boundary, and these tests do not prove real channel security.
 The `claude-synthetic` scene runs a built-in event sequence through the Claude
 reader and WPF presentation. It labels progress as based on observed steps and
 shows an unconfirmed plan without a progress bar or colored step marks. This is
-only a preview: the native application does not read a real Claude event file,
-and event-order and hook-result validation are still under review.
+a preview; event-order and hook-result validation remain incomplete.
 
 `ClaudeSourcePump` and `ApplyClaudeSource` can pass an explicitly supplied
 synthetic file source into a test window without blocking the WPF thread. The
-pump is not started by the application entry point, and it does not establish a
-real Claude connection. The owner supplies an initial connection and reports
+normal entry point creates this pump only after detecting the known standalone
+hook. That registration does not establish a real Claude connection. The owner
+supplies an initial connection and reports
 every later change through the pump on its dispatcher; it must not notify the
 source directly or use a stale connection value from a background read. An
 inspection error is not proof of disconnection: until a separate inspector
@@ -104,12 +125,18 @@ blocked; elapsed time is checked
 again before a result is presented. The deadline does not cancel I/O.
 
 The worker limit applies to a single pump instance. `Dispose` prevents later
-presentation but cannot stop a permanently blocked read; constructing another
-pump can therefore add another blocked worker. A future process owner must
-enforce a single pump for the lifetime of the process, including after disposal,
-until a separately verified cancellation or replacement contract exists. No
-guarantee is made that blocked I/O terminates. Both limitations block real
-integration; the current component does not enforce the single-pump contract.
+presentation but cannot stop a permanently blocked read. The new process owner
+enforces one owner and pump for the process lifetime, including after disposal;
+the pump class itself does not. Its settings inspection also permits only one
+worker at a time and discards results after a timeout. A missing registration
+for the known global hook is treated as unavailable because an external writer may briefly replace
+the settings file; existing cards remain unconfirmed and can persist even after
+a later stop. Only an explicit disconnect immediately clears visible cards and
+schedules retained history for removal without waiting on I/O. Other Claude
+scopes may still exist. A later reconnect admits only events at or after the
+disconnect boundary and keeps their status unconfirmed. Future-dated or delayed
+events may still cross that boundary. A blocked I/O operation is not guaranteed
+to terminate.
 
 `windows/native/Tests/ClaudePump/ClaudePump.Tests.csproj` tests the pump with a
 dispatcher and synthetic files without opening a window. Its controlled races
@@ -123,8 +150,9 @@ its result; it does not block or test cancellation inside real file I/O. Run
 only on disposable hosted Windows with an isolated .NET 10 SDK and
 `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0` for every SDK process; the output assembly
 is `AITaskMonitor.ClaudePump.Tests.dll`. The file-to-window tests are documented
-in the `ClaudeReader` README. Neither test establishes real hook behavior,
-actual connection inspection, or application integration.
+in the `ClaudeReader` README. Those tests do not establish real Claude session behavior. The separate
+registered-hook host test exercises a copied released hook with synthetic input
+and an isolated profile; it is not an authenticated Claude test.
 
 The preview can also render a caller-supplied synthetic repeated-error warning
 and pass its dismissal back to that caller. It does not start the loop detector

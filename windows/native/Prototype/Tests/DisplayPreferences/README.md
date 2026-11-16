@@ -1,41 +1,40 @@
 # Synthetic display preferences
 
-This isolated layer is not connected to the preview window or the installed
-application. It does not discover a user profile or choose the standard or
-Store edition's paths. The caller must supply two distinct absolute paths in
-trusted directories; target and lock paths must also differ from the legacy
-path. If the separate target does not exist, the concrete file adapter returns
-`MigrationDeferred`: it does not open or copy the old file, infer defaults,
-or create a target. This applies even if the old file may be absent, because
-absence has not been verified against concurrent writers. A host must surface
-the deferred state and must not replace the user's theme or language silently.
-The target read can create the separate lock file even while migration is
-deferred. A caller may explicitly invoke `Initialize(theme, language)` only
-after the user has chosen both values. It does not inspect the legacy source,
-and creates a separate target containing exactly those two choices; `system`
-is accepted only when explicitly selected. Invalid or missing choices fail.
-An existing target causes a conflict; if a competing target appears after the
-snapshot, initialization does not overwrite it. The target lock can still be
-created in this case. No UI calls this operation automatically or otherwise.
+The adapter reads old display values without writing the old settings file.
+Each explicit choice is stored in a separate target: selecting only a theme
+writes only `theme`, and selecting only a language writes only `language`.
+For an absent target field, a read uses the corresponding old field, or the
+system mode if the old field or file is absent. An existing target field takes
+precedence. A missing or unreadable old file is not the same condition: access
+errors and invalid documents are reported instead of silently using defaults.
+The adapter never copies unrelated old properties into the new file.
 
-Explicit initialization does not migrate other settings from the old file;
-the old file remains untouched. A future application must retain access to
-those settings and must not treat the new display-only target as the complete
-old configuration. The initialization UI, other settings and their migration
-are not implemented.
+The caller supplies distinct absolute legacy and target paths in trusted
+directories. The path helper reproduces the published standalone and Store
+directory conventions. `ForApplication` accepts an executable directory and
+user roots, checks Windows package identity and the published Store marker, and
+currently enables only an unpackaged standalone launch with no marker. A
+packaged process, marker, unknown identity or inaccessible application
+directory makes the service unavailable instead of choosing the wrong edition.
+The standalone `LOCALAPPDATA` root must already be a plain directory; the
+factory does not create a missing or redirected root.
+No native C# Store package has yet been built or verified. The target and its lock are separate. Reading an existing target directory can create its lock
+file; a missing directory is created only when a selection is saved. The
+existing `Initialize(theme, language)` operation remains available to an
+explicit caller but is not required for normal individual selections.
+Package identity uses Windows' `GetCurrentPackageFullName` contract:
+[Microsoft documentation](https://learn.microsoft.com/windows/msix/detect-package-identity).
 
-If a target already exists, it takes precedence and can be read or updated
-without opening the legacy file. Later changes to the old file are not
-synchronized. The read-only source interface also supports a `Confirmed`
-snapshot (including a confirmed absent file) and `Unavailable`; only synthetic
-test sources currently provide `Confirmed`. Implementing a real confirmation
-provider requires separate evidence of a stable non-interfering snapshot.
+The window can receive an injected adapter and expose the existing theme and
+language controls. The application entry point does not yet create or inject
+one; synthetic previews use an explicitly supplied fixture. Other settings and
+sources are not connected by this change.
 
 The supported modes are `theme` = `system`, `dark`, `light` and `language` =
 `system`, `ru`, `en`. Reading accepts case variants as the released PowerShell
 implementation does. Unknown properties and values, including large numbers
-and the type of `codexCloudEnabled`, are preserved; JSON formatting and property
-name escaping can change. Both UTF-8 with a BOM and UTF-8 without a BOM are
+and the type of `codexCloudEnabled`, in an already-existing target are preserved;
+JSON formatting and property name escaping can change. Both UTF-8 with a BOM and UTF-8 without a BOM are
 accepted. Invalid UTF-8, malformed JSON, non-object roots and duplicate keys
 at any depth, including case collisions, are rejected without a settings
 write. Names containing a Unicode replacement character are also rejected to
@@ -49,13 +48,11 @@ compares the complete captured bytes under that lock, writes a unique temporary
 file and flushes it before a same-directory move or replace. Conflicts return a
 status instead of overwriting the newer target. The lock is advisory to other
 programs: a writer that ignores it can race between the comparison and the
-replace. A concurrent in-place update of the legacy file can produce a stale or
-mixed snapshot even when its length is unchanged; a mixed snapshot can still be
-valid JSON. Length checks do not establish a consistent read. Opening the
-legacy file without write/delete sharing would also block the released version's
-`File.Replace` while the read is open; its theme handler ignores save failure.
-That alternative has therefore not been adopted. Changes to the legacy file
-after migration are not synchronized. The adapter is not a filesystem sandbox
+replace. The legacy reader opens with read/write/delete sharing and checks two
+bounded reads. A concurrent in-place change can still create a stale or mixed
+snapshot, including valid JSON; these checks do not prove atomicity. An atomic
+replacement can also happen after the read. A later load rereads missing fields,
+but no live synchronization or writer cooperation is guaranteed. The adapter is not a filesystem sandbox
 and does not protect against concurrent replacement of path ancestors or aliases
 in an untrusted directory.
 The guarantees of rename, replace, and durability depend on the filesystem;
@@ -66,14 +63,15 @@ the trusted target directory.
 An existing target may contain sensitive unknown properties, and an update may
 temporarily copy them into a temporary file. The effective permissions of the
 target directory, new file and replaced file have not been checked, and no
-retention or cleanup policy for such copies has been established. These are
-blockers before using real settings. Deferred migration does not prove that a
-cooperating lock excludes unrelated writers of an existing target.
+retention or cleanup policy for such copies has been established. These remain
+open limitations before using real settings. A cooperating lock does not exclude
+unrelated writers of an existing target.
 
 This does not migrate all application behavior. In particular, the released
 Claude hook reads its retention setting from the old file; that setting must
 move together with a replacement hook. Diagnostic data is stored separately.
-No UI controls, other settings, installer or real agent source are connected.
+Only the injected display controls are connected by this slice. Other settings,
+the installer and real agent sources are not connected by it.
 
 For hosted Windows CI with .NET 10 already installed, set
 `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0` at job level. From the repository root in
@@ -111,18 +109,16 @@ The tests create a unique fixture directory under the supplied work directory
 and do not delete it. They reject paths inside the current checkout, current
 profile/application-data directories, and reparse-point ancestors. These are
 not a general filesystem sandbox and depend on environment and path evidence.
-The deferred-state and explicit-initialization tests keep a synthetic old file
-exclusively open while checking that it is neither opened nor overwritten.
-They also exercise missing choices, a target appearing after a snapshot, an
-already-existing target, distinct synthetic edition roots and unconfirmed and
-unavailable synthetic sources. The Windows-only sharing fixture checks both the rejected concurrent writer and
-the resulting conflict with a legacy-style file replacement. It uses only
-synthetic files and is not part of the adapter's actual reading policy.
+The tests exercise individual choices, fallback from a synthetic old file,
+invalid and inaccessible old input, target changes during a read, first-run
+directory creation, foreign target fields and separate edition roots. A Windows
+sharing fixture holds a synthetic writer open while the adapter reads and also
+demonstrates why a strict read share would interfere with a legacy replacement.
+The fixtures do not prove an atomic snapshot under an uncooperative writer.
 They do not assign `HOME` or `CODEX_HOME`, launch agents, or change persistent
 `PATH`. Tests use only synthetic data and do not establish visual fidelity,
 live interoperability, full migration, or release readiness.
 
-The deferred-migration and explicit-initialization candidate passed 74
-synthetic checks and the WPF prototype compiled without warnings in
-[Windows CI run 43831214988](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43831214988).
-Neither test reads real settings or exercises the settings screen.
+The individual-choice adapter passed 80 synthetic checks and a WPF build in
+[Windows CI run 43856015300](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43856015300).
+That run did not read real settings or exercise the settings screen.

@@ -6,9 +6,13 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Input;
+using System.Windows.Documents;
+using System.Windows.Threading;
+using System.Globalization;
 using AITaskMonitor.NativeUpdateController;
 using AITaskMonitor.Claude;
 using AITaskMonitor.CodexCloud;
+using AITaskMonitor.Prototype.Settings;
 using ShapePath = System.Windows.Shapes.Path;
 
 namespace AITaskMonitor.Prototype;
@@ -20,7 +24,7 @@ internal sealed record WarningFocusKey(string TaskId);
 internal sealed class PrototypeWindow
 {
     private readonly Window window;
-    private readonly Options options;
+    private Options options;
     private readonly Border frame;
     private readonly ShapePath outline;
     private readonly Grid expanded;
@@ -35,7 +39,19 @@ internal sealed class PrototypeWindow
     private readonly TextBlock compactMore;
     private readonly ScrollViewer tasksScroll;
     private readonly ScrollBar tasksScrollBar;
-    private readonly IReadOnlyDictionary<string, string> palette;
+    private IReadOnlyDictionary<string, string> palette;
+    private readonly DisplayPreferenceService? preferences;
+    private readonly Func<bool?> windowsUsesLightTheme;
+    private readonly Func<string> systemLanguage;
+    private readonly Dictionary<TextBlock, string> staticText = new();
+    private readonly Dictionary<Button, string> staticButtons = new();
+    private readonly Dictionary<DependencyObject, string> staticNames = new();
+    private string? themeMode, languageMode;
+    private string preferenceError = "";
+    private bool navigationByKeyboard;
+    private ClaudeSourceSnapshot? latestClaude;
+    private ClaudeRegistration? claudeRegistration;
+    private CloudSnapshot? latestCloud;
     private readonly Color accent = SystemParameters.WindowGlassColor;
     private string selectedProvider = "all";
     private string compactSelection = "";
@@ -59,9 +75,27 @@ internal sealed class PrototypeWindow
     private string dismissedSyntheticVersion = "";
     private Action? syntheticDownload;
 
-    public PrototypeWindow(Window window, Options options)
+    public PrototypeWindow(Window window, Options options, DisplayPreferenceService? preferences = null,
+        Func<bool?>? windowsUsesLightTheme = null, Func<string>? systemLanguage = null)
     {
         this.window = window;
+        this.preferences = preferences;
+        this.windowsUsesLightTheme = windowsUsesLightTheme ?? WindowsUsesLightTheme;
+        this.systemLanguage = systemLanguage ?? (() => CultureInfo.CurrentUICulture.Name);
+        if (preferences is not null)
+        {
+            PreferenceLoad loaded = preferences.Load();
+            if (loaded.Status == PreferenceStatus.Success && loaded.Modes is not null)
+            {
+                themeMode = loaded.Modes.Theme;
+                languageMode = loaded.Modes.Language;
+                options = options with {
+                    Theme = DisplayPreferenceDocument.ResolveTheme(themeMode, this.windowsUsesLightTheme()),
+                    Language = DisplayPreferenceDocument.ResolveLanguage(languageMode, this.systemLanguage())
+                };
+            }
+            else preferenceError = "load";
+        }
         this.options = options;
         frame = Find<Border>("WindowFrame");
         outline = Find<ShapePath>("WindowOutline");
@@ -81,7 +115,8 @@ internal sealed class PrototypeWindow
         palette = options.Theme == "light" ? LightPalette : DarkPalette;
         ApplyPalette();
         ApplyIcon();
-        if (options.Language == "en") TranslateVisibleStaticText(window);
+        CaptureStaticTranslations(window);
+        ApplyStaticTranslations();
 
         var updateDialog = Find<Grid>("UpdateDialog");
         updateDialog.SizeChanged += (_, _) =>
@@ -130,9 +165,13 @@ internal sealed class PrototypeWindow
         Find<Button>("CompactTaskbarMinimizeButton").Click += (_, _) => window.WindowState = WindowState.Minimized;
         Find<Button>("MinimizeButton").Click += (_, _) => SetCompact(true);
         Find<Button>("ExpandButton").Click += (_, _) => SetCompact(false);
-        // Settings, integrations and other application features are not part of this prototype.
-        Find<Button>("SettingsFooterButton").IsHitTestVisible = false;
-        Find<Button>("SettingsFooterButton").Focusable = false;
+        if (preferences is null)
+        {
+            // Synthetic previews do not access any real settings.
+            Find<Button>("SettingsFooterButton").IsHitTestVisible = false;
+            Find<Button>("SettingsFooterButton").Focusable = false;
+        }
+        else ConfigureDisplaySettings();
         if (options.Scene == "active")
         {
             samples = LegacySamples(options.Language);
@@ -224,12 +263,18 @@ internal sealed class PrototypeWindow
             overlay.Visibility = Visibility.Collapsed;
             return;
         }
-        Find<TextBlock>("UpdateVersionText").Text = options.Language == "en"
-            ? $"Version {syntheticUpdate.Version} is available to download"
-            : $"Версия {syntheticUpdate.Version} доступна для скачивания";
+        UpdateVersionText();
         Find<TextBlock>("UpdateOpenError").Visibility = Visibility.Collapsed;
         overlay.Visibility = Visibility.Visible;
         Find<Button>("UpdateLaterButton").Focus();
+    }
+
+    private void UpdateVersionText()
+    {
+        if (syntheticUpdate is null) return;
+        Find<TextBlock>("UpdateVersionText").Text = options.Language == "en"
+            ? $"Version {syntheticUpdate.Version} is available to download"
+            : $"Версия {syntheticUpdate.Version} доступна для скачивания";
     }
 
     private void DismissSyntheticUpdate()
@@ -265,12 +310,29 @@ internal sealed class PrototypeWindow
     {
         if (!window.Dispatcher.CheckAccess()) throw new InvalidOperationException("UI updates must run on the window dispatcher.");
         ArgumentNullException.ThrowIfNull(snapshot);
+        latestClaude = snapshot;
         claudeSourceObserved = true;
         claudeSourceUnavailable = snapshot.Unavailable;
         var combined = samples.Where(task => task.Provider != "claude").ToList();
         combined.AddRange(snapshot.Tasks.Select(task => ClaudePresentation.Map(task, options.Language)));
         UpdateSamples(combined);
         Render();
+    }
+
+    // A single settings file cannot establish whether other Claude registrations exist.
+    internal void ApplyClaudeRegistration(ClaudeRegistration registration)
+    {
+        if (!window.Dispatcher.CheckAccess()) throw new InvalidOperationException("UI updates must run on the window dispatcher.");
+        claudeRegistration = registration;
+        UpdateClaudeRegistrationStatus();
+    }
+
+    private void UpdateClaudeRegistrationStatus()
+    {
+        bool english = options.Language == "en";
+        Find<TextBlock>("ClaudeSourceStatus").Text = claudeRegistration is null or ClaudeRegistration.Unavailable
+            ? english ? "No data" : "Нет данных"
+            : english ? "Status unconfirmed" : "Статус не подтверждён";
     }
 
     // Cloud and local Codex share a visible provider tab, not a source state.
@@ -292,6 +354,7 @@ internal sealed class PrototypeWindow
             Render();
             return;
         }
+        latestCloud = snapshot;
         cloudTaskIds.Clear();
         foreach (SampleTask task in mapped) cloudTaskIds.Add(task.Id);
         other.AddRange(mapped);
@@ -382,34 +445,193 @@ internal sealed class PrototypeWindow
         }
     }
 
-    private static void TranslateVisibleStaticText(DependencyObject root)
+    private void CaptureStaticTranslations(DependencyObject root)
     {
-        if (root is TextBlock text)
-        {
-            text.Text = text.Text switch
-            {
-                "Ход выполнения" => "Progress",
-                "Настройки" => "Settings",
-                "Доступна новая версия" => "A new version is available",
-                "Скачайте приложение, полностью закройте старую версию и переустановите новую." =>
-                    "Download the app, quit the old version completely, and install the new one.",
-                "Не удалось открыть страницу загрузки." => "Could not open the download page.",
-                _ => text.Text
-            };
-        }
-        if (root is Button button && button.Content is string label)
-            button.Content = label switch { "Позже" => "Later", "Скачать" => "Download", _ => label };
+        if (root is TextBlock text && DisplayText.English.ContainsKey(text.Text)) staticText[text] = text.Text;
+        if (root is Button button && button.Content is string label && DisplayText.English.ContainsKey(label))
+            staticButtons[button] = label;
         string name = AutomationProperties.GetName(root);
-        string translated = name switch
-        {
-            "Свернуть в панель задач" => "Minimize to taskbar", "Компактный режим" => "Compact view",
-            "Закрыть" => "Close", "Открыть настройки" => "Open settings", "Развернуть" => "Expand",
-            "Напомнить при следующем запуске" => "Remind me next time",
-            "Скачать новую версию" => "Download the new version", _ => name
-        };
-        if (translated != name) AutomationProperties.SetName(root, translated);
+        if (!string.IsNullOrEmpty(name) && DisplayText.English.ContainsKey(name)) staticNames[root] = name;
         foreach (object child in LogicalTreeHelper.GetChildren(root))
-            if (child is DependencyObject element) TranslateVisibleStaticText(element);
+            if (child is DependencyObject element) CaptureStaticTranslations(element);
+    }
+
+    private void ApplyStaticTranslations()
+    {
+        bool english = options.Language == "en";
+        foreach (var pair in staticText) pair.Key.Text = english ? DisplayText.English[pair.Value] : pair.Value;
+        foreach (var pair in staticButtons) pair.Key.Content = english ? DisplayText.English[pair.Value] : pair.Value;
+        foreach (var pair in staticNames) AutomationProperties.SetName(pair.Key, english ? DisplayText.English[pair.Value] : pair.Value);
+        window.Language = System.Windows.Markup.XmlLanguage.GetLanguage(english ? "en-US" : "ru-RU");
+    }
+
+    private static bool? WindowsUsesLightTheme()
+    {
+        try
+        {
+            using Microsoft.Win32.RegistryKey? key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", false);
+            return key?.GetValue("AppsUseLightTheme") is int value ? value != 0 : null;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        { return null; }
+    }
+
+    private void ConfigureDisplaySettings()
+    {
+        Grid settings = Find<Grid>("SettingsView");
+        var enabled = new HashSet<Button>
+        {
+            Find<Button>("SettingsBackButton"), Find<Button>("SettingsTaskbarMinimizeButton"), Find<Button>("SettingsCloseButton"),
+            Find<Button>("SystemThemeButton"), Find<Button>("DarkThemeButton"), Find<Button>("LightThemeButton"),
+            Find<Button>("SystemLanguageButton"), Find<Button>("RussianLanguageButton"), Find<Button>("EnglishLanguageButton")
+        };
+        void DisableUnconnected(DependencyObject root)
+        {
+            if (root is Button button && !enabled.Contains(button)) button.IsEnabled = false;
+            if (root is ComboBox combo) combo.IsEnabled = false;
+            if (root is Hyperlink link) link.IsEnabled = false;
+            foreach (object child in LogicalTreeHelper.GetChildren(root))
+                if (child is DependencyObject element) DisableUnconnected(element);
+        }
+        DisableUnconnected(settings);
+        Button footer = Find<Button>("SettingsFooterButton"), back = Find<Button>("SettingsBackButton");
+        foreach (Button button in new[] { footer, back })
+        {
+            button.PreviewMouseLeftButtonDown += (_, _) => { navigationByKeyboard = false; Keyboard.ClearFocus(); };
+            button.PreviewKeyDown += (_, e) => { if (e.Key is Key.Enter or Key.Space) navigationByKeyboard = true; };
+        }
+        footer.Click += (_, _) => { ShowSettings(true, navigationByKeyboard); navigationByKeyboard = false; };
+        back.Click += (_, _) => { ShowSettings(false, navigationByKeyboard); navigationByKeyboard = false; };
+        Find<Button>("SettingsTaskbarMinimizeButton").Click += (_, _) => window.WindowState = WindowState.Minimized;
+        Find<Button>("SettingsCloseButton").Click += (_, _) => window.Close();
+        Find<Button>("SystemThemeButton").Click += (_, _) => SelectDisplayMode(true, "system");
+        Find<Button>("DarkThemeButton").Click += (_, _) => SelectDisplayMode(true, "dark");
+        Find<Button>("LightThemeButton").Click += (_, _) => SelectDisplayMode(true, "light");
+        Find<Button>("SystemLanguageButton").Click += (_, _) => SelectDisplayMode(false, "system");
+        Find<Button>("RussianLanguageButton").Click += (_, _) => SelectDisplayMode(false, "ru");
+        Find<Button>("EnglishLanguageButton").Click += (_, _) => SelectDisplayMode(false, "en");
+        var scroll = Find<ScrollViewer>("SettingsScroll");
+        var bar = Find<ScrollBar>("SettingsScrollBar");
+        scroll.ScrollChanged += (_, _) =>
+        {
+            bar.Maximum = scroll.ScrollableHeight;
+            bar.ViewportSize = scroll.ViewportHeight;
+            bar.Value = scroll.VerticalOffset;
+            bar.Visibility = scroll.ScrollableHeight > 0 ? Visibility.Visible : Visibility.Hidden;
+        };
+        bar.ValueChanged += (_, _) =>
+        {
+            if (Math.Abs(scroll.VerticalOffset - bar.Value) > 0.5) scroll.ScrollToVerticalOffset(bar.Value);
+        };
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+        timer.Tick += (_, _) => { if (themeMode == "system") ApplyDisplayModes(); };
+        window.Closed += (_, _) => timer.Stop();
+        timer.Start();
+        UpdateDisplayControls();
+    }
+
+    private void ShowSettings(bool show, bool keyboardNavigation)
+    {
+        expanded.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
+        Find<Grid>("SettingsView").Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (keyboardNavigation) Find<Button>(show ? "SettingsBackButton" : "SettingsFooterButton").Focus();
+        else Keyboard.ClearFocus();
+    }
+
+    private void SelectDisplayMode(bool theme, string mode)
+    {
+        if (preferences is null) return;
+        PreferenceStatus saved = theme ? preferences.SaveTheme(mode) : preferences.SaveLanguage(mode);
+        if (saved != PreferenceStatus.Success)
+        {
+            preferenceError = "save";
+            UpdateDisplayControls();
+            return;
+        }
+        PreferenceLoad loaded = preferences.Load();
+        if (loaded.Status == PreferenceStatus.Success && loaded.Modes is not null)
+        {
+            themeMode = loaded.Modes.Theme;
+            languageMode = loaded.Modes.Language;
+            preferenceError = "";
+        }
+        else
+        {
+            if (theme) themeMode = mode; else languageMode = mode;
+            preferenceError = "load";
+        }
+        ApplyDisplayModes();
+    }
+
+    private void ApplyDisplayModes()
+    {
+        string nextTheme = themeMode is null ? options.Theme : DisplayPreferenceDocument.ResolveTheme(themeMode, windowsUsesLightTheme());
+        string nextLanguage = languageMode is null ? options.Language : DisplayPreferenceDocument.ResolveLanguage(languageMode, systemLanguage());
+        bool changedTheme = nextTheme != options.Theme, changedLanguage = nextLanguage != options.Language;
+        options = options with { Theme = nextTheme, Language = nextLanguage };
+        if (changedTheme)
+        {
+            palette = nextTheme == "light" ? LightPalette : DarkPalette;
+            ApplyPalette();
+        }
+        if (changedLanguage)
+        {
+            ApplyStaticTranslations();
+            UpdateVersionText();
+            RelocalizeSamples();
+        }
+        if (changedTheme || changedLanguage) Render();
+        UpdateDisplayControls();
+    }
+
+    private void UpdateDisplayControls()
+    {
+        foreach (var item in new[] { ("SystemThemeButton", "system"), ("DarkThemeButton", "dark"), ("LightThemeButton", "light") })
+            Find<Button>(item.Item1).Background = themeMode == item.Item2 ? ColorFor("Pressed") : Brushes.Transparent;
+        foreach (var item in new[] { ("SystemLanguageButton", "system"), ("RussianLanguageButton", "ru"), ("EnglishLanguageButton", "en") })
+            Find<Button>(item.Item1).Background = languageMode == item.Item2 ? ColorFor("Pressed") : Brushes.Transparent;
+        TextBlock error = Find<TextBlock>("LanguageSettingsError");
+        bool english = options.Language == "en";
+        error.Text = preferenceError == "save"
+            ? english ? "Could not save display settings" : "Не удалось сохранить настройки оформления"
+            : english ? "Could not read display settings" : "Не удалось прочитать настройки оформления";
+        error.Visibility = preferenceError.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        // These source controls are not yet connected in this host. Keep the
+        // published labels and report only that their state is unavailable.
+        foreach (string name in new[] { "CodexSourceStatus", "CodexCloudSourceStatus",
+            "OpenCodeSourceStatus", "KimiSourceStatus", "DeepSeekSourceStatus", "HermesSourceStatus" })
+            Find<TextBlock>(name).Text = english ? "No data" : "Нет данных";
+        UpdateClaudeRegistrationStatus();
+        foreach (string name in new[] { "CodexCloudSourceAction", "ClaudeSourceAction", "OpenCodeSourceAction", "DeepSeekSourceAction" })
+            Find<Button>(name).Content = english ? "Connect" : "Подключить";
+        Find<Button>("KimiSourceAction").Content = english ? "Copy path" : "Скопировать путь";
+        Find<Button>("HermesSourceAction").Content = english ? "Prepare" : "Подготовить";
+        foreach (var item in new[] { ("CodexCloudSourceAction", "Codex Cloud"), ("ClaudeSourceAction", "Claude Code"),
+            ("OpenCodeSourceAction", "OpenCode"), ("KimiSourceAction", "Kimi Code"),
+            ("DeepSeekSourceAction", "DeepSeek Harness"), ("HermesSourceAction", "Hermes Agent") })
+        {
+            Button button = Find<Button>(item.Item1);
+            AutomationProperties.SetName(button, (string)button.Content + " " + item.Item2);
+        }
+    }
+
+    private void RelocalizeSamples()
+    {
+        List<SampleTask> next = options.Scene == "active" ? LegacySamples(options.Language)
+            : scenario is not null ? scenario.Snapshot().Select(state => ProviderPresentation.Map(state, options.Language)).ToList()
+            : claudeScenario is not null ? claudeScenario.Snapshot(options.Language) : samples.ToList();
+        if (latestClaude is not null)
+        {
+            next.RemoveAll(task => task.Provider == "claude");
+            next.AddRange(latestClaude.Tasks.Select(task => ClaudePresentation.Map(task, options.Language)));
+        }
+        if (latestCloud is not null)
+        {
+            next.RemoveAll(task => cloudTaskIds.Contains(task.Id));
+            next.AddRange(latestCloud.Tasks.Select(task => MapCloudTask(task, options.Language)));
+        }
+        UpdateSamples(next);
     }
 
     private void UpdateShapes()
