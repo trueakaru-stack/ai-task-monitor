@@ -17,5 +17,8 @@
     <Resource Include="Assets\app-icon.ico" />
     <ProjectReference Include="..\Providers\Providers.csproj" />
     <ProjectReference Include="..\ClaudeReader\ClaudeReader.csproj" />
+    <ProjectReference Include="..\CodexCloud\CodexCloud.csproj" />
+    <ProjectReference Include="..\CodexCloudCommand\CodexCloudCommand.csproj" />
   </ItemGroup>
 </Project>
+

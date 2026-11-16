@@ -6,6 +6,56 @@ profiles, monitor activity, connect providers, save preferences, implement
 settings, manage diagnostics or update the installed application. The settings
 button is intentionally inactive. No installer is modified.
 
+Without explicit preview arguments the window opens with an empty task list,
+not the built-in example cards, and says that no sources are connected.
+There is no local Codex source owner in this preview. A future application
+must track the actual connection and confidence of every source when choosing
+the empty-state message; the preview's scene-based fallback is not a usable
+connected-source status and is not final application behavior.
+An injected empty Claude snapshot does not distinguish a disconnected source
+from a connected one; this preview therefore reports the task status as
+unconfirmed until a future owner supplies a verified connection state.
+`CloudSourcePump` is created with no runner
+and remains disabled in the normal entry point. The cloud-to-WPF test injects
+only its own synthetic executable on a disposable hosted runner; it does not
+discover or run a real Codex executable, authenticate an account or contact a
+cloud service. Cloud and local Codex cards share the provider tab but are kept
+as distinct sources, and every cloud card is marked unconfirmed. An empty cloud
+response does not prove that other cloud surfaces have no tasks.
+
+The cloud owner serializes presentation on the window dispatcher, rejects late
+results from an old connection generation, bounds a scan to five pages and
+coalesces refreshes while one scan is running. Its process-wide lease prevents
+another scan while that worker is active and remains blocked for the process
+lifetime after a reported unconfirmed exit or unexpected worker exception.
+This is conservative and can make cloud monitoring unavailable until restart.
+After cancellation, the lease and token source also remain alive until all
+cancellation callbacks have finished; this can delay a new scan indefinitely
+without blocking the WPF dispatcher if a callback never returns.
+The deadline cannot interrupt a blocked synchronous process launch or guarantee
+the exit of every descendant; a busy WPF dispatcher can delay timeout handling.
+Before any real integration, the future owner must establish the executable's
+trust and lifecycle, handle those limitations and verify actual CLI behavior.
+The current window close only requests asynchronous cancellation and does not
+keep the application process alive until a running child exits. A shutdown
+protocol and isolated process-exit test are required before a real runner is
+enabled.
+
+The synthetic host test exercises two-page and incomplete responses, failure,
+disconnect, late results, timeout, two owners, cancellation and the shared
+process lease, including a delayed cancellation callback. It also checks
+the scheduling-failure cleanup with a controlled second owner, coexistence
+with the Claude source, compact count
+grammar, the executable owning its window and sampled process/module absence of
+PowerShell. These are test scenarios rather than continuous observation. The
+captured screenshots are synthetic WPF evidence, not final visual acceptance.
+An immediately reentrant refresh from the busy-lease presentation callback is
+ignored to avoid recursive failures; a later explicit refresh or poll retries.
+The injected scheduler is a test seam: it must return the scheduled task, or
+throw before dispatching any work. A scheduler that starts work and then throws
+can violate the lease. The normal path uses `Task.Run`; exceptional scheduling
+behavior outside that documented test contract has not been reproduced.
+
 The fixed provider scenarios pass compiled-in sanitized events through the
 referenced .NET 10 provider parser, state store and presentation adapter. They
 do not accept event JSON or input paths and do not start agents, channels or
@@ -148,3 +198,4 @@ output path causes exit code 3 without overwriting an existing file.
 The C# preview includes only a few sample interactions: changing the sample
 provider tab, selecting a sample in compact mode, switching layout, minimizing
 and closing the window. It makes no claim of feature parity.
+

@@ -22,6 +22,8 @@ internal static class Program
             ?? throw new InvalidOperationException("Published WPF layout is missing.");
         var window = (Window)XamlReader.Load(resource);
         var controller = new PrototypeWindow(window, options!);
+        using var cloud = new CloudSourcePump(window.Dispatcher, controller.ApplyCloudSource, runner: null);
+        window.Closed += (_, _) => cloud.Dispose();
         if (options!.Offscreen)
         {
             window.WindowStartupLocation = WindowStartupLocation.Manual;
@@ -73,7 +75,7 @@ internal sealed record Options(string Theme, string Language, string Scene, bool
 {
     public static bool TryParse(string[] args, out Options? options)
     {
-        string theme = "dark", language = "ru", scene = "active";
+        string theme = "dark", language = "ru", scene = "empty";
         string? snapshot = null, ready = null;
         bool compact = false, offscreen = false, exit = false;
         for (int i = 0; i < args.Length; i++)
@@ -103,3 +105,4 @@ internal sealed record Options(string Theme, string Language, string Scene, bool
         return true;
     }
 }
+
