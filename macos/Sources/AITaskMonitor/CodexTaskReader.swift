@@ -142,7 +142,16 @@ struct CodexTaskReader {
                 if state.terminal {
                     // A partial filename scan may have missed a competing
                     // rollout. Do not close a previously observed task then.
-                    guard !extraFiles.didHitLimit, state.sawStart else { result.isPartial = true; continue }
+                    if extraFiles.didHitLimit {
+                        guard previouslyObserved.contains(id),
+                              extra.verifiedFiles[id]?.standardizedFileURL == file.standardizedFileURL,
+                              execDiscovery.matchesObserved(id: id, file: file, device: record.device,
+                                                            inode: record.inode, startKey: state.startKey) else {
+                            result.isPartial = true
+                            continue
+                        }
+                    }
+                    guard state.sawStart else { result.isPartial = true; continue }
                     let recognized = observedSince.map { since in
                         state.terminalDate.map { $0 >= since } ?? false
                     } ?? true
@@ -164,7 +173,8 @@ struct CodexTaskReader {
                 let steps = plan.steps
                 let detail = parseActivity(from: record.tail)
                 let status = tr("Статус не подтверждён", "Status unconfirmed")
-                execDiscovery.remember(id: id, file: file)
+                execDiscovery.remember(id: id, file: file, device: record.device, inode: record.inode,
+                                       startKey: state.startKey)
                 result.tasks.append(MonitoredTask(
                     id: id,
                     provider: .codex,
@@ -251,7 +261,7 @@ struct CodexTaskReader {
     // A supported timestamped basename is exactly the form emitted by the
     // pinned upstream writer. Parsing the whole basename prevents a short ID
     // from claiming a longer identifier merely because their suffixes match.
-    private static func canonicalOwner(in stem: String) -> String? {
+    fileprivate static func canonicalOwner(in stem: String) -> String? {
         let bytes = Array(stem.utf8)
         let prefix = Array("rollout-".utf8)
         guard bytes.starts(with: prefix), bytes.count >= prefix.count + 20 else { return nil }
@@ -290,9 +300,9 @@ struct CodexTaskReader {
     /// Each refresh examines at most 256 recent-day entries and 256 entries
     /// from a progressing history scan. Partial scans do not claim completeness.
     private func unindexedOwners(excluding indexedIDs: Set<String>, now: Date, observedSince: Date?,
-                                 previouslyObserved: Set<String>) throws -> (ids: Set<String>, fastFiles: [String: URL], isPartial: Bool) {
+                                 previouslyObserved: Set<String>) throws -> (ids: Set<String>, fastFiles: [String: URL], verifiedFiles: [String: URL], isPartial: Bool) {
         let directory = codexHome.appendingPathComponent("sessions", isDirectory: true)
-        if Self.pathIsMissing(directory) { return ([], [:], false) }
+        if Self.pathIsMissing(directory) { return ([], [:], [:], false) }
         let excluded = Set(indexedIDs.map { $0.lowercased() })
         var modifiedByOwner: [String: Date] = [:]
         var fastVariants: [String: [String: URL]] = [:]
@@ -358,7 +368,7 @@ struct CodexTaskReader {
             if !fastComplete { break }
         }
 
-        let page = try execDiscovery.nextHistoryPage(directory: directory, limit: 256)
+        let page = try execDiscovery.nextHistoryPage(directory: directory, limit: 256, previouslyObserved: previouslyObserved)
         if !page.complete { partial = true }
         for url in page.urls { consider(url, fast: true) }
         let ordered = modifiedByOwner.sorted { first, second in
@@ -394,7 +404,7 @@ struct CodexTaskReader {
                 fastFiles[id] = file
             }
         }
-        return (selected, fastFiles, partial)
+        return (selected, fastFiles, page.verifiedFiles, partial)
     }
 
     private enum WriterLockStatus {
@@ -417,6 +427,8 @@ struct CodexTaskReader {
         var tail: String
         var modified: Date
         var truncated: Bool
+        var device: UInt64
+        var inode: UInt64
     }
 
     /// Open only regular files beneath the sessions directory, without
@@ -464,8 +476,9 @@ struct CodexTaskReader {
         guard bytes.count == Int(count), fstat(descriptor, &info) == 0 else { throw CocoaError(.fileReadUnknown) }
         let modified = Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec) +
                             Double(info.st_mtimespec.tv_nsec) / 1_000_000_000)
-        return UnindexedExecRecord(tail: String(decoding: bytes, as: UTF8.self),
-                                   modified: modified, truncated: end > count)
+        return UnindexedExecRecord(tail: String(decoding: bytes, as: UTF8.self), modified: modified,
+                                   truncated: end > count, device: UInt64(bitPattern: Int64(info.st_dev)),
+                                   inode: UInt64(info.st_ino))
     }
 
     private func sessionFiles(for ids: Set<String>, now: Date, observedSince: Date?,
@@ -570,15 +583,25 @@ final class CodexExecDiscoveryCache {
         var value: Error?
     }
 
+    private struct Observation {
+        var file: URL
+        var device: UInt64
+        var inode: UInt64
+        var startKey: String
+    }
+
     private let lock = NSLock()
     private var seenIndex = false
-    private var paths: [String: URL] = [:]
+    private var observations: [String: Observation] = [:]
     private var order: [String] = []
     private var historyPath = ""
     private var historyDevice: UInt64?
     private var historyInode: UInt64?
     private var historyEnumerator: FileManager.DirectoryEnumerator?
     private var historyErrors: EnumerationErrors?
+    private var sweepTargets: Set<String> = []
+    private var sweepPaths: [String: Set<String>] = [:]
+    private var sweepAmbiguous: Set<String> = []
 
     func noteIndexAvailable() {
         lock.lock()
@@ -595,25 +618,34 @@ final class CodexExecDiscoveryCache {
     func files(for ids: Set<String>) -> [String: URL] {
         lock.lock()
         defer { lock.unlock() }
-        return paths.filter { ids.contains($0.key) }
+        return observations.filter { ids.contains($0.key) }.mapValues(\.file)
     }
 
-    func remember(id: String, file: URL) {
+    func remember(id: String, file: URL, device: UInt64, inode: UInt64, startKey: String) {
         lock.lock()
         defer { lock.unlock() }
-        if paths[id] == nil {
+        if observations[id] == nil {
             if order.count >= 64, let oldest = order.first {
                 order.removeFirst()
-                paths.removeValue(forKey: oldest)
+                observations.removeValue(forKey: oldest)
             }
             order.append(id)
         }
-        paths[id] = file
+        observations[id] = Observation(file: file, device: device, inode: inode, startKey: startKey)
     }
 
-    /// Keep the directory iterator between refreshes so older sessions are
-    /// eventually examined without traversing the entire tree on the main actor.
-    func nextHistoryPage(directory: URL, limit: Int) throws -> (urls: [URL], complete: Bool) {
+    func matchesObserved(id: String, file: URL, device: UInt64, inode: UInt64, startKey: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let observed = observations[id], !startKey.isEmpty else { return false }
+        return observed.file.standardizedFileURL == file.standardizedFileURL &&
+            observed.device == device && observed.inode == inode && observed.startKey == startKey
+    }
+
+    /// Keep the iterator across refreshes. A complete sweep can confirm that
+    /// an already observed task has only one recognized rollout path.
+    func nextHistoryPage(directory: URL, limit: Int, previouslyObserved: Set<String>)
+        throws -> (urls: [URL], complete: Bool, verifiedFiles: [String: URL]) {
         guard limit > 0 else { throw CocoaError(.fileReadUnknown) }
         lock.lock()
         defer { lock.unlock() }
@@ -637,7 +669,59 @@ final class CodexExecDiscoveryCache {
             }
             historyEnumerator = enumerator
             historyErrors = errors
+            sweepTargets = Set(previouslyObserved.filter { observations[$0] != nil })
+            sweepPaths.removeAll(keepingCapacity: true)
+            sweepAmbiguous.removeAll(keepingCapacity: true)
         }
+
+        func observe(_ url: URL) {
+            let name = url.lastPathComponent
+            let suffix: String
+            if name.hasSuffix(".jsonl.zst") { suffix = ".jsonl.zst" }
+            else if name.hasSuffix(".jsonl") { suffix = ".jsonl" }
+            else { return }
+            let stem = String(name.dropLast(suffix.count))
+            if let owner = CodexTaskReader.canonicalOwner(in: stem) {
+                let matching = sweepTargets.filter { $0.lowercased() == owner.lowercased() }
+                guard matching.count == 1, let id = matching.first, id == owner else {
+                    sweepAmbiguous.formUnion(matching)
+                    return
+                }
+                var found = sweepPaths[id, default: []]
+                found.insert(url.standardizedFileURL.path)
+                if found.count > 3 {
+                    sweepAmbiguous.insert(id)
+                    sweepPaths.removeValue(forKey: id)
+                } else {
+                    sweepPaths[id] = found
+                }
+            } else {
+                let lower = stem.lowercased()
+                for id in sweepTargets {
+                    let target = id.lowercased()
+                    if lower == target || lower.hasSuffix("-" + target) || lower.contains("-" + target + "_") {
+                        sweepAmbiguous.insert(id)
+                    }
+                }
+            }
+        }
+
+        func uniqueFiles() -> [String: URL] {
+            var result: [String: URL] = [:]
+            for id in sweepTargets where !sweepAmbiguous.contains(id) {
+                let variants = sweepPaths[id, default: []]
+                let plain = Set(variants.filter { !$0.hasSuffix(".zst") })
+                let distinct = variants.filter { path in
+                    guard path.hasSuffix(".jsonl.zst") else { return true }
+                    return !plain.contains(String(path.dropLast(4)))
+                }
+                if distinct.count == 1, let path = distinct.first, !path.hasSuffix(".jsonl.zst") {
+                    result[id] = URL(fileURLWithPath: path)
+                }
+            }
+            return result
+        }
+
         var urls: [URL] = []
         for _ in 0..<limit {
             guard let item = historyEnumerator?.nextObject() else {
@@ -645,16 +729,19 @@ final class CodexExecDiscoveryCache {
                 historyEnumerator = nil
                 historyErrors = nil
                 if let error { throw error }
-                return (urls, true)
+                return (urls, true, uniqueFiles())
             }
-            if let url = item as? URL { urls.append(url) }
+            if let url = item as? URL {
+                urls.append(url)
+                observe(url)
+            }
         }
         if let error = historyErrors?.value {
             historyEnumerator = nil
             historyErrors = nil
             throw error
         }
-        return (urls, false)
+        return (urls, false, [:])
     }
 }
 

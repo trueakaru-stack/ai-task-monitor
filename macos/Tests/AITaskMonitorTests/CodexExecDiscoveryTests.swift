@@ -338,31 +338,61 @@ final class CodexExecDiscoveryTests: XCTestCase {
 
     func testTodayDirectoryOverBudgetEventuallyReachesLaterFile() throws {
         let root = try makeRoot()
+        let sessions = root.appendingPathComponent("sessions", isDirectory: true)
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         let date = calendar.dateComponents([.year, .month, .day], from: Date())
         let today = root.appendingPathComponent(String(format: "sessions/%04d/%02d/%02d",
             try XCTUnwrap(date.year), try XCTUnwrap(date.month), try XCTUnwrap(date.day)), isDirectory: true)
         try FileManager.default.createDirectory(at: today, withIntermediateDirectories: true)
-        for _ in 0..<300 {
-            let path = today.appendingPathComponent("rollout-2026-11-16T15-31-00-\(UUID().uuidString.lowercased()).jsonl")
+        var candidates: [String: String] = [:]
+        for _ in 0..<600 {
+            let id = UUID().uuidString.lowercased()
+            let path = today.appendingPathComponent("rollout-2026-11-16T15-31-00-\(id).jsonl")
             guard FileManager.default.createFile(atPath: path.path, contents: Data()) else {
                 throw CocoaError(.fileWriteUnknown)
             }
             try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: path.path)
+            candidates[path.standardizedFileURL.path] = id
         }
-        let original = try rollout(root, fileID: first)
-        let destination = today.appendingPathComponent(original.lastPathComponent)
-        if destination.standardizedFileURL != original.standardizedFileURL {
-            try FileManager.default.moveItem(at: original, to: destination)
+        func firstPage(_ directory: URL) throws -> Set<String> {
+            guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil,
+                                                                   options: [.skipsHiddenFiles]) else {
+                throw CocoaError(.fileReadNoSuchFile)
+            }
+            var paths: Set<String> = []
+            for _ in 0..<256 {
+                guard let value = enumerator.nextObject() as? URL else { break }
+                paths.insert(value.standardizedFileURL.path)
+            }
+            return paths
         }
+        let initiallyScanned = try firstPage(today).union(firstPage(sessions))
+        let chosen = try XCTUnwrap(candidates.first { !initiallyScanned.contains($0.key) })
+        let target = URL(fileURLWithPath: chosen.key)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let timestamp = formatter.string(from: Date())
+        let rows: [[String: Any]] = [
+            ["timestamp": timestamp, "type": "session_meta", "payload": ["id": chosen.value, "source": "exec"]],
+            ["timestamp": timestamp, "type": "event_msg", "payload": ["type": "task_started", "turn_id": "fixture-turn"]]
+        ]
+        var bytes = Data()
+        for row in rows {
+            bytes.append(try JSONSerialization.data(withJSONObject: row))
+            bytes.append(0x0a)
+        }
+        let handle = try FileHandle(forWritingTo: target)
+        try handle.write(contentsOf: bytes)
+        try handle.close()
         let reader = CodexTaskReader(codexHome: root)
         let observedSince = Date().addingTimeInterval(-60)
         var found = false
-        for _ in 0..<12 {
+        for round in 0..<12 {
             let snapshot = try reader.readSnapshot(observedSince: observedSince)
             XCTAssertTrue(snapshot.isPartial)
-            if let task = snapshot.tasks.first(where: { $0.id == first }) {
+            if round == 0 { XCTAssertFalse(snapshot.tasks.contains { $0.id == chosen.value }) }
+            if let task = snapshot.tasks.first(where: { $0.id == chosen.value }) {
                 XCTAssertTrue(task.isUnconfirmed)
                 XCTAssertFalse(task.isActive)
                 found = true
@@ -370,5 +400,73 @@ final class CodexExecDiscoveryTests: XCTestCase {
             }
         }
         XCTAssertTrue(found)
+    }
+
+    func testObservedExecFinishesAfterPagedHistoryVerification() throws {
+        let root = try makeRoot()
+        let old = root.appendingPathComponent("sessions/2001/01/01", isDirectory: true)
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        for _ in 0..<300 {
+            let path = old.appendingPathComponent("rollout-2001-01-01T00-00-00-\(UUID().uuidString.lowercased()).jsonl")
+            guard FileManager.default.createFile(atPath: path.path, contents: Data()) else { throw CocoaError(.fileWriteUnknown) }
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: path.path)
+        }
+        let original = try rollout(root, fileID: first)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let date = calendar.dateComponents([.year, .month, .day], from: Date())
+        let today = root.appendingPathComponent(String(format: "sessions/%04d/%02d/%02d",
+            try XCTUnwrap(date.year), try XCTUnwrap(date.month), try XCTUnwrap(date.day)), isDirectory: true)
+        try FileManager.default.createDirectory(at: today, withIntermediateDirectories: true)
+        let file = today.appendingPathComponent(original.lastPathComponent)
+        if file.standardizedFileURL != original.standardizedFileURL { try FileManager.default.moveItem(at: original, to: file) }
+        let reader = CodexTaskReader(codexHome: root)
+        let since = Date().addingTimeInterval(-60)
+        let before = try reader.readSnapshot(observedSince: since)
+        XCTAssertTrue(try XCTUnwrap(before.tasks.first { $0.id == first }).isUnconfirmed)
+        try append("task_complete", to: file)
+        var finished = false
+        for _ in 0..<12 {
+            let after = try reader.readSnapshot(observedSince: since, previouslyObserved: [first])
+            if after.terminalIDs.contains(first) {
+                let merged = TaskSnapshotMerger.merge(previous: before.tasks, current: after.tasks, terminalIDs: after.terminalIDs)
+                XCTAssertFalse(merged.contains { $0.id == first })
+                finished = true
+                break
+            }
+        }
+        XCTAssertTrue(finished)
+    }
+
+    func testPagedHistoryDuplicatePreventsFalseCompletion() throws {
+        let root = try makeRoot()
+        let old = root.appendingPathComponent("sessions/2001/01/01", isDirectory: true)
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        for _ in 0..<300 {
+            let path = old.appendingPathComponent("rollout-2001-01-01T00-00-00-\(UUID().uuidString.lowercased()).jsonl")
+            guard FileManager.default.createFile(atPath: path.path, contents: Data()) else { throw CocoaError(.fileWriteUnknown) }
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: path.path)
+        }
+        let original = try rollout(root, fileID: first)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let date = calendar.dateComponents([.year, .month, .day], from: Date())
+        let today = root.appendingPathComponent(String(format: "sessions/%04d/%02d/%02d",
+            try XCTUnwrap(date.year), try XCTUnwrap(date.month), try XCTUnwrap(date.day)), isDirectory: true)
+        try FileManager.default.createDirectory(at: today, withIntermediateDirectories: true)
+        let file = today.appendingPathComponent(original.lastPathComponent)
+        if file.standardizedFileURL != original.standardizedFileURL { try FileManager.default.moveItem(at: original, to: file) }
+        let reader = CodexTaskReader(codexHome: root)
+        let since = Date().addingTimeInterval(-60)
+        let before = try reader.readSnapshot(observedSince: since)
+        XCTAssertTrue(try XCTUnwrap(before.tasks.first { $0.id == first }).isUnconfirmed)
+        let duplicate = old.appendingPathComponent("rollout-2001-01-01T00-00-00-\(first)_\(revision).jsonl")
+        try FileManager.default.copyItem(at: file, to: duplicate)
+        try append("task_complete", to: file)
+        for _ in 0..<12 {
+            let after = try reader.readSnapshot(observedSince: since, previouslyObserved: [first])
+            XCTAssertTrue(after.isPartial)
+            XCTAssertFalse(after.terminalIDs.contains(first))
+        }
     }
 }
