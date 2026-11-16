@@ -160,15 +160,7 @@ public static class FallbackTestNative
     }
     Check ([IO.File]::Exists($uninstaller) -and [IO.Directory]::Exists($install) -and [IO.Directory]::Exists($junction)) 'Installation files or the synthetic link were removed.'
     Write-Output ('Safe uninstall fallback: explanatory dialog, non-success exit, and {0} synthetic files including modified, unrelated and redirected data preserved.' -f $items.Count)
-    Check ($env:GITHUB_SHA -cmatch '^[a-f0-9]{40}
-}finally{
-    foreach($scope in @('User','Machine')){
-        $before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine};$after=PathState $scope
-        if($before.Value -cne $after.Value -or $before.Kind -cne $after.Kind){throw "$scope PATH changed."}
-    }
-    if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}
-}
-) 'The source revision is missing.'
+    Check ($env:GITHUB_SHA -cmatch '^[a-f0-9]{40}$') 'The source revision is missing.'
     $artifactRoot=[IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP ('aitm-verified-setup-'+$env:GITHUB_SHA)))
     Check ([string]::Equals([IO.Directory]::GetParent($artifactRoot).FullName,[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\'),[StringComparison]::OrdinalIgnoreCase) -and -not [IO.Directory]::Exists($artifactRoot) -and -not [IO.File]::Exists($artifactRoot)) 'Unsafe artifact directory.'
     [void][IO.Directory]::CreateDirectory($artifactRoot)
