@@ -15,7 +15,9 @@ function New-IsolatedStart([string]$file,[hashtable]$values){
     return $start
 }
 function Find-Window([Diagnostics.Process]$process,[int]$seconds){
-    $condition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,$process.Id)
+    $idCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,$process.Id)
+    $nameCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,'AI task monitor')
+    $condition=[Windows.Automation.AndCondition]::new($idCondition,$nameCondition)
     $clock=[Diagnostics.Stopwatch]::StartNew()
     while($clock.Elapsed.TotalSeconds -lt $seconds){
         if($process.HasExited){throw 'The synthetic process exited before its window appeared.'}
@@ -89,6 +91,7 @@ try{
     $setup=[Diagnostics.Process]::Start($start)
     $setupTime=$setup.StartTime.ToUniversalTime()
     $dialog=Find-Window $setup 30
+    Write-Output 'Synthetic setup dialog found.'
     $names=Get-Names $dialog
     Check (@($names|Where-Object {$_.Contains('AI task monitor установлен.') -and $_.Contains('AI task monitor (new)')}).Count -gt 0) 'The installer did not report a completed installation with the alternative shortcut.'
     $launcher=Join-Path $install 'AI task monitor.exe';$appScript=Join-Path $install 'CodexProgress.ps1'
@@ -102,10 +105,12 @@ try{
         Start-Sleep -Milliseconds 100
     }
     Check ($null -ne $candidate) 'The installer did not launch the synthetic monitor.'
+    Write-Output 'Synthetic monitor process found.'
     $monitor=[Diagnostics.Process]::GetProcessById([int]$candidate.ProcessId)
     $observedTime=([DateTime]$candidate.CreationDate).ToUniversalTime()
     Check ((($monitor.StartTime.ToUniversalTime()-$observedTime).Duration().TotalSeconds -le 1) -and [string]::Equals($monitor.MainModule.FileName,$SystemPowerShell,[StringComparison]::OrdinalIgnoreCase)) 'The opened monitor process identity did not match.'
     $monitorWindow=Find-Window $monitor 40
+    Write-Output 'Synthetic monitor window found.'
     Check ($monitorWindow.Current.Name -ceq 'AI task monitor') 'The synthetic monitor window did not open.'
     Dismiss-Dialog $dialog $setup
     Check ($setup.WaitForExit(10000) -and $setup.ExitCode -eq 0) 'The synthetic setup did not finish successfully.'
