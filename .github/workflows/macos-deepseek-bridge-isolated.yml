@@ -133,22 +133,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
           cd "$AITM_TEST_TASK_ROOT/source/macos"
-          "$task_run" swift build --build-tests --disable-sandbox \
-            --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" \
-            --security-path "$AITM_TEST_TASK_ROOT/swift-security"
+          # Only this reviewed manifest may be compiled outside the test sandbox.
+          # It contains no package dependencies, build plugins, or script targets.
+          task_manifest="$(/usr/bin/env -i "PATH=$AITM_TASK_PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 git hash-object Package.swift)"
+          test "$task_manifest" = "144202dfc5f413e896867b219af2e0c3dc621897"
+          task_compiler=(/usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 swift)
+          "${task_compiler[@]}" build --build-tests --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security"
+          task_bin="$("${task_compiler[@]}" build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
+          test -d "$task_bin/AITaskMonitorPackageTests.xctest"
+          printf 'AITM_TEST_BIN=%s\n' "$task_bin" >> "$GITHUB_ENV"
       - name: Exercise isolated upstream DeepSeek bridge
         shell: bash
         run: |
           set -euo pipefail
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
           cd "$AITM_TEST_TASK_ROOT/source/macos"
-          task_bin="$("$task_run" swift build --show-bin-path --disable-sandbox --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
-          test -d "$task_bin/AITaskMonitorPackageTests.xctest"
+          test -d "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
           "$task_run" /usr/bin/env "AITM_DSH_ANCHOR=$AITM_TEST_TASK_ROOT/dsh/node_modules/@deepseek-ai/dsh/package.json" \
             "AITM_PNPM_SCRIPT=$AITM_TEST_TASK_ROOT/dsh/node_modules/pnpm/bin/pnpm.mjs" "AITM_NODE=$AITM_TEST_NODE_BIN" \
             "AITM_TEST_NODE_ROOT=$AITM_TEST_NODE_ROOT" "$DEVELOPER_DIR/usr/bin/xctest" \
-            -XCTest AITaskMonitorTests.DeepSeekIntegrationTests/testIsolatedUpstreamConnectionBridge "$task_bin/AITaskMonitorPackageTests.xctest" \
+            -XCTest AITaskMonitorTests.DeepSeekIntegrationTests/testIsolatedUpstreamConnectionBridge "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" \
             2>&1 | tee "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
           grep -q 'testIsolatedUpstreamConnectionBridge.*passed' "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
