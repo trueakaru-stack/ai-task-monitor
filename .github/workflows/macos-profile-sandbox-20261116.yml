@@ -1,0 +1,43 @@
+name: Probe disposable macOS profile isolation
+on:
+  push:
+    branches: ['codex/macos-profile-sandbox-20261116']
+    paths: ['.github/workflows/macos-profile-sandbox-20261116.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - name: Exercise macOS sandbox against synthetic files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          task_profile_dir="$(/usr/bin/python3 -I -S -B -c 'import os, pwd; print(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))')"
+          case "$task_profile_dir" in /Users/*) ;; *) echo "Unexpected hosted profile directory." >&2; exit 1;; esac
+          task_root="$(mktemp -d /private/tmp/aitm-profile-probe.XXXXXXXX)"
+          task_sentinel="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
+          printf 'synthetic-only\n' > "$task_sentinel"
+          cat > "$task_root/profile.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* file-write* (subpath (param "TASK_PROFILE")))
+          PROFILE
+          /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -f "$task_root/profile.sb" /usr/bin/true
+          if /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -f "$task_root/profile.sb" /bin/cat "$task_sentinel" >"$task_root/read.out" 2>"$task_root/read.err"; then
+            echo "Sandbox unexpectedly read the protected synthetic marker." >&2; exit 1
+          fi
+          if /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -f "$task_root/profile.sb" /usr/bin/touch "$task_sentinel" >"$task_root/write.out" 2>"$task_root/write.err"; then
+            echo "Sandbox unexpectedly wrote the protected synthetic marker." >&2; exit 1
+          fi
+          /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -f "$task_root/profile.sb" /usr/bin/python3 -I -S -B -c 'import os,sys; assert "HOME" not in os.environ and "CODEX_HOME" not in os.environ; open(sys.argv[1],"w").write("fixture")' "$task_root/allowed"
+          test "$(cat "$task_root/allowed")" = fixture
+          echo "Profile isolation probe passed."
