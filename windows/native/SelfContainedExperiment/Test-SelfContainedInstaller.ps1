@@ -250,6 +250,27 @@ try {
     Assert-Test ([IO.File]::Exists($sentinel) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($sentinel)) -ceq
         [Convert]::ToBase64String($sentinelBytes)) 'Uninstall followed a junction and changed external synthetic data.'
     Assert-Test ([Convert]::ToBase64String([IO.File]::ReadAllBytes($statePath)) -ceq [Convert]::ToBase64String($stateBytes)) 'Uninstall changed synthetic user settings during redirection.'
+
+    # Remove only the junction we just created, inside this verified test root.
+    # Never recursively delete it or its external target.
+    $link = Get-Item -LiteralPath $redirectedDirectory -Force
+    Assert-Test (($link.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -and
+        [string]::Equals([IO.Path]::GetFullPath([string]$link.Target), $externalDirectory, [StringComparison]::OrdinalIgnoreCase)) 'Synthetic junction target changed.'
+    Assert-Test ([string]::Equals([IO.Directory]::GetParent($redirectedDirectory).FullName, $install, [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([IO.Directory]::GetParent($savedDirectory).FullName, $root, [StringComparison]::OrdinalIgnoreCase) -and
+        ((Get-Item -LiteralPath $install -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and
+        ((Get-Item -LiteralPath $savedDirectory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Synthetic restoration paths changed.'
+    Remove-Item -LiteralPath $redirectedDirectory -Force
+    Assert-Test (-not [IO.Directory]::Exists($redirectedDirectory) -and
+        [IO.File]::Exists($sentinel)) 'Removing the test junction affected its target.'
+    [IO.Directory]::Move($savedDirectory, $redirectedDirectory)
+    $recoveryExit = Invoke-HiddenSetup $secondUninstallers[0].FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+    Assert-Test ($recoveryExit -eq 0) 'Synthetic uninstall did not recover after the junction was removed.'
+    foreach ($file in $files) {
+        Assert-Test (-not [IO.File]::Exists((Join-Path $install $file.Relative))) 'An installed payload file remained after recovery uninstall.'
+    }
+    Assert-Test ([Convert]::ToBase64String([IO.File]::ReadAllBytes($sentinel)) -ceq [Convert]::ToBase64String($sentinelBytes) -and
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($statePath)) -ceq [Convert]::ToBase64String($stateBytes)) 'Recovery uninstall changed unrelated synthetic data.'
     Write-Output ('Synthetic uninstall: examined {0} installed files including {1} nested files; exit for redirected fixture: {2}.' -f $files.Count, $nested.Count, $redirectExit)
 } finally {
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
