@@ -49,7 +49,7 @@ const
   FileDispositionInfo = 4;
 
 type
-  THandleFileInfo = packed record
+  THandleFileInfo = record
     Attributes: Cardinal;
     CreationLow, CreationHigh: Cardinal;
     AccessLow, AccessHigh: Cardinal;
