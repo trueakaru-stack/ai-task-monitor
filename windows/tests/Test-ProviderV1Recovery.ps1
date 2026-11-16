@@ -51,6 +51,18 @@ Feed-DeepSeek $deep @() $false
 Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0) 'An error was treated as a disconnect.'
 Feed-DeepSeek $deep @((Profile 'A' 'disconnected'),(Profile 'B' 'connected' $b))
 Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep) -ccontains $a -and @(Get-DeepSeekAllowedScopes $deep) -ccontains $b) 'A unique disconnect was not isolated.'
+Feed-DeepSeek $deep @((Profile 'A' 'partial'),(Profile 'B' 'connected' $b))
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a -and
+        (Get-DeepSeekMonitorConnectionState $deep) -eq 'connected-degraded') 'A stale disconnect was reused after the profile became partial.'
+Feed-DeepSeek $deep @((Profile 'B' 'connected' $b))
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a) 'A stale disconnect was reused after the profile disappeared.'
+Feed-DeepSeek $deep @((Profile 'A' 'disconnected'),(Profile 'B' 'connected' $b))
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep) -ccontains $a) 'A current unique disconnect was not confirmed again.'
+$lostRoster=New-DeepSeekMonitorController -AppRoot $appRoot
+Feed-DeepSeek $lostRoster @((Profile 'A' 'connected' $a))
+Feed-DeepSeek $lostRoster @((Profile 'A' 'disconnected'))
+Feed-DeepSeek $lostRoster @() $false
+Assert ((Get-DeepSeekMonitorConnectionState $lostRoster) -eq 'error' -and @(Get-DeepSeekConfirmedDisconnectedScopes $lostRoster).Count -eq 0) 'A later roster error was treated as a confirmed disconnect.'
 $collision=New-DeepSeekMonitorController -AppRoot $appRoot
 Feed-DeepSeek $collision @((Profile 'A' 'connected' $a),(Profile 'B' 'connected' $b))
 Feed-DeepSeek $collision @((Profile 'A' 'connected' $b),(Profile 'B' 'connected' $b))
