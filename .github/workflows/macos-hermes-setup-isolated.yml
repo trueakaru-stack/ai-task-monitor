@@ -94,10 +94,56 @@ jobs:
         run: |
           set -euo pipefail
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          task_git="$(command -v git)"
+          task_commit='b200f5bc60e31588ba2cb60e288029c4a54ba5fa'
+          task_repo="$AITM_TEST_TASK_ROOT/hermes-git"
+          task_git_run() {
+            "$task_run" /usr/bin/env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+              GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 "$task_git" \
+              -c credential.helper= -c core.hooksPath="$AITM_TEST_TASK_ROOT/hooks" \
+              -c core.attributesFile=/dev/null "$@"
+          }
+          task_git_run init --quiet --bare --template="$AITM_TEST_TASK_ROOT/template" "$task_repo"
+          task_git_run -C "$task_repo" fetch --no-tags --no-recurse-submodules --depth=1 \
+            'https://github.com/NousResearch/hermes-agent.git' "$task_commit"
+          test "$(task_git_run -C "$task_repo" rev-parse 'FETCH_HEAD^{commit}')" = "$task_commit"
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B - "$AITM_TEST_TASK_ROOT/source/macos" \
+            > "$AITM_TEST_TASK_ROOT/fixture-paths" <<'PY'
+          import ast
+          from pathlib import Path, PurePosixPath
+          import re
+          import sys
+
+          root = Path(sys.argv[1])
+          def assignment(path, name):
+              tree = ast.parse(path.read_text(encoding="utf-8"))
+              return next(ast.literal_eval(node.value) for node in tree.body
+                          if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == name for target in node.targets))
+          expected = assignment(root / "integration-tests/Test-HermesPublication.py", "EXPECTED")
+          expected.update(assignment(root / "integrations/hermes-manager.py", "_MANAGER_HASHES"))
+          tree = ast.parse((root / "integration-tests/Extract-HermesFixture.py").read_text(encoding="utf-8"))
+          expected.update(next(ast.literal_eval(node.value.args[0]) for node in tree.body
+                               if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                               and isinstance(node.value.func, ast.Attribute)
+                               and isinstance(node.value.func.value, ast.Name)
+                               and node.value.func.value.id == "expected" and node.value.func.attr == "update"
+                               and len(node.value.args) == 1 and isinstance(node.value.args[0], ast.Dict)))
+          for name in sorted(expected):
+              path = PurePosixPath(name)
+              if (not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_./-]+", name) is None
+                      or path.is_absolute() or str(path) != name or ".." in path.parts):
+                  raise SystemExit("Unsafe fixture source path.")
+              print(name)
+          PY
+          test -s "$AITM_TEST_TASK_ROOT/fixture-paths"
+          task_paths=()
+          while IFS= read -r task_path; do task_paths+=("$task_path"); done < "$AITM_TEST_TASK_ROOT/fixture-paths"
+          task_git_run -C "$task_repo" archive --format=tar \
+            --prefix="hermes-agent-$task_commit/" --output="$AITM_TEST_TASK_ROOT/hermes.tar" \
+            "$task_commit" -- "${task_paths[@]}"
+          "$task_run" /usr/bin/gzip -n "$AITM_TEST_TASK_ROOT/hermes.tar"
           cd "$AITM_TEST_TASK_ROOT/source/macos"
-          "$task_run" /usr/bin/curl -q --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
-            'https://codeload.github.com/NousResearch/hermes-agent/tar.gz/b200f5bc60e31588ba2cb60e288029c4a54ba5fa' \
-            --output "$AITM_TEST_TASK_ROOT/hermes.tar.gz"
           "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B integration-tests/Extract-HermesFixture.py \
             "$AITM_TEST_TASK_ROOT/hermes.tar.gz" "$AITM_TEST_TASK_ROOT/hermes-source"
       - name: Verify missing marker fails closed
