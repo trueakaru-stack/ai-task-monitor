@@ -1,11 +1,16 @@
 name: Synthetic Claude registered-hook-to-WPF
 on:
   push:
-    branches: ['windows', 'codex/claude-settings-integrated-20261116', 'codex/claude-settings-e718-20261116']
+    branches: ['codex/claude-entrypoint-diagnostic-20261116']
 permissions:
   contents: read
 jobs:
   synthetic-claude-anchor:
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: [1, 2, 3, 4]
+      max-parallel: 4
     runs-on: windows-2025
     timeout-minutes: 15
     env:
@@ -34,8 +39,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Cannot select test revision.' }
           & (Join-Path $source '.github/claude-anchor-ci/Run.ps1')
       - name: Save synthetic Claude screenshots
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: claude-registered-hook-synthetic
+          name: claude-entrypoint-diagnostic-${{ matrix.trial }}
           path: ${{ runner.temp }}/aitm-claude-anchor-*/visuals/*.png
-          if-no-files-found: error
+          if-no-files-found: ignore

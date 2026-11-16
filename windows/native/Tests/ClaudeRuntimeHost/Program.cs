@@ -254,6 +254,27 @@ internal static class Program
         finally { if (!host.HasExited) { host.Kill(true); host.WaitForExit(5000); } }
     }
 
+    private static void ReportEntryPointFailure(Process host, ClaudeRegisteredHookPaths paths, string legacy, byte[] original)
+    {
+        try
+        {
+            host.Refresh();
+            bool exited = host.HasExited;
+            Console.Error.WriteLine("Synthetic child exited=" + exited +
+                (exited ? " exitCode=" + host.ExitCode : " hasMainWindow=" + (host.MainWindowHandle != IntPtr.Zero)));
+            Console.Error.WriteLine("Synthetic global registration=" + ClaudeRegisteredHookOwner.Inspect(paths) +
+                ", legacyUnchanged=" + (File.Exists(legacy) && File.ReadAllBytes(legacy).AsSpan().SequenceEqual(original)));
+            foreach (string name in new[] { "Статус задач не подтверждён", "Task status unconfirmed",
+                "Нет данных от Claude Code", "No data from Claude Code", "Источники не подключены",
+                "No sources connected", "Задача Claude Code", "Claude Code task", "Ход выполнения", "Progress" })
+            {
+                try { Console.Error.WriteLine("Synthetic UIA label [" + name + "]=" + HasName(host, name)); }
+                catch (Exception error) { Console.Error.WriteLine("Synthetic UIA label read failed: " + error.GetType().Name); }
+            }
+        }
+        catch (Exception error) { Console.Error.WriteLine("Synthetic child diagnostics failed: " + error.GetType().Name); }
+    }
+
     private static void CheckActualEntryPoint(string root, ClaudeRegisteredHookPaths paths)
     {
         string exe = Path.Combine(root, "artifacts", "bin", "Prototype", "release", "AI Task Monitor.exe");
@@ -269,10 +290,20 @@ internal static class Program
         System.Threading.Thread.Sleep(250);
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = root };
         ApplySyntheticEnvironment(start);
+        Console.WriteLine("Synthetic preflight registration=" + ClaudeRegisteredHookOwner.Inspect(paths) +
+            ", legacyUnchanged=" + File.ReadAllBytes(legacy).AsSpan().SequenceEqual(original));
         using Process host = Process.Start(start) ?? throw new InvalidOperationException("The synthetic host did not start.");
         try
         {
-            WaitUntil(() => HasName(host, "Статус задач не подтверждён"), "The normal entry point did not discover the synthetic registration.");
+            try
+            {
+                WaitUntil(() => HasName(host, "Статус задач не подтверждён"), "The normal entry point did not show the expected empty state.");
+            }
+            catch
+            {
+                ReportEntryPointFailure(host, paths, legacy, original);
+                throw;
+            }
             HoldWithoutCard(host, 2500);
             Check(!HasName(host, "Источники не подключены") && !HasName(host, "Активных задач сейчас нет"),
                 "A missing pre-start card was presented as a definitive absence.");
