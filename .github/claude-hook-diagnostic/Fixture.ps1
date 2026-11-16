@@ -22,6 +22,7 @@ $hook=Join-Path $install 'ClaudeTaskHook.ps1'
 $compiler=Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $stage=Join-Path $install 'ClaudeStageObservation.dll'
 $stageSource=Join-Path $repo 'windows\app\ClaudeStageObservation.cs'
+$global:LASTEXITCODE=0
 & $compiler '/nologo' '/target:library' '/platform:anycpu' '/reference:System.Web.Extensions.dll' ('/out:'+$stage) $stageSource
 if($LASTEXITCODE -ne 0 -or -not [IO.File]::Exists($stage)){throw 'Synthetic helper compilation failed.'}
 function Invoke-Synthetic([string[]]$arguments,[string]$payload,[bool]$capture,[bool]$addPowerShellPath){
