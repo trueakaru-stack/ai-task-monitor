@@ -1,4 +1,4 @@
-param([string]$Installer,[string]$FixtureRoot,[hashtable]$ProcessValues,[string]$SystemPowerShell)
+﻿param([string]$Installer,[string]$FixtureRoot,[hashtable]$ProcessValues,[string]$SystemPowerShell)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 function Check([bool]$value,[string]$message){if(-not $value){throw $message}}

@@ -1,4 +1,4 @@
-param([string]$Installer,[string]$FixtureRoot)
+﻿param([string]$Installer,[string]$FixtureRoot)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 if($env:CI -cne 'true' -or $env:GITHUB_ACTIONS -cne 'true' -or
