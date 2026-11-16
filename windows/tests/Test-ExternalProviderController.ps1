@@ -24,6 +24,7 @@ try{
  [void]@(Read-ManagedExternalProviderSnapshot -Controller $controller -AllowedProviders @('opencode'))
  Assert ($null -ne $controller.Channel) 'The connected source did not start its channel.'
  $firstChannel=$controller.Channel
+ $firstStore=$controller.Store
  Send $name '{"version":1,"provider":"opencode","session":"one","kind":"active"}'
  $deadline=[DateTime]::UtcNow.AddSeconds(3)
  do {
@@ -33,9 +34,10 @@ try{
  }while([DateTime]::UtcNow -lt $deadline)
  Assert (@($tasks|Where-Object {$_.Id -eq 'opencode:one' -and $_.Active}).Count -eq 1) 'The controller did not map a fresh event into a task.'
  Assert (@(Read-ManagedExternalProviderSnapshot -Controller $controller -AllowedProviders @()).Count -eq 0) 'A disconnected source retained tasks.'
- Assert ($firstChannel.IsStopped -and $null -eq $controller.Channel -and $null -eq $controller.Store) 'Disconnect did not stop the receiver and clear state.'
+ Assert ($firstChannel.IsStopped -and $null -eq $controller.Channel -and [object]::ReferenceEquals($firstStore,$controller.Store) -and @($controller.Store.Snapshot([DateTimeOffset]::UtcNow)).Count -eq 0) 'Disconnect did not stop the receiver and clear disconnected tasks.'
  $tasks=@(Read-ManagedExternalProviderSnapshot -Controller $controller -AllowedProviders @('opencode'))
  Assert ($tasks.Count -eq 0) 'A task reappeared after reconnect without a fresh event.'
+ Assert ([object]::ReferenceEquals($firstStore,$controller.Store)) 'Reconnect replaced the retained store.'
  $secondChannel=$controller.Channel
 }finally{Stop-ExternalProviderController $controller}
 Assert ($secondChannel.IsStopped) 'The receiver was not stopped during shutdown.'

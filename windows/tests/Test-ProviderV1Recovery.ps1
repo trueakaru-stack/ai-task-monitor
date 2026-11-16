@@ -69,7 +69,7 @@ try{
  Send-Event 'opencode' 'other' 'active'
  for($i=0;$i -lt 254;$i++){Send-Event 'deepseek' ($b+'_'+$i) 'active'}
  Poll-Group
- Assert ($state.Tasks.Count -eq 256 -and @($state.Tasks | Where-Object {$_.Active -or $_.Paused}).Count -eq 0) 'Initial V1 tasks were missing or falsely confirmed.'
+ Assert ($state.Tasks.Count -eq 256 -and @($state.Tasks | Where-Object {$_.Active}).Count -eq 256) 'Normal V1 startup changed.'
  Send-Event 'deepseek' ($a+'_overflow') 'active'
  Poll-Group
  Assert ($state.Tasks.Count -eq 256 -and $state.Unavailable -contains 'DeepSeek Harness' -and $state.Unavailable -notcontains 'OpenCode') 'Capacity loss affected the wrong source or displaced a card.'
@@ -79,7 +79,8 @@ try{
  $connections.deepseek='connected-degraded';$scopes.deepseek=@($b);$uncertain.deepseek=@($a)
  Poll-Group
  Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_one') -and -not $_.Active -and -not $_.Paused}).Count -eq 1) 'Delayed A events changed an unconfirmed task.'
- Assert (@($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*')}).Count -eq 254) 'A partial A profile removed B cards.'
+ Assert (@($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*') -and $_.Active}).Count -eq 254 -and
+         @($state.Tasks | Where-Object {$_.Id -eq 'opencode:other' -and $_.Active}).Count -eq 1) 'A partial A profile affected B or OpenCode.'
  Assert ($state.PartialConnection -contains 'DeepSeek Harness' -and $state.PartialData -contains 'DeepSeek Harness') 'Partial connection and known event loss were not distinguished.'
  $connections.deepseek='connected';$scopes.deepseek=@($a,$b);$uncertain.deepseek=@()
  Poll-Group
@@ -87,8 +88,15 @@ try{
  $scopes.deepseek=@($b);$confirmed.deepseek=@(Get-DeepSeekConfirmedDisconnectedScopes $deep)
  Poll-Group
  Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_one')}).Count -eq 0 -and
-         @($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*')}).Count -eq 254 -and
+         @($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*') -and $_.Active}).Count -eq 254 -and
          $state.Unavailable -notcontains 'DeepSeek Harness') 'Confirmed A disconnect did not clear only A and its warning.'
+ $scopes.deepseek=@($a,$b);$confirmed=@{}
+ Send-Event 'deepseek' ($a+'_reconnected') 'active'
+ Poll-Group
+ Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_reconnected') -and -not $_.Active -and -not $_.Paused}).Count -eq 1 -and
+         @($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*') -and $_.Active}).Count -eq 254) 'Reconnected A was confirmed or affected healthy B.'
+ $scopes.deepseek=@($b);$confirmed.deepseek=@($a)
+ Poll-Group
  $scopes.deepseek=@($b,$c);$confirmed=@{}
  Send-Event 'deepseek' ($c+'_one') 'active'
  Poll-Group

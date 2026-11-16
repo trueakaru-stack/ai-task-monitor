@@ -38,7 +38,7 @@ try{
  $connections.deepseek='connected';$uncertain.deepseek=@()
  Send $pipe ('{"version":1,"provider":"deepseek","session":"'+$scopeTwo+'_two","kind":"active"}')
  Send $pipe ('{"version":1,"provider":"deepseek","session":"'+$scopeTwo+'_two","kind":"gap"}')
- $state=Read-ExternalProviderGroupSnapshot -Controller $controller -Connections $connections -Seen $seen -PreviousTasks $state.Tasks -ProfileScopes $scopes -UncertainProfileScopes $uncertain
+ $state=Read-ExternalProviderGroupSnapshot -Controller $controller -Connections $connections -Seen $seen -PreviousTasks $state.Tasks -ProfileScopes $scopes -UncertainProfileScopes $uncertain -ConfirmedDisconnectedProfileScopes @{deepseek=@($scopeTwo)}
  Assert (@($state.Tasks|Where-Object {$_.Id -eq ('deepseek:'+$scopeTwo+'_two')}).Count -eq 0) 'A disconnected profile must be removed and its late events ignored.'
  Assert (@($state.Tasks|Where-Object {$_.Id -eq ('deepseek:'+$scopeOne+'_one') -and $_.Active}).Count -eq 1) 'A disconnected profile must not invalidate a healthy one.'
  'External profile scopes: failures, disconnects and late events remained isolated.'

@@ -148,8 +148,8 @@ namespace AITaskMonitor.ExternalProviders
     }
 
     // State is bounded and exists only while the monitor process is running.
-    // V1 has no sender generation, so legacy DeepSeek and OpenCode events
-    // cannot establish that an observed turn is still current.
+    // V1 has no sender generation. Existing first-start behavior is retained;
+    // after a known loss or disconnect, later events cannot restore confidence.
     public sealed class StateStore
     {
         private readonly Dictionary<string, TaskState> states = new Dictionary<string, TaskState>(StringComparer.Ordinal);
@@ -164,6 +164,8 @@ namespace AITaskMonitor.ExternalProviders
         private readonly Dictionary<string, HashSet<string>> capacityLimitedScopes = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         private readonly HashSet<string> lossAffectedProviders = new HashSet<string>(StringComparer.Ordinal);
         private readonly Dictionary<string, HashSet<string>> lossAffectedScopes = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        private readonly HashSet<string> retiredV1Providers = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> retiredDeepSeekScopes = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> hermesLostScopes = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> hermesTrustedAtOverflow = new HashSet<string>(StringComparer.Ordinal);
         private bool hermesLossGlobal, hermesLossOverflow;
@@ -200,6 +202,14 @@ namespace AITaskMonitor.ExternalProviders
             else lossAffectedProviders.Add(provider);
         }
 
+        private bool IsV1Unconfirmed(string provider, string scope)
+        {
+            HashSet<string> scopes;
+            return retiredV1Providers.Contains(provider) || lossAffectedProviders.Contains(provider) ||
+                (lossAffectedScopes.TryGetValue(provider, out scopes) && scopes.Contains(scope)) ||
+                (provider == "deepseek" && retiredDeepSeekScopes.Contains(scope));
+        }
+
         public bool Apply(Event input, DateTimeOffset now)
         {
             if (input == null) return false;
@@ -222,9 +232,11 @@ namespace AITaskMonitor.ExternalProviders
             string key = input.Provider + ":" + input.Session;
             TaskState state;
             bool created = false;
-            bool legacyUnconfirmed = input.Provider == "opencode" || input.Provider == "deepseek";
+            bool legacyUnconfirmed = (input.Provider == "opencode" || input.Provider == "deepseek") &&
+                IsV1Unconfirmed(input.Provider, scope);
             if (input.Provider == "hermes" && IsHermesUnconfirmed(scope))
             {
+                RecordScopeLoss("hermes", scope);
                 // User chose to wait for a confirmed restart rather than create
                 // new, potentially permanent Hermes cards after a loss.
                 if (states.TryGetValue(key, out state) && !IsTerminal(state.Status)) MakeUnconfirmed(state);
@@ -394,6 +406,8 @@ namespace AITaskMonitor.ExternalProviders
         public void RetainProviders(string[] providers)
         {
             var allowed = new HashSet<string>(providers ?? new string[0], StringComparer.Ordinal);
+            foreach (string provider in retainedProviders.Except(allowed))
+                if (provider == "opencode" || provider == "deepseek") retiredV1Providers.Add(provider);
             retainedProviders.Clear();
             retainedProviders.UnionWith(allowed);
             capacityLimitedProviders.IntersectWith(allowed);
@@ -403,6 +417,7 @@ namespace AITaskMonitor.ExternalProviders
             foreach (string provider in lossAffectedScopes.Keys.Where(provider => !allowed.Contains(provider)).ToArray())
                 lossAffectedScopes.Remove(provider);
             bool nowAllowed = allowed.Contains("hermes");
+            if (nowAllowed && (hermesLossGlobal || hermesLossOverflow)) lossAffectedProviders.Add("hermes");
             if (nowAllowed != hermesAllowed)
             {
                 hermesBarrier = Math.Max(hermesBarrier, MonotonicNanoseconds());
@@ -436,6 +451,12 @@ namespace AITaskMonitor.ExternalProviders
         public void ConfirmDeepSeekDisconnectedScopes(string[] scopes)
         {
             var confirmed = new HashSet<string>((scopes ?? new string[0]).Where(IsScope), StringComparer.Ordinal);
+            foreach (string scope in confirmed)
+            {
+                if (retiredDeepSeekScopes.Count < MaximumSessions || retiredDeepSeekScopes.Contains(scope))
+                    retiredDeepSeekScopes.Add(scope);
+                else { retiredV1Providers.Add("deepseek"); lossAffectedProviders.Add("deepseek"); }
+            }
             HashSet<string> capacityScopes;
             if (capacityLimitedScopes.TryGetValue("deepseek", out capacityScopes)) capacityScopes.ExceptWith(confirmed);
             HashSet<string> lostScopes;

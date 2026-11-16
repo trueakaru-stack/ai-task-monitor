@@ -37,12 +37,17 @@ Check(store.Apply(Frame("opencode", "open", "active"), now), "OpenCode was rejec
 Check(store.Apply(Frame("kimi", c + "_task", "active"), now), "Kimi was rejected.");
 for (int i = 0; i < 253; i++)
     Check(store.Apply(Frame("deepseek", b + "_" + i, "active"), now), "A bounded task was rejected.");
-Check(store.Snapshot(now).Length == 256 && store.Snapshot(now).All(x => x.Status == "unknown"),
-    "V1 claimed a current state or failed to retain the initial cards.");
+Check(store.Snapshot(now).Length == 256 && store.Snapshot(now).Count(x => x.Status == "active") == 255 &&
+    store.Snapshot(now).Single(x => x.Provider == "kimi").Status == "unknown",
+    "Normal V1 startup or Kimi's unconfirmed policy changed.");
 Check(!store.Apply(Frame("deepseek", a + "_overflow", "active"), now), "Overflow was silently admitted.");
 Check(store.Snapshot(now).Length == 256 && store.CapacityLimitedScopes("deepseek").SequenceEqual([a]) &&
     store.CapacityLimitedProviders.SequenceEqual(["deepseek"]) && store.LossAffectedProviders.SequenceEqual(["deepseek"]),
     "A scoped loss was not recorded.");
+Check(store.Snapshot(now).Single(x => x.Session == a + "_first").Status == "unknown" &&
+    store.Snapshot(now).Count(x => x.Session.StartsWith(b + "_", StringComparison.Ordinal) && x.Status == "active") == 253 &&
+    store.Snapshot(now).Single(x => x.Provider == "opencode").Status == "active",
+    "A scoped loss degraded an unrelated profile or provider.");
 Check(store.Apply(Frame("deepseek", a + "_first", "completed"), now) &&
     store.Apply(Frame("deepseek", a + "_first", "active"), now) &&
     store.Snapshot(now).Single(x => x.Session == a + "_first").Status == "unknown", "A late event changed an unconfirmed card.");
@@ -54,6 +59,17 @@ Check(store.CapacityLimitedProviders.Length == 0 && store.LossAffectedProviders.
     store.Snapshot(now).All(x => x.Session != a + "_first"), "Confirmed scope removal changed the wrong area.");
 Check(store.Apply(Frame("deepseek", a + "_late", "active"), now) &&
     store.Snapshot(now).Single(x => x.Session == a + "_late").Status == "unknown", "Reconnection invented a verified restart.");
+
+var reconnect = new StateStore();
+reconnect.RetainProviders(["opencode"]);
+Check(reconnect.Apply(Frame("opencode", "first", "active"), now) &&
+    reconnect.Snapshot(now).Single().Status == "active", "Normal OpenCode startup changed.");
+reconnect.RetainProviders([]);
+reconnect.RetainProviders(["opencode"]);
+Check(reconnect.Apply(Frame("opencode", "delayed", "active"), now) &&
+    reconnect.Snapshot(now).Single().Status == "unknown", "Reconnection invented an OpenCode restart.");
+Check(reconnect.Apply(Frame("opencode", "delayed", "completed"), now) &&
+    reconnect.Snapshot(now).Single().Status == "unknown", "A delayed terminal event confirmed completion after reconnect.");
 
 var bounded = new StateStore();
 bounded.RetainProviders(["opencode", "deepseek"]);

@@ -46,6 +46,12 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch the exact test revision.' }
             git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
             if ($LASTEXITCODE -ne 0) { throw 'Cannot select the test revision.' }
+            # Add the current primary branch's PATH guard and its test fixtures
+            # only to this disposable checkout; do not alter the candidate branch.
+            git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" 'b8eb77e4d817f2dc80285ae19bfff1f0075e1246'
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch the current PATH-safety guard.' }
+            git -C "$source" -c core.hooksPath="$hooks" restore --source=b8eb77e4d817f2dc80285ae19bfff1f0075e1246 -- '.github/workflows/windows-dotnet-path-safety.yml' 'windows/native/SelfContainedExperiment' 'windows/tests/Test-DotnetPathSafety.py'
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot prepare the current PATH-safety fixtures.' }
             python -B (Join-Path $source 'windows/tests/Test-DotnetPathSafety.py')
             if ($LASTEXITCODE -ne 0) { throw 'The static PATH-safety guard failed.' }
             $command = Get-Command dotnet.exe -CommandType Application | Select-Object -First 1
@@ -104,6 +110,12 @@ jobs:
             Invoke-Isolated $dotnet @($assembly)
             $powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
             Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/tests/Test-ProviderV1Recovery.ps1'))
+            foreach ($test in @('Test-ExternalProviderState.ps1','Test-ExternalProviderView.ps1',
+              'Test-ExternalProviderRuntime.ps1','Test-ExternalProviderController.ps1',
+              'Test-ExternalProviderScopeIsolation.ps1','Test-ExternalProviderIsolation.ps1',
+              'Test-HermesObserverState.ps1','Test-ExternalSourceSnapshot.ps1')) {
+              Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source "windows/tests/$test"))
+            }
             $screenshots = Join-Path $root 'screenshots'
             $null = [IO.Directory]::CreateDirectory($screenshots)
             foreach ($theme in @('light','dark')) {

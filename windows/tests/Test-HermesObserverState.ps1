@@ -75,7 +75,7 @@ $newEpoch = Clock
 Start-Sleep -Milliseconds 2
 $newTick = Clock
 Assert ($barrier.Apply((Event s started $newTick $newEpoch '' turn_1), $now)) 'New observer did not recover.'
-Assert ((Status $barrier s $now) -eq 'active') 'New observer did not restore activity.'
+Assert ((Status $barrier s $now) -eq 'unknown') 'A new observer alone must not confirm a full Hermes restart.'
 Assert (-not $barrier.Apply((Event s active (Clock) $epoch), $now)) 'Old observer displaced a recovered generation.'
 
 $alreadyRunning = [AITaskMonitor.ExternalProviders.StateStore]::new()
@@ -248,7 +248,7 @@ $scoped.MarkSessionScopesGap('hermes', @())
 Start-Sleep -Milliseconds 2
 $freshEpoch = Clock; $freshTick = Clock
 Assert ($scoped.Apply((Event $sessionA started $freshTick $freshEpoch '' turn_fresh), $now)) 'New profile observer did not recover.'
-Assert ((Status $scoped $sessionA $now) -eq 'active') 'Recovered profile did not report activity.'
+Assert ((Status $scoped $sessionA $now) -eq 'unknown') 'A new observer alone must not confirm recovery of a lost profile.'
 $scoped.RetainSessionScopes('hermes', @($scopeB))
 $scoped.RetainSessionScopes('hermes', @($scopeA, $scopeB))
 Assert (-not $scoped.Apply((Event $sessionA active (Clock) $freshEpoch), $now)) 'Removed profile revived from an old observer.'
@@ -306,17 +306,18 @@ $gapScoped.RetainSessionScopes('hermes', @($scopeA, $scopeB))
 Start-Sleep -Milliseconds 1
 $postReconnectEpoch = Clock
 Assert ($gapScoped.Apply((Event $sessionA started (Clock) $postReconnectEpoch '' new_a), $now)) 'New scope observer did not start.'
+Assert (@($gapScoped.Snapshot($now) | Where-Object Session -eq $sessionA).Count -eq 0) 'Reconnect must wait for proof of a full Hermes restart.'
 Assert (-not $gapScoped.Apply((Event ($scopeA + '_unknown') gap (Clock) $preReconnectEpoch), $now)) 'Old unknown-scope gap was accepted.'
 Assert (-not $gapScoped.Apply((Event $sessionA gap ((Clock) + 3000000000) $preReconnectEpoch), $now)) 'Old future scope gap was accepted.'
-Assert ((Status $gapScoped $sessionA $now) -eq 'active') 'Old scope gap invalidated the restarted observer.'
+Assert (@($gapScoped.Snapshot($now) | Where-Object Session -eq $sessionA).Count -eq 0) 'An old scope gap created a new task.'
 Assert ((Status $gapScoped $sessionB $now) -eq 'active') 'Old scope gap invalidated another profile.'
 Assert ($gapScoped.Apply((Event ($scopeA + '_unknown') gap (Clock) $postReconnectEpoch), $now)) 'Current scope gap was rejected.'
-Assert ((Status $gapScoped $sessionA $now) -eq 'unknown') 'Current gap did not invalidate its profile.'
+Assert (@($gapScoped.Snapshot($now) | Where-Object Session -eq $sessionA).Count -eq 0) 'Current gap created an unconfirmed Hermes task.'
 Assert ((Status $gapScoped $sessionB $now) -eq 'active') 'Current gap invalidated a healthy profile.'
 Assert (-not $gapScoped.Apply((Event $sessionA active (Clock) $postReconnectEpoch '' new_a), $now)) 'Observer revived its profile after a gap.'
 Assert ($gapScoped.Apply((Event $sessionB active (Clock) $preReconnectEpoch '' old_b), $now)) 'Healthy profile stopped reporting after another profile gap.'
 Start-Sleep -Milliseconds 1
 $afterScopeGapEpoch = Clock
 Assert ($gapScoped.Apply((Event $sessionA started (Clock) $afterScopeGapEpoch '' recovered), $now)) 'Restarted scope did not recover after a gap.'
-Assert ((Status $gapScoped $sessionA $now) -eq 'active') 'Restarted scope stayed unknown.'
+Assert (@($gapScoped.Snapshot($now) | Where-Object Session -eq $sessionA).Count -eq 0) 'A new observer alone created a task without a confirmed restart.'
 Write-Output 'Hermes ordering, approvals, observer generations, and reconnect checks passed.'
