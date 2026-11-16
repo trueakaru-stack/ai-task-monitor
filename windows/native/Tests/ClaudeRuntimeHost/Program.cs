@@ -224,6 +224,36 @@ internal static class Program
         Check(!observed && !host.HasExited, "A pre-start event must not be presented as a current task.");
     }
 
+    private static void CheckPreviewDoesNotReadProfile(string root, ClaudeRegisteredHookPaths paths)
+    {
+        string exe = Path.Combine(root, "artifacts", "bin", "Prototype", "release", "AI Task Monitor.exe");
+        string directory = Path.GetDirectoryName(paths.CurrentJournal)!;
+        string legacy = Path.Combine(directory, "settings.json");
+        string display = Path.Combine(directory, "display-preferences.json");
+        string lockFile = display + ".lock";
+        string ready = Path.Combine(root, "preview-ready.txt");
+        byte[] original = Encoding.UTF8.GetBytes("{\"theme\":\"dark\",\"language\":\"en\"}");
+        File.WriteAllBytes(legacy, original);
+        Check(!File.Exists(display) && !File.Exists(lockFile), "Preview preferences must start absent.");
+        var start = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = root };
+        start.ArgumentList.Add("--ready-file");
+        start.ArgumentList.Add(ready);
+        ApplySyntheticEnvironment(start);
+        using Process host = Process.Start(start) ?? throw new InvalidOperationException("The synthetic preview did not start.");
+        try
+        {
+            WaitUntil(() => File.Exists(ready) && HasName(host, "Источники не подключены"),
+                "The preview read the synthetic profile or did not start.");
+            Emit(paths.Hook, new { hook_event_name = "UserPromptSubmit", session_id = "preview-fixture" }, root);
+            HoldWithoutCard(host, 2500);
+            Check(!HasName(host, "Claude Code task") && !File.Exists(display) && !File.Exists(lockFile) &&
+                File.ReadAllBytes(legacy).AsSpan().SequenceEqual(original),
+                "The preview used or modified synthetic profile data.");
+            Check(host.CloseMainWindow() && host.WaitForExit(8000), "The synthetic preview did not close gracefully.");
+        }
+        finally { if (!host.HasExited) { host.Kill(true); host.WaitForExit(5000); } }
+    }
+
     private static void CheckActualEntryPoint(string root, ClaudeRegisteredHookPaths paths)
     {
         string exe = Path.Combine(root, "artifacts", "bin", "Prototype", "release", "AI Task Monitor.exe");
@@ -372,6 +402,39 @@ internal static class Program
                 WaitUntil(() => controller.CurrentTasks.All(task => task.Provider != "claude"), "A clear synthetic stop was not observed.");
                 Emit(paths.Hook, new { hook_event_name = "UserPromptSubmit", session_id = "synthetic-second" }, root);
                 WaitUntil(() => controller.CurrentTasks.Any(task => task.Provider == "claude"), "A subsequent synthetic task was not shown.");
+                string heldSettings = paths.Settings + ".fixture-held";
+                File.Move(paths.Settings, heldSettings);
+                try
+                {
+                    owner.RequestInspection();
+                    WaitUntil(() => registration == ClaudeRegistration.Absent && latest is { Unavailable: true },
+                        "A temporarily missing settings file was not reported as uncertain.");
+                    Check(controller.CurrentTasks.Single(task => task.Provider == "claude").Status == "unknown",
+                        "A temporarily missing settings file cleared a known card.");
+                }
+                finally { File.Move(heldSettings, paths.Settings); }
+                owner.RequestInspection();
+                WaitUntil(() => registration == ClaudeRegistration.Registered,
+                    "Returning settings were not inspected.");
+                Check(controller.CurrentTasks.Single(task => task.Provider == "claude").Status == "unknown",
+                    "Returning settings silently cleared a retained card.");
+
+                string heldHook = paths.Hook + ".fixture-held";
+                File.Move(paths.Hook, heldHook);
+                try
+                {
+                    owner.RequestInspection();
+                    WaitUntil(() => registration == ClaudeRegistration.Unavailable && latest is { Unavailable: true },
+                        "A temporarily missing hook was not reported unavailable.");
+                    Check(((TextBlock)window.FindName("ClaudeSourceStatus")).Text == "Нет данных" &&
+                        controller.CurrentTasks.Single(task => task.Provider == "claude").Status == "unknown",
+                        "A missing hook cleared a card or asserted a registration.");
+                }
+                finally { File.Move(heldHook, paths.Hook); }
+                owner.RequestInspection();
+                WaitUntil(() => registration == ClaudeRegistration.Registered,
+                    "Returning hook was not inspected.");
+
                 File.WriteAllText(paths.Settings, partial, new UTF8Encoding(false));
                 owner.RequestInspection();
                 WaitUntil(() => latest is { Unavailable: true } && registration == ClaudeRegistration.Partial, "Partial registration did not make the source unavailable.");
@@ -382,25 +445,26 @@ internal static class Program
                 int beforeDelayedStop = presentations;
                 Emit(paths.Hook, new { hook_event_name = "Stop", session_id = "synthetic-second",
                     background_tasks = Array.Empty<object>(), session_crons = Array.Empty<object>() }, root);
-                WaitUntil(() => presentations > beforeDelayedStop &&
+                WaitUntil(() => presentations >= beforeDelayedStop + 2 &&
                     controller.CurrentTasks.Any(task => task.Provider == "claude") && latest is { Unavailable: true },
                     "Connection loss must retain the known unconfirmed card.");
                 File.WriteAllText(paths.Settings, "{\"hooks\":{}}", new UTF8Encoding(false));
                 owner.RequestInspection();
-                WaitUntil(() => controller.CurrentTasks.All(task => task.Provider != "claude") && latest is { Unavailable: false }
-                    && registration == ClaudeRegistration.Absent, "Removing the known global hook did not clear its cards.");
+                WaitUntil(() => registration == ClaudeRegistration.Absent && latest is { Unavailable: true }
+                    && controller.CurrentTasks.Any(task => task.Provider == "claude"),
+                    "Removing one known hook must retain the last unconfirmed card.");
                 Check(((TextBlock)window.FindName("ClaudeSourceStatus")).Text == "Статус не подтверждён",
                     "Removing one global hook was presented as absence of all integrations.");
                 File.WriteAllText(paths.Settings, complete, new UTF8Encoding(false));
-                owner.RequestInspection();
-                WaitUntil(() => !owner.InspectionPending, "Reconnect inspection did not finish.");
                 int beforeReconnect = presentations;
-                WaitUntil(() => presentations > beforeReconnect, "Reconnected source did not report a snapshot.");
-                Check(controller.CurrentTasks.All(task => task.Provider != "claude"),
-                    "The disconnected task reappeared without a new event.");
+                owner.RequestInspection();
+                WaitUntil(() => registration == ClaudeRegistration.Registered && presentations > beforeReconnect,
+                    "Returning registration did not report a snapshot.");
+                Check(controller.CurrentTasks.Any(task => task.Provider == "claude") && latest is { Unavailable: true },
+                    "A late stop after lost registration erased the unconfirmed card.");
                 Emit(paths.Hook, new { hook_event_name = "UserPromptSubmit", session_id = "after-reconnect" }, root);
-                WaitUntil(() => controller.CurrentTasks.Any(task => task.Provider == "claude"),
-                    "A new event after reconnection was not shown.");
+                WaitUntil(() => controller.CurrentTasks.Count(task => task.Provider == "claude") >= 2,
+                    "A new event after registration returned was not shown.");
                 Interlocked.Exchange(ref blockInspection, 1);
                 owner.RequestInspection();
                 WaitUntil(() => inspectionEntered.IsSet, "The delayed inspection did not reach its gate.");
@@ -414,6 +478,7 @@ internal static class Program
             finally { inspectionRelease.Set(); owner.Dispose(); window.Close(); }
 
             File.WriteAllText(paths.Settings, complete, new UTF8Encoding(false));
+            CheckPreviewDoesNotReadProfile(root, paths);
             CheckActualEntryPoint(root, paths);
             application.Shutdown();
             Console.WriteLine("Claude registered-hook-to-WPF: " + checks + " synthetic checks passed.");

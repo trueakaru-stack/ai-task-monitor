@@ -191,9 +191,10 @@ internal sealed class ClaudeRegisteredHookOwner : IDisposable
         }
         if (registration == ClaudeRegistration.Absent)
         {
-            // This owner covers only the legacy global standalone hook. Other
-            // Claude settings and sources may still exist.
-            if (pump is not null) pump.DisconnectAndForget();
+            // Automatic inspection of one file cannot distinguish removal
+            // from a transient replacement or hooks in other settings scopes.
+            // Keep already observed cards unconfirmed until explicit disconnect.
+            if (pump is not null) pump.NotifyConnection(ClaudeConnection.Partial);
             else apply(new ClaudeSourceSnapshot([], false));
             reportRegistration?.Invoke(registration);
             return;

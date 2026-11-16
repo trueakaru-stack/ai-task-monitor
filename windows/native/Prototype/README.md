@@ -20,9 +20,11 @@ scopes are disconnected. An empty source reports that task status is
 unconfirmed rather than claiming that all tasks are absent. A task whose only
 known activity predates this monitor launch is not displayed until an eligible
 later active event arrives; earlier records may then contribute context. Other
-integrations remain synthetic or disabled. The user must already have
-authorized and configured the old hook; this prototype neither installs nor
-runs it.
+integrations remain synthetic or disabled. The current presentation also suppresses
+all step status and progress, including some observations the reader may know;
+showing progress over known steps with an incomplete-plan label remains unfinished.
+The user must already have authorized and configured the old hook; this prototype
+neither installs nor runs it.
 
 There is no local Codex source owner in this preview. A future application
 must track the actual connection and confidence of every source when choosing
@@ -120,12 +122,15 @@ The worker limit applies to a single pump instance. `Dispose` prevents later
 presentation but cannot stop a permanently blocked read. The new process owner
 enforces one owner and pump for the process lifetime, including after disposal;
 the pump class itself does not. Its settings inspection also permits only one
-worker at a time and discards results after a timeout. A known removed global
-hook or an explicit disconnect immediately clears its visible cards and schedules
-retained history for removal without waiting on I/O; other Claude scopes may still exist. A later reconnect admits only events at or
-after the disconnect boundary and keeps their status unconfirmed. Future-dated
-or delayed events may still cross that boundary. A blocked I/O operation is not
-guaranteed to terminate.
+worker at a time and discards results after a timeout. A missing registration
+for the known global hook is treated as unavailable because an external writer may briefly replace
+the settings file; existing cards remain unconfirmed and can persist even after
+a later stop. Only an explicit disconnect immediately clears visible cards and
+schedules retained history for removal without waiting on I/O. Other Claude
+scopes may still exist. A later reconnect admits only events at or after the
+disconnect boundary and keeps their status unconfirmed. Future-dated or delayed
+events may still cross that boundary. A blocked I/O operation is not guaranteed
+to terminate.
 
 `windows/native/Tests/ClaudePump/ClaudePump.Tests.csproj` tests the pump with a
 dispatcher and synthetic files without opening a window. Its controlled races
