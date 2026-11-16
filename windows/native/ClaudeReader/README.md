@@ -9,8 +9,19 @@ This also applies when the same step ID is reused for different observed
 names, including when both arrive before the first read. Without observed loss
 or session uncertainty, an ordinary rename keeps its latest name. Retained
 history is limited to 128 entries per session and is marked incomplete when
-bounded; an overlong step ID is represented internally by a SHA-256 identity and
-also marks the retained plan incomplete. Values no longer present or observed
+bounded. Names of at most 256 hidden stopped sessions are retained; the oldest
+hidden entry is evicted when this limit is reached. A bounded probabilistic
+filter tracks evicted session IDs: a later matching task is unconfirmed and its
+retained plan is marked incomplete, while the source stays available. False
+positives can conservatively downgrade an unrelated task, and many evictions
+can eventually make these more frequent. The filter lasts for this reader's
+lifetime and resets on explicit disconnect. Per-session uncertainty is also
+remembered by separate bounded probabilistic filters, with the same possible
+conservative false positives. A previously uncertain session is not treated as
+confirmed simply because many other sessions were observed. The separate
+limit of 256 simultaneously retained visible cards still applies and can make
+the source unavailable. An overlong step ID is represented internally by a
+SHA-256 identity and also marks the retained plan incomplete. Values no longer present or observed
 cannot be recovered.
 
 Session IDs are limited to 128 UTF-16 code units, matching the length limit in
@@ -63,6 +74,16 @@ resolve it. Equal-time events with matching active states do not cause this
 ambiguity; a strictly later clear stop in an otherwise unambiguous history can
 end its session normally.
 
+An event more than one minute in the future also marks that session's evidence
+uncertain and retains conflicting observed names. This uncertainty persists for
+the reader's lifetime even if the clock later catches up. A terminal event only
+slightly later than the poll's timestamp is temporarily unconfirmed, keeps
+conflicting observed names for that snapshot and can be resolved by a subsequent
+poll. If the same session continues, those names remain in bounded hidden
+history for a later detected loss. A session being quiet for at least 120 minutes is
+treated separately: later observed activity can restore its ordinary status when
+no other uncertainty was observed.
+
 The future owner must call `NotifyConnection` promptly for every connection
 change, including while a poll is in progress, and then use `Poll(utcNow)` to
 read the latest signalled state. Each result carries a generation; `IsCurrent`
@@ -84,9 +105,13 @@ the prototype; this behavior alone does not establish delivery from a real hook.
 
 Pending snapshots use the session reader's existing retention rules: at most
 256 cards and 128 retained steps per card, with bounded step titles and IDs.
-An incomplete retained plan is flagged and retention overflow marks the source
-unavailable and unconfirmed rather than silently confirming a partial view.
-These bounds also apply to fallback cards after a failure during a pending read.
+An incomplete retained plan is flagged and stays unconfirmed for that session
+after the pending record is completed; a bounded probabilistic filter remembers
+this per-session uncertainty. A cut of one plan's retained names does not by
+itself declare the entire source unavailable or downgrade a neighboring task.
+Actual journal loss and exceeding the retained-card limit still affect source
+availability. These bounds also apply to fallback cards after a failure during a
+pending read.
 
 During a poll, Windows `FILE_ID_INFO` is compared across simultaneously open
 metadata handles. A successful read keeps one metadata-only handle, shared for
@@ -156,12 +181,11 @@ synthetic fixture against the current PowerShell-embedded reader and the
 native reader. It checks session startup, legacy-only sessions and step names,
 quiet and resumed activity, prompt identity, activity privacy, malformed input,
 old-step status, an unambiguous stop and 10,000 synthetic events. It separately asserts the differences for
-simultaneous active/stop events, malformed legacy-only input, 129-unit session
-IDs and stopped-name retention after a later loss. The
+simultaneous active/stop events, malformed legacy-only input and 129-unit session
+IDs. Both readers must retain an observed stopped step name as unconfirmed if
+history is later lost and the same session becomes active, without creating a
+card solely from stored names. The
 [test README](../Tests/ClaudeReaderBehavior/README.md)
-describes those cases and the deliberately failing old assertion. The native
-reader's loss of a previously observed stopped step name after later history
-loss is an open defect against the agreed preservation of known names. These
-selected checks do not establish full behavioral equivalence. Real Claude
-sessions, final application integration and installer behavior remain
-unverified.
+describes those cases and the deliberately failing old assertion. These selected
+checks do not establish full behavioral equivalence. Real Claude sessions,
+final application integration and installer behavior remain unverified.
