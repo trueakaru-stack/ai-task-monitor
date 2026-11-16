@@ -36,6 +36,7 @@ function Session-File([string]$id) { return $script:sessionPaths[$id] }
 function Manual-Tasks($sessions) { return @{} }
 function Codex-Plan([string]$id) { return @() }
 function Codex-Activity([string]$id) { return "Synthetic activity" }
+function Codex-ObservedActivity([string]$id,[string]$key) { return "Synthetic activity" }
 
 $now = [DateTime]::UtcNow.ToString("o")
 $records = @(

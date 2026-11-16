@@ -7,7 +7,7 @@ if ($errors.Count) { throw 'Unable to parse the application source.' }
 $names = @(
     'Prop', 'Lock-State', 'Find-PriorLifecycle', 'Thread-State', 'Codex-Uncertain',
     'Session-File', 'Session-Workspace', 'Progress-Files', 'Manual-Tasks',
-    'Read-TailText', 'Codex-Plan', 'Codex-Activity', 'Plan-Progress',
+    'Read-TailText', 'Codex-Plan', 'Codex-Activity', 'Read-ObservedCodexTail', 'Codex-ObservedActivity', 'Plan-Progress',
     'Codex-IndexCandidates', 'Codex-Tasks', 'Unconfirmed-Tasks', 'Source-Snapshot'
 )
 $definitions = foreach ($name in $names) {

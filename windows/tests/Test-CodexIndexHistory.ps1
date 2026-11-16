@@ -29,6 +29,7 @@ $script:monitorStartedUtc = [DateTime]::UtcNow.AddSeconds(-5)
 function Manual-Tasks($sessions) { return @{} }
 function Codex-Plan([string]$id) { return @() }
 function Codex-Activity([string]$id) { return 'Synthetic action' }
+function Codex-ObservedActivity([string]$id,[string]$key) { return 'Synthetic action' }
 function Thread-State([string]$id) {
     $lockState = Lock-State (Join-Path $lockDirectory ($id + '.lock'))
     return [PSCustomObject]@{ State='unknown'; HasStartMarker=$true; UpdatedUtc=[DateTime]::UtcNow; StartKey='turn:test'; StartedUtc=[DateTime]::UtcNow; LockState=$lockState }

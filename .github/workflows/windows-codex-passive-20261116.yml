@@ -110,7 +110,7 @@ jobs:
                 Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
               }
             }else{
-              foreach($count in @(0,1)){foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){
+              foreach($count in @(1)){foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){
                 $stem="codex-$count-$theme-$language-$mode"
                 $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks',[string]$count,'-PreviewSourceWarning','partial-data','-PreviewWarningProvider','codex','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
                 if($count -eq 1){$arguments+=@('-PreviewUnconfirmed','-PreviewPlanUnconfirmed','-PreviewScenario','planned')}

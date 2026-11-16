@@ -2316,7 +2316,7 @@ function Codex-Plan([string]$id) {
  return @($latest)
 }
 
-function Codex-Activity([string]$id,[string]$expectedStartKey='') {
+function Codex-Activity([string]$id) {
  $path = Session-File $id
  if (-not $path) { return "" }
  try {
@@ -2331,13 +2331,6 @@ function Codex-Activity([string]$id,[string]$expectedStartKey='') {
     $startIndex=$index;$turnId=[string](Prop $payload "turn_id" "");break
    }
   }
-  $requireObservedTurn=$expectedStartKey.StartsWith('turn:',[StringComparison]::Ordinal)
-  if($requireObservedTurn){
-   $expectedTurn=$expectedStartKey.Substring(5)
-   if(-not $expectedTurn){return ''}
-   if($startIndex -ge 0 -and $turnId -cne $expectedTurn){return ''}
-   if($startIndex -lt 0){$turnId=$expectedTurn}
-  }
   for($index=$lines.Count-1;$index -gt $startIndex;$index--){
    $line=$lines[$index]
    if($line.Length -gt 1048576 -or $line -notmatch '"(agent_reasoning|reasoning|Reasoning|commentary)"'){continue}
@@ -2346,8 +2339,6 @@ function Codex-Activity([string]$id,[string]$expectedStartKey='') {
    $recordType=[string](Prop $record "type" ""); $kind=[string](Prop $payload "type" "")
    $eventTurn=[string](Prop $payload "turn_id" "")
    if($turnId -and $eventTurn -and $turnId -ne $eventTurn){continue}
-   if($requireObservedTurn -and ($recordType -ne 'event_msg' -or $kind -ne 'item_completed' -or
-      -not $eventTurn -or $eventTurn -cne $turnId -or [string](Prop $payload 'thread_id' '') -ne $id)){continue}
    $summary=""
    if($recordType -eq "event_msg" -and $kind -eq "agent_reasoning"){
     $summary=[string](Prop $payload "text" "")
@@ -2365,7 +2356,6 @@ function Codex-Activity([string]$id,[string]$expectedStartKey='') {
    }elseif(-not $latestCommentary -and $kind -eq "message" -and [string](Prop $payload "phase" "") -eq "commentary"){
     foreach($part in @(Prop $payload "content" @())){if([string](Prop $part "type" "") -eq "output_text"){$latestCommentary=[string](Prop $part "text" "")}}
    }
-   if($requireObservedTurn -and $latestCommentary){return [regex]::Replace($latestCommentary.Trim(),'\s+',' ')}
    if($summary){
     $firstLine=@($summary -split "`r?`n" | Where-Object {$_.Trim()} | Select-Object -First 1)
     if($firstLine.Count -gt 0){
@@ -2378,6 +2368,81 @@ function Codex-Activity([string]$id,[string]$expectedStartKey='') {
   if($latestCommentary){return [regex]::Replace($latestCommentary.Trim(),'\s+',' ')}
  } catch {}
  return ""
+}
+
+function Read-ObservedCodexTail([string]$path,[string]$id) {
+ $sharing=[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+ $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
+ try{
+  $length=[long]$stream.Length
+  $headCount=[int][Math]::Min([long]65536,$length)
+  $offset=[Math]::Max([long]0,$length-[long]2097152)
+  $tailStart=if($offset -gt 0){$offset-1}else{[long]0}
+  $tailCount=[int]($length-$tailStart)
+  $readRange={param([long]$position,[int]$count)
+   $data=[byte[]]::new($count);[void]$stream.Seek($position,[IO.SeekOrigin]::Begin);$read=0
+   while($read -lt $count){$n=$stream.Read($data,$read,$count-$read);if($n -le 0){throw 'Codex journal changed while reading.'};$read+=$n}
+   return ,$data
+  }
+  $head=& $readRange 0 $headCount;$tail=& $readRange $tailStart $tailCount
+  $headAgain=& $readRange 0 $headCount;$tailAgain=& $readRange $tailStart $tailCount
+  if($stream.Length -lt $length){throw 'Codex journal was truncated.'}
+  $hash=[Security.Cryptography.SHA256]::Create()
+  try{
+   if([Convert]::ToBase64String($hash.ComputeHash($head)) -cne [Convert]::ToBase64String($hash.ComputeHash($headAgain)) -or
+      [Convert]::ToBase64String($hash.ComputeHash($tail)) -cne [Convert]::ToBase64String($hash.ComputeHash($tailAgain))){throw 'Codex journal changed while reading.'}
+  }finally{$hash.Dispose()}
+ }finally{$stream.Dispose()}
+ $lineEnd=0;while($lineEnd -lt $head.Length -and $head[$lineEnd] -ne 10){$lineEnd++}
+ if($lineEnd -ge $head.Length){return ''}
+ $encoding=[Text.UTF8Encoding]::new($false,$true)
+ $first=$encoding.GetString($head,0,$lineEnd).TrimStart([char]0xFEFF).TrimEnd([char]13)
+ try{$meta=$first|ConvertFrom-Json -ErrorAction Stop}catch{return ''}
+ if([string](Prop $meta 'type' '') -ne 'session_meta' -or [string](Prop (Prop $meta 'payload') 'id' '') -ne $id){return ''}
+ $start=0
+ if($offset -gt 0){
+  $start=1
+  if($tail[0] -ne 10){while($start -lt $tail.Length -and $tail[$start] -ne 10){$start++};if($start -lt $tail.Length){$start++}}
+ }
+ $end=$tail.Length
+ if($end -gt $start -and $tail[$end-1] -ne 10){while($end -gt $start -and $tail[$end-1] -ne 10){$end--}}
+ if($end -le $start){return ''}
+ return $encoding.GetString($tail,$start,$end-$start)
+}
+
+function Codex-ObservedActivity([string]$id,[string]$startKey) {
+ $path=Session-File $id
+ if(-not $path){return ''}
+ try{
+  $tail=Read-ObservedCodexTail $path $id
+  $lines=$tail -split "`r?`n"
+  $turn=if($startKey.StartsWith('turn:',[StringComparison]::Ordinal)){$startKey.Substring(5)}else{''}
+  for($index=$lines.Count-1;$index -ge 0;$index--){
+   $line=$lines[$index]
+   if($line.Length -gt 1048576 -or $line -notmatch '"(item_completed|agent_message|commentary)"'){continue}
+   try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
+   $payload=Prop $record 'payload';$recordType=[string](Prop $record 'type' '');$kind=[string](Prop $payload 'type' '')
+   $message=''
+   if($recordType -eq 'event_msg' -and $kind -eq 'item_completed' -and $turn -and
+      [string](Prop $payload 'thread_id' '') -eq $id -and [string](Prop $payload 'turn_id' '') -ceq $turn){
+    $item=Prop $payload 'item';$itemType=[string](Prop $item 'type' '')
+    if($itemType -eq 'Reasoning'){
+     foreach($part in @(Prop $item 'summary_text' @())){if($part -is [string] -and $part.Trim()){$message=[string]$part}}
+    }elseif($itemType -eq 'AgentMessage' -and [string](Prop $item 'phase' '') -eq 'commentary'){
+     foreach($part in @(Prop $item 'content' @())){if([string](Prop $part 'type' '') -eq 'Text'){$message=[string](Prop $part 'text' '')}}
+    }
+   }elseif($recordType -eq 'event_msg' -and $kind -eq 'agent_message' -and [string](Prop $payload 'phase' '') -eq 'commentary'){
+    $message=[string](Prop $payload 'message' '')
+   }elseif($recordType -eq 'response_item' -and $kind -eq 'message' -and [string](Prop $payload 'role' '') -eq 'assistant' -and [string](Prop $payload 'phase' '') -eq 'commentary'){
+    foreach($part in @(Prop $payload 'content' @())){if([string](Prop $part 'type' '') -eq 'output_text'){$message=[string](Prop $part 'text' '')}}
+   }
+   if($message){
+    $first=@($message -split "`r?`n"|Where-Object {$_.Trim()}|Select-Object -First 1)
+    if($first.Count){$value=$first[0].Trim();if($value -match '^\*\*(?<heading>.+?)\*\*'){$value=$Matches.heading};return [regex]::Replace($value,'\s+',' ')}
+   }
+  }
+ }catch{}
+ return ''
 }
 
 function Plan-Progress($steps, [int]$fallback) {
@@ -2534,7 +2599,7 @@ function Codex-Tasks {
   $started=[DateTime](Prop $threadState "StartedUtc" ([DateTime]::MinValue))
   $activityGenerated=$uncertain;$activityObserved=$false
   $activity = if($uncertain){
-   $observed=if($startKey.StartsWith('turn:',[StringComparison]::Ordinal)){Codex-Activity $id $startKey}else{''}
+   $observed=Codex-ObservedActivity $id $startKey
    if($observed){$activityObserved=$true;$activityGenerated=$false;$observed}else{"Статус не подтверждён"}
   }elseif($running){$currentActivity=Codex-Activity $id;if($currentActivity){$currentActivity}else{$activityGenerated=$true;"Выполняется"}}else{""}
   $items.Add([PSCustomObject]@{ Id=$id; Title=$title; Activity=$activity; ActivityGenerated=$activityGenerated; ActivityObserved=$activityObserved; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; ProgressBasis=$progressBasis; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source; PlanConfirmed=$planConfirmed })

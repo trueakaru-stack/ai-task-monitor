@@ -14,7 +14,7 @@ $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'The monitor source failed to parse.'}
 $names=@('Prop','Tr','Localized-TaskActivity','Lock-State','Find-PriorLifecycle','Thread-State','Codex-Uncertain','Session-File',
- 'Session-Workspace','Progress-Files','Manual-Tasks','Read-TailText','Codex-Plan','Codex-Activity',
+ 'Session-Workspace','Progress-Files','Manual-Tasks','Read-TailText','Codex-Plan','Codex-Activity','Read-ObservedCodexTail','Codex-ObservedActivity',
  'Plan-Progress','Codex-IndexCandidates','Codex-Tasks','Unconfirmed-Tasks','Source-Snapshot')
 $definitions=foreach($name in $names){
  $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true)
@@ -56,6 +56,8 @@ function Write-Index([object[]]$records){
 function Record([string]$id){return @{id=$id;thread_name=('Synthetic '+$id);updated_at=$script:fixtureNow.ToString('o')}}
 function New-Session([string]$id,[string]$turn){
  $path=Join-Path $script:fixtureDay ('rollout-'+$id+'.jsonl')
+ $meta=@{timestamp=[DateTime]::UtcNow.ToString('o');type='session_meta';payload=@{id=$id}}|ConvertTo-Json -Compress
+ [IO.File]::WriteAllText($path,($meta+"`n"),[Text.UTF8Encoding]::new($false))
  Write-Event $path 'task_started' $turn
  [IO.File]::WriteAllText((Join-Path $lockDirectory ($id+'.lock')),'',[Text.UTF8Encoding]::new($false))
  return $path
@@ -141,21 +143,37 @@ Write-Event $pathB 'task_complete' 'turn-b'
 $completed=Source-Snapshot
 Require (@($completed.Tasks|Where-Object Id -eq 'task-b').Count -eq 0 -and @($completed.PartialData) -contains 'Codex') 'A matched terminal or the incomplete-source warning was mishandled.'
 
-# Paginated ItemCompleted carries thread and turn identity; legacy reasoning
-# without that identity cannot be attributed to a particular turn.
+# Paginated ItemCompleted carries thread and turn identity. Legacy commentary
+# is displayed only as a record from a verified session file, not as a turn.
 $paginatedId='00000000-0000-0000-0000-000000000101';$paginatedTurn='00000000-0000-0000-0000-000000000102'
 $paginated=New-Session $paginatedId $paginatedTurn
 $paginatedItem=@{timestamp=[DateTime]::UtcNow.ToString('o');type='event_msg';payload=@{type='item_completed';thread_id=$paginatedId;turn_id=$paginatedTurn;item=@{type='Reasoning';id='reasoning-1';summary_text=@('Paginated observation');raw_content=@()}}}|ConvertTo-Json -Compress -Depth 8
 [IO.File]::AppendAllText($paginated,($paginatedItem+"`n"),[Text.UTF8Encoding]::new($false))
 $legacyId='00000000-0000-0000-0000-000000000201';$legacyTurn='00000000-0000-0000-0000-000000000202'
 $legacy=New-Session $legacyId $legacyTurn
-$legacyItem=@{timestamp=[DateTime]::UtcNow.ToString('o');type='event_msg';payload=@{type='agent_reasoning';text='Legacy message without turn identity'}}|ConvertTo-Json -Compress
+$legacyItem=@{timestamp=[DateTime]::UtcNow.ToString('o');type='event_msg';payload=@{type='agent_message';phase='commentary';message='Legacy message from log'}}|ConvertTo-Json -Compress
 [IO.File]::AppendAllText($legacy,($legacyItem+"`n"),[Text.UTF8Encoding]::new($false))
 Write-Index @((Record $paginatedId),(Record $legacyId))
 $both=Source-Snapshot
 $paged=@($both.Tasks|Where-Object Id -eq $paginatedId);$legacyCard=@($both.Tasks|Where-Object Id -eq $legacyId)
 Require ($paged.Count -eq 1 -and $paged[0].ActivityObserved -and $paged[0].Activity -eq 'Paginated observation' -and -not $paged[0].Active) 'A paginated item with matching thread and turn was not shown as observed.'
-Require ($legacyCard.Count -eq 1 -and -not $legacyCard[0].ActivityObserved -and $legacyCard[0].Activity -eq 'Статус не подтверждён') 'A legacy message without turn identity was attributed to a turn.'
+Require ($legacyCard.Count -eq 1 -and $legacyCard[0].ActivityObserved -and $legacyCard[0].Activity -eq 'Legacy message from log' -and -not $legacyCard[0].Active) 'A completed legacy commentary was not shown as an unconfirmed log observation.'
+$pendingLegacy=@{timestamp=[DateTime]::UtcNow.AddHours(-1).ToString('o');type='event_msg';payload=@{type='agent_message';phase='commentary';message='Delayed legacy message'}}|ConvertTo-Json -Compress
+[IO.File]::AppendAllText($legacy,$pendingLegacy,[Text.UTF8Encoding]::new($false))
+$pendingSnapshot=Source-Snapshot;$pendingCard=@($pendingSnapshot.Tasks|Where-Object Id -eq $legacyId)
+Require ($pendingCard.Count -eq 1 -and $pendingCard[0].Activity -eq 'Legacy message from log') 'An incomplete final line was treated as a finished commentary.'
+[IO.File]::AppendAllText($legacy,"`n",[Text.UTF8Encoding]::new($false))
+$delayedSnapshot=Source-Snapshot;$delayedCard=@($delayedSnapshot.Tasks|Where-Object Id -eq $legacyId)
+Require ($delayedCard.Count -eq 1 -and $delayedCard[0].Activity -eq 'Delayed legacy message' -and -not $delayedCard[0].Active -and $delayedCard[0].Status -eq 'Статус не подтверждён') 'A delayed completed record was misrepresented or lost.'
+$wrongId='00000000-0000-0000-0000-000000000301';$wrongTurn='00000000-0000-0000-0000-000000000302'
+$wrongPath=New-Session $wrongId $wrongTurn
+$wrongMeta=@{type='session_meta';payload=@{id='different-session'}}|ConvertTo-Json -Compress
+[IO.File]::WriteAllText($wrongPath,($wrongMeta+"`n"),[Text.UTF8Encoding]::new($false))
+Write-Event $wrongPath 'task_started' $wrongTurn
+[IO.File]::AppendAllText($wrongPath,($legacyItem+"`n"),[Text.UTF8Encoding]::new($false))
+Write-Index @((Record $wrongId))
+$wrongCard=@((Source-Snapshot).Tasks|Where-Object Id -eq $wrongId)
+Require ($wrongCard.Count -eq 1 -and -not $wrongCard[0].ActivityObserved) 'A message from a different session was displayed.'
 
 # A start outside the last index rows is still found from lock metadata.
 $oldPath=New-Session 'historical-lock' 'turn-old'

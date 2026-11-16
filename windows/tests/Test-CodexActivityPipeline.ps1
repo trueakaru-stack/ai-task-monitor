@@ -3,7 +3,7 @@ $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Application source could not be parsed.' }
-$names = @('Prop', 'Read-TailText', 'Lock-State', 'Thread-State', 'Codex-Uncertain', 'Codex-Plan', 'Codex-Activity', 'Plan-Progress', 'Codex-IndexCandidates', 'Codex-Tasks', 'Prioritize-Tasks')
+$names = @('Prop', 'Read-TailText', 'Lock-State', 'Thread-State', 'Codex-Uncertain', 'Codex-Plan', 'Codex-Activity', 'Read-ObservedCodexTail', 'Codex-ObservedActivity', 'Plan-Progress', 'Codex-IndexCandidates', 'Codex-Tasks', 'Prioritize-Tasks')
 $definitions = foreach ($name in $names) {
     $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if ($null -eq $function) { throw "Missing function: $name" }
@@ -41,6 +41,7 @@ function New-Fixture([string]$id, [string]$key, [int]$seconds, [string]$summary)
     $path = Join-Path $sessionsDirectory ($id + '.jsonl')
     $script:sessionPaths[$id] = $path
     Write-Record $sessionIndex @{id=$id;thread_name=('Synthetic '+$id);updated_at=$when}
+    Write-Record $path @{timestamp=$when;type='session_meta';payload=@{id=$id}}
     Write-Record $path @{timestamp=$when;type='event_msg';payload=@{type='task_started';turn_id=$key}}
     Write-Record $path @{timestamp=$when;type='response_item';payload=@{type='reasoning';summary=@(@{type='summary_text';text=('**'+$summary+'**')});content=@(@{text='PRIVATE_REASONING'})}}
     Write-Record $path @{timestamp=$when;type='event_msg';payload=@{type='item_completed';thread_id=$id;turn_id=$key;item=@{type='Reasoning';id='reasoning-1';summary_text=@('**'+$summary+'**');raw_content=@()}}}
