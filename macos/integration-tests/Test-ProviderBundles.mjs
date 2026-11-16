@@ -20,7 +20,7 @@ const rootTemp = await realpath(tmpdir());
 const scratch = await mkdtemp(join(rootTemp, 'aitm-provider-bundles-'));
 try {
   assert.equal(await realpath(scratch), scratch);
-  for (const file of ['package.json', 'deepseek-plugin.js', 'provider-events.mjs', 'provider-observers.mjs', 'provider-transport.mjs']) {
+  for (const file of ['package.json', 'deepseek-plugin.js', 'provider-events.mjs', 'provider-observers.mjs', 'provider-transport.mjs', 'provider-v2-sender.mjs']) {
     await copyFile(new URL(file, root), join(scratch, file));
   }
   const profileFile = join(scratch, 'monitor-profile.json');
