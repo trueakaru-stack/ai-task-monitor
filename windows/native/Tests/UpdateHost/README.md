@@ -17,9 +17,11 @@ not appear after shutdown.
 The test writes twelve synthetic frames under a new GitHub-hosted runner-temp
 directory: Russian and English, light and dark, full and compact. Full frames
 show the existing dialog; compact frames show the deferred state. Four further
-frames follow synthetic Tab navigation to the download button. The presence
-of a visible focus indicator must still be checked from the rendered frames.
-These frames
+frames follow Tab navigation to the download button. The test first tries
+native keyboard input only when its own offscreen window is foreground in the
+disposable hosted runner; it falls back to a synthetic WPF key event otherwise.
+The log reports how many frames used native Tab. The presence of a visible
+focus indicator must still be checked from the rendered frames. These frames
 do not constitute visual acceptance against the approved reference. No real
 network, user settings, installation, package download or live update is tested.
 

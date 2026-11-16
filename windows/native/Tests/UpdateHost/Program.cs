@@ -3,12 +3,14 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Markup;
+using System.Windows.Interop;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -27,6 +29,11 @@ internal static class Program
     private const string Url = "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.7-alpha/AITaskMonitorSetup-0.2.7-alpha.exe";
     private static string root = "";
     private static int checks;
+    private static int nativeTabs;
+
+    [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extraInfo);
 
     private static void Check(bool condition, string message)
     {
@@ -146,6 +153,30 @@ internal static class Program
             foreach (T child in Visible<T>(VisualTreeHelper.GetChild(parent, i))) yield return child;
     }
 
+    // Runs only after RequireHosted. Never inject a key unless this test window
+    // is the foreground window of the disposable runner.
+    private static bool TryNativeTab(Window window, Button later, Button download)
+    {
+        IntPtr handle = new WindowInteropHelper(window).Handle;
+        if (handle == IntPtr.Zero || !window.Activate() || !SetForegroundWindow(handle) ||
+            GetForegroundWindow() != handle || !later.Focus() || !later.IsKeyboardFocused ||
+            GetForegroundWindow() != handle) return false;
+        keybd_event(0x09, 0x0f, 0, UIntPtr.Zero);
+        keybd_event(0x09, 0x0f, 0x0002, UIntPtr.Zero);
+        var frame = new DispatcherFrame();
+        long started = Stopwatch.GetTimestamp();
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(20) };
+        timer.Tick += (_, _) =>
+        {
+            if (download.IsKeyboardFocused || GetForegroundWindow() != handle ||
+                Stopwatch.GetElapsedTime(started) >= TimeSpan.FromSeconds(1)) frame.Continue = false;
+        };
+        timer.Start();
+        try { Dispatcher.PushFrame(frame); }
+        finally { timer.Stop(); }
+        return download.IsKeyboardFocused && GetForegroundWindow() == handle;
+    }
+
     private static void Capture(Window window, string name)
     {
         window.UpdateLayout();
@@ -214,15 +245,19 @@ internal static class Program
                 Button later = Find<Button>(window, "UpdateLaterButton");
                 Button download = Find<Button>(window, "UpdateDownloadButton");
                 Check(later.Focus() && later.IsKeyboardFocused, "The later button did not receive keyboard focus.");
-                PresentationSource presentation = PresentationSource.FromVisual(later)
-                    ?? throw new InvalidOperationException("The synthetic window has no presentation source.");
-                var tab = new KeyEventArgs(Keyboard.PrimaryDevice, presentation, Environment.TickCount, Key.Tab)
+                if (TryNativeTab(window, later, download)) nativeTabs++;
+                else
                 {
-                    RoutedEvent = Keyboard.KeyDownEvent,
-                    Source = later
-                };
-                InputManager.Current.ProcessInput(tab);
-                WaitUntil(() => download.IsKeyboardFocused, "Synthetic Tab did not move focus to download.");
+                    PresentationSource presentation = PresentationSource.FromVisual(later)
+                        ?? throw new InvalidOperationException("The synthetic window has no presentation source.");
+                    var tab = new KeyEventArgs(Keyboard.PrimaryDevice, presentation, Environment.TickCount, Key.Tab)
+                    {
+                        RoutedEvent = Keyboard.KeyDownEvent,
+                        Source = later
+                    };
+                    InputManager.Current.ProcessInput(tab);
+                    WaitUntil(() => download.IsKeyboardFocused, "Synthetic Tab did not move focus to download.");
+                }
                 bool rendered = false;
                 window.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => rendered = true));
                 WaitUntil(() => rendered, "The focused WPF frame did not render.");
@@ -323,6 +358,7 @@ internal static class Program
             Store();
             NonBlockingStop();
             Console.WriteLine($"Synthetic update host: {checks} checks passed; 12 screenshots written.");
+            Console.WriteLine($"Native Tab reached the download button in {nativeTabs}/4 focused frames.");
             return 0;
         }
         finally { app.Shutdown(); }
