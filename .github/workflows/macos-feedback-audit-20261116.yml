@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [capture, direct]
+        mode: [draw, delay]
     runs-on: macos-15
     timeout-minutes: 10
     env:
@@ -37,11 +37,3 @@ jobs:
           export AITM_FEEDBACK_SYNTHETIC_ROOT="$(mktemp -d "$RUNNER_TEMP/aitm-feedback-XXXXXXXX")"
           export AITM_FEEDBACK_SYNTHETIC_CI=1
           swift test --filter FeedbackAlignmentTests
-      - name: Upload settings previews
-        if: ${{ !cancelled() && matrix.mode == 'capture' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-feedback-${{ matrix.mode }}
-          path: ${{ runner.temp }}/aitm-feedback-*/feedback-test-host.png
-          if-no-files-found: error
-          retention-days: 7
