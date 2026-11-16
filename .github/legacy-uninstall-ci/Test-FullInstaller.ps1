@@ -14,6 +14,23 @@ function New-IsolatedStart([string]$file,[hashtable]$values){
     foreach($key in $values.Keys){$start.Environment[$key]=[string]$values[$key]}
     return $start
 }
+function Get-NativeWindowSummary([int]$processId){
+    $windows=[Collections.Generic.List[string]]::new()
+    $callback=[FallbackTestNative+EnumWindowsCallback]{
+        param([IntPtr]$handle,[IntPtr]$parameter)
+        $owner=[uint32]0
+        [void][FallbackTestNative]::GetWindowThreadProcessId($handle,[ref]$owner)
+        if($owner -eq $processId){
+            $title=[Text.StringBuilder]::new(512);$className=[Text.StringBuilder]::new(256)
+            [void][FallbackTestNative]::GetWindowText($handle,$title,$title.Capacity)
+            [void][FallbackTestNative]::GetClassName($handle,$className,$className.Capacity)
+            $windows.Add($className.ToString()+':'+$title.ToString()+':visible='+[FallbackTestNative]::IsWindowVisible($handle))
+        }
+        return $true
+    }
+    [void][FallbackTestNative]::EnumWindows($callback,[IntPtr]::Zero)
+    return ($windows -join ' | ')
+}
 function Find-Window([Diagnostics.Process]$process,[int]$seconds){
     $idCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,$process.Id)
     $nameCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,'AI task monitor')
@@ -30,7 +47,7 @@ function Find-Window([Diagnostics.Process]$process,[int]$seconds){
     $otherWindows=[Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children,$idCondition)
     $details=@(foreach($item in $otherWindows){$item.Current.ClassName+':'+$item.Current.Name})
     $children=@(Get-CimInstance Win32_Process -Filter ('ParentProcessId = '+$process.Id) -Property Name|ForEach-Object {$_.Name})
-    Write-Warning ('Window diagnostic: alive='+(-not $process.HasExited)+'; UIA windows='+($details -join ' | ')+'; child process names='+($children -join ','))
+    Write-Warning ('Window diagnostic: alive='+(-not $process.HasExited)+'; UIA windows='+($details -join ' | ')+'; native windows='+(Get-NativeWindowSummary $process.Id)+'; child process names='+($children -join ','))
     throw 'The synthetic process window was not found in time.'
 }
 function Get-Names($window){
@@ -230,6 +247,20 @@ try{
             $observedErr=if($probeErr.IsCompleted){$probeErr.Result}else{'<stream still open>'}
             Write-Warning ('Direct installed-script diagnostic: exited='+$finished+'; stdout='+$observedOut+'; stderr='+$observedErr)
         }finally{$probeMonitor.Dispose()}
+        # Positive control in the same disposable profile and hidden-window
+        # process mode; this opens no agent or user data.
+        $controlCode='Add-Type -AssemblyName PresentationFramework; $window=New-Object Windows.Window; $window.Title="AI task monitor"; [void]$window.ShowDialog()'
+        $control=New-IsolatedStart $SystemPowerShell $values
+        foreach($arg in @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-Sta','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($controlCode)))){[void]$control.ArgumentList.Add($arg)}
+        $controlProcess=[Diagnostics.Process]::Start($control)
+        try{
+            $controlVisible=$false
+            try{$controlWindow=Find-Window $controlProcess 20;$controlVisible=$null -ne $controlWindow}catch{}
+            Write-Warning ('Synthetic WPF positive control: UIA window found='+$controlVisible+'; native windows='+(Get-NativeWindowSummary $controlProcess.Id))
+        }finally{
+            if(-not $controlProcess.HasExited){$controlProcess.Kill();[void]$controlProcess.WaitForExit(10000)}
+            $controlProcess.Dispose()
+        }
         # Insert checkpoints only into a synthetic copy in the fixture. The
         # installed resource itself remains unchanged.
         $checkpoint=Join-Path $FixtureRoot 'startup-checkpoints.txt'
@@ -271,9 +302,15 @@ try{
                 if([IO.File]::Exists($checkpoint) -and [IO.File]::ReadAllText($checkpoint).Contains('before-show-dialog')){break}
                 Start-Sleep -Milliseconds 200
             }
+            $reached=[IO.File]::Exists($checkpoint) -and [IO.File]::ReadAllText($checkpoint).Contains('before-show-dialog')
+            $instrumentedVisible=$false
+            if($reached -and -not $instrumentedProcess.HasExited){
+                try{$instrumentedWindow=Find-Window $instrumentedProcess 15;$instrumentedVisible=$null -ne $instrumentedWindow}catch{}
+            }
+            $nativeSummary=if(-not $instrumentedProcess.HasExited){Get-NativeWindowSummary $instrumentedProcess.Id}else{'process exited'}
             if(-not $instrumentedProcess.HasExited){$instrumentedProcess.Kill();[void]$instrumentedProcess.WaitForExit(10000)}
             $observed=if([IO.File]::Exists($checkpoint)){[IO.File]::ReadAllLines($checkpoint) -join ', '}else{'none'}
-            Write-Warning ('Synthetic instrumented startup checkpoints: '+$observed)
+            Write-Warning ('Synthetic instrumented startup checkpoints: '+$observed+'; UIA window found='+$instrumentedVisible+'; native windows='+$nativeSummary)
         }finally{$instrumentedProcess.Dispose()}
         throw
     }
