@@ -87,6 +87,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
           "$task_run" /usr/bin/true
           if "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read was not denied.' >&2; exit 1; fi
@@ -100,6 +101,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
           "$AITM_TEST_TASK_ROOT/run-isolated" "$AITM_TEST_PYTHON_BIN" -I -S -B \
             "$AITM_TEST_TASK_ROOT/source/macos/integration-tests/StageWindowGroupSyntheticAudit.py"
       - name: Build the real WindowGroup under strict isolation
@@ -108,9 +110,9 @@ jobs:
           set -euo pipefail
           cd "$AITM_TEST_TASK_ROOT/source/macos"
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
-          "$task_run" swift build --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" \
+          "$task_run" swift build --disable-sandbox --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" \
             --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security"
-          task_bin="$("$task_run" swift build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" \
+          task_bin="$("$task_run" swift build --disable-sandbox --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" \
             --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
           test -x "$task_bin/AITaskMonitor"
           printf 'AITM_TEST_APP=%s\n' "$task_bin/AITaskMonitor" >> "$GITHUB_ENV"
@@ -119,6 +121,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
           for task_mode in light dark; do
             "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/env "AITM_SYNTHETIC_APPEARANCE=$task_mode" "$AITM_TEST_APP" &
             task_pid=$!
