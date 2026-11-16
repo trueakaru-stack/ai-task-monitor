@@ -4,9 +4,9 @@
 
 ## Русский
 
-AI Task Monitor — бесплатное приложение для Windows 11 и macOS, которое помогает следить за задачами Codex и Claude Code в одном окне.
+AI Task Monitor — бесплатное приложение для Windows 11 и macOS, которое помогает следить за локальными задачами Codex и Claude Code в одном окне.
 
-- Показывает активные задачи и доступную информацию о текущем действии.
+- Показывает доступные задачи и сведения о действиях; неподтверждённый статус отмечает отдельно.
 - Если агент опубликовал план, отображает его этапы и долю выполненных этапов. Одновременно в карточке видно до пяти этапов; остальные можно прокрутить.
 - Без плана показывает доступную активность; процент не выводится, если данных для оценки недостаточно. Приблизительная оценка помечается знаком `≈`.
 - Компактное окно можно держать поверх других окон и переключать задачи; настройки доступны в развёрнутом режиме.
@@ -30,9 +30,9 @@ AI Task Monitor — бесплатное приложение для Windows 11 
 
 ## English
 
-AI Task Monitor is a free Windows 11 and macOS app for following Codex and Claude Code tasks in one window.
+AI Task Monitor is a free Windows 11 and macOS app for following local Codex and Claude Code tasks in one window.
 
-- Shows active tasks and available information about their current action.
+- Shows available tasks and activity, marking unconfirmed status separately.
 - When an agent publishes a plan, shows its steps and the share of completed steps. Up to five steps are visible per card; the rest can be scrolled.
 - Without a plan, shows available activity and omits the percentage when there is not enough information to estimate it. Estimated values use `≈`.
 - A compact window can stay above other windows and switch between tasks; settings are available in the expanded view.
