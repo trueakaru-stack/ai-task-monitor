@@ -2639,7 +2639,6 @@ function Codex-Tasks {
   $threadState = Thread-State $id $unindexed
   if($threadState.State -in @('completed','interrupted')){$script:codexTerminated[$id]=$true}
   $eventActive = $threadState.State -eq "active"
-  if($unindexed -and $threadState.State -eq 'unknown' -and $threadState.HasStartMarker){$script:observedCodex[$id]=$true}
   $uncertain = Codex-Uncertain $id $threadState
   if($threadState.State -in @("interrupted","unobserved")){continue}
   $override = if ($manual.ContainsKey($id)) { $manual[$id] } elseif ($manual.ContainsKey("title:$title")) { $manual["title:$title"] } else { $null }

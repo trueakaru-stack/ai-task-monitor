@@ -227,6 +227,10 @@ try{
   @($discovered|Where-Object {$_.id -in @($badId,$partialId,$duplicateId)}).Count -eq 0 -and
   $script:unindexedScan.CheckedFiles -le 256 -and $script:unindexedScan.BytesRead -le 4194304) 'Invalid, incomplete, ambiguous or oversized discovery was accepted.'
  $noIndex=Source-Snapshot
+ Require (@($noIndex.Tasks|Where-Object Id -eq $noIndexId).Count -eq 0 -and
+  @($noIndex.PartialData) -contains 'Codex') 'An old unobserved, unlocked rollout was treated as an active task.'
+ [IO.File]::AppendAllText($noIndexPath,($legacyItem+"`n"),[Text.UTF8Encoding]::new($false))
+ $noIndex=Source-Snapshot
  $card=@($noIndex.Tasks|Where-Object Id -eq $noIndexId)
  Require ($card.Count -eq 1 -and -not $card[0].Active -and $card[0].Status -eq 'Статус не подтверждён' -and
   $card[0].TitleGenerated -and $card[0].Title -ceq 'Задача Codex' -and $card[0].ActivityObserved -and
@@ -237,11 +241,28 @@ try{
  Require ((Localized-TaskTitle $userTitle) -ceq 'Задача Codex') 'A user-provided Codex title was translated.'
  $script:resolvedLanguage='ru'
  Require ((Localized-TaskTitle $card[0]) -ceq 'Задача Codex') 'The generated Russian Codex title was changed.'
+ $longId='10000000-0000-0000-0000-000000000006'
+ $longTurn='10000000-0000-0000-0000-000000000007'
+ $longUnindexed=Join-Path $script:fixtureDay ('rollout-'+$filenameTime+'-'+$longId+'.jsonl')
+ $longMeta=@{type='session_meta';payload=@{id=$longId;source='exec'}}|ConvertTo-Json -Compress
+ [IO.File]::WriteAllText($longUnindexed,($longMeta+"`n"),[Text.UTF8Encoding]::new($false))
+ Write-Event $longUnindexed 'task_started' $longTurn
+ $filler='{"type":"event_msg","payload":{"type":"token_count","padding":"'+('x'*700000)+'"}}'+"`n"
+ for($i=0;$i -lt 4;$i++){[IO.File]::AppendAllText($longUnindexed,$filler,[Text.UTF8Encoding]::new($false))}
+ $script:unindexedScan=$null
+ $longSnapshot=Source-Snapshot
+ Require (@($longSnapshot.Tasks|Where-Object {$_.Id -eq $longId -and -not $_.Active -and $_.Status -eq 'Статус не подтверждён'}).Count -eq 1) 'A large freshly updated rollout without a lock lost its bounded start marker.'
 }finally{[IO.File]::Move($savedIndex,$sessionIndex)}
 Write-Index @((Record $paginatedId))
 $combined=Source-Snapshot
 Require (@($combined.Tasks|Where-Object Id -eq $paginatedId).Count -eq 1 -and
  @($combined.Tasks|Where-Object Id -eq $noIndexId).Count -eq 1) 'An existing index hid an unindexed session or its indexed neighbor.'
+[IO.File]::WriteAllText($sessionIndex,'{"id":"incomplete"}',[Text.UTF8Encoding]::new($false))
+$brokenIndex=Source-Snapshot
+Require (@($brokenIndex.Unavailable) -contains 'Codex' -and
+ @($brokenIndex.Tasks|Where-Object {$_.Id -eq $noIndexId -and -not $_.Active}).Count -eq 1 -and
+ @($brokenIndex.Tasks|Where-Object {$_.Id -eq $paginatedId -and -not $_.Active}).Count -eq 1) 'A damaged index hid previously visible tasks or its warning.'
+Write-Index @((Record $paginatedId))
 Write-Event $noIndexPath 'task_complete' $noIndexTurn
 $finished=Source-Snapshot
 Require (@($finished.Tasks|Where-Object Id -eq $noIndexId).Count -eq 0) 'A matching terminal event did not hide an unindexed task.'
