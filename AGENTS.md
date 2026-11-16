@@ -1,5 +1,6 @@
 # Windows .NET test safety
 
+- Do not invoke bare `python` or `py` on the user's Windows machine: these commands can resolve to Python Install Manager and start an installation or update. Use PowerShell/.NET APIs, or first verify an existing interpreter's explicit path and ensure it is not an installer alias. An isolated hosted runner may use its verified Python toolchain.
 - Never change the persistent user or machine `PATH` while running tests.
 - Set `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0` in every process that launches `dotnet`, including CI jobs and nested child environments rebuilt from an allowlist. A separate `DOTNET_CLI_HOME` alone does not prevent the SDK from changing the user's `PATH`.
 - Before reusing scripts from the adjacent `AI Task Monitor Audit` directory, inspect their complete process environment. Many historical copies do not include this protection, and inheriting the flag from a parent is insufficient when a script clears the child environment.
