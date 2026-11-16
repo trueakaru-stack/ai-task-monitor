@@ -977,6 +977,21 @@ Check(coincidentTask.Unconfirmed && !coincidentTask.PlanConfirmed &&
     coincidentTask.Steps.All(step => step.status == "unknown"),
     "A clean stop and simultaneous source loss must keep prior titles unconfirmed for a later observation.");
 
+
+var intactThenLoss = new SessionReader();
+intactThenLoss.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
+intactThenLoss.Read(complete + completeStop, "", now.AddSeconds(2), DateTime.MinValue.ToUniversalTime());
+var activeBeforeGap = intactThenLoss.Read(complete + completeStop + resumedAfterCoincidentLoss, "", now.AddSeconds(5),
+    DateTime.MinValue.ToUniversalTime()).Single();
+Check(activeBeforeGap.Steps.Any(step => step.title == "First step") && !activeBeforeGap.PlanConfirmed,
+    "An intact history after a stop must retain its observed names without confirming the new plan.");
+var activeAfterGap = intactThenLoss.Read(sourceLossMarker + resumedAfterCoincidentLoss, "", now.AddSeconds(5),
+    DateTime.MinValue.ToUniversalTime()).Single();
+Check(activeAfterGap.Unconfirmed && !activeAfterGap.PlanConfirmed &&
+    activeAfterGap.Steps.Any(step => step.title == "First step") &&
+    activeAfterGap.Steps.All(step => step.status == "unknown"),
+    "Loss after a later prompt must not erase previously observed stopped names.");
+
 var cappedHistory = new SessionReader();
 string Retarget(string value, string id) => value.Replace("\"observed\"", "\"" + id + "\"", StringComparison.Ordinal);
 for (int index = 0; index < 256; index++)
@@ -1010,19 +1025,25 @@ string cappedFile = Path.Combine(work, "stopped-cap-pending.jsonl");
 File.WriteAllText(cappedFile, "", utf8);
 using (var cappedSource = new ClaudeFileSource(cappedFile, null, DateTime.MinValue.ToUniversalTime()))
 {
+    int firstUnavailable = -1;
     for (int index = 0; index < 257; index++)
     {
         string id = "file-cap-" + index;
         File.AppendAllText(cappedFile, Retarget(complete, id), utf8);
         _ = cappedSource.Poll(ClaudeConnection.Connected, now);
         File.AppendAllText(cappedFile, Retarget(completeStop, id), utf8);
-        _ = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
+        ClaudeSourceSnapshot stopped = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
+        if (stopped.Unavailable && firstUnavailable < 0) firstUnavailable = index;
     }
     string returnEvent = JsonSerializer.Serialize(new Dictionary<string, object> {
         ["session_id"] = "file-cap-0", ["timestamp"] = now.AddSeconds(3).ToString("O"),
         ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
     File.AppendAllText(cappedFile, returnEvent, utf8);
     ClaudeSourceSnapshot returned = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(4));
+    Console.WriteLine("Synthetic hidden-history state: firstUnavailable=" + firstUnavailable +
+        ", unavailable=" + returned.Unavailable + ", loss=" + cappedSource.HasObservedSourceLoss +
+        ", count=" + returned.Tasks.Count + ", taskUnconfirmed=" + returned.Tasks.FirstOrDefault()?.Unconfirmed +
+        ", planIncomplete=" + returned.Tasks.FirstOrDefault()?.RetainedPlanIncomplete);
     Check(!returned.Unavailable && returned.Tasks.Single().Unconfirmed &&
         returned.Tasks.Single().RetainedPlanIncomplete,
         "A returned session with evicted names must not make the whole source unavailable.");
