@@ -41,7 +41,7 @@ function Find-Window([Diagnostics.Process]$process,[int]$seconds){
         if($clock.ElapsedMilliseconds-$lastNative -ge 1000){
             $lastNative=$clock.ElapsedMilliseconds
             $native=Get-NativeWindowSummary $process.Id
-            if($firstNative -lt 0 -and $native.Contains('AI task monitor:visible=True')){$firstNative=$clock.ElapsedMilliseconds}
+            if($firstNative -lt 0 -and $null -ne $native -and $native.Contains('AI task monitor:visible=True')){$firstNative=$clock.ElapsedMilliseconds}
         }
         $found=[Windows.Automation.AutomationElement]::RootElement.FindFirst([Windows.Automation.TreeScope]::Children,$condition)
         if($null -ne $found -and $found.Current.Name -ceq 'AI task monitor'){
@@ -263,6 +263,13 @@ try{
     try{
         $monitorWindow=Find-Window $monitor 40
     }catch{
+        $strictFailure=$_
+        $lateFound=$false
+        if(-not $monitor.HasExited){
+            try{$lateWindow=Find-Window $monitor 50;$lateFound=$null -ne $lateWindow}catch{}
+        }
+        $sinceStart=if(-not $monitor.HasExited){[Math]::Round(([DateTime]::UtcNow-$monitor.StartTime.ToUniversalTime()).TotalSeconds,1)}else{-1}
+        Write-Warning ('Extended observation of the same monitor: window found='+$lateFound+'; seconds since process start='+$sinceStart+'; strict 40-second check remains failed.')
         if(-not $monitor.HasExited){$monitor.Kill();[void]$monitor.WaitForExit(10000)}
         $monitor.Dispose();$monitor=$null
         # Diagnostic only: repeat the installed launcher's exact PowerShell
@@ -274,11 +281,13 @@ try{
         $probeMonitor=[Diagnostics.Process]::Start($direct)
         try{
             $probeOut=$probeMonitor.StandardOutput.ReadToEndAsync();$probeErr=$probeMonitor.StandardError.ReadToEndAsync()
-            $finished=$probeMonitor.WaitForExit(20000)
+            $probeWindowFound=$false
+            try{$probeWindow=Find-Window $probeMonitor 30;$probeWindowFound=$null -ne $probeWindow}catch{}
+            $finished=$probeMonitor.HasExited
             if(-not $finished){$probeMonitor.Kill();[void]$probeMonitor.WaitForExit(10000)}
             $observedOut=if($probeOut.IsCompleted){$probeOut.Result}else{'<stream still open>'}
             $observedErr=if($probeErr.IsCompleted){$probeErr.Result}else{'<stream still open>'}
-            Write-Warning ('Direct installed-script diagnostic: exited='+$finished+'; stdout='+$observedOut+'; stderr='+$observedErr)
+            Write-Warning ('Direct installed-script diagnostic: UIA window found='+$probeWindowFound+'; exited='+$finished+'; stdout='+$observedOut+'; stderr='+$observedErr)
         }finally{$probeMonitor.Dispose()}
         # Insert checkpoints only into a synthetic copy in the fixture. The
         # installed resource itself remains unchanged.
@@ -332,7 +341,7 @@ try{
             $observed=if([IO.File]::Exists($checkpoint)){[IO.File]::ReadAllLines($checkpoint) -join ', '}else{'none'}
             Write-Warning ('Synthetic instrumented startup checkpoints: '+$observed+'; UIA window found='+$instrumentedVisible+'; native windows='+$nativeSummary)
         }finally{$instrumentedProcess.Dispose()}
-        throw
+        throw $strictFailure
     }
     Write-Output 'Synthetic monitor window found.'
     Check ($monitorWindow.Current.Name -ceq 'AI task monitor') 'The synthetic monitor window did not open.'
