@@ -78,6 +78,9 @@ async function run() {
       let request;
       try { request = JSON.parse(body); } catch { res.writeHead(400); res.end(); return; }
       const messages = request.messages || [];
+      if (requests <= 6) console.log('Synthetic model shape ' + requests + ': ' + messages.map(m =>
+        m.role + '[' + (Array.isArray(m.content) ? m.content.map(c => c && c.type || '?').join(',') : typeof m.content) + ']'
+      ).join(' '));
       let lastPrompt = -1;
       for (let i = 0; i < messages.length; i++) {
         const m = messages[i];
