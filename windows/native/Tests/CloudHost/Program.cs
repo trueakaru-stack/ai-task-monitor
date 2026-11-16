@@ -234,6 +234,30 @@ internal static class Program
         finally { window.Close(); }
     }
 
+    private static void CloudAndClaudeIsolation()
+    {
+        Mode("pages");
+        var (window, view) = Open("active", "en", "dark");
+        using var host = new CloudSourcePump(window.Dispatcher, view.ApplyCloudSource, RunFixture,
+            pollInterval: TimeSpan.FromMinutes(1));
+        try
+        {
+            host.SetEnabled(true);
+            WaitUntil(() => !host.InFlight && view.CurrentTasks.Count == 4, "cloud scan completes before Claude update");
+            view.ApplyClaudeSource(new AITaskMonitor.Claude.ClaudeSourceSnapshot([], true));
+            Check(view.CurrentTasks.Count == 3 && view.CurrentTasks.Count(task => task.Provider == "codex") == 3 &&
+                  HasText(window, "No data from Claude Code"), "Claude loss retains local and cloud Codex tasks");
+            host.RequestRefresh();
+            WaitUntil(() => !host.InFlight, "cloud refresh completes after Claude loss");
+            Check(view.CurrentTasks.Count == 3 && HasText(window, "No data from Claude Code"),
+                "cloud refresh does not clear Claude source warning");
+            view.ApplyClaudeSource(new AITaskMonitor.Claude.ClaudeSourceSnapshot([], false));
+            Check(view.CurrentTasks.Count == 3 && !HasText(window, "No data from Claude Code"),
+                "Claude recovery keeps both Codex sources");
+        }
+        finally { window.Close(); }
+    }
+
     private static void LateAfterReconnect()
     {
         Mode("pages");
@@ -603,6 +627,7 @@ internal static class Program
                 foreach (string theme in new[] { "dark", "light" })
                     Flow(language, theme);
             EmptyCoverage();
+            CloudAndClaudeIsolation();
             LateAfterReconnect();
             DeadlineAndSlot();
             AnotherOwnerCannotOverlap();
