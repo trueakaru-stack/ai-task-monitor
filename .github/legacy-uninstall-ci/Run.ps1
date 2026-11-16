@@ -26,6 +26,7 @@ try {
     $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $results=[Collections.Generic.List[object]]::new()
     foreach ($scenario in @('nested-junction','root-junction')) {
+        Write-Output ('Starting synthetic scenario: ' + $scenario)
         $case=[IO.Path]::GetFullPath((Join-Path $root $scenario))
         $local=Join-Path $case 'local'; $profile=Join-Path $case 'profile'; $appdata=Join-Path $case 'appdata'
         $temp=Join-Path $case 'temp'; $external=Join-Path $case 'external'
@@ -66,10 +67,27 @@ try {
             if (-not [string]::IsNullOrEmpty($value)) { $values[$name]=$value }
         }
         foreach ($key in $values.Keys) { $start.Environment[$key]=[string]$values[$key] }
+        # Establish that Windows PowerShell itself starts under the same isolated environment.
+        $probe=[Diagnostics.ProcessStartInfo]::new()
+        $probe.FileName=$powershell; $probe.WorkingDirectory=$case; $probe.UseShellExecute=$false; $probe.CreateNoWindow=$true
+        $probe.Environment.Clear()
+        foreach ($key in $values.Keys) { $probe.Environment[$key]=[string]$values[$key] }
+        foreach ($arg in @('-NoProfile','-NonInteractive','-Command','exit 0')) { [void]$probe.ArgumentList.Add($arg) }
+        $probeProcess=[Diagnostics.Process]::Start($probe)
+        try {
+            if (-not $probeProcess.WaitForExit(12000)) { $probeProcess.Kill($true); throw 'Synthetic PowerShell startup timed out.' }
+            Check ($probeProcess.ExitCode -eq 0) 'Synthetic PowerShell startup failed.'
+        } finally { $probeProcess.Dispose() }
+        Write-Output 'Synthetic PowerShell startup succeeded.'
         foreach ($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$uninstaller)) { [void]$start.ArgumentList.Add($arg) }
         $process=[Diagnostics.Process]::Start($start)
         try {
-            if (-not $process.WaitForExit(30000)) { $process.Kill($true); throw 'Synthetic uninstaller timed out.' }
+            if (-not $process.WaitForExit(20000)) {
+                $children=@(Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $process.Id) | ForEach-Object { $_.Name })
+                Write-Output ('Timed-out synthetic process children: ' + ($children -join ','))
+                $process.Kill($true)
+                throw 'Synthetic uninstaller timed out.'
+            }
             $exit=$process.ExitCode
         } finally { $process.Dispose() }
         $deadline=[DateTime]::UtcNow.AddSeconds(15)
