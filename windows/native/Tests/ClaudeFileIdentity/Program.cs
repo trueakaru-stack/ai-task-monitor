@@ -50,8 +50,13 @@ var handlesSource = new ClaudeFileSource(NewPath("handle-lifetime"), null, obser
 });
 snapshot = handlesSource.Poll(ClaudeConnection.Connected, now);
 Check(!snapshot.Unavailable && snapshot.Tasks.Single().PlanConfirmed && identities == 2 &&
-    firstHandle is { IsClosed: true } && secondHandle is { IsClosed: true },
-    "The identity comparison must release both handles after the poll.");
+    firstHandle is { IsClosed: false } && secondHandle is { IsClosed: true },
+    "One shared-read anchor must remain open after a successful poll.");
+handlesSource.Dispose();
+Check(firstHandle is { IsClosed: true } && !handlesSource.IsCurrent(snapshot), "Disposal must release the anchor and invalidate snapshots.");
+bool disposedRejected = false;
+try { handlesSource.Poll(ClaudeConnection.Connected, now); } catch (ObjectDisposedException) { disposedRejected = true; }
+Check(disposedRejected, "A disposed source must reject new polls.");
 
 var failures = new (string Name, ClaudeFileIdentity? First, ClaudeFileIdentity? Second)[] {
     ("first-unavailable", null, valid),
@@ -131,5 +136,35 @@ Check(!snapshot.Unavailable && snapshot.Tasks.Count == 1 && snapshot.Tasks.Singl
 snapshot = appendSource.Poll(ClaudeConnection.Connected, now);
 Check(!snapshot.Unavailable && snapshot.Tasks.Any(x => x.Id == "late-session" && !x.Unconfirmed),
     "The subsequent poll must see the ordinary append.");
+
+foreach (bool replaceLegacy in new[] { false, true })
+{
+    string currentPath = NewPath("between-polls-current-" + replaceLegacy);
+    string legacyPath = Path.Combine(work, "between-polls-legacy-" + replaceLegacy + ".jsonl");
+    File.WriteAllText(legacyPath, "", utf8);
+    string target = replaceLegacy ? legacyPath : currentPath;
+    string next = Path.Combine(work, "between-polls-replacement-" + replaceLegacy + ".tmp");
+    using var source = new ClaudeFileSource(currentPath, replaceLegacy ? legacyPath : null, observed);
+    snapshot = source.Poll(ClaudeConnection.Connected, now);
+    Check(!snapshot.Unavailable && snapshot.Tasks.Single().PlanConfirmed,
+        "A between-polls replacement fixture must start confirmed.");
+    File.WriteAllText(next, File.ReadAllText(target, utf8), utf8);
+    File.Replace(next, target, null);
+    snapshot = source.Poll(ClaudeConnection.Connected, now);
+    Check(snapshot.Unavailable && source.HasObservedSourceLoss && snapshot.Tasks.Single().Unconfirmed &&
+          snapshot.Tasks.Single().Steps.Select(x => x.title).SequenceEqual(new[] { "First step", "Second step" }),
+          "A same-content file replacement between polls must retain known names as unconfirmed.");
+}
+
+string linkedTarget = NewPath("symbolic-target");
+string linkPath = Path.Combine(work, "symbolic-journal.jsonl");
+File.CreateSymbolicLink(linkPath, linkedTarget);
+int linkReads = 0;
+using (var linkedSource = new ClaudeFileSource(linkPath, null, observed, null, _ => linkReads++))
+{
+    snapshot = linkedSource.Poll(ClaudeConnection.Connected, now);
+    Check(snapshot.Unavailable && snapshot.Tasks.Count == 0 && linkReads == 0,
+        "A symbolic-link journal must be rejected before reading its target.");
+}
 
 Console.WriteLine($"Claude file identity: {checks} synthetic checks passed.");

@@ -7,6 +7,7 @@ using ClaudeTask = AITaskMonitor.Claude.Task;
 
 namespace AITaskMonitor.Prototype;
 
+// The pump owns its source and disposes it off the dispatcher.
 // The owner must report connection changes through this pump on the dispatcher.
 // Polling runs off that thread; verification and presentation stay ordered with
 // connection notifications on it. The application entry point does not start it.
@@ -233,5 +234,9 @@ internal sealed class ClaudeSourcePump : IDisposable
         deadline = null;
         timer.Stop();
         timer.Tick -= OnTick;
+        _ = System.Threading.Tasks.Task.Run(source.Dispose).ContinueWith(
+            completed => { _ = completed.Exception; }, System.Threading.CancellationToken.None,
+            System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted | System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously,
+            System.Threading.Tasks.TaskScheduler.Default);
     }
 }

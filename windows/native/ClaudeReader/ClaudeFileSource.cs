@@ -24,7 +24,7 @@ public sealed record ClaudeSourceSnapshot(IReadOnlyList<Task> Tasks, bool Unavai
 
 // One instance belongs to one monitor session. Paths and connection state are
 // supplied by its caller; this class does not find profiles or install hooks.
-public sealed class ClaudeFileSource
+public sealed class ClaudeFileSource : IDisposable
 {
     private const int MaximumTailBytes = 4 * 1024 * 1024;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
@@ -42,6 +42,8 @@ public sealed class ClaudeFileSource
     private bool currentSeen, legacySeen;
     private bool pendingRead, pendingLoss, connectionLoss;
     private Cursor? currentCursor, legacyCursor;
+    private SafeFileHandle? currentAnchor, legacyAnchor;
+    private bool disposed;
     private ClaudeConnection? signalledConnection;
     private long generation;
     private bool signalLoss, generationExhausted;
@@ -74,6 +76,7 @@ public sealed class ClaudeFileSource
         if (!Enum.IsDefined(connection)) throw new ArgumentOutOfRangeException(nameof(connection));
         lock (signalGate)
         {
+            ObjectDisposedException.ThrowIf(disposed, this);
             if (signalledConnection == connection) return;
             signalledConnection = connection;
             if (connection != ClaudeConnection.Connected) signalLoss = true;
@@ -125,7 +128,7 @@ public sealed class ClaudeFileSource
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         lock (signalGate)
-            return !generationExhausted && ReferenceEquals(snapshot.Owner, identity) && snapshot.Generation == generation;
+            return !disposed && !generationExhausted && ReferenceEquals(snapshot.Owner, identity) && snapshot.Generation == generation;
     }
 
     public ClaudeSourceSnapshot Poll(ClaudeConnection connection, DateTime utcNow)
@@ -141,6 +144,7 @@ public sealed class ClaudeFileSource
         if (utcNow.Kind != DateTimeKind.Utc) throw new ArgumentException("Poll time must be UTC.", nameof(utcNow));
         lock (gate)
         {
+            if (System.Threading.Volatile.Read(ref disposed)) throw new ObjectDisposedException(nameof(ClaudeFileSource));
             ConnectionSignal start = Signal();
             if (start.Connection is null) throw new InvalidOperationException("A connection must be signalled before polling.");
             Task[] before = previous;
@@ -196,8 +200,8 @@ public sealed class ClaudeFileSource
             }
             try
             {
-                Tail? current = ReadOptional(currentPath, ref currentSeen, ref currentCursor, afterFirstFileRead, readIdentity);
-                Tail? legacy = legacyPath is null ? null : ReadOptional(legacyPath, ref legacySeen, ref legacyCursor, afterFirstFileRead, readIdentity);
+                Tail? current = ReadOptional(currentPath, ref currentSeen, ref currentCursor, ref currentAnchor, afterFirstFileRead, readIdentity);
+                Tail? legacy = legacyPath is null ? null : ReadOptional(legacyPath, ref legacySeen, ref legacyCursor, ref legacyAnchor, afterFirstFileRead, readIdentity);
                 bool isPending = current?.Pending == true || legacy?.Pending == true;
                 if (current?.Discontinuity == true || legacy?.Discontinuity == true ||
                     current?.WindowMoved == true || legacy?.WindowMoved == true)
@@ -269,12 +273,32 @@ public sealed class ClaudeFileSource
     private readonly record struct Cursor(long Length, byte[] ObservedDigest, long FirstCompleteOffset);
     private readonly record struct Tail(string Text, bool Pending, Cursor Cursor, bool Discontinuity, bool WindowMoved);
 
-    private static Tail? ReadOptional(string path, ref bool seen, ref Cursor? cursor, Action<string>? afterFirstFileRead,
-        Func<SafeFileHandle, ClaudeFileIdentity?> readIdentity)
+    // Dispose may wait for an in-flight read. UI owners must call it off the dispatcher.
+    public void Dispose()
+    {
+        lock (signalGate)
+        {
+            if (!disposed)
+            {
+                System.Threading.Volatile.Write(ref disposed, true);
+                AdvanceGeneration();
+            }
+        }
+        lock (gate)
+        {
+            currentAnchor?.Dispose();
+            currentAnchor = null;
+            legacyAnchor?.Dispose();
+            legacyAnchor = null;
+        }
+    }
+
+    private static Tail? ReadOptional(string path, ref bool seen, ref Cursor? cursor, ref SafeFileHandle? anchor,
+        Action<string>? afterFirstFileRead, Func<SafeFileHandle, ClaudeFileIdentity?> readIdentity)
     {
         try
         {
-            Tail text = ReadCompleteTail(path, cursor, afterFirstFileRead, readIdentity);
+            Tail text = ReadCompleteTail(path, cursor, ref anchor, afterFirstFileRead, readIdentity);
             seen = true;
             cursor = text.Cursor;
             return text;
@@ -283,90 +307,104 @@ public sealed class ClaudeFileSource
         catch (DirectoryNotFoundException) when (!seen) { return null; }
     }
 
-    // Read the bounded window twice through independently opened handles. An
-    // append after the captured length may wait until the next poll, but a
-    // changed captured range records source loss. Matching identities are
-    // required while both handles are open; identity is not kept across polls.
-    private static Tail ReadCompleteTail(string path, Cursor? prior, Action<string>? afterFirstFileRead,
+    // Hold a metadata-only handle until the next snapshot. Compare identities
+    // while handles are open, and reopen the same objects for bounded reads.
+    // This does not establish atomicity or prove that no write was lost.
+    private static Tail ReadCompleteTail(string path, Cursor? prior, ref SafeFileHandle? anchor, Action<string>? afterFirstFileRead,
         Func<SafeFileHandle, ClaudeFileIdentity?> readIdentity)
     {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
-        long length = stream.Length;
-        int count = (int)Math.Min(length, MaximumTailBytes);
-        long start = length - count;
-        int prefix = start > 0 ? 1 : 0;
-        long readStart = start - prefix;
-        var captured = new byte[count + prefix];
-        stream.Seek(readStart, SeekOrigin.Begin);
-        stream.ReadExactly(captured);
-        afterFirstFileRead?.Invoke(path);
+        SafeFileHandle metadata = ClaudeFileIdentityReader.OpenAnchor(path);
+        bool transferred = false;
         try
         {
-            using var verify = new FileStream(path, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
-            ClaudeFileIdentity? capturedIdentity, verifiedIdentity;
+            using var stream = ClaudeFileIdentityReader.OpenRead(metadata);
+            long length = stream.Length;
+            int count = (int)Math.Min(length, MaximumTailBytes);
+            long start = length - count;
+            int prefix = start > 0 ? 1 : 0;
+            long readStart = start - prefix;
+            var captured = new byte[count + prefix];
+            stream.Seek(readStart, SeekOrigin.Begin);
+            stream.ReadExactly(captured);
+            afterFirstFileRead?.Invoke(path);
+            bool identityChanged;
             try
             {
-                capturedIdentity = readIdentity(stream.SafeFileHandle);
-                verifiedIdentity = readIdentity(verify.SafeFileHandle);
+                using SafeFileHandle verification = ClaudeFileIdentityReader.OpenAnchor(path);
+                ClaudeFileIdentity? capturedIdentity, verifiedIdentity, anchoredIdentity = null;
+                try
+                {
+                    capturedIdentity = readIdentity(metadata);
+                    verifiedIdentity = readIdentity(verification);
+                    if (anchor is not null) anchoredIdentity = readIdentity(anchor);
+                }
+                catch (Exception error) { throw new IOException("Event source identity could not be checked.", error); }
+                if (!capturedIdentity.HasValue || !verifiedIdentity.HasValue ||
+                    !capturedIdentity.Value.IsUsable || !verifiedIdentity.Value.IsUsable ||
+                    capturedIdentity.Value != verifiedIdentity.Value)
+                    throw new IOException("Event source identity changed or could not be checked.");
+                if (anchor is not null && (!anchoredIdentity.HasValue || !anchoredIdentity.Value.IsUsable))
+                    throw new IOException("Previous event source identity could not be checked.");
+                identityChanged = anchor is not null && capturedIdentity.Value != anchoredIdentity!.Value;
+                using var verify = ClaudeFileIdentityReader.OpenRead(verification);
+                if (verify.Length < length) throw new IOException("Event source shortened during reading.");
+                var repeated = new byte[captured.Length];
+                verify.Seek(readStart, SeekOrigin.Begin);
+                verify.ReadExactly(repeated);
+                if (verify.Length < length || !captured.AsSpan().SequenceEqual(repeated))
+                    throw new IOException("Event source changed during reading.");
             }
-            catch (Exception error) { throw new IOException("Event source identity could not be checked.", error); }
-            if (!capturedIdentity.HasValue || !verifiedIdentity.HasValue ||
-                !capturedIdentity.Value.IsUsable || !verifiedIdentity.Value.IsUsable ||
-                capturedIdentity.Value != verifiedIdentity.Value)
-                throw new IOException("Event source identity changed or could not be checked.");
-            if (verify.Length < length) throw new IOException("Event source shortened during reading.");
-            var repeated = new byte[captured.Length];
-            verify.Seek(readStart, SeekOrigin.Begin);
-            verify.ReadExactly(repeated);
-            if (verify.Length < length || !captured.AsSpan().SequenceEqual(repeated))
-                throw new IOException("Event source changed during reading.");
-        }
-        // Once the first open succeeded, a missing path is a read loss, not an
-        // optional source that has never existed.
-        catch (FileNotFoundException error) { throw new IOException("Event source disappeared during reading.", error); }
-        catch (DirectoryNotFoundException error) { throw new IOException("Event source disappeared during reading.", error); }
+            catch (FileNotFoundException error) { throw new IOException("Event source disappeared during reading.", error); }
+            catch (DirectoryNotFoundException error) { throw new IOException("Event source disappeared during reading.", error); }
 
-        ReadOnlySpan<byte> bytes = captured.AsSpan(prefix, count);
-        bool atLineBoundary = start == 0 || captured[0] == '\n';
-        int first = 0;
-        if (!atLineBoundary)
-        {
-            int boundary = bytes.IndexOf((byte)'\n');
-            if (boundary < 0) throw new IOException("No complete event fits in the source tail.");
-            first = boundary + 1;
-        }
-        int last = bytes.LastIndexOf((byte)'\n');
-        long firstCompleteOffset = start + first;
-        // A first bounded read has no evidence about any omitted prefix. On
-        // later reads, crossing a previously observed line has the same effect.
-        bool windowMoved = prior is { } oldWindow
-            ? firstCompleteOffset > oldWindow.FirstCompleteOffset
-            : start > 0;
-        bool discontinuity = false;
-        if (prior is { } old)
-        {
-            if (length < old.Length || old.FirstCompleteOffset < start || old.FirstCompleteOffset > old.Length)
-                discontinuity = true;
+            ReadOnlySpan<byte> bytes = captured.AsSpan(prefix, count);
+            bool atLineBoundary = start == 0 || captured[0] == '\n';
+            int first = 0;
+            if (!atLineBoundary)
+            {
+                int boundary = bytes.IndexOf((byte)'\n');
+                if (boundary < 0) throw new IOException("No complete event fits in the source tail.");
+                first = boundary + 1;
+            }
+            int last = bytes.LastIndexOf((byte)'\n');
+            long firstCompleteOffset = start + first;
+            bool windowMoved = prior is { } oldWindow
+                ? firstCompleteOffset > oldWindow.FirstCompleteOffset
+                : start > 0;
+            bool discontinuity = identityChanged;
+            if (prior is { } old)
+            {
+                if (length < old.Length || old.FirstCompleteOffset < start || old.FirstCompleteOffset > old.Length)
+                    discontinuity = true;
+                else
+                {
+                    int oldOffset = checked((int)(old.FirstCompleteOffset - start));
+                    int oldCount = checked((int)(old.Length - old.FirstCompleteOffset));
+                    byte[] oldDigest = SHA256.HashData(bytes.Slice(oldOffset, oldCount));
+                    discontinuity |= !CryptographicOperations.FixedTimeEquals(oldDigest, old.ObservedDigest);
+                }
+            }
+            byte[] digest = SHA256.HashData(bytes[first..]);
+            var cursor = new Cursor(length, digest, firstCompleteOffset);
+            Tail result;
+            if (count == 0) result = new Tail("", false, cursor, discontinuity, windowMoved);
+            else if (last < first) result = new Tail("", true, cursor, discontinuity, windowMoved);
             else
             {
-                int oldOffset = checked((int)(old.FirstCompleteOffset - start));
-                int oldCount = checked((int)(old.Length - old.FirstCompleteOffset));
-                byte[] oldDigest = SHA256.HashData(bytes.Slice(oldOffset, oldCount));
-                discontinuity = !CryptographicOperations.FixedTimeEquals(oldDigest, old.ObservedDigest);
+                string text = StrictUtf8.GetString(bytes.Slice(first, last - first + 1));
+                result = new Tail(text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text,
+                    last != bytes.Length - 1, cursor, discontinuity, windowMoved);
             }
+            SafeFileHandle? oldAnchor = anchor;
+            anchor = metadata;
+            transferred = true;
+            oldAnchor?.Dispose();
+            return result;
         }
-        byte[] digest = SHA256.HashData(bytes[first..]);
-        var cursor = new Cursor(length, digest, firstCompleteOffset);
-        if (count == 0) return new Tail("", false, cursor, discontinuity, windowMoved);
-        if (last < first)
+        finally
         {
-            return new Tail("", true, cursor, discontinuity, windowMoved);
+            if (!transferred) metadata.Dispose();
         }
-        string text = StrictUtf8.GetString(bytes.Slice(first, last - first + 1));
-        return new Tail(text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text,
-            last != bytes.Length - 1, cursor, discontinuity, windowMoved);
     }
 
     private static Task[] MergePending(IEnumerable<Task> prior, IEnumerable<Task> fresh, out bool overflow)

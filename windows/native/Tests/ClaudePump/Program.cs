@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Windows.Threading;
+using Microsoft.Win32.SafeHandles;
 using AITaskMonitor.Claude;
 using AITaskMonitor.Prototype;
 
@@ -42,6 +43,7 @@ internal static class Program
             CheckDisconnectedTimeout(dispatcher, work, events, now);
             CheckForeignFallback(work, events, now);
             CheckDisposeBeforeDelivery(dispatcher, work, events, now);
+            CheckDisposeDuringRead(dispatcher, work, events, now);
             dispatcher.InvokeShutdown();
             Console.WriteLine($"Claude dispatcher pump: {checks} synthetic checks passed.");
             return 0;
@@ -667,6 +669,41 @@ internal static class Program
             Check(refreshRejected && notificationRejected, "A closed pump accepted new work.");
         }
         finally { resultRelease.Set(); pump.Dispose(); }
+    }
+
+    private static void CheckDisposeDuringRead(Dispatcher dispatcher, string work, string events, DateTime now)
+    {
+        string path = Path.Combine(work, "dispose-during-read.jsonl");
+        File.WriteAllText(path, events, new UTF8Encoding(false));
+        using var entered = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        SafeFileHandle? captured = null;
+        int identities = 0, completed = 0, presented = 0;
+        var source = new ClaudeFileSource(path, null, DateTime.MinValue.ToUniversalTime(), null, _ =>
+        {
+            entered.Set();
+            if (!release.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException("The synthetic read was not released.");
+        }, handle =>
+        {
+            if (Interlocked.Increment(ref identities) == 1) captured = handle;
+            return ClaudeFileIdentityReader.Read(handle);
+        });
+        var pump = new ClaudeSourcePump(dispatcher, source, ClaudeConnection.Connected, _ => presented++,
+            () => now, TimeSpan.FromHours(1), afterCompletion: () => completed++);
+        try
+        {
+            pump.Start();
+            WaitUntil(() => entered.IsSet, "The synthetic read did not reach its gate.");
+            var clock = Stopwatch.StartNew();
+            pump.Dispose();
+            clock.Stop();
+            Check(clock.Elapsed < TimeSpan.FromSeconds(2), "Pump disposal blocked on the read.");
+            release.Set();
+            WaitUntil(() => completed == 1 && captured is { IsClosed: true },
+                "The released read did not finish and close its retained handle.");
+            Check(presented == 0, "A disposed pump presented its late read.");
+        }
+        finally { release.Set(); pump.Dispose(); }
     }
 
     private static void WaitUntil(Func<bool> condition, string message)
