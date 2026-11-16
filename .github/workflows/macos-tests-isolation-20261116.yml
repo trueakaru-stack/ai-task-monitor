@@ -52,6 +52,7 @@ jobs:
           (version 1)
           (allow default)
           (deny file-read* (subpath (param "TASK_PROFILE")))
+          (allow file-read-metadata)
           (allow file-read* (subpath (param "TASK_NODE_ROOT")))
           (allow file-read* (subpath (param "TASK_PYTHON_ROOT")))
           (deny file-write*)
