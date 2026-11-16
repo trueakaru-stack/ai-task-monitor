@@ -30,6 +30,8 @@ namespace AITaskMonitor.Claude {
   public bool SessionEvidenceUncertain { get; set; }
   public bool PlanEvidenceUncertain { get; set; }
   public bool RetainedPlanIncomplete { get; set; }
+  // Preserve conflicting names for one transient time-ambiguous snapshot.
+  internal bool PreserveSnapshotNames { get; set; }
  }
  internal sealed class Event {
   internal DateTimeOffset Time;
@@ -552,7 +554,7 @@ namespace AITaskMonitor.Claude {
     };
     if(retainNames) foreach(Step oldName in state.TitleHistory) append(oldName);
     foreach(string id in state.StepOrder) append(state.Steps[id]);
-    result.Add(new Task { Id=state.Id, Activity=state.Activity, Updated=state.Updated.UtcDateTime, Started=state.Started.UtcDateTime, StartKey=state.StartKey, Steps=displayed.ToArray(), Unconfirmed=unconfirmed, PlanConfirmed=state.PlanConfirmed && state.PromptSeen && allStepsObserved && !pendingCreate && !state.SessionUncertain && !sourceUncertain && !unconfirmed && !planUncertain.Contains(state.Id), KnownStepCount=known, KnownDoneCount=done, UnknownStepCount=displayed.Count-known, SessionEvidenceUncertain=sessionEvidenceUncertain, PlanEvidenceUncertain=planEvidenceUncertain, RetainedPlanIncomplete=titlesIncomplete });
+    result.Add(new Task { Id=state.Id, Activity=state.Activity, Updated=state.Updated.UtcDateTime, Started=state.Started.UtcDateTime, StartKey=state.StartKey, Steps=displayed.ToArray(), Unconfirmed=unconfirmed, PlanConfirmed=state.PlanConfirmed && state.PromptSeen && allStepsObserved && !pendingCreate && !state.SessionUncertain && !sourceUncertain && !unconfirmed && !planUncertain.Contains(state.Id), KnownStepCount=known, KnownDoneCount=done, UnknownStepCount=displayed.Count-known, SessionEvidenceUncertain=sessionEvidenceUncertain, PlanEvidenceUncertain=planEvidenceUncertain, RetainedPlanIncomplete=titlesIncomplete, PreserveSnapshotNames=timeAnomaly && !sessionEvidenceUncertain && !sourceUncertain });
    }
    return result.ToArray();
   }
@@ -685,7 +687,7 @@ namespace AITaskMonitor.Claude {
     StartKey=item.StartKey, Steps=steps.ToArray(), Unconfirmed=true, PlanConfirmed=false,
     KnownStepCount=0, KnownDoneCount=0, UnknownStepCount=steps.Count,
     SessionEvidenceUncertain=item.SessionEvidenceUncertain, PlanEvidenceUncertain=item.PlanEvidenceUncertain,
-    RetainedPlanIncomplete=incomplete };
+    RetainedPlanIncomplete=incomplete, PreserveSnapshotNames=item.PreserveSnapshotNames };
   }
 
   public Task[] Read(string current, string legacy, DateTime utcNow, DateTime observedSinceUtc) {
@@ -729,7 +731,7 @@ namespace AITaskMonitor.Claude {
      if(sourceLoss || uncertainSessions.Contains(item.Id) || uncertainPlans.Contains(item.Id) || item.Unconfirmed) {
       Task previous, hidden;
       retained.TryGetValue(item.Id, out previous);
-      bool preserveNames = sourceLoss || uncertainSessions.Contains(item.Id) || nameHistorySessions.Contains(item.Id);
+      bool preserveNames = sourceLoss || uncertainSessions.Contains(item.Id) || nameHistorySessions.Contains(item.Id) || item.PreserveSnapshotNames;
       if(TryStopped(item.Id, out hidden)) {
        if(previous == null) previous = hidden;
        else if(preserveNames) previous = Freeze(previous, hidden, true);
@@ -743,7 +745,7 @@ namespace AITaskMonitor.Claude {
     var result = new List<Task>(tasks);
     foreach(var entry in retained) if((prior || uncertainSessions.Contains(entry.Key)) && !visible.Contains(entry.Key)) result.Add(Freeze(entry.Value, null, sourceLoss || uncertainSessions.Contains(entry.Key) || nameHistorySessions.Contains(entry.Key)));
     foreach(Task item in tasks) {
-     Task frozen = Freeze(item, null, sourceLoss || uncertainSessions.Contains(item.Id) || nameHistorySessions.Contains(item.Id));
+     Task frozen = Freeze(item, null, sourceLoss || uncertainSessions.Contains(item.Id) || nameHistorySessions.Contains(item.Id) || item.PreserveSnapshotNames);
      if(retained.ContainsKey(item.Id)) retained[item.Id] = frozen;
      else if(retained.Count < MaximumRetained) retained.Add(item.Id, frozen);
      else overflow = true;

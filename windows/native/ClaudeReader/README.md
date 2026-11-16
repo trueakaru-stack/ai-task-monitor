@@ -77,8 +77,9 @@ end its session normally.
 An event more than one minute in the future also marks that session's evidence
 uncertain and retains conflicting observed names. This uncertainty persists for
 the reader's lifetime even if the clock later catches up. A terminal event only
-slightly later than the poll's timestamp is temporarily unconfirmed and can be
-resolved by a subsequent poll. A session being quiet for at least 120 minutes is
+slightly later than the poll's timestamp is temporarily unconfirmed, keeps
+conflicting observed names for that snapshot and can be resolved by a subsequent
+poll. A session being quiet for at least 120 minutes is
 treated separately: later observed activity can restore its ordinary status when
 no other uncertainty was observed.
 

@@ -1053,12 +1053,32 @@ nearFutureStop.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
 string shortlyFutureStop = JsonSerializer.Serialize(new Dictionary<string, object> {
     ["session_id"] = "observed", ["timestamp"] = now.AddMilliseconds(10).ToString("O"),
     ["event"] = "Stop", ["active"] = false, ["stage_version"] = 1, ["stage_phase"] = "stop_clear" }) + "\n";
-var nearFutureSnapshot = nearFutureStop.Read(complete + shortlyFutureStop, "", now,
+string renamedNearStop = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "observed", ["timestamp"] = now.AddMilliseconds(-10).ToString("O"),
+    ["event"] = "TaskCreated", ["active"] = true, ["task_id"] = "first",
+    ["task_subject"] = "Near-stop step", ["task_status"] = "pending" }) + "\n";
+string nearStopJournal = complete + renamedNearStop + shortlyFutureStop;
+var nearFutureSnapshot = nearFutureStop.Read(nearStopJournal, "", now,
     DateTime.MinValue.ToUniversalTime()).Single();
-Check(nearFutureSnapshot.Unconfirmed, "A stop slightly after the poll timestamp must initially remain unconfirmed.");
-Check(nearFutureStop.Read(complete + shortlyFutureStop, "", now.AddSeconds(1),
+Check(nearFutureSnapshot.Unconfirmed &&
+    nearFutureSnapshot.Steps.Any(step => step.title == "First step") &&
+    nearFutureSnapshot.Steps.Any(step => step.title == "Near-stop step") &&
+    nearFutureSnapshot.Steps.All(step => step.status == "unknown"),
+    "A stop slightly after the poll must temporarily retain both observed names as unknown.");
+Check(nearFutureStop.Read(nearStopJournal, "", now.AddSeconds(1),
     DateTime.MinValue.ToUniversalTime()).Length == 0 && !nearFutureStop.SourceUncertain,
     "A subsequent poll after a small clock boundary must finish the cleanly stopped session.");
+
+var nearFutureFirstPoll = new SessionReader();
+var nearFutureInitially = nearFutureFirstPoll.Read(nearStopJournal, "", now, DateTime.MinValue.ToUniversalTime()).Single();
+Check(nearFutureInitially.Unconfirmed &&
+    nearFutureInitially.Steps.Any(step => step.title == "First step") &&
+    nearFutureInitially.Steps.Any(step => step.title == "Near-stop step") &&
+    nearFutureInitially.Steps.All(step => step.status == "unknown"),
+    "A transient future stop before the first poll must keep both names unconfirmed.");
+Check(nearFutureFirstPoll.Read(nearStopJournal, "", now.AddSeconds(1),
+    DateTime.MinValue.ToUniversalTime()).Length == 0 && !nearFutureFirstPoll.SourceUncertain,
+    "A transient future stop seen first must not remain permanently uncertain.");
 
 string futureRename = JsonSerializer.Serialize(new Dictionary<string, object> {
     ["session_id"] = "observed", ["timestamp"] = now.AddMinutes(10).ToString("O"),
