@@ -90,6 +90,8 @@ try {
     Check ([IO.File]::Exists($assembly)) 'The synthetic test assembly is missing.'
     $output = Invoke-Isolated @($assembly, $root)
     Write-Output $output.TrimEnd()
+    $output = Invoke-Isolated @($assembly, $root, '--dirty-workspace')
+    Write-Output $output.TrimEnd()
 
     $oldCwd = Join-Path $root 'original-cwd-legacy'
     [void][IO.Directory]::CreateDirectory($oldCwd)

@@ -50,6 +50,7 @@ namespace AITaskMonitor.CodexCloud
         private Result Execute(string executable, string cursor, int timeoutMilliseconds)
         {
             Process child = null;
+            bool started = false;
             CloudWorkingDirectory workspace = null;
             try
             {
@@ -66,6 +67,7 @@ namespace AITaskMonitor.CodexCloud
                 {
                     if (cancelled) return new Result { Ok = false };
                     if (!child.Start()) return new Result { Ok = false };
+                    started = true;
                     process = child;
                 }
                 child.StandardInput.Close();
@@ -81,6 +83,11 @@ namespace AITaskMonitor.CodexCloud
             finally
             {
                 lock (gate) { process = null; }
+                if (started && workspace != null)
+                {
+                    try { if (!child.WaitForExit(2000)) workspace.PreventFurtherRuns(); }
+                    catch { workspace.PreventFurtherRuns(); }
+                }
                 if (child != null) child.Dispose();
                 if (workspace != null) workspace.Dispose();
             }
@@ -143,6 +150,10 @@ namespace AITaskMonitor.CodexCloud
             new System.Collections.Generic.List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
         private Microsoft.Win32.SafeHandles.SafeFileHandle directory;
         private bool disposed;
+        private bool ownsLease;
+        private bool blockFurtherRuns;
+        // 0: available, 1: workspace in use, 2: cleanup or exit unconfirmed.
+        private static int workspaceLease;
 
         private CloudWorkingDirectory() { }
         internal string Path { get; private set; }
@@ -203,6 +214,9 @@ namespace AITaskMonitor.CodexCloud
         internal static CloudWorkingDirectory Create()
         {
             var result = new CloudWorkingDirectory();
+            if (System.Threading.Interlocked.CompareExchange(ref workspaceLease, 1, 0) != 0)
+                throw new IOException("The cloud workspace is busy or unavailable.");
+            result.ownsLease = true;
             try
             {
                 result.Initialize();
@@ -343,18 +357,36 @@ namespace AITaskMonitor.CodexCloud
             }
         }
 
+        internal void PreventFurtherRuns() { blockFurtherRuns = true; }
+
         public void Dispose()
         {
             if (disposed) return;
             disposed = true;
-            if (directory != null)
+            try
             {
-                byte delete = 1;
-                // The operation fails rather than recursively removing unexpected contents.
-                SetFileInformationByHandle(directory, 4, ref delete, 1);
-                directory.Dispose();
+                if (directory != null)
+                {
+                    byte delete = 1;
+                    // The operation fails rather than recursively removing unexpected contents.
+                    try
+                    {
+                        if (!SetFileInformationByHandle(directory, 4, ref delete, 1)) blockFurtherRuns = true;
+                    }
+                    catch { blockFurtherRuns = true; throw; }
+                    finally { directory.Dispose(); }
+                }
             }
-            for (int i = ancestors.Count - 1; i >= 0; i--) ancestors[i].Dispose();
+            finally
+            {
+                try { for (int i = ancestors.Count - 1; i >= 0; i--) ancestors[i].Dispose(); }
+                catch { blockFurtherRuns = true; throw; }
+                finally
+                {
+                    if (ownsLease)
+                        System.Threading.Interlocked.Exchange(ref workspaceLease, blockFurtherRuns ? 2 : 0);
+                }
+            }
         }
     }
 

@@ -3,6 +3,9 @@ using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using AITaskMonitor.CodexCloud;
 using AITaskMonitor.CodexCloudCommand;
 
 internal static class Program
@@ -232,11 +235,64 @@ internal static class Program
         Check(propagated, "unexpected aggregate failure is not hidden");
     }
 
+    private static async Task DirtyWorkspace(string fixture, string root)
+    {
+        string temp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
+        Check(string.Equals(temp, Path.Combine(root, "isolated", "temp"), StringComparison.OrdinalIgnoreCase),
+            "dirty workspace requires the isolated temp");
+        for (DirectoryInfo? item = new(temp); item is not null; item = item.Parent)
+            Check((item.Attributes & FileAttributes.ReparsePoint) == 0, "dirty workspace ancestry is plain");
+        CloudWorkingDirectory owned = CloudWorkingDirectory.Create();
+        string path = owned.Path;
+        bool validated = false;
+        FileStream? payload = null;
+        try
+        {
+            Check(string.Equals(Directory.GetParent(path)?.FullName, temp, StringComparison.OrdinalIgnoreCase) &&
+                  Regex.IsMatch(Path.GetFileName(path), "^aitm-cloud-[0-9a-f]{32}$", RegexOptions.CultureInvariant) &&
+                  (File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0,
+                  "dirty workspace remains in the synthetic temp");
+            validated = true;
+            SecurityIdentifier user = WindowsIdentity.GetCurrent().User
+                ?? throw new CheckFailure("synthetic identity unavailable");
+            var security = new DirectorySecurity();
+            security.SetAccessRuleProtection(true, false);
+            security.SetOwner(user);
+            security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl,
+                InheritanceFlags.None, PropagationFlags.None, AccessControlType.Allow));
+            new DirectoryInfo(path).SetAccessControl(security);
+            payload = new FileStream(Path.Combine(path, "owned-synthetic-payload.txt"), FileMode.CreateNew,
+                FileAccess.ReadWrite, FileShare.Read | FileShare.Delete, 4096, FileOptions.DeleteOnClose);
+            payload.WriteByte(42);
+            payload.Flush();
+            owned.Dispose();
+            payload.Position = 0;
+            Check(payload.ReadByte() == 42, "cleanup did not remove unexpected contents");
+            using CommandResult blocked = await CloudCommand.RunAsync(fixture, null, TimeSpan.FromSeconds(15));
+            Check(blocked.Outcome == CommandOutcome.StartFailed && !blocked.Started,
+                "cleanup failure blocks further launches");
+        }
+        finally
+        {
+            owned.Dispose();
+            payload?.Dispose();
+            if (validated && Directory.Exists(path)) Directory.Delete(path);
+        }
+        Check(!Directory.Exists(path), "owned synthetic dirty workspace removed after check");
+    }
+
     private static async Task<int> Main(string[] args)
     {
         try
         {
-            string fixture = RequireFixture(args);
+            bool dirtyCase = args.Length == 2 && args[1] == "--dirty-workspace";
+            string fixture = RequireFixture(dirtyCase ? new[] { args[0] } : args);
+            if (dirtyCase)
+            {
+                await DirtyWorkspace(fixture, Path.GetFullPath(args[0]));
+                Console.WriteLine("Dirty workspace synthetic checks passed: " + checks);
+                return 0;
+            }
             string root = Path.GetFullPath(args[0]);
             string original = Path.Combine(root, "original-cwd");
             Directory.CreateDirectory(original);
@@ -245,6 +301,13 @@ internal static class Program
             Directory.SetCurrentDirectory(original);
             string temp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
             Check(!Directory.EnumerateDirectories(temp, "aitm-cloud-*").Any(), "workspace test starts empty");
+            using (CloudWorkingDirectory held = CloudWorkingDirectory.Create())
+            {
+                using CommandResult busy = await CloudCommand.RunAsync(fixture, null, TimeSpan.FromSeconds(15));
+                Check(busy.Outcome == CommandOutcome.StartFailed && !busy.Started,
+                    "busy workspace blocks a second process");
+            }
+            Check(!Directory.EnumerateDirectories(temp, "aitm-cloud-*").Any(), "idle workspace is removed");
             await Basic(fixture, root);
             await Bounds(fixture);
             await StopCase(fixture, true);
@@ -289,6 +352,13 @@ internal static class Program
                 Directory.Delete(link);
             }
             Check(File.ReadAllText(sentinel) == "original-synthetic-sentinel", "redirect rejection left original cwd intact");
+            using (CloudWorkingDirectory uncertain = CloudWorkingDirectory.Create())
+                uncertain.PreventFurtherRuns();
+            using (CommandResult blocked = await CloudCommand.RunAsync(fixture, null, TimeSpan.FromSeconds(15)))
+                Check(blocked.Outcome == CommandOutcome.StartFailed && !blocked.Started,
+                    "unconfirmed child termination blocks further launches");
+            Check(!Directory.EnumerateDirectories(temp, "aitm-cloud-*").Any(),
+                "unconfirmed termination test removed its empty workspace");
             Console.WriteLine("Codex Cloud command synthetic checks passed: " + checks);
             return 0;
         }

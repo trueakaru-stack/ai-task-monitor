@@ -166,23 +166,30 @@ public static class CloudCommand
         }
         finally
         {
-            // Cancellation wakes stream readers; termination can include the launched process tree.
-            linked.Cancel();
-            if (started && outcome != CommandOutcome.Success)
+            try
             {
-                exitObserved = await StopAsync(process).ConfigureAwait(false);
-                CloseQuietly(() => process.StandardOutput.BaseStream);
-                CloseQuietly(() => process.StandardError.BaseStream);
-            }
-            else if (started)
-                exitObserved = true;
+                // Cancellation wakes stream readers; termination can include the launched process tree.
+                linked.Cancel();
+                if (started && outcome != CommandOutcome.Success)
+                {
+                    exitObserved = await StopAsync(process).ConfigureAwait(false);
+                    CloseQuietly(() => process.StandardOutput.BaseStream);
+                    CloseQuietly(() => process.StandardError.BaseStream);
+                }
+                else if (started)
+                    exitObserved = true;
 
-            if (outcome != CommandOutcome.Success)
-                ObserveAndClear(stdoutTask);
-            Observe(stderrTask);
-            Observe(allTasks);
-            Observe(failure.Task);
-            workspace?.Dispose();
+                if (outcome != CommandOutcome.Success)
+                    ObserveAndClear(stdoutTask);
+                Observe(stderrTask);
+                Observe(allTasks);
+                Observe(failure.Task);
+            }
+            finally
+            {
+                if (started && !exitObserved) workspace?.PreventFurtherRuns();
+                workspace?.Dispose();
+            }
         }
 
         if (started && !exitObserved) outcome = CommandOutcome.TerminationUnconfirmed;
