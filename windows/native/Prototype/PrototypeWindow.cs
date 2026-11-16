@@ -115,6 +115,7 @@ internal sealed class PrototypeWindow
         palette = options.Theme == "light" ? LightPalette : DarkPalette;
         ApplyPalette();
         ApplyIcon();
+        SizeFeedbackAddress();
         CaptureStaticTranslations(window);
         ApplyStaticTranslations();
 
@@ -443,6 +444,20 @@ internal sealed class PrototypeWindow
             image.Source = window.Icon;
             image.Visibility = Visibility.Visible;
         }
+    }
+
+    // Match the published layout: otherwise an unconstrained FlowDocument can
+    // wrap the address into a very tall control inside the settings scroller.
+    private void SizeFeedbackAddress()
+    {
+        RichTextBox box = Find<RichTextBox>("FeedbackEmailBox");
+        Hyperlink link = Find<Hyperlink>("FeedbackEmailLink");
+        string address = new TextRange(link.ContentStart, link.ContentEnd).Text.Trim();
+        var typeface = new Typeface(box.Document.FontFamily, box.Document.FontStyle,
+            box.Document.FontWeight, box.Document.FontStretch);
+        var metrics = new FormattedText(address, CultureInfo.CurrentUICulture, FlowDirection.LeftToRight,
+            typeface, box.Document.FontSize, Brushes.Black, VisualTreeHelper.GetDpi(window).PixelsPerDip);
+        box.Width = Math.Ceiling(metrics.WidthIncludingTrailingWhitespace) + 20;
     }
 
     private void CaptureStaticTranslations(DependencyObject root)
