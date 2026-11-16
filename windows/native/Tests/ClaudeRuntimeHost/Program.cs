@@ -172,7 +172,7 @@ internal static class Program
         using (var evidence = new StringWriter())
         {
             WaitUntilStable(() => sequence[Math.Min(index++, sequence.Length - 1)],
-                "A temporary missing observation did not recover.", evidence, 1000);
+                "A temporary missing observation did not recover.", evidence, 3000);
             Check(index == 4 && evidence.ToString().Contains("Found,Missing,Found,Found", StringComparison.Ordinal),
                 "Stable wait must reset after a transient missing result.");
         }
@@ -184,19 +184,23 @@ internal static class Program
             {
                 WaitUntilStable(() => Interlocked.Increment(ref alternating) % 2 == 1
                     ? NameObservation.Found : NameObservation.Missing,
-                    "Synthetic alternating observations.", evidence, 240);
+                    "Synthetic alternating observations.", evidence, 2000);
             }
             catch (InvalidOperationException) { rejectedAlternating = true; }
-            Check(rejectedAlternating && evidence.ToString().Contains("deadline=True", StringComparison.Ordinal),
-                "Alternating results must not pass without two consecutive observations.");
+            Check(rejectedAlternating && alternating >= 4 &&
+                evidence.ToString().Contains("deadline=True", StringComparison.Ordinal) &&
+                evidence.ToString().Contains("Found:", StringComparison.Ordinal) &&
+                evidence.ToString().Contains("Missing:", StringComparison.Ordinal),
+                "Alternating results must include both states and fail without two consecutive observations.");
         }
         bool rejectedMissing = false;
+        int missing = 0;
         using (var evidence = new StringWriter())
         {
-            try { WaitUntilStable(() => NameObservation.Missing, "Synthetic missing observation.", evidence, 180); }
+            try { WaitUntilStable(() => { missing++; return NameObservation.Missing; }, "Synthetic missing observation.", evidence, 1000); }
             catch (InvalidOperationException) { rejectedMissing = true; }
-            Check(rejectedMissing && evidence.ToString().Contains("deadline=True", StringComparison.Ordinal),
-                "A consistently missing observation must fail at the deadline.");
+            Check(rejectedMissing && missing >= 2 && evidence.ToString().Contains("deadline=True", StringComparison.Ordinal),
+                "Repeated missing observations must fail at the deadline.");
         }
     }
 
