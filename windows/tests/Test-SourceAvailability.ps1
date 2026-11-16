@@ -69,6 +69,8 @@ Write-Output "Source availability: independent errors and surviving tasks verifi
 & ([scriptblock]::Create(($definitions -join "`n") + "`n" + $checks))
 
 $claudeDefinition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq "Claude-Tasks" }, $true)
+if ($null -eq $claudeDefinition) { throw 'The Claude source function is missing.' }
+. (Join-Path $PSScriptRoot '..\app\ClaudeReaderCore.ps1')
 $missingPath = Join-Path ([IO.Path]::GetTempPath()) ("ai-task-monitor-missing-" + [Guid]::NewGuid().ToString("N") + ".jsonl")
 $claudeChecks = @'
 $claudeEventPath = $args[0]

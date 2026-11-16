@@ -8,6 +8,7 @@ on:
       - 'windows/app/VersionInfo.cs'
       - 'windows/tests/Test-Codex*.ps1'
       - 'windows/tests/Test-ReleaseUpdates.ps1'
+      - 'windows/tests/Test-SourceAvailability.ps1'
       - 'windows/tests/Test-DotnetPathSafety.py'
       - '.github/workflows/windows-codex-passive-20261116.yml'
 permissions:
@@ -22,11 +23,13 @@ jobs:
         part: [checks, screenshots]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
+      AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
       DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
       DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
     steps:
       - name: Verify passive observation in isolated Windows
+        if: ${{ matrix.part != 'screenshots' || !contains(github.event.head_commit.message, '[remaining-checks]') }}
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -101,7 +104,8 @@ jobs:
             }
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if($env:AITM_TEST_PART -eq 'checks'){
-              foreach($test in @('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')){
+              $tests=if($env:AITM_REMAINING_ONLY -eq '1'){@('Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}else{@('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}
+              foreach($test in $tests){
                 Write-Output ('Running '+$test)
                 Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
               }
@@ -120,7 +124,7 @@ jobs:
             if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}
           }
       - name: Preserve synthetic screenshots
-        if: always() && matrix.part == 'screenshots'
+        if: always() && matrix.part == 'screenshots' && !contains(github.event.head_commit.message, '[remaining-checks]')
         uses: actions/upload-artifact@v4
         with:
           name: windows-codex-passive-screenshots
