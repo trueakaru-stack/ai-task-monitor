@@ -101,6 +101,12 @@ replace_once("RootView.swift",
              '        let size = isCompact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)\n'
              '        FileHandle.standardError.write(Data("AITM_CONFIG before compact=\\(isCompact) desired=\\(size) frame=\\(window.frame) min=\\(window.minSize) max=\\(window.maxSize)\\n".utf8))')
 
+replace_once("RootView.swift",
+             "        guard let window else { return }\n        coordinator.observe(window)",
+             "        guard let window else { return }\n"
+             "        SyntheticWindowGroupAudit.observeWindow(window)\n"
+             "        coordinator.observe(window)")
+
 helper = project / "integration-tests/WindowGroupSyntheticAudit.swift"
 target = source / "SyntheticWindowGroupAudit.swift"
 if not stat.S_ISREG(helper.lstat().st_mode) or target.exists() or target.is_symlink():
