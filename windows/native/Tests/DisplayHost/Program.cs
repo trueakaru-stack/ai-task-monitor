@@ -38,6 +38,18 @@ internal static class Program
         using var output = new FileStream(Path.Combine(root, name + ".png"), FileMode.CreateNew, FileAccess.Write, FileShare.None);
         encoder.Save(output);
     }
+    private static void ScrollSettingsToEnd(Window window)
+    {
+        Find<ScrollViewer>(window, "SettingsScroll").ScrollToEnd();
+        window.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(() => { }));
+        window.UpdateLayout();
+    }
+    private static void CaptureFeedbackImmediate(Window window, string root, string stem)
+    {
+        window.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(() => { }));
+        window.UpdateLayout();
+        Capture(window, root, "instant-error-" + stem);
+    }
     private static void CaptureSettingsEnd(Window window, string root, string stem)
     {
         ScrollViewer scroll = Find<ScrollViewer>(window, "SettingsScroll");
@@ -134,8 +146,10 @@ internal static class Program
         Check(opened == "mailto:truea.k.a.ru@gmail.com?subject=" +
             Uri.EscapeDataString("Отзыв или предложение об AI Task Monitor") && !Visible(feedbackError),
             "Feedback mail did not request the expected empty draft.");
+        ScrollSettingsToEnd(window);
         failCopy = true;
         Click(window, "FeedbackCopyButton");
+        CaptureFeedbackImmediate(window, root, "copy-dark-ru");
         Check(Visible(feedbackError) && feedbackError.Text ==
             "Не удалось скопировать адрес. Выделите его и скопируйте вручную.",
             "A clipboard failure was not shown in Russian.");
@@ -143,8 +157,10 @@ internal static class Program
         failCopy = false;
         Click(window, "FeedbackCopyButton");
         Check(!Visible(feedbackError), "A successful copy did not clear the error.");
+        ScrollSettingsToEnd(window);
         failMail = true;
         feedbackLink.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
+        CaptureFeedbackImmediate(window, root, "mail-dark-ru");
         Check(Visible(feedbackError) && feedbackError.Text ==
             "Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com.",
             "A mail failure was not shown in Russian.");
@@ -162,15 +178,19 @@ internal static class Program
         Check(File.ReadAllBytes(old).AsSpan().SequenceEqual(original) &&
             ((SolidColorBrush)window.Resources["Surface"]).Color == (Color)ColorConverter.ConvertFromString("#F6F6F6"),
             "Theme selection changed legacy settings or the window did not update.");
+        ScrollSettingsToEnd(window);
         failCopy = true;
         Click(window, "FeedbackCopyButton");
+        CaptureFeedbackImmediate(window, root, "copy-light-ru");
         Check(Visible(feedbackError) && feedbackError.Text.StartsWith("Не удалось скопировать", StringComparison.Ordinal),
             "A clipboard error is missing in the light Russian theme.");
         CaptureSettingsEnd(window, root, "error-copy-light-ru");
         failCopy = false;
         Click(window, "FeedbackCopyButton");
+        ScrollSettingsToEnd(window);
         failMail = true;
         feedbackLink.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
+        CaptureFeedbackImmediate(window, root, "mail-light-ru");
         Check(Visible(feedbackError) && feedbackError.Text.StartsWith("Не удалось открыть", StringComparison.Ordinal),
             "A mail error is missing in the light Russian theme.");
         CaptureSettingsEnd(window, root, "error-mail-light-ru");
@@ -203,8 +223,10 @@ internal static class Program
             retained.Title == "Claude Code task", "Changing language altered source text or failed to relocalize a generated title.");
         Check(System.Windows.Automation.AutomationProperties.GetName(feedbackCopy) == "Copy email address",
             "The feedback copy control was not translated.");
+        ScrollSettingsToEnd(window);
         failCopy = true;
         Click(window, "FeedbackCopyButton");
+        CaptureFeedbackImmediate(window, root, "copy-light-en");
         Check(Visible(feedbackError) && feedbackError.Text ==
             "Could not copy the address. Select and copy it manually.",
             "A clipboard failure was not shown in English.");
@@ -217,8 +239,10 @@ internal static class Program
             "A visible feedback error did not switch to English.");
         failCopy = false;
         Click(window, "FeedbackCopyButton");
+        ScrollSettingsToEnd(window);
         failMail = true;
         feedbackLink.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
+        CaptureFeedbackImmediate(window, root, "mail-light-en");
         Check(Visible(feedbackError) && feedbackError.Text ==
             "Could not open your email app. Write to truea.k.a.ru@gmail.com.",
             "A mail failure was not shown in English.");
@@ -231,15 +255,19 @@ internal static class Program
         Capture(window, root, "settings-light-en");
         CaptureSettingsEnd(window, root, "light-en");
         Click(window, "DarkThemeButton");
+        ScrollSettingsToEnd(window);
         failCopy = true;
         Click(window, "FeedbackCopyButton");
+        CaptureFeedbackImmediate(window, root, "copy-dark-en");
         Check(Visible(feedbackError) && feedbackError.Text.StartsWith("Could not copy", StringComparison.Ordinal),
             "A clipboard error is missing in the dark English theme.");
         CaptureSettingsEnd(window, root, "error-copy-dark-en");
         failCopy = false;
         Click(window, "FeedbackCopyButton");
+        ScrollSettingsToEnd(window);
         failMail = true;
         feedbackLink.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
+        CaptureFeedbackImmediate(window, root, "mail-dark-en");
         Check(Visible(feedbackError) && feedbackError.Text.StartsWith("Could not open", StringComparison.Ordinal),
             "A mail error is missing in the dark English theme.");
         CaptureSettingsEnd(window, root, "error-mail-dark-en");
