@@ -364,9 +364,13 @@ namespace AITaskMonitor.ExternalProviders
                 else capacityLimitedProviders.Add(provider); // Unknown affected scope; retain source warning.
                 MarkSessionScopesGap(provider, new[] { scope });
             }
-            else if (provider == "deepseek" || provider == "opencode")
-            { capacityLimitedProviders.Add(provider); MarkProviderGap(provider); }
-            else MarkGap();
+            else
+            {
+                // The rejected frame identifies its source. Do not invalidate
+                // healthy neighbors that share this bounded store.
+                capacityLimitedProviders.Add(provider);
+                MarkProviderGap(provider);
+            }
         }
 
         // An overflow or broken transport invalidates activity claims, never invents completion.

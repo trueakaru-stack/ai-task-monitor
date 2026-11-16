@@ -117,12 +117,21 @@ Check(hermes.Apply(Hermes(a + "_new", "started"), now) &&
 // This fixture tests old behavior only; a new epoch does not establish that
 // every older Hermes process has stopped.
 var sharedCapacity = new StateStore();
-sharedCapacity.RetainProviders(["hermes", "opencode"]);
+sharedCapacity.RetainProviders(["hermes", "opencode", "deepseek", "kimi"]);
 sharedCapacity.RetainSessionScopes("hermes", [a]);
-for (int i = 0; i < 255; i++) Check(sharedCapacity.Apply(Frame("opencode", "shared" + i, "active"), now), "Could not fill V1 capacity.");
+for (int i = 0; i < 254; i++) Check(sharedCapacity.Apply(Frame("opencode", "shared" + i, "active"), now), "Could not fill V1 capacity.");
 sharedCapacity.MarkProviderGap("opencode");
+Check(sharedCapacity.Apply(Frame("deepseek", b + "_healthy", "active"), now), "Healthy DeepSeek fixture could not start.");
 Thread.Sleep(2);
 Check(sharedCapacity.Apply(Hermes(a + "_live", "started"), now), "Hermes fixture could not start.");
+Check(!sharedCapacity.Apply(Frame("kimi", c + "_overflow", "active"), now) &&
+    sharedCapacity.CapacityLimitedProviders.Contains("kimi") &&
+    sharedCapacity.Snapshot(now).Single(x => x.Session == b + "_healthy").Status == "active" &&
+    sharedCapacity.Snapshot(now).Single(x => x.Session == a + "_live").Status == "active",
+    "Kimi overflow degraded a healthy neighbor or hid the warning.");
 Check(!sharedCapacity.Apply(Hermes(a + "_overflow", "started"), now) && sharedCapacity.Snapshot(now).Length == 256,
     "The shared capacity boundary was not exercised.");
+Check(sharedCapacity.CapacityLimitedProviders.Contains("hermes") &&
+    sharedCapacity.Snapshot(now).Single(x => x.Session == b + "_healthy").Status == "active" &&
+    !sharedCapacity.LossAffectedProviders.Contains("deepseek"), "Hermes overflow degraded healthy DeepSeek or hid the warning.");
 Console.WriteLine($"Provider V1 recovery: {checks} synthetic checks passed.");

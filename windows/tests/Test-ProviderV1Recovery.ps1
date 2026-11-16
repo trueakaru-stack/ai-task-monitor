@@ -214,5 +214,21 @@ try{
  Poll-Group
  Assert (@($state.Tasks | Where-Object {$_.Id -eq ('hermes:'+$c+'_next') -and $_.Active}).Count -eq 1 -and
          @($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_healthy') -and $_.Active}).Count -eq 1) 'A new Hermes observer did not follow the existing behavior.'
+ $connections.opencode='connected';$connections.kimi='connected'
+ Poll-Group
+ for($i=0;$i -lt 254;$i++){Send-Event 'opencode' ('capacity'+$i) 'started'}
+ Poll-Group
+ Assert ($state.Tasks.Count -eq 256) 'The mixed-source capacity fixture did not fill the store.'
+ Send-Event 'kimi' ($b+'_overflow') 'started'
+ Poll-Group
+ Assert ($state.Unavailable -contains 'Kimi Code' -and $state.Unavailable -notcontains 'DeepSeek Harness' -and
+         $state.Unavailable -notcontains 'Hermes Agent' -and
+         @($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_healthy') -and $_.Active}).Count -eq 1 -and
+         @($state.Tasks | Where-Object {$_.Id -eq ('hermes:'+$c+'_next') -and $_.Active}).Count -eq 1) 'Kimi overflow affected a healthy neighboring source.'
+ Start-Sleep -Milliseconds 10
+ Send-Hermes ($c+'_overflow') 'started'
+ Poll-Group
+ Assert ($state.Unavailable -contains 'Hermes Agent' -and $state.Unavailable -notcontains 'DeepSeek Harness' -and
+         @($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_healthy') -and $_.Active}).Count -eq 1) 'Hermes overflow affected a healthy DeepSeek source.'
 }finally{Stop-ExternalProviderController $controller -KnownIdle}
 'Provider V1 recovery: real group, scoped disconnect, loss and synthetic channel checks passed.'
