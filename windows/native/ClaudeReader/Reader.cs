@@ -569,14 +569,65 @@ namespace AITaskMonitor.Claude {
   private const int MaximumRetainedStepId = 128;
   private readonly object gate = new object();
   private readonly Dictionary<string, Task> retained = new Dictionary<string, Task>(StringComparer.Ordinal);
-  // A cleanly stopped session keeps bounded names without creating a visible card.
-  private readonly Dictionary<string, Task> stoppedHistory = new Dictionary<string, Task>(StringComparer.Ordinal);
+  // Hidden completed sessions do not create cards. Their bounded insertion
+  // order lets newer names replace old ones without declaring the source lost.
+  private readonly Dictionary<string, LinkedListNode<Task>> stoppedHistory = new Dictionary<string, LinkedListNode<Task>>(StringComparer.Ordinal);
+  private readonly LinkedList<Task> stoppedOrder = new LinkedList<Task>();
+  // This bounded no-false-negative filter remembers IDs whose hidden titles
+  // were evicted. False positives conservatively make only that task uncertain.
+  private readonly byte[] evictedIds = new byte[16384];
+  private bool hasEvictedIds;
   private readonly HashSet<string> uncertainSessions = new HashSet<string>(StringComparer.Ordinal);
   private readonly HashSet<string> uncertainPlans = new HashSet<string>(StringComparer.Ordinal);
   private readonly HashSet<string> nameHistorySessions = new HashSet<string>(StringComparer.Ordinal);
   private bool sourceLoss, overflow;
   public bool SourceUncertain { get { lock(gate) return sourceLoss; } }
   public bool RetentionOverflow { get { lock(gate) return overflow; } }
+
+  private void RecordEviction(string id) {
+   byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(id));
+   for(int i=0;i<4;i++) {
+    int bit = (int)(BitConverter.ToUInt32(hash, i * 4) % (uint)(evictedIds.Length * 8));
+    evictedIds[bit / 8] |= (byte)(1 << (bit % 8));
+   }
+   hasEvictedIds = true;
+  }
+
+  private bool PossiblyEvicted(string id) {
+   if(!hasEvictedIds) return false;
+   byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(id));
+   for(int i=0;i<4;i++) {
+    int bit = (int)(BitConverter.ToUInt32(hash, i * 4) % (uint)(evictedIds.Length * 8));
+    if((evictedIds[bit / 8] & (1 << (bit % 8))) == 0) return false;
+   }
+   return true;
+  }
+
+  private void RememberStopped(Task previous) {
+   LinkedListNode<Task> node;
+   if(stoppedHistory.TryGetValue(previous.Id, out node)) {
+    node.Value = previous; stoppedOrder.Remove(node); stoppedOrder.AddLast(node); return;
+   }
+   if(stoppedHistory.Count == MaximumRetained) {
+    LinkedListNode<Task> oldest = stoppedOrder.First;
+    RecordEviction(oldest.Value.Id);
+    stoppedHistory.Remove(oldest.Value.Id);
+    stoppedOrder.RemoveFirst();
+   }
+   stoppedHistory.Add(previous.Id, stoppedOrder.AddLast(previous));
+  }
+
+  private bool TryStopped(string id, out Task task) {
+   LinkedListNode<Task> node;
+   if(stoppedHistory.TryGetValue(id, out node)) { task = node.Value; return true; }
+   task = null; return false;
+  }
+
+  private void ForgetStopped(string id) {
+   LinkedListNode<Task> node;
+   if(!stoppedHistory.TryGetValue(id, out node)) return;
+   stoppedHistory.Remove(id); stoppedOrder.Remove(node);
+  }
 
   // The caller uses this after an externally visible source-read failure.
   public void MarkSourceLoss() { lock(gate) sourceLoss = true; }
@@ -658,17 +709,18 @@ namespace AITaskMonitor.Claude {
     }
     // Do not re-create a card solely because its stopped session has stored
     // evidence. On a prior source-wide loss, retain the previous fallback.
-    if(!sourceLoss) foreach(string id in cleanlyStopped) {
+    if(!prior) foreach(string id in cleanlyStopped) {
      Task previous;
-     if(retained.TryGetValue(id, out previous) && previous.Steps != null && previous.Steps.Length > 0) {
-      if(stoppedHistory.ContainsKey(id)) stoppedHistory[id] = previous;
-      else if(stoppedHistory.Count < MaximumRetained) stoppedHistory.Add(id, previous);
-      else { overflow = true; sourceLoss = true; }
-     }
-     retained.Remove(id);
+     if(retained.TryGetValue(id, out previous) && previous.Steps != null && previous.Steps.Length > 0)
+      RememberStopped(previous);
+     if(!sourceLoss) retained.Remove(id);
     }
-    // An overflow while hiding a stopped session also makes every visible
-    // task uncertain before snapshots are produced.
+    // A bounded hidden-history eviction does not make the entire source
+    // unavailable. A matching later task is individually marked uncertain.
+    foreach(Task item in tasks) if(PossiblyEvicted(item.Id)) {
+     item.Unconfirmed=true; item.PlanConfirmed=false; item.KnownStepCount=0; item.KnownDoneCount=0;
+     item.UnknownStepCount=item.Steps.Length; item.RetainedPlanIncomplete=true;
+    }
     foreach(Task item in tasks) if(sourceLoss || uncertainSessions.Contains(item.Id)) {
      item.Unconfirmed=true; item.PlanConfirmed=false; item.KnownStepCount=0; item.KnownDoneCount=0; item.UnknownStepCount=item.Steps.Length;
     }
@@ -683,7 +735,7 @@ namespace AITaskMonitor.Claude {
      Task item = tasks[index];
      if(sourceLoss || uncertainSessions.Contains(item.Id) || uncertainPlans.Contains(item.Id) || item.Unconfirmed) {
       Task previous;
-      if(!retained.TryGetValue(item.Id, out previous)) stoppedHistory.TryGetValue(item.Id, out previous);
+      if(!retained.TryGetValue(item.Id, out previous)) TryStopped(item.Id, out previous);
       Task safe = Freeze(item, previous, sourceLoss || nameHistorySessions.Contains(item.Id));
       safe.Unconfirmed = item.Unconfirmed;
       safe.Activity = item.Unconfirmed ? "" : item.Activity;
@@ -694,8 +746,8 @@ namespace AITaskMonitor.Claude {
     foreach(var entry in retained) if((prior || uncertainSessions.Contains(entry.Key)) && !visible.Contains(entry.Key)) result.Add(Freeze(entry.Value, null, sourceLoss || nameHistorySessions.Contains(entry.Key)));
     foreach(Task item in tasks) {
      Task frozen = Freeze(item, null, sourceLoss || nameHistorySessions.Contains(item.Id));
-     if(retained.ContainsKey(item.Id)) { retained[item.Id] = frozen; stoppedHistory.Remove(item.Id); }
-     else if(retained.Count < MaximumRetained) { retained.Add(item.Id, frozen); stoppedHistory.Remove(item.Id); }
+     if(retained.ContainsKey(item.Id)) { retained[item.Id] = frozen; ForgetStopped(item.Id); }
+     else if(retained.Count < MaximumRetained) { retained.Add(item.Id, frozen); ForgetStopped(item.Id); }
      else overflow = true;
     }
     return result.ToArray();

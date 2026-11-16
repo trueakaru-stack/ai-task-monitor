@@ -9,9 +9,14 @@ This also applies when the same step ID is reused for different observed
 names, including when both arrive before the first read. Without observed loss
 or session uncertainty, an ordinary rename keeps its latest name. Retained
 history is limited to 128 entries per session and is marked incomplete when
-bounded; hidden stopped sessions with names are limited to 256 entries. Reaching
-this limit records overflow and makes other visible tasks unconfirmed; an overlong step ID is represented internally by a SHA-256 identity and
-also marks the retained plan incomplete. Values no longer present or observed
+bounded. Names of at most 256 hidden stopped sessions are retained; the oldest
+hidden entry is evicted when this limit is reached. A bounded probabilistic
+filter tracks evicted session IDs: a later matching task is unconfirmed and its
+retained plan is marked incomplete, while the source stays available. False
+positives can conservatively downgrade an unrelated task, and many evictions
+can eventually make these more frequent. The filter lasts for this reader's
+lifetime and resets on explicit disconnect. An overlong step ID is represented
+internally by a SHA-256 identity and also marks the retained plan incomplete. Values no longer present or observed
 cannot be recovered.
 
 Session IDs are limited to 128 UTF-16 code units, matching the length limit in
@@ -85,9 +90,12 @@ the prototype; this behavior alone does not establish delivery from a real hook.
 
 Pending snapshots use the session reader's existing retention rules: at most
 256 cards and 128 retained steps per card, with bounded step titles and IDs.
-An incomplete retained plan is flagged and retention overflow marks the source
-unavailable and unconfirmed rather than silently confirming a partial view.
-These bounds also apply to fallback cards after a failure during a pending read.
+An incomplete retained plan is flagged. A new retention overflow during a
+pending merge marks the source unavailable and unconfirmed rather than silently
+confirming a partial view. A pre-existing incomplete plan remains a per-task
+uncertainty and does not, by itself, create source-wide loss when a partial
+record is later completed. These bounds also apply to fallback cards after a
+failure during a pending read.
 
 During a poll, Windows `FILE_ID_INFO` is compared across simultaneously open
 metadata handles. A successful read keeps one metadata-only handle, shared for

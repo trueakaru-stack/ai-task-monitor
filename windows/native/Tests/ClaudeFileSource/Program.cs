@@ -958,6 +958,25 @@ using (var stoppedHistorySource = new ClaudeFileSource(stoppedHistoryPath, null,
 }
 
 
+
+var coincidentLoss = new SessionReader();
+coincidentLoss.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
+string sourceLossMarker = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "", ["timestamp"] = now.AddSeconds(2).ToString("O"),
+    ["event"] = "Unknown", ["active"] = null!, ["stage_version"] = 1, ["stage_phase"] = "source_uncertain" }) + "\n";
+Check(coincidentLoss.Read(first + completeStop + sourceLossMarker, "", now.AddSeconds(3), DateTime.MinValue.ToUniversalTime()).Length == 0,
+    "A stopped task must not reappear solely because source loss is observed at the same time.");
+string resumedAfterCoincidentLoss = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "observed", ["timestamp"] = now.AddSeconds(4).ToString("O"),
+    ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
+var coincidentTask = coincidentLoss.Read(sourceLossMarker + resumedAfterCoincidentLoss, "", now.AddSeconds(5),
+    DateTime.MinValue.ToUniversalTime()).Single();
+Check(coincidentTask.Unconfirmed && !coincidentTask.PlanConfirmed &&
+    coincidentTask.KnownStepCount == 0 && coincidentTask.KnownDoneCount == 0 &&
+    coincidentTask.Steps.Any(step => step.title == "First step") &&
+    coincidentTask.Steps.All(step => step.status == "unknown"),
+    "A clean stop and simultaneous source loss must keep prior titles unconfirmed for a later observation.");
+
 var cappedHistory = new SessionReader();
 string Retarget(string value, string id) => value.Replace("\"observed\"", "\"" + id + "\"", StringComparison.Ordinal);
 for (int index = 0; index < 256; index++)
@@ -973,9 +992,56 @@ string overflowPlan = Retarget(complete, "stopped-cap-overflow");
 cappedHistory.Read(overflowPlan + neighbor, "", now, DateTime.MinValue.ToUniversalTime());
 var capResult = cappedHistory.Read(overflowPlan + neighbor + Retarget(completeStop, "stopped-cap-overflow"),
     "", now.AddSeconds(2), DateTime.MinValue.ToUniversalTime());
-Check(cappedHistory.RetentionOverflow && cappedHistory.SourceUncertain && capResult.Length == 1 &&
-    capResult[0].Id == "neighbor" && capResult[0].Unconfirmed && !capResult[0].PlanConfirmed,
-    "Overflow during a stop must immediately mark another visible session unconfirmed.");
+Check(!cappedHistory.RetentionOverflow && !cappedHistory.SourceUncertain && capResult.Length == 1 &&
+    capResult[0].Id == "neighbor" && !capResult[0].Unconfirmed,
+    "Evicting old stopped names must not mark an unrelated visible session or the source unavailable.");
+string evictedPrompt = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "stopped-cap-0", ["timestamp"] = now.AddSeconds(3).ToString("O"),
+    ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
+var evictedTask = cappedHistory.Read(evictedPrompt, "", now.AddSeconds(4), DateTime.MinValue.ToUniversalTime()).Single();
+Check(!cappedHistory.RetentionOverflow && !cappedHistory.SourceUncertain && evictedTask.Unconfirmed &&
+    !evictedTask.PlanConfirmed && evictedTask.RetainedPlanIncomplete &&
+    evictedTask.KnownStepCount == 0 && evictedTask.KnownDoneCount == 0 &&
+    evictedTask.Steps.All(step => step.status == "unknown"),
+    "A session whose hidden history was evicted must not gain a confirmed plan when it returns.");
+
+
+string cappedFile = Path.Combine(work, "stopped-cap-pending.jsonl");
+File.WriteAllText(cappedFile, "", utf8);
+using (var cappedSource = new ClaudeFileSource(cappedFile, null, DateTime.MinValue.ToUniversalTime()))
+{
+    for (int index = 0; index < 257; index++)
+    {
+        string id = "file-cap-" + index;
+        File.AppendAllText(cappedFile, Retarget(complete, id), utf8);
+        _ = cappedSource.Poll(ClaudeConnection.Connected, now);
+        File.AppendAllText(cappedFile, Retarget(completeStop, id), utf8);
+        _ = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
+    }
+    string returnEvent = JsonSerializer.Serialize(new Dictionary<string, object> {
+        ["session_id"] = "file-cap-0", ["timestamp"] = now.AddSeconds(3).ToString("O"),
+        ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
+    File.AppendAllText(cappedFile, returnEvent, utf8);
+    ClaudeSourceSnapshot returned = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(4));
+    Check(!returned.Unavailable && returned.Tasks.Single().Unconfirmed &&
+        returned.Tasks.Single().RetainedPlanIncomplete,
+        "A returned session with evicted names must not make the whole source unavailable.");
+    string pendingOther = JsonSerializer.Serialize(new Dictionary<string, object> {
+        ["session_id"] = "file-cap-neighbor", ["timestamp"] = now.AddSeconds(5).ToString("O"),
+        ["event"] = "PreToolUse", ["tool_name"] = "Read", ["active"] = true }) + "\n";
+    int pendingCut = pendingOther.Length / 2;
+    File.AppendAllText(cappedFile, pendingOther[..pendingCut], utf8);
+    ClaudeSourceSnapshot capPending = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(5));
+    Check(capPending.Unavailable && !cappedSource.HasObservedSourceLoss,
+        "A partial tail may be unavailable temporarily, but an already incomplete task must not create source loss.");
+    File.AppendAllText(cappedFile, pendingOther[pendingCut..], utf8);
+    ClaudeSourceSnapshot capComplete = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(6));
+    Check(!capComplete.Unavailable && !cappedSource.HasObservedSourceLoss &&
+        capComplete.Tasks.Single(x => x.Id == "file-cap-0").Unconfirmed &&
+        capComplete.Tasks.Single(x => x.Id == "file-cap-0").RetainedPlanIncomplete &&
+        !capComplete.Tasks.Single(x => x.Id == "file-cap-neighbor").Unconfirmed,
+        "Completing the tail must restore source availability without confirming an incomplete session.");
+}
 
 Console.WriteLine($"Claude file source: {checks} synthetic checks passed.");
 }
