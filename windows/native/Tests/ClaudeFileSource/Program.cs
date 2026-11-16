@@ -29,6 +29,43 @@ snapshot = source.Poll(ClaudeConnection.Connected, now);
 Check(snapshot.Tasks.Count == 2 && !snapshot.Unavailable, "Completed events should appear");
 var observed = snapshot.Tasks.Single(x => x.Id == "observed");
 Check(observed.PlanConfirmed && observed.KnownStepCount == 2 && !observed.Unconfirmed, "Known steps should be confirmed");
+Check(snapshot.ObservedPromptIds.SequenceEqual(new[] { "observed" }),
+    "Clean same-turn progress needs a current prompt after the boundary.");
+string evidenceCurrent = Path.Combine(work, "evidence-current.jsonl");
+File.WriteAllText(evidenceCurrent, Get("partial"), utf8);
+using (var partialEvidence = new ClaudeFileSource(evidenceCurrent, null, DateTime.MinValue.ToUniversalTime()))
+{
+    var partialSnapshot = partialEvidence.Poll(ClaudeConnection.Connected, now);
+    var partialTask = partialSnapshot.Tasks.Single();
+    Check(!partialSnapshot.Unavailable && !partialTask.PlanConfirmed && partialTask.KnownStepCount == 1 &&
+        partialTask.KnownDoneCount == 1 && partialTask.UnknownStepCount == 1 &&
+        partialSnapshot.ObservedPromptIds.SequenceEqual(new[] { "observed" }),
+        "Known steps of an incomplete observed plan were not distinguished.");
+}
+string legacyEvidence = Path.Combine(work, "evidence-legacy.jsonl");
+string olderLegacy = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "observed", ["timestamp"] = now.AddHours(-1).ToString("O"),
+    ["event"] = "PreToolUse", ["tool_name"] = "Read", ["active"] = true }) + "\n";
+File.WriteAllText(legacyEvidence, olderLegacy, utf8);
+using (var mixedEvidence = new ClaudeFileSource(current, legacyEvidence, DateTime.MinValue.ToUniversalTime()))
+{
+    var mixedSnapshot = mixedEvidence.Poll(ClaudeConnection.Connected, now);
+    Check(!mixedSnapshot.Unavailable && mixedSnapshot.Tasks.Single(x => x.Id == "observed").KnownStepCount == 2 &&
+        !mixedSnapshot.ObservedPromptIds.Contains("observed"),
+        "An older journal for the same session must prevent observed-progress attribution.");
+}
+string afterStart = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "observed", ["timestamp"] = now.AddSeconds(2).ToString("O"),
+    ["event"] = "PreToolUse", ["tool_name"] = "Read", ["active"] = true }) + "\n";
+string preStartPath = Path.Combine(work, "evidence-before-start.jsonl");
+File.WriteAllText(preStartPath, complete + afterStart, utf8);
+using (var preStartEvidence = new ClaudeFileSource(preStartPath, null, now.AddSeconds(1)))
+{
+    var preStartSnapshot = preStartEvidence.Poll(ClaudeConnection.Connected, now.AddSeconds(3));
+    Check(preStartSnapshot.Tasks.Any(x => x.Id == "observed") &&
+        !preStartSnapshot.ObservedPromptIds.Contains("observed"),
+        "Activity after startup must not make a prior prompt evidence for current progress.");
+}
 string firstTitle = observed.Steps[0].title;
 observed.Steps[0].title = "externally modified";
 snapshot = source.Poll(ClaudeConnection.Connected, now);
@@ -48,7 +85,7 @@ string nonTerminal = JsonSerializer.Serialize(new Dictionary<string, object> {
 int split = nonTerminal.Length / 2;
 File.AppendAllText(current, nonTerminal[..split], utf8);
 snapshot = source.Poll(ClaudeConnection.Connected, now);
-Check(snapshot.Unavailable && snapshot.Tasks.Count == 2 && snapshot.Tasks.All(x => x.Unconfirmed && !x.PlanConfirmed &&
+Check(snapshot.Unavailable && snapshot.ObservedPromptIds.Count == 0 && snapshot.Tasks.Count == 2 && snapshot.Tasks.All(x => x.Unconfirmed && !x.PlanConfirmed &&
     x.KnownStepCount == 0 && x.KnownDoneCount == 0 && x.Activity == "" && x.Steps.All(step => step.status == "unknown")),
     "An incomplete final event after complete records must make every visible task unconfirmed");
 Check(snapshot.Tasks.Single(x => x.Id == "observed").Steps.Select(x => x.title).SequenceEqual(new[] { "First step", "Second step" }),

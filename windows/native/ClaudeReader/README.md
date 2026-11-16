@@ -117,6 +117,16 @@ owner therefore presents all observations as unconfirmed, preserves an
 unavailable state on detected loss and does not claim complete coverage. It
 does not turn a registration check into proof that a hook ran.
 
+A separate native-source check can recognize a current-file prompt matching
+the reader's current turn at or after the source observation boundary. It
+conservatively excludes a session also seen in the older journal, future or
+inconsistent times, unavailable snapshots, untrusted IDs and parser failures.
+The WPF owner can display the reader's individually known step counts only for
+such clean observations. These counts are a historical view of known steps,
+not proof of the entire plan or current activity; missing hook events may go
+undetected. An incomplete or growing plan can change the denominator. The
+legacy embedded reader remains unchanged.
+
 An explicit disconnect can record a UTC boundary and asynchronously forget
 retained cards and names. After reconnecting, only activity observed at or after
 that boundary can create a card, and the source remains unconfirmed because

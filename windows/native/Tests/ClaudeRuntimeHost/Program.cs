@@ -119,6 +119,31 @@ internal static class Program
             errors.GetAwaiter().GetResult().Length == 0, "Released hook failed for a synthetic input.");
     }
 
+    private static void EmitCreate(string hook, string work, string session, string id, string title)
+    {
+        Emit(hook, new { hook_event_name = "PreToolUse", session_id = session, tool_name = "TaskCreate",
+            tool_input = new { subject = title } }, work);
+        Emit(hook, new { hook_event_name = "PostToolUse", session_id = session, tool_name = "TaskCreate",
+            tool_input = new { subject = title }, tool_response = new { success = true, task = new { id, subject = title } } }, work);
+    }
+
+    private static void EmitUpdate(string hook, string work, string session, string id, string before, string after)
+    {
+        Emit(hook, new { hook_event_name = "PreToolUse", session_id = session, tool_name = "TaskUpdate",
+            tool_input = new { taskId = id, status = after } }, work);
+        Emit(hook, new { hook_event_name = "PostToolUse", session_id = session, tool_name = "TaskUpdate",
+            tool_input = new { taskId = id, status = after },
+            tool_response = new { success = true, taskId = id, updatedFields = new[] { "status" },
+                statusChange = new { from = before, to = after } } }, work);
+    }
+
+    private static IEnumerable<T> Visible<T>(DependencyObject root) where T : UIElement
+    {
+        if (root is T element && element.IsVisible) yield return element;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            foreach (T child in Visible<T>(VisualTreeHelper.GetChild(root, i))) yield return child;
+    }
+
     private static void WaitUntil(Func<bool> condition, string description, int seconds = 20)
     {
         var frame = new DispatcherFrame();
@@ -144,7 +169,7 @@ internal static class Program
         return window;
     }
 
-    private static void CaptureVariants(ClaudeSourceSnapshot snapshot, string root)
+    private static void CaptureVariants(ClaudeSourceSnapshot snapshot, string root, string suffix = "")
     {
         string output = Path.Combine(root, "visuals");
         Directory.CreateDirectory(output);
@@ -163,10 +188,18 @@ internal static class Program
                 var encoder = new PngBitmapEncoder();
                 encoder.Frames.Add(BitmapFrame.Create(image));
                 using var file = new FileStream(Path.Combine(output,
-                    language + "-" + theme + "-" + (compact ? "compact" : "full") + ".png"), FileMode.CreateNew, FileAccess.Write);
+                    language + "-" + theme + "-" + (compact ? "compact" : "full") + suffix + ".png"), FileMode.CreateNew, FileAccess.Write);
                 encoder.Save(file);
                 Check(controller.CurrentTasks.Count == 1 && controller.CurrentTasks[0].Status == "unknown",
                     "A rendered variant lost the unconfirmed task.");
+                if (suffix.Length != 0)
+                {
+                    string note = language == "en" ? "Based on observed steps; may be inaccurate" : "По известным этапам, возможна неточность";
+                    Check(controller.CurrentTasks[0] is { ObservedProgress: true, Progress: 50 } &&
+                        Visible<TextBlock>(window).Any(text => text.Text.StartsWith(note, StringComparison.Ordinal)),
+                        "A rendered observed-progress variant lost its qualification.");
+                    Check(Visible<ProgressBar>(window).Any(), "A rendered observed-progress variant lost its bar.");
+                }
             }
             finally { window.Close(); }
         }
@@ -266,6 +299,8 @@ internal static class Program
         Check(!File.Exists(display), "The synthetic display preferences already exist.");
         // The existing prompt predates the monitor. It cannot prove activity now.
         Emit(paths.Hook, new { hook_event_name = "UserPromptSubmit", session_id = "host-fixture" }, root);
+        EmitCreate(paths.Hook, root, "host-fixture", "old-step", "Prior step");
+        EmitUpdate(paths.Hook, root, "host-fixture", "old-step", "pending", "completed");
         System.Threading.Thread.Sleep(250);
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = root };
         ApplySyntheticEnvironment(start);
@@ -280,6 +315,8 @@ internal static class Program
             Emit(paths.Hook, new { hook_event_name = "PreToolUse", session_id = "host-fixture", tool_name = "Read" }, root);
             WaitUntil(() => HasName(host, "Задача Claude Code") && HasName(host, "Статус не подтверждён"),
                 "The normal entry point did not render later same-session activity as unconfirmed.");
+            Check(!HasName(host, "Готово 1 из 1") && !HasName(host, "По известным этапам, возможна неточность"),
+                "A pre-start plan was presented as observed progress.");
             InvokeControl(host, "SettingsFooterButton");
             WaitUntil(() => HasName(host, "Настройки") && HasName(host, "Статус не подтверждён"),
                 "The loaded Russian preferences or Claude registration status was not shown.");
@@ -402,6 +439,26 @@ internal static class Program
                 WaitUntil(() => controller.CurrentTasks.All(task => task.Provider != "claude"), "A clear synthetic stop was not observed.");
                 Emit(paths.Hook, new { hook_event_name = "UserPromptSubmit", session_id = "synthetic-second" }, root);
                 WaitUntil(() => controller.CurrentTasks.Any(task => task.Provider == "claude"), "A subsequent synthetic task was not shown.");
+                EmitCreate(paths.Hook, root, "synthetic-second", "first", "First observed step");
+                EmitUpdate(paths.Hook, root, "synthetic-second", "first", "pending", "completed");
+                EmitCreate(paths.Hook, root, "synthetic-second", "second", "Second observed step");
+                WaitUntil(() => controller.CurrentTasks.Single(task => task.Provider == "claude") is
+                    { Status: "unknown", PlanConfirmed: false, ObservedProgress: true, ObservedStepCount: 1,
+                      ObservedDoneCount: 1, Progress: 100 } task && task.Steps.Length == 2,
+                    "A partially known plan did not show progress over the known step.");
+                EmitUpdate(paths.Hook, root, "synthetic-second", "second", "pending", "in_progress");
+                EmitCreate(paths.Hook, root, "synthetic-second", "third", "Third observed step");
+                WaitUntil(() => controller.CurrentTasks.Single(task => task.Provider == "claude") is
+                    { Status: "unknown", PlanConfirmed: false, ObservedProgress: true, ObservedStepCount: 2,
+                      ObservedDoneCount: 1, Progress: 50 } task && task.Steps.Length == 3 &&
+                      task.Steps.Count(step => step.Status == "unknown") == 1,
+                    "Known-step progress did not update as new observations arrived.");
+                window.UpdateLayout();
+                Check(Visible<TextBlock>(window).Any(text => text.Text == "Готово 1 из 2") &&
+                    Visible<TextBlock>(window).Any(text => text.Text.StartsWith("По известным этапам, возможна неточность", StringComparison.Ordinal)) &&
+                    Visible<ProgressBar>(window).Any(),
+                    "Observed progress was not visibly qualified.");
+                CaptureVariants(latest!, root, "-observed");
                 string heldSettings = paths.Settings + ".fixture-held";
                 File.Move(paths.Settings, heldSettings);
                 try
@@ -409,8 +466,10 @@ internal static class Program
                     owner.RequestInspection();
                     WaitUntil(() => registration == ClaudeRegistration.Absent && latest is { Unavailable: true },
                         "A temporarily missing settings file was not reported as uncertain.");
-                    Check(controller.CurrentTasks.Single(task => task.Provider == "claude").Status == "unknown",
-                        "A temporarily missing settings file cleared a known card.");
+                    Check(controller.CurrentTasks.Single(task => task.Provider == "claude") is
+                        { Status: "unknown", ObservedProgress: false, Progress: null } task &&
+                        task.Steps.All(step => step.Status == "unknown"),
+                        "A temporarily missing settings file retained claimed progress or cleared a known card.");
                 }
                 finally { File.Move(heldSettings, paths.Settings); }
                 owner.RequestInspection();

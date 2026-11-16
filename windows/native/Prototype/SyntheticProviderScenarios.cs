@@ -189,7 +189,8 @@ internal static class ProviderPresentation
 internal sealed record SampleStep(string Title, string Status);
 internal sealed record SampleTask(string Id, string Provider, string ProviderName, string Title, string Activity,
     string Status, int? Progress, SampleStep[] Steps, bool PlanConfirmed, string UpdatedText,
-    DateTimeOffset Updated, string StartKey, DateTimeOffset Started, bool RetainedPlanIncomplete = false)
+    DateTimeOffset Updated, string StartKey, DateTimeOffset Started, bool RetainedPlanIncomplete = false,
+    bool ObservedProgress = false, int ObservedStepCount = 0, int ObservedDoneCount = 0)
 {
     public bool Active => Status == "active";
 }

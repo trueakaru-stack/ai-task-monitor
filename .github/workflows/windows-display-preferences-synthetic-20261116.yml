@@ -1,7 +1,7 @@
 name: Synthetic Windows display preferences
 on:
   push:
-    branches: [windows, codex/claude-settings-integrated-20261116, codex/claude-settings-e718-20261116]
+    branches: [windows, codex/claude-settings-integrated-20261116, codex/claude-settings-e718-20261116, codex/claude-observed-progress-20261116]
 permissions:
   contents: read
 jobs:

@@ -233,7 +233,11 @@ internal sealed class ClaudeSourcePump : IDisposable
                 SessionEvidenceUncertain = item.SessionEvidenceUncertain, PlanEvidenceUncertain = item.PlanEvidenceUncertain,
                 RetainedPlanIncomplete = item.RetainedPlanIncomplete };
         }).ToArray();
-        return new ClaudeSourceSnapshot(tasks, unconfirmed || snapshot.Unavailable);
+        return new ClaudeSourceSnapshot(tasks, unconfirmed || snapshot.Unavailable)
+        {
+            ObservedPromptIds = !unconfirmed && !snapshot.Unavailable
+                ? snapshot.ObservedPromptIds.ToArray() : Array.Empty<string>()
+        };
     }
 
     public void Dispose()

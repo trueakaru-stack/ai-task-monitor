@@ -26,11 +26,18 @@ scopes are disconnected. An empty source reports that task status is
 unconfirmed rather than claiming that all tasks are absent. A task whose only
 known activity predates this monitor launch is not displayed until an eligible
 later active event arrives; earlier records may then contribute context. Other
-integrations remain synthetic or disabled. The current presentation also suppresses
-all step status and progress, including some observations the reader may know;
-showing progress over known steps with an incomplete-plan label remains unfinished.
-The user must already have authorized and configured the old hook; this prototype
-neither installs nor runs it.
+integrations remain synthetic or disabled. When a clean current-file prompt was
+observed after this monitor began, the reader may also provide individually
+observed step states. The prototype can show progress over those known steps
+with the existing "Based on observed steps; may be inaccurate" qualification.
+This is not a claim that the full plan or current activity is known. The
+denominator can change as new steps are observed, including after reaching
+100%. Loss, malformed or incomplete records, conflicting history, an older
+journal for the same session, and a prompt predating observation suppress
+observed progress and preserve only unconfirmed names where available. Hook
+events can still be silently omitted; this remains a prototype and has not been
+validated against a real Claude session. The user must already have authorized
+and configured the old hook; this prototype neither installs nor runs it.
 
 There is no local Codex source owner in this preview. A future application
 must track the actual connection and confidence of every source when choosing

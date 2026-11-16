@@ -314,7 +314,8 @@ internal sealed class PrototypeWindow
         claudeSourceObserved = true;
         claudeSourceUnavailable = snapshot.Unavailable;
         var combined = samples.Where(task => task.Provider != "claude").ToList();
-        combined.AddRange(snapshot.Tasks.Select(task => ClaudePresentation.Map(task, options.Language)));
+        combined.AddRange(snapshot.Tasks.Select(task => ClaudePresentation.Map(task, options.Language,
+            snapshot.ObservedProgressIds.Contains(task.Id, StringComparer.Ordinal))));
         UpdateSamples(combined);
         Render();
     }
@@ -624,7 +625,8 @@ internal sealed class PrototypeWindow
         if (latestClaude is not null)
         {
             next.RemoveAll(task => task.Provider == "claude");
-            next.AddRange(latestClaude.Tasks.Select(task => ClaudePresentation.Map(task, options.Language)));
+            next.AddRange(latestClaude.Tasks.Select(task => ClaudePresentation.Map(task, options.Language,
+                latestClaude.ObservedProgressIds.Contains(task.Id, StringComparer.Ordinal))));
         }
         if (latestCloud is not null)
         {
@@ -685,6 +687,9 @@ internal sealed class PrototypeWindow
 
     private string Progress(SampleTask task)
     {
+        if (task.Provider == "claude" && task.ObservedProgress)
+            return options.Language == "en" ? $"Done {task.ObservedDoneCount} of {task.ObservedStepCount}"
+                : $"Готово {task.ObservedDoneCount} из {task.ObservedStepCount}";
         if (task.Steps.Length == 0 || !task.PlanConfirmed || task.Status == "unknown") return "";
         int[] active = task.Steps.Select((step, index) => (step, index)).Where(item => item.step.Status == "active").Select(item => item.index + 1).ToArray();
         if (active.Length == 1) return options.Language == "en" ? $"Step {active[0]} of {task.Steps.Length}" : $"Этап {active[0]} из {task.Steps.Length}";
@@ -697,6 +702,8 @@ internal sealed class PrototypeWindow
         if (task.Provider == "claude" && task.RetainedPlanIncomplete)
             return options.Language == "en" ? "Plan unconfirmed; retained plan is incomplete" : "План не подтверждён, сохранён не полностью";
         if (task.Steps.Length == 0) return "";
+        if (task.Provider == "claude" && task.ObservedProgress)
+            return options.Language == "en" ? "Based on observed steps; may be inaccurate" : "По известным этапам, возможна неточность";
         if (!task.PlanConfirmed || (task.Provider == "claude" && task.Status == "unknown"))
             return options.Language == "en" ? "Plan unconfirmed" : "План не подтверждён";
         return task.Provider == "claude"
@@ -934,7 +941,7 @@ internal sealed class PrototypeWindow
         var progress = Text(Progress(task), 16, "Primary", true); progress.Height = 22; progress.VerticalAlignment = VerticalAlignment.Top; Grid.SetColumn(progress, 1);
         header.Children.Add(titleStack); header.Children.Add(progress); stack.Children.Add(header);
         AddLoopWarning(stack, task, false);
-        if (task.Progress.HasValue && (task.Provider != "claude" || (task.PlanConfirmed && task.Status != "unknown")))
+        if (task.Progress.HasValue && (task.Provider != "claude" || task.ObservedProgress || (task.PlanConfirmed && task.Status != "unknown")))
             stack.Children.Add(new ProgressBar { Maximum = 100, Value = task.Progress.Value, Margin = new Thickness(0, 14, 0, 0) });
         if (task.Steps.Length > 0)
         {
@@ -995,7 +1002,7 @@ internal sealed class PrototypeWindow
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(22) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             var marker = new Border { Width = 14, Height = 14, CornerRadius = new CornerRadius(7), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 2, 0, 0) };
-            bool showStatus = task.Provider != "claude" || (task.PlanConfirmed && task.Status != "unknown");
+            bool showStatus = task.Provider != "claude" || task.ObservedProgress || (task.PlanConfirmed && task.Status != "unknown");
             bool done = showStatus && task.Steps[i].Status == "done", current = showStatus && task.Steps[i].Status == "active";
             if (done)
             {
@@ -1041,7 +1048,7 @@ internal sealed class PrototypeWindow
             AddLoopWarning(notes, task, true);
             Grid.SetRow(notes, 2); container.Children.Add(notes);
         }
-        if (task.Progress.HasValue && (task.Provider != "claude" || (task.PlanConfirmed && task.Status != "unknown")))
+        if (task.Progress.HasValue && (task.Provider != "claude" || task.ObservedProgress || (task.PlanConfirmed && task.Status != "unknown")))
         {
             var bar = new ProgressBar { Maximum = 100, Value = task.Progress.Value, Height = 2, Margin = new Thickness(12, 7, 0, 0) }; Grid.SetRow(bar, 3); container.Children.Add(bar);
         }

@@ -50,13 +50,21 @@ internal sealed class SyntheticClaudeScenario
 // Converts the reader's generated labels while preserving source-provided text.
 internal static class ClaudePresentation
 {
-    public static SampleTask Map(AITaskMonitor.Claude.Task state, string language)
+    public static SampleTask Map(AITaskMonitor.Claude.Task state, string language, bool observedProgress = false)
     {
         if (language is not ("ru" or "en")) throw new ArgumentOutOfRangeException(nameof(language));
         bool english = language == "en";
         var steps = state.Steps.Select(step => new SampleStep(
             english && step.generated ? "Step " + step.id : step.title, step.status)).ToArray();
-        int? progress = steps.Length == 0 || !state.PlanConfirmed ? null : (int)Math.Round(100.0 * steps.Count(step => step.Status == "done") / steps.Length);
+        bool observed = observedProgress && state.Unconfirmed && !state.PlanConfirmed && state.KnownStepCount > 0 &&
+            state.KnownDoneCount >= 0 && state.KnownDoneCount <= state.KnownStepCount &&
+            state.KnownStepCount == steps.Count(step => step.Status is "done" or "active" or "pending") &&
+            state.KnownDoneCount == steps.Count(step => step.Status == "done") &&
+            state.UnknownStepCount == steps.Count(step => step.Status == "unknown");
+        int? progress = observed
+            ? (int)Math.Round(100.0 * state.KnownDoneCount / state.KnownStepCount, MidpointRounding.AwayFromZero)
+            : steps.Length == 0 || !state.PlanConfirmed ? null
+            : (int)Math.Round(100.0 * steps.Count(step => step.Status == "done") / steps.Length);
         string activity = state.Unconfirmed ? (english ? "Status unconfirmed" : "Статус не подтверждён")
             : english ? TranslateGeneratedActivity(state.Activity) : state.Activity;
         var updated = new DateTimeOffset(DateTime.SpecifyKind(state.Updated, DateTimeKind.Utc));
@@ -66,7 +74,8 @@ internal static class ClaudePresentation
             state.Unconfirmed ? "unknown" : "active", progress, steps, state.PlanConfirmed,
             updated.LocalDateTime.ToString("HH:mm", CultureInfo.InvariantCulture), updated,
             string.IsNullOrEmpty(state.StartKey) ? "" : "claude:" + state.Id + ":" + state.StartKey, started,
-            RetainedPlanIncomplete: state.RetainedPlanIncomplete);
+            RetainedPlanIncomplete: state.RetainedPlanIncomplete, ObservedProgress: observed,
+            ObservedStepCount: observed ? state.KnownStepCount : 0, ObservedDoneCount: observed ? state.KnownDoneCount : 0);
     }
 
     private static string TranslateGeneratedActivity(string activity)

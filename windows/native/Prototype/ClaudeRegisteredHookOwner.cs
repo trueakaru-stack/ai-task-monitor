@@ -205,10 +205,45 @@ internal sealed class ClaudeRegisteredHookOwner : IDisposable
     }
 
     // Registration does not establish event delivery or current task activity.
+    // A clean current-turn observation can still report progress over known
+    // steps, with an explicit incomplete-plan qualification.
     private void PresentUnconfirmed(ClaudeSourceSnapshot snapshot)
     {
         ClaudeSourceSnapshot copy = ClaudeSourcePump.AsUnconfirmed(snapshot);
-        apply(new ClaudeSourceSnapshot(copy.Tasks, snapshot.Unavailable));
+        var observedProgress = new List<string>();
+        if (!snapshot.Unavailable)
+        {
+            for (int i = 0; i < snapshot.Tasks.Count; i++)
+            {
+                AITaskMonitor.Claude.Task item = snapshot.Tasks[i];
+                if (!snapshot.ObservedPromptIds.Contains(item.Id, StringComparer.Ordinal) ||
+                    item.Unconfirmed || item.SessionEvidenceUncertain || item.PlanEvidenceUncertain ||
+                    item.RetainedPlanIncomplete || item.Steps is null || item.KnownStepCount <= 0) continue;
+                int known = 0, done = 0, unknown = 0;
+                bool valid = true;
+                foreach (Step step in item.Steps)
+                {
+                    if (step.status == "unknown") unknown++;
+                    else if (step.status is "done" or "active" or "pending")
+                    {
+                        known++;
+                        if (step.status == "done") done++;
+                    }
+                    else { valid = false; break; }
+                }
+                if (!valid || known != item.KnownStepCount || done != item.KnownDoneCount ||
+                    unknown != item.UnknownStepCount || known + unknown != item.Steps.Length) continue;
+                AITaskMonitor.Claude.Task target = copy.Tasks[i];
+                target.Steps = item.Steps.Select(step => new Step { id = step.id, title = step.title,
+                    generated = step.generated, status = step.status }).ToArray();
+                target.KnownStepCount = known;
+                target.KnownDoneCount = done;
+                target.UnknownStepCount = unknown;
+                observedProgress.Add(item.Id);
+            }
+        }
+        apply(new ClaudeSourceSnapshot(copy.Tasks, snapshot.Unavailable)
+            { ObservedProgressIds = observedProgress.ToArray() });
     }
 
     internal static ClaudeRegistration Inspect(ClaudeRegisteredHookPaths paths)

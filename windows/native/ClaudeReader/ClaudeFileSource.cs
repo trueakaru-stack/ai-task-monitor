@@ -2,10 +2,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Security;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
 
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("ClaudeFileSource.Tests")]
@@ -18,6 +20,10 @@ public enum ClaudeConnection { Disconnected, Partial, Connected }
 public sealed record ClaudeSourceSnapshot(IReadOnlyList<Task> Tasks, bool Unavailable)
 {
     public long Generation { get; internal init; }
+    // The source sets prompt IDs only for clean current-file observations after
+    // its boundary; the owner separately decides which progress can be shown.
+    public IReadOnlyList<string> ObservedPromptIds { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> ObservedProgressIds { get; init; } = Array.Empty<string>();
     internal object? Owner { get; init; }
     internal long ForgetVersion { get; init; }
     internal Task[]? RetainedFallback { get; init; }
@@ -278,7 +284,11 @@ public sealed class ClaudeFileSource : IDisposable
                 }
                 bool uncertain = connection == ClaudeConnection.Partial;
                 previous = Copy(parsed, uncertain);
-                return new ClaudeSourceSnapshot(Copy(previous, false), uncertain || reader.RetentionOverflow || reader.SourceUncertain);
+                bool unavailable = uncertain || reader.RetentionOverflow || reader.SourceUncertain;
+                Task[] output = Copy(previous, false);
+                IReadOnlyList<string> prompts = unavailable ? Array.Empty<string>() :
+                    ObservedPrompts(current?.Text ?? "", legacy?.Text ?? "", output, observedSinceUtc, utcNow);
+                return new ClaudeSourceSnapshot(output, unavailable) { ObservedPromptIds = prompts };
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or SecurityException or DecoderFallbackException)
             {
@@ -287,6 +297,82 @@ public sealed class ClaudeFileSource : IDisposable
                 previous = Copy(previous, true);
                 return new ClaudeSourceSnapshot(Copy(previous, false), true);
             }
+    }
+
+    // A reader's Started value can also result from activity without a new
+    // prompt. Require the exact current-file prompt after the observation
+    // boundary before treating step observations as belonging to this turn.
+    // Failure of this additional bounded check only suppresses progress.
+    private static IReadOnlyList<string> ObservedPrompts(string current, string legacy, Task[] tasks,
+        DateTime boundary, DateTime utcNow)
+    {
+        var candidates = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        foreach (Task task in tasks)
+        {
+            if (task.Unconfirmed || task.SessionEvidenceUncertain || task.PlanEvidenceUncertain ||
+                task.RetainedPlanIncomplete || task.KnownStepCount <= 0 || task.Started.Kind != DateTimeKind.Utc ||
+                task.Updated.Kind != DateTimeKind.Utc || task.Started < boundary || task.Started > utcNow ||
+                task.Updated < task.Started || task.Updated > utcNow || !SafeSession(task.Id)) continue;
+            if (candidates.Count >= SessionReader.MaximumRetained || !candidates.TryAdd(task.Id, task.Started))
+                return Array.Empty<string>();
+        }
+        if (candidates.Count == 0) return Array.Empty<string>();
+        try
+        {
+            // Older journal entries for the same session have no common writer
+            // sequence with the current file. Exclude them conservatively.
+            using (var lines = new StringReader(legacy))
+            {
+                string? line;
+                while ((line = lines.ReadLine()) is not null)
+                {
+                    if (line.Length == 0) continue;
+                    using JsonDocument document = JsonDocument.Parse(line, new JsonDocumentOptions { MaxDepth = 32 });
+                    if (document.RootElement.ValueKind != JsonValueKind.Object) return Array.Empty<string>();
+                    if (TryString(document.RootElement, "session_id", out string id)) candidates.Remove(id);
+                }
+            }
+            if (candidates.Count == 0) return Array.Empty<string>();
+            var observed = new HashSet<string>(StringComparer.Ordinal);
+            using var currentLines = new StringReader(current);
+            string? currentLine;
+            while ((currentLine = currentLines.ReadLine()) is not null)
+            {
+                if (!currentLine.Contains("UserPromptSubmit", StringComparison.Ordinal)) continue;
+                using JsonDocument document = JsonDocument.Parse(currentLine, new JsonDocumentOptions { MaxDepth = 32 });
+                JsonElement root = document.RootElement;
+                if (root.ValueKind != JsonValueKind.Object ||
+                    !TryString(root, "event", out string eventName) || eventName != "UserPromptSubmit" ||
+                    !TryString(root, "session_id", out string id) || !candidates.TryGetValue(id, out DateTime started) ||
+                    !root.TryGetProperty("active", out JsonElement active) || active.ValueKind != JsonValueKind.True ||
+                    !TryString(root, "timestamp", out string timestamp) ||
+                    !DateTimeOffset.TryParse(timestamp, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset time) ||
+                    time.UtcDateTime != started) continue;
+                observed.Add(id);
+            }
+            return observed.ToArray();
+        }
+        catch (Exception error) when (error is JsonException or ArgumentException or InvalidOperationException or FormatException)
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    private static bool TryString(JsonElement root, string name, out string value)
+    {
+        value = "";
+        if (!root.TryGetProperty(name, out JsonElement property) || property.ValueKind != JsonValueKind.String) return false;
+        value = property.GetString() ?? "";
+        return true;
+    }
+
+    private static bool SafeSession(string value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length > 128) return false;
+        foreach (char c in value)
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '-')) return false;
+        return true;
     }
 
     public ClaudeSourceSnapshot ReportUnavailable()
