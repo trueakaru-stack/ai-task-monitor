@@ -1,17 +1,32 @@
+function Get-ConfirmedDisconnectedDeepSeekScopes {
+ param([hashtable]$Confirmed,[hashtable]$ProfileScopes,[hashtable]$UncertainProfileScopes)
+ if(-not $Confirmed.ContainsKey('deepseek')){return @()}
+ $active=@($ProfileScopes['deepseek'])+@($UncertainProfileScopes['deepseek'])
+ return @($Confirmed['deepseek'] | Where-Object {$_ -cmatch '^[a-f0-9]{32}$' -and $active -cnotcontains $_})
+}
+
 function Read-ExternalProviderSnapshot {
  param(
   [Parameter(Mandatory=$true)]$Channel,
   [Parameter(Mandatory=$true)]$Store,
   [string[]]$AllowedProviders = @(),
+  [string[]]$RetainedProviders = $null,
+  [string[]]$UncertainProviders = @(),
   [hashtable]$ProfileScopes = @{},
   [hashtable]$UncertainProfileScopes = @{},
+  [hashtable]$ConfirmedDisconnectedProfileScopes = @{},
   [ValidateSet('ru','en')][string]$Language = 'ru',
   [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
  )
  $allowed=@{}
  foreach($name in $AllowedProviders){if($name -in @('kimi','deepseek','hermes','opencode')){$allowed[$name]=$true}}
+ $retained=if($null -eq $RetainedProviders){[string[]]@($allowed.Keys)}else{[string[]]@($RetainedProviders)}
  $Channel.SetAllowedProviders([string[]]@($allowed.Keys))
- $Store.RetainProviders([string[]]@($allowed.Keys))
+ $Store.RetainProviders($retained)
+ foreach($provider in $UncertainProviders){if($retained -ccontains $provider){$Store.MarkProviderGap([string]$provider)}}
+ $confirmed=@(Get-ConfirmedDisconnectedDeepSeekScopes $ConfirmedDisconnectedProfileScopes $ProfileScopes $UncertainProfileScopes)
+ $Store.ConfirmDeepSeekDisconnectedScopes([string[]]$confirmed)
+ if($Channel.IsStopped){$Store.MarkGap();throw 'External provider channel stopped.'}
  $scoped=@{}
  foreach($provider in $ProfileScopes.Keys){
   if(-not $allowed.ContainsKey([string]$provider)){continue}
@@ -19,8 +34,10 @@ function Read-ExternalProviderSnapshot {
   $uncertain=@($UncertainProfileScopes[$provider] | Where-Object {$_ -cmatch '^[a-f0-9]{32}$'} | Select-Object -Unique)
   $scoped[$provider]=$valid
   $Store.RetainSessionScopes([string]$provider,[string[]]@($valid+$uncertain))
+  $Store.MarkSessionScopesGap([string]$provider,[string[]]$uncertain)
  }
  $batch=$Channel.Drain()
+ if($Channel.IsStopped){$Store.MarkGap();throw 'External provider channel stopped.'}
  if($batch.Gap){$Store.MarkGap()}
  foreach($event in @($batch.Events)){
   if(-not $allowed.ContainsKey([string]$event.Provider)){continue}
@@ -34,21 +51,23 @@ function Read-ExternalProviderSnapshot {
   [void]$Store.Apply($event,$received)
  }
  foreach($provider in $scoped.Keys){$Store.MarkSessionScopesGap([string]$provider,[string[]]@($UncertainProfileScopes[$provider]))}
+ if($Channel.IsStopped){$Store.MarkGap();throw 'External provider channel stopped.'}
  return @(Convert-ExternalProviderStates -States @($Store.Snapshot($Now)) -Language $Language)
 }
 
 # The application starts a receiver only when a provider has actually been
-# connected. An empty allowlist stops it and clears all in-memory task state.
+# connected. The store outlives a stopped receiver while this monitor is open.
 function New-ExternalProviderController {
  param([string]$PipeName = '')
  return [PSCustomObject]@{Channel=$null;Store=$null;PipeName=$PipeName;DegradedProviders=@{}}
 }
 
 function Stop-ExternalProviderController {
- param([Parameter(Mandatory=$true)]$Controller)
- if($null -ne $Controller.Channel){$Controller.Channel.Dispose()}
- $Controller.Channel=$null
- $Controller.Store=$null
+ param([Parameter(Mandatory=$true)]$Controller,[switch]$KnownIdle)
+ if($null -ne $Controller.Channel){
+  if(-not $KnownIdle -and $null -ne $Controller.Store){$Controller.Store.MarkGap()}
+  try{$Controller.Channel.Dispose()}finally{$Controller.Channel=$null}
+ }
  $Controller.DegradedProviders.Clear()
 }
 
@@ -56,24 +75,31 @@ function Read-ManagedExternalProviderSnapshot {
  param(
   [Parameter(Mandatory=$true)]$Controller,
   [string[]]$AllowedProviders = @(),
+  [string[]]$RetainedProviders = $null,
+  [string[]]$UncertainProviders = @(),
   [hashtable]$ProfileScopes = @{},
   [hashtable]$UncertainProfileScopes = @{},
+  [hashtable]$ConfirmedDisconnectedProfileScopes = @{},
   [ValidateSet('ru','en')][string]$Language = 'ru',
   [DateTimeOffset]$Now = [DateTimeOffset]::UtcNow
  )
  $allowed=@($AllowedProviders | Where-Object {$_ -in @('kimi','deepseek','hermes','opencode')} | Select-Object -Unique)
- if($allowed.Count -eq 0){Stop-ExternalProviderController $Controller;return @()}
+ if($null -eq $RetainedProviders){$RetainedProviders=[string[]]$allowed}
+ if($allowed.Count -eq 0){
+  if($null -ne $Controller.Store){$Controller.Store.RetainProviders([string[]]@())}
+  Stop-ExternalProviderController $Controller -KnownIdle;return @()
+ }
  if($null -eq $Controller.Channel){
   if(-not ('AITaskMonitor.ExternalProviders.EventChannel' -as [type])){
    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
    $sources=@((Join-Path $PSScriptRoot 'ProviderEventState.cs'),(Join-Path $PSScriptRoot 'ProviderEventChannel.cs'))
    Add-Type -Path $sources -ReferencedAssemblies System.Web.Extensions -ErrorAction Stop
   }
-  $Controller.Store=[AITaskMonitor.ExternalProviders.StateStore]::new()
+  if($null -eq $Controller.Store){$Controller.Store=[AITaskMonitor.ExternalProviders.StateStore]::new()}
   try{$Controller.Channel=[AITaskMonitor.ExternalProviders.EventChannel]::new($Controller.PipeName)}
-  catch{$Controller.Store=$null;throw}
+  catch{foreach($provider in $allowed){$Controller.Store.MarkProviderGap([string]$provider)};throw}
  }
- return @(Read-ExternalProviderSnapshot -Channel $Controller.Channel -Store $Controller.Store -AllowedProviders $allowed -ProfileScopes $ProfileScopes -UncertainProfileScopes $UncertainProfileScopes -Language $Language -Now $Now)
+ return @(Read-ExternalProviderSnapshot -Channel $Controller.Channel -Store $Controller.Store -AllowedProviders $allowed -RetainedProviders $RetainedProviders -UncertainProviders $UncertainProviders -ProfileScopes $ProfileScopes -UncertainProfileScopes $UncertainProfileScopes -ConfirmedDisconnectedProfileScopes $ConfirmedDisconnectedProfileScopes -Language $Language -Now $Now)
 }
 
 # Connection failures are isolated per provider; only a shared channel failure
@@ -86,22 +112,29 @@ function Read-ExternalProviderGroupSnapshot {
   [object[]]$PreviousTasks = @(),
   [hashtable]$ProfileScopes = @{},
   [hashtable]$UncertainProfileScopes = @{},
+  [hashtable]$ConfirmedDisconnectedProfileScopes = @{},
   [ValidateSet('ru','en')][string]$Language = 'ru'
  )
  $names=[ordered]@{kimi='Kimi Code';deepseek='DeepSeek Harness';hermes='Hermes Agent';opencode='OpenCode'}
  $allowed=New-Object 'Collections.Generic.List[string]'
  $uncertain=New-Object 'Collections.Generic.List[string]'
  $unavailable=New-Object 'Collections.Generic.List[string]'
+ $partialConnection=New-Object 'Collections.Generic.List[string]'
+ $partialData=New-Object 'Collections.Generic.List[string]'
  $newGaps=New-Object 'Collections.Generic.List[string]'
  foreach($provider in @($Controller.DegradedProviders.Keys)){
   if(-not $Connections.ContainsKey($provider) -or $Connections[$provider] -ne 'connected-degraded'){[void]$Controller.DegradedProviders.Remove($provider)}
  }
  foreach($provider in $names.Keys){
-  if(-not $Connections.ContainsKey($provider)){continue}
+  if(-not $Connections.ContainsKey($provider)){
+   if($Seen.ContainsKey($provider)){$uncertain.Add($provider);$unavailable.Add($names[$provider])}
+   continue
+  }
   switch([string]$Connections[$provider]){
    'connected' {$Seen[$provider]=$true;$allowed.Add($provider)}
    'connected-degraded' {
     $Seen[$provider]=$true;$allowed.Add($provider);$unavailable.Add($names[$provider])
+    $partialConnection.Add($names[$provider])
     if(-not $ProfileScopes.ContainsKey($provider) -and -not $Controller.DegradedProviders.ContainsKey($provider)){$newGaps.Add($provider);$Controller.DegradedProviders[$provider]=$true}
    }
    'partial' {$uncertain.Add($provider);$unavailable.Add($names[$provider])}
@@ -110,23 +143,45 @@ function Read-ExternalProviderGroupSnapshot {
    default {throw 'Invalid external provider connection state.'}
   }
  }
- $retained=@(Unconfirmed-ExternalTasks @($PreviousTasks|Where-Object {$_.Provider -in $uncertain}))
+ $confirmed=@(Get-ConfirmedDisconnectedDeepSeekScopes $ConfirmedDisconnectedProfileScopes $ProfileScopes $UncertainProfileScopes)
+ $eligiblePrevious=@($PreviousTasks | Where-Object {
+  $id=[string]$_.Id
+  -not ($_.Provider -ceq 'deepseek' -and $id -cmatch '^deepseek:([a-f0-9]{32})_' -and $confirmed -ccontains $Matches[1])
+ })
+ $retained=@(Unconfirmed-ExternalTasks @($eligiblePrevious|Where-Object {$_.Provider -in $uncertain}))
+ $keep=[string[]]@($allowed.ToArray()+$uncertain.ToArray() | Select-Object -Unique)
  if($allowed.Count -eq 0){
-  Stop-ExternalProviderController $Controller
-  return [PSCustomObject]@{Tasks=$retained;Unavailable=$unavailable.ToArray()}
+  if($null -ne $Controller.Store){
+   $Controller.Store.RetainProviders($keep)
+   foreach($provider in $uncertain){$Controller.Store.MarkProviderGap([string]$provider)}
+   $Controller.Store.ConfirmDeepSeekDisconnectedScopes([string[]]$confirmed)
+   $stored=@(Convert-ExternalProviderStates -States @($Controller.Store.Snapshot([DateTimeOffset]::UtcNow)) -Language $Language)
+   $merged=[ordered]@{}
+   foreach($task in @($retained+@($stored | Where-Object {$_.Provider -in $uncertain}))){if($task -and $task.Id){$merged[[string]$task.Id]=$task}}
+   $retained=@($merged.Values)
+  }
+  Stop-ExternalProviderController $Controller -KnownIdle
+  return [PSCustomObject]@{Tasks=$retained;Unavailable=$unavailable.ToArray();PartialConnection=@();PartialData=@()}
  }
  try{
-  $current=@(Read-ManagedExternalProviderSnapshot -Controller $Controller -AllowedProviders $allowed.ToArray() -ProfileScopes $ProfileScopes -UncertainProfileScopes $UncertainProfileScopes -Language $Language)
-  if($newGaps.Count -gt 0 -and $null -ne $Controller.Store){
-   foreach($provider in $newGaps){$Controller.Store.MarkProviderGap($provider)}
-   $current=@(Convert-ExternalProviderStates -States @($Controller.Store.Snapshot([DateTimeOffset]::UtcNow)) -Language $Language)
+  $current=@(Read-ManagedExternalProviderSnapshot -Controller $Controller -AllowedProviders $allowed.ToArray() -RetainedProviders $keep -UncertainProviders ([string[]]@($uncertain.ToArray()+$newGaps.ToArray())) -ProfileScopes $ProfileScopes -UncertainProfileScopes $UncertainProfileScopes -ConfirmedDisconnectedProfileScopes $ConfirmedDisconnectedProfileScopes -Language $Language)
+  if($null -ne $Controller.Store){
+   foreach($provider in @($Controller.Store.CapacityLimitedProviders)+@($Controller.Store.LossAffectedProviders)){
+    if($keep -ccontains [string]$provider -and $names.Contains([string]$provider)){
+     $name=[string]$names[$provider]
+     if(-not $unavailable.Contains($name)){$unavailable.Add($name)}
+     if($allowed.Contains([string]$provider) -and -not $partialData.Contains($name)){$partialData.Add($name)}
+    }
+   }
   }
-  return [PSCustomObject]@{Tasks=@($current+$retained);Unavailable=$unavailable.ToArray()}
+  $merged=[ordered]@{}
+  foreach($task in @($retained+$current)){if($task -and $task.Id){$merged[[string]$task.Id]=$task}}
+  return [PSCustomObject]@{Tasks=@($merged.Values);Unavailable=$unavailable.ToArray();PartialConnection=$partialConnection.ToArray();PartialData=$partialData.ToArray()}
  }catch{
-  foreach($provider in $allowed){$uncertain.Add($provider);$unavailable.Add($names[$provider])}
-  $retained=@(Unconfirmed-ExternalTasks @($PreviousTasks|Where-Object {$_.Provider -in $uncertain}))
+  foreach($provider in $allowed){$uncertain.Add($provider);if(-not $unavailable.Contains($names[$provider])){$unavailable.Add($names[$provider])}}
+  $retained=@(Unconfirmed-ExternalTasks @($eligiblePrevious|Where-Object {$_.Provider -in $uncertain}))
   Stop-ExternalProviderController $Controller
-  return [PSCustomObject]@{Tasks=$retained;Unavailable=$unavailable.ToArray()}
+  return [PSCustomObject]@{Tasks=$retained;Unavailable=$unavailable.ToArray();PartialConnection=@();PartialData=@()}
  }
 }
 

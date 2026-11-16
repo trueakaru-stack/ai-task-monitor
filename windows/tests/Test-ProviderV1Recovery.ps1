@@ -1,0 +1,116 @@
+$ErrorActionPreference='Stop'
+if ($env:CI -ne 'true' -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
+    $env:RUNNER_OS -ne 'Windows' -or $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH -ne '0') {
+ throw 'Disposable hosted Windows runner required.'
+}
+$appRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../app'))
+. (Join-Path $appRoot 'integrations/ProviderEventView.ps1')
+. (Join-Path $appRoot 'integrations/ProviderRuntime.ps1')
+. (Join-Path $appRoot 'integrations/DeepSeekRuntime.ps1')
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $appRoot 'CodexProgress.ps1'),[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'Application source could not be parsed.'}
+$mapper=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Unconfirmed-ExternalTasks'},$true)
+if($null -eq $mapper){throw 'Application task mapper not found.'}
+. ([scriptblock]::Create($mapper.Extent.Text))
+function Assert($value,[string]$message){if(-not $value){throw $message}}
+function Receive-DeepSeekRuntimeRequest {param($Request) return $Request.Reply}
+function Feed-DeepSeek($controller,[object[]]$items,[bool]$ok=$true){
+ $reply=[PSCustomObject]@{Ok=$ok;Error=$(if($ok){''}else{'synthetic-error'});Action='list';Profile='';Result=$items}
+ $controller.Request=[PSCustomObject]@{Action='list';Profile='';Reply=$reply}
+ Update-DeepSeekMonitorController $controller
+}
+function Profile([string]$name,[string]$state,[string]$scope=''){
+ return [PSCustomObject]@{name=$name;state=$state;scope=$scope;error=''}
+}
+function Send([string]$name,[string]$json){
+ $stream=[IO.Pipes.NamedPipeClientStream]::new('.',$name,[IO.Pipes.PipeDirection]::InOut)
+ try{
+  $stream.Connect(2000);$bytes=[Text.Encoding]::UTF8.GetBytes($json);$header=[BitConverter]::GetBytes([int]$bytes.Length)
+  $stream.Write($header,0,$header.Length);$stream.Write($bytes,0,$bytes.Length);$stream.Flush()
+  $ack=New-Object byte[] 1;$pending=$stream.BeginRead($ack,0,1,$null,$null)
+  if(-not $pending.AsyncWaitHandle.WaitOne(2000) -or $stream.EndRead($pending) -ne 1 -or $ack[0] -ne 6){throw 'Acknowledgement missing.'}
+ }finally{$stream.Dispose()}
+}
+function Send-Event([string]$provider,[string]$session,[string]$kind){
+ Send $pipe ('{"version":1,"provider":"'+$provider+'","session":"'+$session+'","kind":"'+$kind+'"}')
+}
+function Poll-Group {
+ $script:state=Read-ExternalProviderGroupSnapshot -Controller $controller -Connections $connections -Seen $seen `
+  -PreviousTasks $state.Tasks -ProfileScopes $scopes -UncertainProfileScopes $uncertain -ConfirmedDisconnectedProfileScopes $confirmed
+}
+$a='a'*32;$b='b'*32;$c='c'*32
+$deep=New-DeepSeekMonitorController -AppRoot $appRoot
+Feed-DeepSeek $deep @((Profile 'A' 'connected' $a),(Profile 'B' 'connected' $b))
+Assert (@(Get-DeepSeekAllowedScopes $deep).Count -eq 2) 'Valid profiles were not connected.'
+Feed-DeepSeek $deep @((Profile 'A' 'partial'),(Profile 'B' 'connected' $b))
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a) 'Partial profile was treated as disconnected.'
+Feed-DeepSeek $deep @((Profile 'B' 'connected' $b))
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a) 'A missing profile was treated as disconnected.'
+Feed-DeepSeek $deep @() $false
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0) 'An error was treated as a disconnect.'
+Feed-DeepSeek $deep @((Profile 'A' 'disconnected'),(Profile 'B' 'connected' $b))
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep) -ccontains $a -and @(Get-DeepSeekAllowedScopes $deep) -ccontains $b) 'A unique disconnect was not isolated.'
+$collision=New-DeepSeekMonitorController -AppRoot $appRoot
+Feed-DeepSeek $collision @((Profile 'A' 'connected' $a),(Profile 'B' 'connected' $b))
+Feed-DeepSeek $collision @((Profile 'A' 'connected' $b),(Profile 'B' 'connected' $b))
+Feed-DeepSeek $collision @((Profile 'A' 'disconnected'),(Profile 'B' 'connected' $b))
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $collision).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $collision).Count -ge 1) 'An identity collision was accepted as a confirmed disconnect.'
+
+$pipe='AITaskMonitor.Test.'+[Guid]::NewGuid().ToString('N')
+$controller=New-ExternalProviderController -PipeName $pipe
+$seen=@{};$connections=@{deepseek='connected';opencode='connected';kimi='disconnected';hermes='disconnected'}
+$scopes=@{deepseek=@($a,$b)};$uncertain=@{deepseek=@()};$confirmed=@{}
+$state=[PSCustomObject]@{Tasks=@()}
+try{
+ Poll-Group
+ $originalStore=$controller.Store
+ Send-Event 'deepseek' ($a+'_one') 'active'
+ Send-Event 'opencode' 'other' 'active'
+ for($i=0;$i -lt 254;$i++){Send-Event 'deepseek' ($b+'_'+$i) 'active'}
+ Poll-Group
+ Assert ($state.Tasks.Count -eq 256 -and @($state.Tasks | Where-Object {$_.Active -or $_.Paused}).Count -eq 0) 'Initial V1 tasks were missing or falsely confirmed.'
+ Send-Event 'deepseek' ($a+'_overflow') 'active'
+ Poll-Group
+ Assert ($state.Tasks.Count -eq 256 -and $state.Unavailable -contains 'DeepSeek Harness' -and $state.Unavailable -notcontains 'OpenCode') 'Capacity loss affected the wrong source or displaced a card.'
+ Assert ($state.PartialData -contains 'DeepSeek Harness' -and $state.PartialData -notcontains 'OpenCode') 'Capacity loss was not identified as partial data loss.'
+ Send-Event 'deepseek' ($a+'_one') 'completed'
+ Send-Event 'deepseek' ($a+'_one') 'active'
+ $connections.deepseek='connected-degraded';$scopes.deepseek=@($b);$uncertain.deepseek=@($a)
+ Poll-Group
+ Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_one') -and -not $_.Active -and -not $_.Paused}).Count -eq 1) 'Delayed A events changed an unconfirmed task.'
+ Assert (@($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*')}).Count -eq 254) 'A partial A profile removed B cards.'
+ Assert ($state.PartialConnection -contains 'DeepSeek Harness' -and $state.PartialData -contains 'DeepSeek Harness') 'Partial connection and known event loss were not distinguished.'
+ $connections.deepseek='connected';$scopes.deepseek=@($a,$b);$uncertain.deepseek=@()
+ Poll-Group
+ Assert ($state.Unavailable -contains 'DeepSeek Harness' -and $state.Tasks.Count -eq 256) 'Recovery forgot the scoped loss.'
+ $scopes.deepseek=@($b);$confirmed.deepseek=@(Get-DeepSeekConfirmedDisconnectedScopes $deep)
+ Poll-Group
+ Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_one')}).Count -eq 0 -and
+         @($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*')}).Count -eq 254 -and
+         $state.Unavailable -notcontains 'DeepSeek Harness') 'Confirmed A disconnect did not clear only A and its warning.'
+ $scopes.deepseek=@($b,$c);$confirmed=@{}
+ Send-Event 'deepseek' ($c+'_one') 'active'
+ Poll-Group
+ Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$c+'_one')}).Count -eq 1) 'New fixture C was not observed.'
+ $connections.deepseek='partial';$scopes.deepseek=@();$uncertain.deepseek=@($b);$confirmed.deepseek=@($c)
+ Poll-Group
+ Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$c+'_one')}).Count -eq 0 -and
+         @($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*')}).Count -eq 254) 'Confirmed disconnect was resurrected by fallback or removed B.'
+ $connections.deepseek='connected';$scopes.deepseek=@($b);$uncertain.deepseek=@();$confirmed=@{}
+ Poll-Group
+ Assert ($state.Unavailable -contains 'DeepSeek Harness' -and $state.Unavailable -notcontains 'OpenCode') 'Source loss warning did not persist across recovery.'
+ $controller.Channel.Dispose()
+ Poll-Group
+ Assert ([object]::ReferenceEquals($controller.Store,$originalStore) -and $state.Tasks.Count -eq 255 -and
+         $state.Unavailable -contains 'DeepSeek Harness' -and $state.Unavailable -contains 'OpenCode') 'A stopped channel lost its store or hid the shared failure.'
+ Poll-Group
+ Assert ([object]::ReferenceEquals($controller.Store,$originalStore) -and $null -ne $controller.Channel -and $state.Tasks.Count -eq 255) 'Channel recovery discarded prior evidence.'
+ $connections.deepseek='partial';$connections.opencode='partial';$uncertain.deepseek=@($b);$scopes.deepseek=@()
+ Poll-Group
+ Assert ($null -eq $controller.Channel -and [object]::ReferenceEquals($controller.Store,$originalStore) -and $state.Tasks.Count -eq 255) 'No-channel interval dropped unconfirmed cards.'
+ $connections.deepseek='connected';$connections.opencode='connected';$scopes.deepseek=@($b);$uncertain.deepseek=@()
+ Poll-Group
+ Assert ($state.Tasks.Count -eq 255 -and $state.Unavailable -contains 'DeepSeek Harness' -and $state.Unavailable -contains 'OpenCode') 'Restarted channel hid prior transport uncertainty.'
+}finally{Stop-ExternalProviderController $controller -KnownIdle}
+'Provider V1 recovery: real group, scoped disconnect, loss and synthetic channel checks passed.'
