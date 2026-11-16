@@ -53,6 +53,7 @@ jobs:
           (allow default)
           (deny file-read* (subpath (param "TASK_PROFILE")))
           (allow file-read-metadata)
+          (deny mach-lookup (global-name "com.apple.bsd.dirhelper"))
           (allow file-read* (subpath (param "TASK_NODE_ROOT")))
           (allow file-read* (subpath (param "TASK_PYTHON_ROOT")))
           (deny file-write*)
@@ -102,7 +103,7 @@ jobs:
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
           cd "$AITM_TEST_TASK_ROOT/source/macos"
           task_flags=(--cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security" --disable-sandbox)
-          "$task_run" swift build "${task_flags[@]}"
+          "$task_run" swift build --verbose "${task_flags[@]}"
           task_bin="$("$task_run" swift build --show-bin-path "${task_flags[@]}")"
           "$task_run" /usr/bin/env "AITM_DSH_ANCHOR=$AITM_TEST_TASK_ROOT/dsh/node_modules/@deepseek-ai/dsh/package.json" "AITM_PNPM_SCRIPT=$AITM_TEST_TASK_ROOT/dsh/node_modules/pnpm/bin/pnpm.mjs" "AITM_NODE=$AITM_TEST_NODE_BIN" "AITM_CLAUDE_TEST_EXECUTABLE=$task_bin/AITaskMonitor" /bin/bash scripts/run-swift-tests.sh "${task_flags[@]}" --filter DeepSeekIntegrationTests/testIsolatedUpstreamConnectionBridge | tee "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
           grep -q 'testIsolatedUpstreamConnectionBridge.*passed' "$AITM_TEST_TASK_ROOT/swift-deepseek.log"

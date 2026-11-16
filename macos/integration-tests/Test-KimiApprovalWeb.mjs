@@ -128,6 +128,7 @@ async function run(withPlugin) {
   child.stderr.on('data', chunk => { output += chunk.toString(); });
   const exited = new Promise(resolve => child.once('exit', resolve));
   let ws;
+  let phase = 'server readiness';
   try {
     let token;
     for (let i = 0; i < 150; i++) {
@@ -141,21 +142,25 @@ async function run(withPlugin) {
     async function api(path, body) {
       const response = await fetch(base + path, { method: body ? 'POST' : 'GET',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(5000) });
+        body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(12000) });
       const value = await response.json();
       assert.equal(value.code, 0, `Fixture API failed: ${path}`);
       return value.data;
     }
+    phase = 'session creation';
     const session = await api('/api/v1/sessions', { metadata: { cwd: workspace } });
     const messages = [];
+    phase = 'websocket connection';
     ws = new WebSocket(`ws://127.0.0.1:${port}/api/v1/ws`, [`kimi-code.bearer.${token}`]);
     ws.onmessage = event => { try { messages.push(JSON.parse(event.data)); } catch {} };
     await Promise.race([new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; }),
       delay(5000).then(() => { throw Error('Fixture WebSocket timed out'); })]);
     ws.send(JSON.stringify({ type: 'subscribe_v2', id: '1', payload: { session_id: session.id, transcript: { '*': 'turn' } } }));
     await delay(300);
+    phase = 'prompt submission';
     await api(`/api/v1/sessions/${session.id}/prompts`, { content: [{ type: 'text', text: 'Synthetic approval test.' }],
       permission_mode: 'manual', model: '__kimi_env_model__' });
+    phase = 'model response and approval';
     await delay(withPlugin ? 12000 : 5000);
     assert.ok(modelRequests > 0, 'The fake model was not called');
     assert.ok(messages.some(frame => frame.type === 'interaction' && JSON.stringify(frame).includes('approval')),
@@ -173,6 +178,9 @@ async function run(withPlugin) {
       assert.ok(events.some(event => event.kind === 'waiting'), 'The Kimi approval observer did not run');
       assert.ok(!JSON.stringify(events).includes('Synthetic approval test.'), 'The observer exposed prompt contents');
     }
+  } catch (error) {
+    const kind = typeof error?.name === 'string' && /^[A-Za-z]+Error$/.test(error.name) ? error.name : 'Error';
+    throw new Error(`Kimi synthetic ${phase}: ${kind}`);
   } finally {
     ws?.close();
     child.kill();
