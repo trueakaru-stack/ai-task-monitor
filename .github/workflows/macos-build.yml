@@ -69,6 +69,11 @@ jobs:
     runs-on: ${{ contains(github.event.head_commit.message, '[macos26]') && 'macos-26' || 'macos-15' }}
     timeout-minutes: 15
     steps:
+      - name: Stop tests-only until profile isolation is repaired
+        shell: bash
+        run: |
+          echo "::error::The legacy tests-only suite is blocked: some tests set HOME in child processes. No tests in this job ran. Fix isolation and rerun the complete suite."
+          exit 1
       - uses: actions/checkout@v4
       - name: Select Xcode
         if: ${{ !contains(github.event.head_commit.message, '[macos26]') }}
@@ -137,6 +142,14 @@ jobs:
     env:
       DEVELOPER_DIR: ${{ contains(github.event.head_commit.message, '[macos26]') && '/Applications/Xcode.app/Contents/Developer' || '/Applications/Xcode_16.1.app/Contents/Developer' }}
     steps:
+      - name: Report blocked integration tests
+        shell: bash
+        run: |
+          {
+            echo '### Integration test status'
+            echo 'The legacy tests-only suite is blocked: some tests set HOME in child processes. Those tests have not run and must be fixed and rerun.'
+            echo 'The separate Kimi workflow covers synthetic approval only; it does not exercise the real account or production socket.'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Checkout exact commit
         shell: bash
         run: |

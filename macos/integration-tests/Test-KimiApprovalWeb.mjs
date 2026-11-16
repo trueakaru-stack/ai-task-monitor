@@ -1,5 +1,6 @@
 // Pinned Kimi web server, fake model and disposable profiles; no user account.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -10,6 +11,25 @@ import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
+
+// These tests execute upstream packages and may run only in a disposable
+// macOS runner whose profile access is denied by the surrounding sandbox.
+if (process.platform !== 'darwin' || process.env.CI !== 'true' ||
+    process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' ||
+    process.env.RUNNER_OS !== 'macOS' || process.env.AITM_MACOS_TEST_SANDBOX !== '1' ||
+    'HOME' in process.env || 'CODEX_HOME' in process.env ||
+    !process.env.AITM_CI_DENIED_FILE?.startsWith('/Users/')) {
+  throw new Error('Disposable macOS profile sandbox is required.');
+}
+try {
+  readFileSync(process.env.AITM_CI_DENIED_FILE);
+  throw new Error('Profile sandbox did not deny the test marker.');
+} catch (error) {
+  if (error.code !== 'EACCES' && error.code !== 'EPERM') {
+    throw new Error('Profile sandbox was not confirmed.');
+  }
+}
+
 const installed = resolve(process.argv[2] || '');
 const executable = join(installed, 'node_modules/@moonshot-ai/kimi-code/dist/main.mjs');
 const hash = createHash('sha256').update(await readFile(executable)).digest('hex');
@@ -18,6 +38,7 @@ const tests = dirname(fileURLToPath(import.meta.url));
 const project = dirname(tests);
 const assets = join(project, (await readdir(project)).includes('app') ? 'app/integrations/kimi-plugin' : 'integrations/kimi-plugin');
 const guard = join(tests, 'KimiNetworkGuard.cjs');
+const syntheticHomeGuard = join(tests, 'KimiSyntheticHomeGuard.cjs');
 const temp = await realpath(tmpdir());
 const fixture = await mkdtemp(join(temp, 'aitm-kimi-approval-'));
 let failures = [];
@@ -61,12 +82,14 @@ async function run(withPlugin) {
   Object.assign(env, {
     PATH: [dirname(process.execPath), process.platform === 'win32' ? `${process.env.SystemRoot}\\System32` : '/usr/bin',
       process.platform === 'win32' ? process.env.SystemRoot : '/bin'].join(delimiter),
-    HOME: home, USERPROFILE: home, APPDATA: join(home, 'appdata'), LOCALAPPDATA: join(home, 'localappdata'),
+    USERPROFILE: home, APPDATA: join(home, 'appdata'), LOCALAPPDATA: join(home, 'localappdata'),
     TEMP: home, TMP: home, TMPDIR: home, XDG_CONFIG_HOME: join(home, 'xdg-config'), XDG_CACHE_HOME: join(home, 'xdg-cache'),
     KIMI_CODE_HOME: home, KIMI_DISABLE_TELEMETRY: '1', KIMI_MODEL_NAME: 'fixture', KIMI_MODEL_API_KEY: 'dummy-fixture',
     KIMI_MODEL_PROVIDER_TYPE: 'openai', KIMI_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`,
     KIMI_MODEL_CAPABILITIES: 'tool_use', AITM_FIXTURE_ROOT: root,
-    NODE_OPTIONS: `--require="${guard.replaceAll('\\', '/')}"`, NO_COLOR: '1',
+    NODE_OPTIONS: `--require="${syntheticHomeGuard.replaceAll('\\', '/')}" --require="${guard.replaceAll('\\', '/')}"`,
+    AITM_CI_DENIED_FILE: process.env.AITM_CI_DENIED_FILE,
+    AITM_MACOS_TEST_ROOT: process.env.AITM_MACOS_TEST_ROOT, NO_COLOR: '1',
   });
   if (process.platform === 'win32') env.KIMI_SHELL_PATH = `${process.env.SystemRoot}\\System32\\cmd.exe`;
   const config = `default_model = "fixture"\ndefault_permission_mode = "manual"\ntelemetry = false\nauto_session_title = false\nmerge_all_available_skills = false\n\n[providers.fixture]\ntype = "openai"\nbase_url = "http://127.0.0.1:${modelPort}/v1"\napi_key = "dummy-fixture"\n\n[models.fixture]\nprovider = "fixture"\nmodel = "fixture"\nmax_context_size = 131072\ncapabilities = ["tool_use"]\n`;
@@ -108,6 +131,7 @@ async function run(withPlugin) {
   child.stderr.on('data', chunk => { output += chunk.toString(); });
   const exited = new Promise(resolve => child.once('exit', resolve));
   let ws;
+  let phase = 'server readiness';
   try {
     let token;
     for (let i = 0; i < 150; i++) {
@@ -121,21 +145,25 @@ async function run(withPlugin) {
     async function api(path, body) {
       const response = await fetch(base + path, { method: body ? 'POST' : 'GET',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(5000) });
+        body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(12000) });
       const value = await response.json();
       assert.equal(value.code, 0, `Fixture API failed: ${path}`);
       return value.data;
     }
+    phase = 'session creation';
     const session = await api('/api/v1/sessions', { metadata: { cwd: workspace } });
     const messages = [];
+    phase = 'websocket connection';
     ws = new WebSocket(`ws://127.0.0.1:${port}/api/v1/ws`, [`kimi-code.bearer.${token}`]);
     ws.onmessage = event => { try { messages.push(JSON.parse(event.data)); } catch {} };
     await Promise.race([new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; }),
       delay(5000).then(() => { throw Error('Fixture WebSocket timed out'); })]);
     ws.send(JSON.stringify({ type: 'subscribe_v2', id: '1', payload: { session_id: session.id, transcript: { '*': 'turn' } } }));
     await delay(300);
+    phase = 'prompt submission';
     await api(`/api/v1/sessions/${session.id}/prompts`, { content: [{ type: 'text', text: 'Synthetic approval test.' }],
       permission_mode: 'manual', model: '__kimi_env_model__' });
+    phase = 'model response and approval';
     await delay(withPlugin ? 12000 : 5000);
     assert.ok(modelRequests > 0, 'The fake model was not called');
     assert.ok(messages.some(frame => frame.type === 'interaction' && JSON.stringify(frame).includes('approval')),
@@ -153,6 +181,10 @@ async function run(withPlugin) {
       assert.ok(events.some(event => event.kind === 'waiting'), 'The Kimi approval observer did not run');
       assert.ok(!JSON.stringify(events).includes('Synthetic approval test.'), 'The observer exposed prompt contents');
     }
+  } catch (error) {
+    const kind = typeof error?.name === 'string' && /^[A-Za-z]+Error$/.test(error.name) ? error.name : 'Error';
+    const denied = /(?:EPERM|EACCES|permission denied|operation not permitted)/i.test(output);
+    throw new Error(`Kimi synthetic ${phase}: ${kind}; processExited=${child.exitCode !== null}; permissionError=${denied}; modelRequests=${modelRequests}`);
   } finally {
     ws?.close();
     child.kill();
