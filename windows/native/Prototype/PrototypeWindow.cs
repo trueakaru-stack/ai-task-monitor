@@ -43,6 +43,9 @@ internal sealed class PrototypeWindow
     private readonly DisplayPreferenceService? preferences;
     private readonly Func<bool?> windowsUsesLightTheme;
     private readonly Func<string> systemLanguage;
+    private readonly Action<string> copyFeedbackAddress;
+    private readonly Action<string> openFeedbackDraft;
+    private string feedbackError = "";
     private readonly Dictionary<TextBlock, string> staticText = new();
     private readonly Dictionary<Button, string> staticButtons = new();
     private readonly Dictionary<DependencyObject, string> staticNames = new();
@@ -76,9 +79,13 @@ internal sealed class PrototypeWindow
     private Action? syntheticDownload;
 
     public PrototypeWindow(Window window, Options options, DisplayPreferenceService? preferences = null,
-        Func<bool?>? windowsUsesLightTheme = null, Func<string>? systemLanguage = null)
+        Func<bool?>? windowsUsesLightTheme = null, Func<string>? systemLanguage = null,
+        Action<string>? copyFeedbackAddress = null, Action<string>? openFeedbackDraft = null)
     {
         this.window = window;
+        this.copyFeedbackAddress = copyFeedbackAddress ?? (address => Clipboard.SetText(address));
+        this.openFeedbackDraft = openFeedbackDraft ?? (uri => System.Diagnostics.Process.Start(
+            new System.Diagnostics.ProcessStartInfo(uri) { UseShellExecute = true }));
         this.preferences = preferences;
         this.windowsUsesLightTheme = windowsUsesLightTheme ?? WindowsUsesLightTheme;
         this.systemLanguage = systemLanguage ?? (() => CultureInfo.CurrentUICulture.Name);
@@ -495,21 +502,25 @@ internal sealed class PrototypeWindow
     private void ConfigureDisplaySettings()
     {
         Grid settings = Find<Grid>("SettingsView");
+        Hyperlink feedbackLink = Find<Hyperlink>("FeedbackEmailLink");
         var enabled = new HashSet<Button>
         {
             Find<Button>("SettingsBackButton"), Find<Button>("SettingsTaskbarMinimizeButton"), Find<Button>("SettingsCloseButton"),
             Find<Button>("SystemThemeButton"), Find<Button>("DarkThemeButton"), Find<Button>("LightThemeButton"),
-            Find<Button>("SystemLanguageButton"), Find<Button>("RussianLanguageButton"), Find<Button>("EnglishLanguageButton")
+            Find<Button>("SystemLanguageButton"), Find<Button>("RussianLanguageButton"), Find<Button>("EnglishLanguageButton"),
+            Find<Button>("FeedbackCopyButton")
         };
         void DisableUnconnected(DependencyObject root)
         {
             if (root is Button button && !enabled.Contains(button)) button.IsEnabled = false;
             if (root is ComboBox combo) combo.IsEnabled = false;
-            if (root is Hyperlink link) link.IsEnabled = false;
+            if (root is Hyperlink link && link != feedbackLink) link.IsEnabled = false;
             foreach (object child in LogicalTreeHelper.GetChildren(root))
                 if (child is DependencyObject element) DisableUnconnected(element);
         }
         DisableUnconnected(settings);
+        Find<Button>("FeedbackCopyButton").Click += (_, _) => CopyFeedbackAddress();
+        feedbackLink.Click += (_, _) => OpenFeedbackDraft();
         Button footer = Find<Button>("SettingsFooterButton"), back = Find<Button>("SettingsBackButton");
         foreach (Button button in new[] { footer, back })
         {
@@ -544,6 +555,48 @@ internal sealed class PrototypeWindow
         window.Closed += (_, _) => timer.Stop();
         timer.Start();
         UpdateDisplayControls();
+    }
+
+    private void CopyFeedbackAddress()
+    {
+        try
+        {
+            Hyperlink link = Find<Hyperlink>("FeedbackEmailLink");
+            string address = new TextRange(link.ContentStart, link.ContentEnd).Text.Trim();
+            if (string.IsNullOrWhiteSpace(address)) throw new InvalidOperationException();
+            copyFeedbackAddress(address);
+            feedbackError = "";
+        }
+        catch { feedbackError = "copy"; }
+        UpdateFeedbackError();
+    }
+
+    private void OpenFeedbackDraft()
+    {
+        try
+        {
+            string subject = options.Language == "en" ? "AI Task Monitor feedback or suggestion"
+                : "Отзыв или предложение об AI Task Monitor";
+            openFeedbackDraft("mailto:truea.k.a.ru@gmail.com?subject=" + Uri.EscapeDataString(subject));
+            feedbackError = "";
+        }
+        catch { feedbackError = "mail"; }
+        UpdateFeedbackError();
+    }
+
+    private void UpdateFeedbackError()
+    {
+        TextBlock error = Find<TextBlock>("FeedbackError");
+        if (feedbackError.Length == 0)
+        {
+            error.Visibility = Visibility.Collapsed;
+            return;
+        }
+        string russian = feedbackError == "copy"
+            ? "Не удалось скопировать адрес. Выделите его и скопируйте вручную."
+            : "Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com.";
+        error.Text = options.Language == "en" ? DisplayText.English[russian] : russian;
+        error.Visibility = Visibility.Visible;
     }
 
     private void ShowSettings(bool show, bool keyboardNavigation)
@@ -602,6 +655,7 @@ internal sealed class PrototypeWindow
 
     private void UpdateDisplayControls()
     {
+        UpdateFeedbackError();
         foreach (var item in new[] { ("SystemThemeButton", "system"), ("DarkThemeButton", "dark"), ("LightThemeButton", "light") })
             Find<Button>(item.Item1).Background = themeMode == item.Item2 ? ColorFor("Pressed") : Brushes.Transparent;
         foreach (var item in new[] { ("SystemLanguageButton", "system"), ("RussianLanguageButton", "ru"), ("EnglishLanguageButton", "en") })

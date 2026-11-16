@@ -7,6 +7,10 @@ scenarios use synthetic data and do not start this detection. In the normal
 standalone launch the existing settings screen can read the old theme and
 language choices and save explicit display changes to a separate file. Source
 actions, About, diagnostics and installed-app updates remain disabled or absent.
+The feedback controls can copy the published address or request an email draft
+with the published subject through the operating system. These actions run only
+when activated; the monitor does not send mail. The hosted tests inject fake
+clipboard and mail actions and do not exercise a real email application.
 
 The preference factory performs filesystem checks and the window constructor
 loads preferences synchronously on the UI thread. A slow or inaccessible data

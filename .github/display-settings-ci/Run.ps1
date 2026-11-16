@@ -75,7 +75,7 @@ try{
  Check ([IO.File]::Exists($hostAssembly)) 'The display-host test assembly is missing.'
  Invoke-Isolated @($hostAssembly,$root)
  Check (@(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File).Count -eq 4) 'The four synthetic frames are missing.'
- Check (@(Get-ChildItem -LiteralPath $root -Filter 'end-*.png' -File).Count -eq 4) 'The four settings-end frames are missing.'
+ Check (@(Get-ChildItem -LiteralPath $root -Filter 'end-*.png' -File).Count -eq 8) 'The eight settings and feedback-error frames are missing.'
  $viewProject=Join-Path $repository 'windows/native/Prototype/Tests/Prototype.Tests.csproj'
  Invoke-Isolated @('build',$viewProject,'-c','Release','--configfile',$config,'--artifacts-path',$artifacts,'-p:NuGetAudit=false','--nologo')
  $viewAssembly=Join-Path $artifacts 'bin/Prototype.Tests/release/AITaskMonitor.Prototype.Tests.dll'
