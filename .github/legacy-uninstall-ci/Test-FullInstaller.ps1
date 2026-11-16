@@ -230,6 +230,51 @@ try{
             $observedErr=if($probeErr.IsCompleted){$probeErr.Result}else{'<stream still open>'}
             Write-Warning ('Direct installed-script diagnostic: exited='+$finished+'; stdout='+$observedOut+'; stderr='+$observedErr)
         }finally{$probeMonitor.Dispose()}
+        # Insert checkpoints only into a synthetic copy in the fixture. The
+        # installed resource itself remains unchanged.
+        $checkpoint=Join-Path $FixtureRoot 'startup-checkpoints.txt'
+        $instrumented=Join-Path $install 'synthetic-startup-diagnostic.ps1'
+        $sourceText=[IO.File]::ReadAllText($appScript,[Text.Encoding]::UTF8).Replace([string][char]13+[char]10,[string][char]10)
+        $lineFeed=[string][char]10;$literal=$checkpoint.Replace("'","''")
+        $markers=[ordered]@{
+            'before-wpf'='Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, System.Drawing'
+            'after-wpf'='$codexHome = if ($env:CODEX_HOME)'
+            'before-diagnostics'='foreach($module in @("DiagnosticPolicy.ps1","DiagnosticStore.ps1","LoopDetection.ps1","DiagnosticCollector.ps1","DiagnosticRuntime.ps1"))'
+            'before-claude-reader'='try { . (Join-Path $PSScriptRoot "ClaudeReaderCore.ps1") }'
+            'after-claude-reader'='$script:claudeRetentionAvailable=$false'
+            'before-update-transport'='$script:releaseUpdatesAvailable=$false'
+            'before-provider-init'='$script:externalProviderController=$null'
+            'before-codex-cloud'='$script:codexCloudModulesAvailable=$false'
+            'after-codex-cloud'='$script:currentVersion='
+            'before-window-load'='$reader = New-Object System.Xml.XmlNodeReader $xaml'
+            'after-window-load'='$iconPath = Join-Path $PSScriptRoot "assets\app-icon.ico"'
+            'before-theme'='$initialTheme=if($ThemeOverride)'
+            'before-diagnostic-runtime'='if($script:diagnosticModulesAvailable -and (($PreviewActiveTasks -lt 0 -and -not $SnapshotFile) -or $DiagnosticDirectory))'
+            'before-language'='$initialLanguage=if($LanguageOverride)'
+            'before-activity'='Refresh-ActivityMotion'+$lineFeed+'Update-View'
+            'before-show-dialog'='$window.ShowDialog()|Out-Null'
+        }
+        foreach($entry in $markers.GetEnumerator()){
+            $token=[string]$entry.Value
+            $at=$sourceText.IndexOf($token,[StringComparison]::Ordinal)
+            Check ($at -ge 0 -and $sourceText.LastIndexOf($token,[StringComparison]::Ordinal) -eq $at) ('A diagnostic checkpoint is absent or ambiguous: '+$entry.Key)
+            $logStatement="[IO.File]::AppendAllText('"+$literal+"','"+[string]$entry.Key+"' + [Environment]::NewLine); "+$lineFeed
+            $sourceText=$sourceText.Insert($at,$logStatement)
+        }
+        [IO.File]::WriteAllText($instrumented,$sourceText,[Text.UTF8Encoding]::new($true))
+        $instrumentedStart=New-IsolatedStart $SystemPowerShell $values
+        foreach($arg in @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-Sta','-File',$instrumented)){[void]$instrumentedStart.ArgumentList.Add($arg)}
+        $instrumentedProcess=[Diagnostics.Process]::Start($instrumentedStart)
+        try{
+            $deadline=[Diagnostics.Stopwatch]::StartNew()
+            while(-not $instrumentedProcess.HasExited -and $deadline.Elapsed.TotalSeconds -lt 25){
+                if([IO.File]::Exists($checkpoint) -and [IO.File]::ReadAllText($checkpoint).Contains('before-show-dialog')){break}
+                Start-Sleep -Milliseconds 200
+            }
+            if(-not $instrumentedProcess.HasExited){$instrumentedProcess.Kill();[void]$instrumentedProcess.WaitForExit(10000)}
+            $observed=if([IO.File]::Exists($checkpoint)){[IO.File]::ReadAllLines($checkpoint) -join ', '}else{'none'}
+            Write-Warning ('Synthetic instrumented startup checkpoints: '+$observed)
+        }finally{$instrumentedProcess.Dispose()}
         throw
     }
     Write-Output 'Synthetic monitor window found.'
