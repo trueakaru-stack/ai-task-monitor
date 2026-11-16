@@ -6,6 +6,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using AITaskMonitor.Claude;
+using AITaskMonitor.CodexCloud;
 using ShapePath = System.Windows.Shapes.Path;
 
 namespace AITaskMonitor.Prototype;
@@ -46,6 +47,8 @@ internal sealed class PrototypeWindow
     private bool equalProviderWidths;
     private string lastRenderedProvider = "";
     private bool claudeSourceUnavailable;
+    private bool cloudEnabled, cloudScanned, cloudUnavailable;
+    private readonly HashSet<string> cloudTaskIds = new(StringComparer.Ordinal);
     private Dictionary<string, LoopWarningView> loopWarnings = new(StringComparer.Ordinal);
     private Func<string, bool>? dismissLoopWarning;
 
@@ -205,11 +208,53 @@ internal sealed class PrototypeWindow
         Render();
     }
 
+    // Cloud and local Codex share a visible provider tab, not a source state.
+    internal void ApplyCloudSource(CloudSnapshot snapshot)
+    {
+        if (!window.Dispatcher.CheckAccess()) throw new InvalidOperationException("UI updates must run on the window dispatcher.");
+        ArgumentNullException.ThrowIfNull(snapshot);
+        cloudEnabled = snapshot.Enabled;
+        cloudScanned = snapshot.Scanned;
+        cloudUnavailable = snapshot.Unavailable;
+
+        var other = samples.Where(task => !cloudTaskIds.Contains(task.Id)).ToList();
+        var mapped = snapshot.Tasks.Select(task => MapCloudTask(task, options.Language)).ToList();
+        var nextIds = mapped.Select(task => task.Id).ToHashSet(StringComparer.Ordinal);
+        if (other.Any(task => nextIds.Contains(task.Id)))
+        {
+            // An ID collision cannot replace an unrelated task.
+            cloudUnavailable = true;
+            Render();
+            return;
+        }
+        cloudTaskIds.Clear();
+        foreach (SampleTask task in mapped) cloudTaskIds.Add(task.Id);
+        other.AddRange(mapped);
+        UpdateSamples(other);
+        Render();
+    }
+
+    private static SampleTask MapCloudTask(CloudTask task, string language)
+    {
+        bool english = language == "en";
+        string title = string.IsNullOrWhiteSpace(task.Title)
+            ? english ? "Codex task" : "Задача Codex"
+            : task.Title;
+        DateTimeOffset updated = task.UpdatedAt ?? DateTimeOffset.MinValue;
+        return new SampleTask(task.Id, "codex", "Codex",
+            (english ? "Cloud: " : "Облако: ") + title,
+            english ? "Status unconfirmed" : "Статус не подтверждён",
+            "unknown", null, [], false,
+            updated == DateTimeOffset.MinValue ? "" : updated.LocalDateTime.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture),
+            updated, "", DateTimeOffset.MinValue);
+    }
+
     internal void AdvanceMultiForTest()
     {
         if (scenario is null) throw new InvalidOperationException("A synthetic scenario is required.");
         scenario.AdvanceMulti();
-        UpdateSamples(scenario.Snapshot().Select(state => ProviderPresentation.Map(state, options.Language)).ToList());
+        var retainedCloud = samples.Where(task => cloudTaskIds.Contains(task.Id)).ToArray();
+        UpdateSamples(scenario.Snapshot().Select(state => ProviderPresentation.Map(state, options.Language)).Concat(retainedCloud).ToList());
         Render();
     }
 
@@ -217,7 +262,8 @@ internal sealed class PrototypeWindow
     {
         if (claudeScenario is null) throw new InvalidOperationException("A synthetic Claude scenario is required.");
         claudeScenario.Advance();
-        UpdateSamples(claudeScenario.Snapshot(options.Language));
+        var retainedCloud = samples.Where(task => cloudTaskIds.Contains(task.Id)).ToArray();
+        UpdateSamples(claudeScenario.Snapshot(options.Language).Concat(retainedCloud).ToList());
         Render();
     }
 
@@ -371,9 +417,11 @@ internal sealed class PrototypeWindow
         string[] oldWarningOrder = oldWarnings.Select(button => ((WarningFocusKey)button.Tag).TaskId).ToArray();
         string? focusedWarning = oldWarnings.FirstOrDefault(button => button.IsKeyboardFocusWithin)?.Tag is WarningFocusKey key ? key.TaskId : null;
         tasks.Children.Clear(); tabs.Children.Clear(); compactTasks.Children.Clear(); dots.Children.Clear();
-        string warningText = claudeSourceUnavailable
-            ? options.Language == "en" ? "No data from Claude Code" : "Нет данных от Claude Code"
-            : "";
+        bool english = options.Language == "en";
+        var warnings = new List<string>();
+        if (claudeSourceUnavailable) warnings.Add(english ? "No data from Claude Code" : "Нет данных от Claude Code");
+        if (cloudEnabled && cloudUnavailable) warnings.Add(english ? "No data from Codex Cloud" : "Нет данных от Codex Cloud");
+        string warningText = string.Join(Environment.NewLine, warnings);
         if (warningText.Length != 0)
         {
             var warning = Text(warningText, 14, "Secondary");
@@ -388,7 +436,11 @@ internal sealed class PrototypeWindow
         if (selectedProvider != "all" && !providers.Contains(selectedProvider)) selectedProvider = "all";
         if (samples.Count == 0)
         {
-            string text = options.Language == "en" ? "No active tasks" : "Активных задач сейчас нет";
+            string text = cloudEnabled
+                ? cloudScanned
+                    ? english ? "Cloud task status unconfirmed" : "Статус облачных задач не подтверждён"
+                    : english ? "Checking Codex Cloud" : "Проверка Codex Cloud"
+                : english ? "No active tasks" : "Активных задач сейчас нет";
             if (warningText.Length == 0) { var empty = Text(text, 14, "Secondary"); empty.Margin = new Thickness(4, 24, 0, 0); tasks.Children.Add(empty); }
             var compactEmpty = Text(warningText.Length != 0 ? warningText : text, 12.5, "Activity"); compactEmpty.Margin = new Thickness(0, 5, 0, 5); compactTasks.Children.Add(compactEmpty);
             dots.Visibility = Visibility.Collapsed;
@@ -489,11 +541,12 @@ internal sealed class PrototypeWindow
 
     private double CompactHeight()
     {
-        if (samples.Count == 0) return 132;
+        int warningCount = (claudeSourceUnavailable ? 1 : 0) + (cloudEnabled && cloudUnavailable ? 1 : 0);
+        if (samples.Count == 0) return 132 + Math.Max(0, warningCount - 1) * 20;
         var selected = samples.FirstOrDefault(task => task.Id == compactSelection);
         return 162 + (samples.Count > 1 ? 18 : 0) + (samples.Count > 3 ? 20 : 0) +
             (samples.Select(task => task.Provider).Distinct(StringComparer.Ordinal).Skip(1).Any() ? 18 : 0) +
-            (selected is not null && PlanNote(selected).Length > 0 ? 20 : 0) + (claudeSourceUnavailable ? 20 : 0) +
+            (selected is not null && PlanNote(selected).Length > 0 ? 20 : 0) + warningCount * 20 +
             (selected is not null && WarningFor(selected) is not null ? 72 : 0);
     }
 
@@ -691,3 +744,4 @@ internal sealed class PrototypeWindow
         dots.Children.Add(button);
     }
 }
+
