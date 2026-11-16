@@ -144,11 +144,14 @@ final class DeepSeekIntegrationTests: XCTestCase {
         initializer.environment = fixtureEnvironment
         initializer.standardOutput = FileHandle.nullDevice
         let initializerLog = root.appendingPathComponent("initializer-stderr.log")
-        guard manager.createFile(atPath: initializerLog.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+        let logDescriptor = initializerLog.path.withCString {
+            Darwin.open($0, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        }
+        guard logDescriptor >= 0 else {
             XCTFail("The synthetic initializer log could not be created.")
             return
         }
-        let initializerError = try FileHandle(forWritingTo: initializerLog)
+        let initializerError = FileHandle(fileDescriptor: logDescriptor, closeOnDealloc: true)
         initializer.standardError = initializerError
         try initializer.run()
         initializer.waitUntilExit()
