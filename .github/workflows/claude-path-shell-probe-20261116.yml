@@ -1,0 +1,53 @@
+name: Synthetic Windows hook shell probe
+on:
+  push:
+    branches: ['codex/legacy-install-release028-20261116']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-2025
+    timeout-minutes: 5
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+    steps:
+      - name: Test command syntax in disposable processes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          if($env:CI -cne 'true' -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows'){throw 'Disposable runner required.'}
+          $root=Join-Path $env:RUNNER_TEMP ('aitm-shell-probe-'+[guid]::NewGuid().ToString('N'))
+          foreach($dir in @('profile','local','roaming','tmp')){[void][IO.Directory]::CreateDirectory((Join-Path $root $dir))}
+          $system=[Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+          $ps=[IO.Path]::Combine($system,'WindowsPowerShell\v1.0\powershell.exe')
+          $bash=Join-Path $env:ProgramFiles 'Git\bin\bash.exe'
+          $cmd=Join-Path $system 'cmd.exe'
+          if(-not [IO.File]::Exists($ps) -or -not [IO.File]::Exists($bash)){throw 'System PowerShell or Git Bash unavailable.'}
+          $payload=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('[Console]::Out.Write("SYNTHETIC_OK")'))
+          $commands=@{
+            quoted=('"'+$ps+'" -NoProfile -NonInteractive -EncodedCommand '+$payload)
+            slash=($ps.Replace('\','/')+' -NoProfile -NonInteractive -EncodedCommand '+$payload)
+            ampersand=('& "'+$ps+'" -NoProfile -NonInteractive -EncodedCommand '+$payload)
+          }
+          foreach($variant in @('quoted','slash','ampersand')){
+            foreach($shell in @('bash','powershell','cmd')){
+              $start=[Diagnostics.ProcessStartInfo]::new()
+              $start.FileName=switch($shell){'bash' {$bash} 'powershell' {$ps} 'cmd' {$cmd}}
+              $start.WorkingDirectory=$root;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+              $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true;$start.Environment.Clear()
+              $values=@{SystemRoot=$env:SystemRoot;windir=$env:SystemRoot;PATH=($system+';'+$env:SystemRoot);USERPROFILE=(Join-Path $root 'profile');LOCALAPPDATA=(Join-Path $root 'local');APPDATA=(Join-Path $root 'roaming');TEMP=(Join-Path $root 'tmp');TMP=(Join-Path $root 'tmp');DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='0';DOTNET_GENERATE_ASPNET_CERTIFICATE='0'}
+              foreach($key in $values.Keys){$start.Environment[$key]=[string]$values[$key]}
+              switch($shell){
+                'bash' {[void]$start.ArgumentList.Add('-c');[void]$start.ArgumentList.Add($commands[$variant])}
+                'powershell' {[void]$start.ArgumentList.Add('-NoProfile');[void]$start.ArgumentList.Add('-NonInteractive');[void]$start.ArgumentList.Add('-EncodedCommand');[void]$start.ArgumentList.Add([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($commands[$variant])))}
+                'cmd' {$start.Arguments='/d /s /c "'+$commands[$variant]+'"'}
+              }
+              $process=[Diagnostics.Process]::Start($start)
+              try{
+                $o=$process.StandardOutput.ReadToEndAsync();$e=$process.StandardError.ReadToEndAsync()
+                if(-not $process.WaitForExit(20000)){throw 'Synthetic shell timed out.'}
+                Write-Output ('Shell probe: '+$shell+' '+$variant+' exit='+$process.ExitCode+' output='+($o.Result -ceq 'SYNTHETIC_OK'))
+              }finally{$process.Dispose()}
+            }
+          }

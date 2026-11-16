@@ -236,9 +236,25 @@ try {
             [void][IO.Directory]::CreateDirectory($caseDirectory)
             $casePath = Join-Path $caseDirectory 'settings.json'
             $second = Join-Path $caseDirectory 'second.json'
-            if ($case -eq 'cycle') { [void](New-Item -ItemType SymbolicLink -Path $second -Target 'settings.json' -ErrorAction Stop) }
-            $targetSpec = if ($case -eq 'cycle') { 'second.json' } else { 'missing.json' }
-            [void](New-Item -ItemType SymbolicLink -Path $casePath -Target $targetSpec -ErrorAction Stop)
+            Push-Location -LiteralPath $caseDirectory
+            try {
+                if ($case -eq 'dangling') {
+                    # Windows PowerShell 5 requires the initial target to exist.
+                    $placeholder=Join-Path $caseDirectory 'missing.json'
+                    [IO.File]::WriteAllText($placeholder,'synthetic')
+                    [void](New-Item -ItemType SymbolicLink -Path $casePath -Target 'missing.json' -ErrorAction Stop)
+                    [IO.File]::Delete($placeholder)
+                } else {
+                    # Create the first link against a temporary file, then use
+                    # the system shell to link back to the now-dangling link.
+                    [IO.File]::WriteAllText($casePath,'synthetic')
+                    [void](New-Item -ItemType SymbolicLink -Path $second -Target 'settings.json' -ErrorAction Stop)
+                    [IO.File]::Delete($casePath)
+                    $cmd=[IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'cmd.exe')
+                    $linkResult=& $cmd /d /c ('mklink "'+$casePath+'" "second.json"')
+                    if ($LASTEXITCODE -ne 0) { throw ('Cannot create the synthetic cyclic link: '+($linkResult -join ' ')) }
+                }
+            } finally { Pop-Location }
             $env:USERPROFILE = $caseProfile
             try {
                 $previousErrorPreference = $ErrorActionPreference
