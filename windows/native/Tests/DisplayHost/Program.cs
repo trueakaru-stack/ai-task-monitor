@@ -49,6 +49,15 @@ internal static class Program
         window.UpdateLayout();
         DpiScale dpi = VisualTreeHelper.GetDpi(window);
         Console.WriteLine($"Candidate scroll {stem}: viewport={scroll.ViewportHeight:F2}, extent={scroll.ExtentHeight:F2}, offset={scroll.VerticalOffset:F2}, dpi={dpi.DpiScaleX:F2}/{dpi.DpiScaleY:F2}");
+        foreach (string name in new[] { "SettingsHeading", "LanguageHeading", "CodexSourceStatus", "ClaudeSourceStatus",
+            "OpenCodeSourceStatus", "KimiSourceStatus", "DeepSeekSourceStatus", "HermesSourceStatus",
+            "HermesSourceDescription", "HermesSourceCommands", "JournalSettingsSection", "ClaudeRetentionSection",
+            "LoopSettingsSection", "AboutSettingsButton", "FeedbackEmailBox" })
+        {
+            FrameworkElement element = Find<FrameworkElement>(window, name);
+            Point origin = element.TranslatePoint(new Point(0, 0), (UIElement)scroll.Content);
+            Console.WriteLine($"Candidate section {stem} {name}: top={origin.Y:F2}, height={element.ActualHeight:F2}, visibility={element.Visibility}");
+        }
         Capture(window, root, "source-unconfirmed-" + stem);
         controller.ApplyClaudeRegistration(ClaudeRegistration.Unavailable);
         window.UpdateLayout();
