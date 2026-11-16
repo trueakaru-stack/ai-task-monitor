@@ -23,13 +23,15 @@ jobs:
           test "$RUNNER_OS" = macOS
           task_profile_dir="$(/usr/bin/python3 -I -S -B -c 'import os, pwd; print(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))')"
           case "$task_profile_dir" in /Users/*) ;; *) echo "Unexpected hosted profile directory." >&2; exit 1;; esac
-          task_root="$(mktemp -d /private/tmp/aitm-profile-probe.XXXXXXXX)"
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-profile-probe.XXXXXXXX")"
           task_sentinel="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
           printf 'synthetic-only\n' > "$task_sentinel"
           cat > "$task_root/profile.sb" <<'PROFILE'
           (version 1)
           (allow default)
           (deny file-read* (subpath (param "TASK_PROFILE")))
+          (allow file-read-metadata)
+          (allow file-read* (subpath (param "TASK_ROOT")))
           (deny file-write*)
           (allow file-write* (subpath (param "TASK_ROOT")))
           (allow file-write-data (literal "/dev/null"))
