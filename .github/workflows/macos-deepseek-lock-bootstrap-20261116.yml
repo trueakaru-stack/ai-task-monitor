@@ -103,6 +103,7 @@ jobs:
         run: |
           set -euo pipefail
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
           "$task_run" npm install --prefix "$AITM_TEST_TASK_ROOT/dsh" --package-lock-only --ignore-scripts --no-audit --no-fund --save-exact --omit=optional @deepseek-ai/dsh@0.2.1-rc.5 pnpm@11.25.0
           test -s "$AITM_TEST_TASK_ROOT/dsh/package.json"
           test -s "$AITM_TEST_TASK_ROOT/dsh/package-lock.json"
