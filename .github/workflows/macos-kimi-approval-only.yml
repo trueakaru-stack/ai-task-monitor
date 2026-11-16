@@ -21,6 +21,14 @@ jobs:
     env:
       DEVELOPER_DIR: ${{ matrix.runner == 'macos-26' && '/Applications/Xcode.app/Contents/Developer' || '/Applications/Xcode_16.1.app/Contents/Developer' }}
     steps:
+      - name: Report integration test scope
+        shell: bash
+        run: |
+          {
+            echo '### Integration test scope'
+            echo 'The legacy tests-only suite is blocked: some tests set HOME in child processes. Those tests did not run in this workflow.'
+            echo 'This workflow covers synthetic Kimi approval; it does not exercise a real account or production socket.'
+          } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24'
