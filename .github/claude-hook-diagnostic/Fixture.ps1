@@ -76,10 +76,26 @@ function Invoke-Synthetic([string[]]$arguments,[string]$payload,[bool]$capture,[
 }
 $basic=Invoke-Synthetic @('-NoProfile','-NonInteractive','-Command','[Console]::Out.Write([Console]::In.ReadToEnd())') 'synthetic' $true $false
 Write-Output ('Simple input, all streams redirected: '+$basic)
+$trace=@'
+function Write-SyntheticTrace([string]$phase) {
+ [IO.File]::AppendAllText((Join-Path $env:TEMP 'aitm-hook-trace.txt'), $phase+[Environment]::NewLine)
+}
+Write-SyntheticTrace 'script-entered'
+'@
+$script=[IO.File]::ReadAllText($original)
+$script=$script.Replace('Set-StrictMode -Version 2.0',$trace+[Environment]::NewLine+'Set-StrictMode -Version 2.0')
+$token='Add-Type -Path (Join-Path $PSScriptRoot ''ClaudeStageObservation.dll'') -ErrorAction Stop'
+$script=$script.Replace($token,("Write-SyntheticTrace 'before-helper'; "+$token+"; Write-SyntheticTrace 'after-helper'"))
+$script=$script.Replace('while($true){',("Write-SyntheticTrace 'before-read'; "+'while($true){'))
+$script=$script.Replace('$raw=$inputBuilder.ToString()',("Write-SyntheticTrace 'after-read'; "+'$raw=$inputBuilder.ToString()'))
+$script=$script.Replace('if($mutex.WaitOne(2000)){',("Write-SyntheticTrace 'before-mutex'; "+'if($mutex.WaitOne(2000)){'))
+$script=$script.Replace('$written=$true',('$written=$true; '+"Write-SyntheticTrace 'after-journal'"))
+Check ($script.Contains("Write-SyntheticTrace 'after-read'") -and $script.Contains("Write-SyntheticTrace 'before-helper'")) 'Synthetic tracing was not injected.'
+$debug=Join-Path $install 'synthetic-debug-hook.ps1'
+[IO.File]::WriteAllText($debug,$script,[Text.UTF8Encoding]::new($false))
 $payload='{"hook_event_name":"UserPromptSubmit","session_id":"synthetic-session"}'
-$hookArguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$hook)
-Write-Output ('Hook, all streams redirected: '+(Invoke-Synthetic $hookArguments $payload $true $false))
-Write-Output ('Hook, only stdin redirected: '+(Invoke-Synthetic $hookArguments $payload $false $false))
-Write-Output ('Hook, all streams redirected and WinPS in PATH: '+(Invoke-Synthetic $hookArguments $payload $true $true))
-$argumentsWithoutNonInteractive=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$hook)
-Write-Output ('Hook, no NonInteractive switch: '+(Invoke-Synthetic $argumentsWithoutNonInteractive $payload $true $true))
+$hookArguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$debug)
+$result=Invoke-Synthetic $hookArguments $payload $true $false
+$tracePath=Join-Path $env:TEMP 'aitm-hook-trace.txt'
+$phases=if([IO.File]::Exists($tracePath)){[IO.File]::ReadAllText($tracePath)}else{'no trace file'}
+Write-Output ('Instrumented synthetic hook: '+$result+'; phases='+$phases)
