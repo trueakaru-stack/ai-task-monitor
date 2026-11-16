@@ -7,9 +7,10 @@ using .NET 10. The program accepts only the fixed engine selector and does not
 open files, profiles, hooks, accounts or network connections.
 
 The common checks cover current and pre-start sessions, legacy-only sessions,
-quiet and later activity, prompt identity, generated activity privacy, a
-malformed current record, old inferred step status and 10,000 synthetic
-events. The test also asserts these intentional, observable differences:
+legacy step-name preservation, quiet and later activity, prompt identity,
+generated activity privacy, a malformed current record, inferred and unnamed
+old steps, an unambiguous clear stop and 10,000 synthetic events. The test also
+asserts these intentional, observable differences:
 
 - A simultaneous active and clear-stop event in one file hides the task in
   the embedded reader; the native reader keeps it unconfirmed.

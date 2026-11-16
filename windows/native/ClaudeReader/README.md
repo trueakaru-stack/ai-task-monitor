@@ -153,9 +153,9 @@ different readers.
 
 The isolated `claude-reader-behavior-20261116.yml` workflow compiles the same
 synthetic fixture against the current PowerShell-embedded reader and the
-native reader. It checks session startup, legacy-only sessions, quiet activity,
-prompt identity, activity privacy, malformed input, inferred old-step status
-and 10,000 synthetic events. It separately asserts the differences for
+native reader. It checks session startup, legacy-only sessions and step names,
+quiet and resumed activity, prompt identity, activity privacy, malformed input,
+old-step status, an unambiguous stop and 10,000 synthetic events. It separately asserts the differences for
 simultaneous active/stop events, malformed legacy-only input and 129-unit
 session IDs. The [test README](../Tests/ClaudeReaderBehavior/README.md)
 describes those cases and the deliberately failing old assertion. These
