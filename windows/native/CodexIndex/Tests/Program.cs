@@ -100,6 +100,7 @@ Check(lockedReader.Read([], [null!]).HasUnsupportedRows, "A missing lock ID was 
 var fileInfo = new FileInfo(source);
 FileSecurity originalAccess = fileInfo.GetAccessControl(AccessControlSections.Access);
 string originalSddl = originalAccess.GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+byte[] originalAcl = AccessList(originalAccess);
 FileSecurity restricted = fileInfo.GetAccessControl(AccessControlSections.Access);
 using WindowsIdentity identity = WindowsIdentity.GetCurrent();
 SecurityIdentifier user = identity.User ?? throw new InvalidOperationException("The synthetic ACL identity is unavailable.");
@@ -116,18 +117,16 @@ finally
 {
     if (applied)
     {
-        // Restore the exact captured access descriptor, including inherited
-        // rules that may be canonicalized when an explicit deny is added.
+        // Restore the captured access rules, including inherited entries.
         var restored = new FileSecurity();
         restored.SetSecurityDescriptorSddlForm(originalSddl, AccessControlSections.Access);
         fileInfo.SetAccessControl(restored);
-        string restoredSddl = fileInfo.GetAccessControl(AccessControlSections.Access).GetSecurityDescriptorSddlForm(AccessControlSections.Access);
-        if (!string.Equals(originalSddl, restoredSddl, StringComparison.Ordinal))
-        {
-            Console.Error.WriteLine("Original synthetic ACL: " + System.Text.RegularExpressions.Regex.Replace(originalSddl, @"S-1-[0-9-]+", "SID"));
-            Console.Error.WriteLine("Restored synthetic ACL: " + System.Text.RegularExpressions.Regex.Replace(restoredSddl, @"S-1-[0-9-]+", "SID"));
-        }
-        Check(string.Equals(originalSddl, restoredSddl, StringComparison.Ordinal), "The synthetic ACL was not restored.");
+        FileSecurity actualAccess = fileInfo.GetAccessControl(AccessControlSections.Access);
+        // Windows may recalculate the descriptor's auto-inherited bit even
+        // with the same access rules. Compare ACE bytes and protection itself.
+        Check(originalAcl.AsSpan().SequenceEqual(AccessList(actualAccess)) &&
+            originalAccess.AreAccessRulesProtected == actualAccess.AreAccessRulesProtected,
+            "The synthetic access rules or inheritance protection were not restored.");
     }
 }
 Check(lockedReader.Read([], []).Entries.Count == 1, "A source did not recover after ACL restoration.");
@@ -337,6 +336,15 @@ static Encoding MakeEncoding(string name) => name switch
     "utf32be" => new UTF32Encoding(true, true),
     _ => throw new InvalidOperationException("Unsupported synthetic encoding.")
 };
+
+static byte[] AccessList(FileSecurity security)
+{
+    var descriptor = new RawSecurityDescriptor(security.GetSecurityDescriptorBinaryForm(), 0);
+    RawAcl acl = descriptor.DiscretionaryAcl ?? throw new InvalidOperationException("Synthetic DACL is missing.");
+    var bytes = new byte[acl.BinaryLength];
+    acl.GetBinaryForm(bytes, 0);
+    return bytes;
+}
 
 sealed record Fixture(string Name, Step[] Steps);
 sealed record Step(string Operation, string? Content, string? Encoding, int Version, string[]? Observed,
