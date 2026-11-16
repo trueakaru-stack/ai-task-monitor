@@ -1047,6 +1047,19 @@ Check(new[] { firstPollNames, repeatPollNames }.All(task => task.Unconfirmed &&
     "An ambiguous stop before the first poll must preserve both observed names on repeated reads.");
 
 
+
+var nearFutureStop = new SessionReader();
+nearFutureStop.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
+string shortlyFutureStop = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "observed", ["timestamp"] = now.AddMilliseconds(10).ToString("O"),
+    ["event"] = "Stop", ["active"] = false, ["stage_version"] = 1, ["stage_phase"] = "stop_clear" }) + "\n";
+var nearFutureSnapshot = nearFutureStop.Read(complete + shortlyFutureStop, "", now,
+    DateTime.MinValue.ToUniversalTime()).Single();
+Check(nearFutureSnapshot.Unconfirmed, "A stop slightly after the poll timestamp must initially remain unconfirmed.");
+Check(nearFutureStop.Read(complete + shortlyFutureStop, "", now.AddSeconds(1),
+    DateTime.MinValue.ToUniversalTime()).Length == 0 && !nearFutureStop.SourceUncertain,
+    "A subsequent poll after a small clock boundary must finish the cleanly stopped session.");
+
 string futureRename = JsonSerializer.Serialize(new Dictionary<string, object> {
     ["session_id"] = "observed", ["timestamp"] = now.AddMinutes(10).ToString("O"),
     ["event"] = "TaskCreated", ["active"] = true, ["task_id"] = "first",

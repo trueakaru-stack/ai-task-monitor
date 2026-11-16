@@ -522,7 +522,7 @@ namespace AITaskMonitor.Claude {
     // A future terminal event must not hide an already observed task, even
     // within the small clock tolerance accepted for active observations.
     bool timeAnomaly = age < -1 || (!state.Active && age < 0) || timeUncertain.Contains(state.Id);
-    bool sessionEvidenceUncertain = state.SessionUncertain || state.StopUncertain || timeAnomaly;
+    bool sessionEvidenceUncertain = state.SessionUncertain || state.StopUncertain || age < -1 || timeUncertain.Contains(state.Id);
     bool allStepsObserved = state.StepOrder.Count > 0 && state.StepOrder.All(id => state.Trust[id].Confirmed && state.Trust[id].Created);
     bool pendingCreate = state.CreateAttempts.Values.Any(count => count > 0) || state.UncertainCreates.Count > 0;
     bool unresolved = state.Trust.Values.Any(item => item.Pending > 0 || item.PendingCreations > 0 || item.PendingCompletions > 0 || item.Ambiguous || item.FailedOrUnknown);
@@ -541,7 +541,7 @@ namespace AITaskMonitor.Claude {
     bool knownEvidence = state.PlanConfirmed && state.PromptSeen && !pendingCreate && !unresolved && !state.SessionUncertain && !sourceUncertain && !unconfirmed && !planUncertain.Contains(state.Id);
     int known = knownEvidence ? state.StepOrder.Count(id => state.Trust[id].Confirmed && state.Trust[id].Created) : 0;
     int done = knownEvidence ? state.StepOrder.Count(id => state.Trust[id].Confirmed && state.Trust[id].Created && state.Steps[id].status == "done") : 0;
-    bool retainNames = sourceUncertain || sessionEvidenceUncertain;
+    bool retainNames = sourceUncertain || sessionEvidenceUncertain || timeAnomaly;
     bool titlesIncomplete = retainNames && state.TitleHistoryTruncated;
     var displayed = new List<Step>();
     Action<Step> append = delegate(Step candidate) {

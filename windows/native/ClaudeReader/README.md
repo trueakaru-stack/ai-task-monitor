@@ -74,11 +74,13 @@ resolve it. Equal-time events with matching active states do not cause this
 ambiguity; a strictly later clear stop in an otherwise unambiguous history can
 end its session normally.
 
-An implausible future event also marks that session's evidence uncertain and
-retains conflicting observed names. This uncertainty persists for the reader's
-lifetime even if the clock later catches up. A session being quiet for at least
-120 minutes is treated separately: later observed activity can restore its
-ordinary status when no other uncertainty was observed.
+An event more than one minute in the future also marks that session's evidence
+uncertain and retains conflicting observed names. This uncertainty persists for
+the reader's lifetime even if the clock later catches up. A terminal event only
+slightly later than the poll's timestamp is temporarily unconfirmed and can be
+resolved by a subsequent poll. A session being quiet for at least 120 minutes is
+treated separately: later observed activity can restore its ordinary status when
+no other uncertainty was observed.
 
 The future owner must call `NotifyConnection` promptly for every connection
 change, including while a poll is in progress, and then use `Poll(utcNow)` to
