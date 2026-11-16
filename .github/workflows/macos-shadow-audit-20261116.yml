@@ -1,0 +1,40 @@
+name: Synthetic macOS own-window shadow audit
+on:
+  push:
+    branches: ['codex/macos-shadow-audit-20261116']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  shadow:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted && test "$RUNNER_OS" = macOS
+          test -z "$(ls -A "$GITHUB_WORKSPACE")"
+          mkdir -p "$RUNNER_TEMP/aitm-empty-template" "$RUNNER_TEMP/aitm-empty-hooks"
+          git -C "$GITHUB_WORKSPACE" -c init.templateDir="$RUNNER_TEMP/aitm-empty-template" -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" init
+          git -C "$GITHUB_WORKSPACE" -c credential.helper= -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C "$GITHUB_WORKSPACE" -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" checkout --detach FETCH_HEAD
+      - name: Capture only the synthetic own window if permitted
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          export AITM_LAYOUT_SYNTHETIC_ROOT="$(mktemp -d "$RUNNER_TEMP/aitm-layout-XXXXXXXX")"
+          export AITM_LAYOUT_SYNTHETIC_CI=1
+          export AITM_LAYOUT_CAPTURE_OWN_WINDOW=1
+          swift test --filter WindowShadowAuditTests
+      - name: Upload capture or skip evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-own-window-shadow
+          path: ${{ runner.temp }}/aitm-layout-*/window-shadow*
+          if-no-files-found: error
+          retention-days: 7
