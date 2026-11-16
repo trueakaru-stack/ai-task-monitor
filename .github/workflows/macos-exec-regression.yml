@@ -8,14 +8,15 @@ on:
       - "macos/Tests/AITaskMonitorTests/CodexExecDiscoveryTests.swift"
 permissions:
   contents: read
+  actions: read
 jobs:
   isolated:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
-            developer: /Applications/Xcode_16.1.app/Contents/Developer
+          - runner: macos-15-intel
+            developer: /Applications/Xcode.app/Contents/Developer
           - runner: macos-26
             developer: /Applications/Xcode.app/Contents/Developer
     runs-on: ${{ matrix.runner }}
@@ -55,6 +56,7 @@ jobs:
           task_path="$task_node_bin:$(dirname "$task_python"):$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin:$DEVELOPER_DIR/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
           mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" "$task_root/npm-cache" "$task_root/swift-cache" "$task_root/swift-config" "$task_root/swift-security" "$task_root/clang-cache"
           : > "$task_root/npmrc"
+          export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
           git -c credential.helper= -c core.hooksPath="$task_root/hooks" -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
           git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
           git -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
@@ -98,25 +100,77 @@ jobs:
           /bin/ln -s "$AITM_TEST_DENIED_FILE" "$AITM_TEST_TASK_ROOT/denied-link"
           if "$task_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read via link was not denied.' >&2; exit 1; fi
           if "$task_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write via link was not denied.' >&2; exit 1; fi
-      - name: Build synthetic regression tests
-        id: build
+      - name: Download the actual synthetic official CLI rollout
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "14240113836"
+          run-id: "43900947332"
+          github-token: ${{ github.token }}
+          path: ${{ env.AITM_TEST_TASK_ROOT }}/temp/official-cli
+      - name: Verify fixture and adapt test-only temporary paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_dir="$AITM_TEST_TASK_ROOT/source/macos/Tests/AITaskMonitorTests"
+          count="$(find "$AITM_TEST_TASK_ROOT/temp/official-cli" -type f -name codex-exec-real-rollout.jsonl | wc -l | tr -d ' ')"
+          test "$count" = 1
+          fixture="$(find "$AITM_TEST_TASK_ROOT/temp/official-cli" -type f -name codex-exec-real-rollout.jsonl)"
+          test "$(shasum -a 256 "$fixture" | cut -d' ' -f1)" = c64f9a4b4f6a8ee3eb218bc8e2693548638b22de3e81268b24c2af8d03b1d72e
+          printf 'AITM_REAL_ROLLOUT=%s\n' "$fixture" >> "$GITHUB_ENV"
+          for suite in CodexRevertSafetyTests CodexSiblingDirectoryIndependentTests CodexColdCompressedIndependentTests CodexMultipleColdIndependentTests CodexSourceStalePlanTests; do
+            task_file="$task_dir/$suite.swift"
+            test -f "$task_file"
+            count="$(grep -Fo 'FileManager.default.temporaryDirectory' "$task_file" | wc -l | tr -d ' ')"
+            test "$count" = 1
+            sed -i '' 's@FileManager.default.temporaryDirectory@URL(fileURLWithPath: ProcessInfo.processInfo.environment["AITM_SYNTHETIC_TEST_ROOT"]!, isDirectory: true)@g' "$task_file"
+          done
+      - name: Compile original reader with the same synthetic tests
         shell: bash
         run: |
           set -euo pipefail
           cd "$AITM_TEST_TASK_ROOT/source/macos"
+          export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+          cp Sources/AITaskMonitor/CodexTaskReader.swift "$AITM_TEST_TASK_ROOT/candidate-reader.swift"
+          git -C "$AITM_TEST_TASK_ROOT/source" -c credential.helper= -c core.hooksPath="$AITM_TEST_TASK_ROOT/hooks" fetch --no-tags --depth=1 \
+            https://github.com/trueakaru-stack/ai-task-monitor.git b9c0dd6e34bf775396fbd719c652c1f7b267cba0
+          git -C "$AITM_TEST_TASK_ROOT/source" show b9c0dd6e34bf775396fbd719c652c1f7b267cba0:macos/Sources/AITaskMonitor/CodexTaskReader.swift > Sources/AITaskMonitor/CodexTaskReader.swift
+          test "$(git -C "$AITM_TEST_TASK_ROOT/source" hash-object macos/Sources/AITaskMonitor/CodexTaskReader.swift)" = 1d7c575be51edbf775e2329fea62c38b2b36e57d
           task_compiler=(/usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 swift)
           "${task_compiler[@]}" build --build-tests --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security"
           task_bin="$("${task_compiler[@]}" build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
           test -d "$task_bin/AITaskMonitorPackageTests.xctest"
           printf 'AITM_TEST_BIN=%s\n' "$task_bin" >> "$GITHUB_ENV"
+      - name: Verify original reader fails on actual CLI rollout
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          if "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/env "AITM_REAL_CODEX_ROLLOUT=$AITM_REAL_ROLLOUT" \
+              "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexExecDiscoveryTests/testOfficialCodexExecFixtureWhenProvided \
+              "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" > "$AITM_TEST_TASK_ROOT/baseline.log" 2>&1; then
+            echo 'Original reader unexpectedly passed the actual CLI fixture.' >&2; exit 1
+          fi
+          /bin/cat "$AITM_TEST_TASK_ROOT/baseline.log"
+          /usr/bin/grep -q 'session_index.jsonl' "$AITM_TEST_TASK_ROOT/baseline.log"
+          /usr/bin/grep -q 'NSCocoaErrorDomain Code=260' "$AITM_TEST_TASK_ROOT/baseline.log"
+      - name: Compile candidate reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          cp "$AITM_TEST_TASK_ROOT/candidate-reader.swift" Sources/AITaskMonitor/CodexTaskReader.swift
+          test "$(git -C "$AITM_TEST_TASK_ROOT/source" hash-object macos/Sources/AITaskMonitor/CodexTaskReader.swift)" = "$(git -C "$AITM_TEST_TASK_ROOT/source" rev-parse HEAD:macos/Sources/AITaskMonitor/CodexTaskReader.swift)"
+          task_compiler=(/usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 swift)
+          "${task_compiler[@]}" build --build-tests --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security"
       - name: Run unindexed Codex regressions
         shell: bash
         run: |
           set -euo pipefail
           cd "$AITM_TEST_TASK_ROOT"
-          "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
+          "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/env "AITM_REAL_CODEX_ROLLOUT=$AITM_REAL_ROLLOUT" "$DEVELOPER_DIR/usr/bin/xctest" \
             -XCTest AITaskMonitorTests.CodexExecDiscoveryTests \
-            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
+            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/candidate.log"
+          grep -q 'testOfficialCodexExecFixtureWhenProvided.*passed' "$AITM_TEST_TASK_ROOT/candidate.log"
       - name: Run existing indexed and ambiguity regressions
         shell: bash
         run: |

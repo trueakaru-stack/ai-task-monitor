@@ -14,6 +14,7 @@ struct CodexTaskReader {
     private let fileManager = FileManager.default
     private let lifecycleCache = CodexLifecycleCache()
     private let indexCache = CodexSessionIndexCache()
+    private let execDiscovery = CodexExecDiscoveryCache()
     private let planCache = CodexPlanHistoryCache()
 
     init(codexHome: URL? = nil) {
@@ -34,23 +35,25 @@ struct CodexTaskReader {
         let index = codexHome.appendingPathComponent("session_index.jsonl")
         if !fileManager.fileExists(atPath: codexHome.path) { return CodexTaskSnapshot() }
         let sessions: [String: [String: Any]]
+        var indexUnavailable = false
         do {
             sessions = try indexCache.read(from: index)
+            execDiscovery.noteIndexAvailable()
         } catch {
-            guard Self.pathIsMissing(index) else { throw error }
+            indexUnavailable = !Self.pathIsMissing(index) || execDiscovery.hasSeenIndex()
             sessions = [:]
         }
 
         let indexedIDs = Set(sessions.keys)
-        let extra = try unindexedOwners(excluding: indexedIDs, observedSince: observedSince,
+        let extra = try unindexedOwners(excluding: indexedIDs, now: now, observedSince: observedSince,
                                         previouslyObserved: previouslyObserved)
         let discovered = try sessionFiles(for: indexedIDs, now: now, observedSince: observedSince,
                                           previouslyObserved: previouslyObserved)
         let extraFiles = try sessionFiles(for: extra.ids, now: now, observedSince: observedSince,
-                                          previouslyObserved: previouslyObserved, maximumVisited: 20_000)
+                                          previouslyObserved: previouslyObserved, maximumVisited: 256)
         let files = discovered.files
         var result = CodexTaskSnapshot()
-        result.isPartial = discovered.isPartial || extra.isPartial || extraFiles.isPartial
+        result.isPartial = indexUnavailable || discovered.isPartial || extra.isPartial || extraFiles.isPartial
         for session in sessions.values {
             let id = session.string("id")
             let title = session.string("thread_name")
@@ -117,7 +120,8 @@ struct CodexTaskReader {
             ))
         }
         for id in extra.ids {
-            guard let file = extraFiles.files[id] else { continue }
+            let available = extraFiles.didHitLimit ? extra.fastFiles : extraFiles.files
+            guard let file = available[id] else { continue }
             do {
                 guard let record = try readUnindexedExec(file, id: id) else { continue }
                 if let observedSince, record.modified < observedSince && !previouslyObserved.contains(id) { continue }
@@ -129,6 +133,9 @@ struct CodexTaskReader {
                     continue
                 }
                 if state.terminal {
+                    // A partial filename scan may have missed a competing
+                    // rollout. Do not close a previously observed task then.
+                    guard !extraFiles.didHitLimit, state.sawStart else { result.isPartial = true; continue }
                     let recognized = observedSince.map { since in
                         state.terminalDate.map { $0 >= since } ?? false
                     } ?? true
@@ -148,20 +155,20 @@ struct CodexTaskReader {
                 }
                 let plan = CodexPlanParser.parse(record.tail)
                 let steps = plan.steps
-                let activity = parseActivity(from: record.tail)
-                let progress = MonitoredTask.progress(for: steps)
-                let unconfirmed = now.timeIntervalSince(record.modified) >= 7_200
+                let detail = parseActivity(from: record.tail)
+                let status = tr("Статус не подтверждён", "Status unconfirmed")
+                execDiscovery.remember(id: id, file: file)
                 result.tasks.append(MonitoredTask(
                     id: id,
                     provider: .codex,
                     title: tr("Задача Codex", "Codex task"),
-                    activity: unconfirmed ? tr("Статус не подтверждён", "Status unconfirmed") : (activity.isEmpty ? tr("Выполняется", "Working") : activity),
-                    isActive: !unconfirmed,
-                    progress: progress,
-                    progressKind: progress == nil ? .none : .exact,
+                    activity: detail.isEmpty ? status : status + ": " + detail,
+                    isActive: false,
+                    progress: nil,
+                    progressKind: .none,
                     steps: steps,
                     updatedAt: record.modified,
-                    isUnconfirmed: unconfirmed,
+                    isUnconfirmed: true,
                     startedAt: state.startedAt ?? .distantPast,
                     startKey: state.startKey,
                     planConfirmed: plan.confirmed
@@ -273,40 +280,74 @@ struct CodexTaskReader {
         return lstat(url.path, &info) != 0 && errno == ENOENT
     }
 
-    /// Find recently changed, unindexed canonical rollout names. Discovery is
-    /// bounded and never reads session bodies; incomplete scans remain visible.
-    private func unindexedOwners(excluding indexedIDs: Set<String>, observedSince: Date?,
-                                 previouslyObserved: Set<String>) throws -> (ids: Set<String>, isPartial: Bool) {
+    /// Each refresh examines at most 256 recent-day entries and 256 entries
+    /// from a progressing history scan. Partial scans do not claim completeness.
+    private func unindexedOwners(excluding indexedIDs: Set<String>, now: Date, observedSince: Date?,
+                                 previouslyObserved: Set<String>) throws -> (ids: Set<String>, fastFiles: [String: URL], isPartial: Bool) {
         let directory = codexHome.appendingPathComponent("sessions", isDirectory: true)
-        if Self.pathIsMissing(directory) { return ([], false) }
-        var enumerationError: Error?
-        guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles], errorHandler: { _, error in enumerationError = error; return false }) else {
-            throw CocoaError(.fileReadNoSuchFile)
-        }
+        if Self.pathIsMissing(directory) { return ([], [:], false) }
         let excluded = Set(indexedIDs.map { $0.lowercased() })
         var modifiedByOwner: [String: Date] = [:]
-        var visited = 0
+        var fastVariants: [String: [String: URL]] = [:]
+        var unknownStems: [String] = []
         var partial = false
-        for case let url as URL in enumerator {
-            visited += 1
-            if visited > 20_000 { partial = true; break }
+        var fastComplete = true
+
+        func consider(_ url: URL, fast: Bool) {
             let name = url.lastPathComponent
             let suffix: String
             if name.hasSuffix(".jsonl.zst") { suffix = ".jsonl.zst" }
             else if name.hasSuffix(".jsonl") { suffix = ".jsonl" }
-            else { continue }
+            else { return }
             let stem = String(name.dropLast(suffix.count))
-            guard let owner = Self.canonicalOwner(in: stem), !excluded.contains(owner.lowercased()) else { continue }
+            guard let owner = Self.canonicalOwner(in: stem) else {
+                unknownStems.append(stem.lowercased())
+                return
+            }
+            guard !excluded.contains(owner.lowercased()) else { return }
             guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
                   let modified = attributes[.modificationDate] as? Date else {
                 partial = true
+                return
+            }
+            if let observedSince, !previouslyObserved.contains(owner), modified < observedSince { return }
+            if modifiedByOwner[owner].map({ modified > $0 }) ?? true { modifiedByOwner[owner] = modified }
+            if fast { fastVariants[owner, default: [:]][url.standardizedFileURL.path] = url }
+        }
+
+        // Previously verified paths let an ongoing task survive across dates
+        // without rereading its owner's entire history on every refresh.
+        for (_, file) in execDiscovery.files(for: previouslyObserved) { consider(file, fast: true) }
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        var recentVisited = 0
+        for offset in [-1, 0, 1] {
+            guard let day = calendar.date(byAdding: .day, value: offset, to: now) else { continue }
+            let parts = calendar.dateComponents([.year, .month, .day], from: day)
+            guard let year = parts.year, let month = parts.month, let date = parts.day else { continue }
+            let subpath = String(format: "%04d/%02d/%02d", year, month, date)
+            let recent = directory.appendingPathComponent(subpath, isDirectory: true)
+            if Self.pathIsMissing(recent) { continue }
+            var recentError: Error?
+            guard let enumerator = fileManager.enumerator(at: recent, includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles], errorHandler: { _, error in recentError = error; return false }) else {
+                partial = true
+                fastComplete = false
                 continue
             }
-            if let observedSince, !previouslyObserved.contains(owner), modified < observedSince { continue }
-            if modifiedByOwner[owner].map({ modified > $0 }) ?? true { modifiedByOwner[owner] = modified }
+            for case let url as URL in enumerator {
+                recentVisited += 1
+                if recentVisited > 256 { partial = true; fastComplete = false; break }
+                consider(url, fast: true)
+            }
+            if recentError != nil { partial = true; fastComplete = false }
+            if !fastComplete { break }
         }
-        if let enumerationError { throw enumerationError }
+
+        let page = try execDiscovery.nextHistoryPage(directory: directory, limit: 256)
+        if !page.complete { partial = true }
+        for url in page.urls { consider(url, fast: true) }
         let ordered = modifiedByOwner.sorted { first, second in
             let firstObserved = previouslyObserved.contains(first.key)
             let secondObserved = previouslyObserved.contains(second.key)
@@ -314,8 +355,31 @@ struct CodexTaskReader {
             if first.value != second.value { return first.value > second.value }
             return first.key < second.key
         }
-        if ordered.count > 64 { partial = true }
-        return (Set(ordered.prefix(64).map(\.key)), partial)
+        if ordered.count > 16 { partial = true }
+        let selected = Set(ordered.prefix(16).map(\.key))
+        var fastFiles: [String: URL] = [:]
+        if fastComplete {
+            for id in selected {
+                let lowerID = id.lowercased()
+                if unknownStems.contains(where: { $0 == lowerID || $0.hasSuffix("-" + lowerID) || $0.contains("-" + lowerID + "_") }) {
+                    partial = true
+                    continue
+                }
+                let variants = Array(fastVariants[id, default: [:]].values)
+                let plainPaths = Set(variants.filter { !$0.lastPathComponent.hasSuffix(".zst") }.map { $0.standardizedFileURL.path })
+                let distinct = variants.filter { file in
+                    guard file.lastPathComponent.hasSuffix(".jsonl.zst") else { return true }
+                    return !plainPaths.contains(String(file.standardizedFileURL.path.dropLast(4)))
+                }
+                guard distinct.count == 1, let file = distinct.first,
+                      !file.lastPathComponent.hasSuffix(".jsonl.zst") else {
+                    if !distinct.isEmpty { partial = true }
+                    continue
+                }
+                fastFiles[id] = file
+            }
+        }
+        return (selected, fastFiles, partial)
     }
 
     private struct UnindexedExecRecord {
@@ -363,7 +427,7 @@ struct CodexTaskReader {
         }
         guard payload.string("id") == id, payload.string("source") == "exec" else { return nil }
         let end = try handle.seekToEnd()
-        let count = min(end, UInt64(1_048_576))
+        let count = min(end, UInt64(262_144))
         try handle.seek(toOffset: end - count)
         let bytes = try handle.read(upToCount: Int(count)) ?? Data()
         guard bytes.count == Int(count), fstat(descriptor, &info) == 0 else { throw CocoaError(.fileReadUnknown) }
@@ -374,8 +438,8 @@ struct CodexTaskReader {
     }
 
     private func sessionFiles(for ids: Set<String>, now: Date, observedSince: Date?,
-                              previouslyObserved: Set<String>, maximumVisited: Int? = nil) throws -> (files: [String: URL], isPartial: Bool) {
-        guard !ids.isEmpty else { return ([:], false) }
+                              previouslyObserved: Set<String>, maximumVisited: Int? = nil) throws -> (files: [String: URL], isPartial: Bool, didHitLimit: Bool) {
+        guard !ids.isEmpty else { return ([:], false, false) }
         let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
         var enumerationError: Error?
         guard let enumerator = fileManager.enumerator(at: sessions, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles], errorHandler: { _, error in
@@ -393,7 +457,7 @@ struct CodexTaskReader {
             visited += 1
             // Do not claim an unindexed task when a bounded scan cannot rule
             // out a second rollout or an ambiguous filename later in the tree.
-            if let maximumVisited, visited > maximumVisited { return ([:], true) }
+            if let maximumVisited, visited > maximumVisited { return ([:], true, true) }
             let file = url.lastPathComponent
             let compressed = file.hasSuffix(".jsonl.zst")
             let suffix = compressed ? ".jsonl.zst" : ".jsonl"
@@ -463,9 +527,104 @@ struct CodexTaskReader {
             }
             files[owner] = chosen
         }
-        return (files, !ambiguous.isEmpty || uuidIDs.count != ids.count)
+        return (files, !ambiguous.isEmpty || uuidIDs.count != ids.count, false)
     }
 
+}
+
+/// Small in-memory cache for paths that were already validated as exec
+/// rollouts. It never writes the Codex index or stores session contents.
+final class CodexExecDiscoveryCache {
+    private final class EnumerationErrors {
+        var value: Error?
+    }
+
+    private let lock = NSLock()
+    private var seenIndex = false
+    private var paths: [String: URL] = [:]
+    private var order: [String] = []
+    private var historyPath = ""
+    private var historyDevice: UInt64?
+    private var historyInode: UInt64?
+    private var historyEnumerator: FileManager.DirectoryEnumerator?
+    private var historyErrors: EnumerationErrors?
+
+    func noteIndexAvailable() {
+        lock.lock()
+        seenIndex = true
+        lock.unlock()
+    }
+
+    func hasSeenIndex() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return seenIndex
+    }
+
+    func files(for ids: Set<String>) -> [String: URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return paths.filter { ids.contains($0.key) }
+    }
+
+    func remember(id: String, file: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        if paths[id] == nil {
+            if order.count >= 64, let oldest = order.first {
+                order.removeFirst()
+                paths.removeValue(forKey: oldest)
+            }
+            order.append(id)
+        }
+        paths[id] = file
+    }
+
+    /// Keep the directory iterator between refreshes so older sessions are
+    /// eventually examined without traversing the entire tree on the main actor.
+    func nextHistoryPage(directory: URL, limit: Int) throws -> (urls: [URL], complete: Bool) {
+        guard limit > 0 else { throw CocoaError(.fileReadUnknown) }
+        lock.lock()
+        defer { lock.unlock() }
+        let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        guard let device = (attributes[.systemNumber] as? NSNumber)?.uint64Value,
+              let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        if historyPath != directory.path || historyDevice != device || historyInode != inode {
+            historyEnumerator = nil
+            historyErrors = nil
+            historyPath = directory.path
+            historyDevice = device
+            historyInode = inode
+        }
+        if historyEnumerator == nil {
+            let errors = EnumerationErrors()
+            guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles], errorHandler: { _, error in errors.value = error; return false }) else {
+                throw CocoaError(.fileReadNoSuchFile)
+            }
+            historyEnumerator = enumerator
+            historyErrors = errors
+        }
+        var urls: [URL] = []
+        for _ in 0..<limit {
+            guard let item = historyEnumerator?.nextObject() else {
+                let error = historyErrors?.value
+                historyEnumerator = nil
+                historyErrors = nil
+                if let error { throw error }
+                return (urls, true)
+            }
+            if let url = item as? URL { urls.append(url) }
+        }
+        if let error = historyErrors?.value {
+            historyEnumerator = nil
+            historyErrors = nil
+            throw error
+        }
+        return (urls, false)
+    }
 }
 
 /// Reads each complete index line without limiting discovery to a fixed tail.
