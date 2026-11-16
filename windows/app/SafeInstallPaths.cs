@@ -64,18 +64,18 @@ internal sealed class SafeInstallPaths : IDisposable
         catch { guard.Dispose(); throw; }
     }
 
-    internal static string ExistingInstallMessage()
+    internal static string ExistingInstallMessage(string path)
     {
         if (System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru")
-            return "Папка установки уже существует. Полностью закройте AI task monitor, Claude Code и другие подключённые программы и их фоновые процессы. Перенесите папку %LOCALAPPDATA%\\AITaskMonitor в безопасное место, затем повторите установку. Данные в папке CodexTaskProgress не изменяются.";
-        return "The installation folder already exists. Quit AI task monitor, Claude Code, other connected programs and their background processes. Move %LOCALAPPDATA%\\AITaskMonitor to a safe location, then run the installer again. Data in CodexTaskProgress will not be changed.";
+            return "Папка установки уже существует. Полностью закройте AI task monitor, Claude Code и другие подключённые программы и их фоновые процессы. Перенесите папку " + path + " в безопасное место, затем повторите установку. Данные в папке CodexTaskProgress не изменяются.";
+        return "The installation folder already exists. Quit AI task monitor, Claude Code, other connected programs and their background processes. Move " + path + " to a safe location, then run the installer again. Data in CodexTaskProgress will not be changed.";
     }
 
-    internal static string PartialInstallMessage()
+    internal static string PartialInstallMessage(string path)
     {
         if (System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru")
-            return "\n\nУстановка могла остаться незавершённой. Проверьте папку %LOCALAPPDATA%\\AITaskMonitor и при необходимости перенесите её в безопасное место перед повтором.";
-        return "\n\nInstallation may be incomplete. Review %LOCALAPPDATA%\\AITaskMonitor and, if needed, move it to a safe location before retrying.";
+            return "\n\nУстановка могла остаться незавершённой. Проверьте папку " + path + " и при необходимости перенесите её в безопасное место перед повтором.";
+        return "\n\nInstallation may be incomplete. Review " + path + " and, if needed, move it to a safe location before retrying.";
     }
 
     internal void CreateChild(string path)
@@ -86,7 +86,7 @@ internal sealed class SafeInstallPaths : IDisposable
         {
             int error = Marshal.GetLastWin32Error();
             if (error == 80 || error == 183)
-                throw new IOException(ExistingInstallMessage());
+                throw new IOException(ExistingInstallMessage(full));
             throw new Win32Exception(error, "Не удалось создать новую папку установки.");
         }
         Hold(full);

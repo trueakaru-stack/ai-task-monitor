@@ -25,6 +25,12 @@ function Find-Window([Diagnostics.Process]$process,[int]$seconds){
         if($null -ne $found -and $found.Current.Name -ceq 'AI task monitor'){return $found}
         Start-Sleep -Milliseconds 100
     }
+    $process.Refresh()
+    $idCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,$process.Id)
+    $otherWindows=[Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children,$idCondition)
+    $details=@(foreach($item in $otherWindows){$item.Current.ClassName+':'+$item.Current.Name})
+    $children=@(Get-CimInstance Win32_Process -Filter ('ParentProcessId = '+$process.Id) -Property Name|ForEach-Object {$_.Name})
+    Write-Output ('Window diagnostic: alive='+(-not $process.HasExited)+'; UIA windows='+($details -join ' | ')+'; child process names='+($children -join ','))
     throw 'The synthetic process window was not found in time.'
 }
 function Get-Names($window){
@@ -109,14 +115,15 @@ try{
     $monitor=[Diagnostics.Process]::GetProcessById([int]$candidate.ProcessId)
     $observedTime=([DateTime]$candidate.CreationDate).ToUniversalTime()
     Check ((($monitor.StartTime.ToUniversalTime()-$observedTime).Duration().TotalSeconds -le 1) -and [string]::Equals($monitor.MainModule.FileName,$SystemPowerShell,[StringComparison]::OrdinalIgnoreCase)) 'The opened monitor process identity did not match.'
+    Dismiss-Dialog $dialog $setup
+    Check ($setup.WaitForExit(10000) -and $setup.ExitCode -eq 0) 'The synthetic setup did not finish successfully.'
+    $setup.Dispose();$setup=$null
+    Write-Output 'Synthetic setup completed; waiting for monitor window.'
     $monitorWindow=Find-Window $monitor 40
     Write-Output 'Synthetic monitor window found.'
     Check ($monitorWindow.Current.Name -ceq 'AI task monitor') 'The synthetic monitor window did not open.'
-    Dismiss-Dialog $dialog $setup
-    Check ($setup.WaitForExit(10000) -and $setup.ExitCode -eq 0) 'The synthetic setup did not finish successfully.'
     $monitor.Kill();Check ($monitor.WaitForExit(10000)) 'The synthetic monitor did not exit.'
     $monitor.Dispose();$monitor=$null
-    $setup.Dispose();$setup=$null
     Check ([IO.File]::ReadAllText($oldSentinel) -ceq 'synthetic user data') 'The synthetic existing data was changed.'
     $foreign=Join-Path $install 'foreign.txt';[IO.File]::WriteAllText($foreign,'synthetic unrelated file')
     $launcherHash=(Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash

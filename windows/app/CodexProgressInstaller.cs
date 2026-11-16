@@ -10,15 +10,16 @@ internal static class CodexProgressInstaller
     private static void Main()
     {
         bool installationAttempted = false;
+        string installDirectory = null;
         try
         {
             string localDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            string installDirectory = Path.Combine(localDirectory, "AITaskMonitor");
+            installDirectory = Path.Combine(localDirectory, "AITaskMonitor");
             bool claudeConnected = false;
             string shortcutName = null;
             string launcher = Path.Combine(installDirectory, "AI task monitor.exe");
             if (Directory.Exists(installDirectory) || File.Exists(installDirectory))
-                throw new IOException(SafeInstallPaths.ExistingInstallMessage());
+                throw new IOException(SafeInstallPaths.ExistingInstallMessage(installDirectory));
             bool connectClaude = false;
             string claudeDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
             if (Directory.Exists(claudeDirectory))
@@ -97,7 +98,7 @@ internal static class CodexProgressInstaller
                 "AI task monitor установлен. " +
                 (shortcutName == "AI task monitor.lnk" ? "Ярлык добавлен в меню «Пуск»." :
                     shortcutName != null ? "Существующий ярлык сохранён. Добавлен новый ярлык «AI task monitor (new)»." :
-                    "Новый ярлык создать не удалось. Приложение можно открыть из папки %LOCALAPPDATA%\\AITaskMonitor.") +
+                    "Новый ярлык создать не удалось. Приложение можно открыть из папки " + installDirectory + ".") +
                 (claudeConnected ? " Claude Code подключён. Перезапустите Claude Code." : ""),
                 "AI task monitor",
                 MessageBoxButtons.OK,
@@ -105,7 +106,7 @@ internal static class CodexProgressInstaller
         }
         catch (Exception error)
         {
-            string advice = installationAttempted ? SafeInstallPaths.PartialInstallMessage() : "";
+            string advice = installationAttempted ? SafeInstallPaths.PartialInstallMessage(installDirectory) : "";
             MessageBox.Show(error.Message + advice, "AI task monitor", MessageBoxButtons.OK, MessageBoxIcon.Error);
             Environment.ExitCode = 1;
         }
