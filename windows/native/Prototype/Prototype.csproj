@@ -19,6 +19,7 @@
     <ProjectReference Include="..\ClaudeReader\ClaudeReader.csproj" />
     <ProjectReference Include="..\CodexCloud\CodexCloud.csproj" />
     <ProjectReference Include="..\CodexCloudCommand\CodexCloudCommand.csproj" />
+    <ProjectReference Include="..\UpdateIntegration\UpdateIntegration.csproj" />
   </ItemGroup>
 </Project>
 
