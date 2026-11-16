@@ -1,7 +1,7 @@
 name: Synthetic legacy uninstall safety
 on:
   push:
-    branches: ['codex/legacy-uninstall-check-20261116']
+    branches: ['windows', 'codex/legacy-uninstall-check-20261116']
 permissions:
   contents: read
 jobs:
@@ -20,10 +20,16 @@ jobs:
           $template = Join-Path $sourceRoot 'template'
           $hooks = Join-Path $sourceRoot 'hooks'
           New-Item -ItemType Directory -Path $source, $template, $hooks | Out-Null
+          $env:GIT_CONFIG_NOSYSTEM = '1'
+          $env:GIT_CONFIG_GLOBAL = Join-Path $sourceRoot 'empty.gitconfig'
+          [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL, '')
+          $env:GIT_TERMINAL_PROMPT = '0'
           git -c credential.helper= -c core.hooksPath="$hooks" -c init.defaultBranch=fixture init --quiet --template="$template" "$source"
           if ($LASTEXITCODE -ne 0) { throw 'Cannot initialize source checkout.' }
           git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$env:GITHUB_SHA"
           if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch exact test revision.' }
           git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
           if ($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:GITHUB_SHA) { throw 'Cannot select exact test revision.' }
+          python -B (Join-Path $source 'windows/tests/Test-DotnetPathSafety.py')
+          if ($LASTEXITCODE -ne 0) { throw '.NET PATH safety guard failed.' }
           & (Join-Path $source '.github/legacy-uninstall-ci/Run.ps1')

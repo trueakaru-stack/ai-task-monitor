@@ -4,6 +4,17 @@ if ($env:CI -cne 'true' -or $env:GITHUB_ACTIONS -cne 'true' -or
     $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH -cne '0') { throw 'A disposable hosted Windows runner is required.' }
 function Check([bool]$ok, [string]$message) { if (-not $ok) { throw $message } }
+function Test-CleanupIdentity(
+    [int]$expectedParent, [DateTime]$parentStart, [int]$observedParent,
+    [DateTime]$observedStart, [DateTime]$openedStart,
+    [string]$observedPath, [string]$openedPath, [string]$expectedPath
+) {
+    return ($observedParent -eq $expectedParent -and
+        $observedStart -ge $parentStart.AddMilliseconds(-20) -and
+        ($observedStart - $openedStart).Duration().TotalMilliseconds -le 20 -and
+        [string]::Equals($observedPath,$expectedPath,[StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals($openedPath,$expectedPath,[StringComparison]::OrdinalIgnoreCase))
+}
 function PathState([string]$scope) {
     $key = if ($scope -eq 'User') { [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $false) }
         else { [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment', $false) }
@@ -22,8 +33,22 @@ try {
     [void][IO.Directory]::CreateDirectory($root)
     $source = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\windows\app\Uninstall-CodexProgress.ps1'))
     Check ([IO.File]::Exists($source)) 'Legacy uninstaller source is missing.'
+    # Compare the checked-out script with the blob in the released v0.2.7-alpha source.
+    # This does not inspect an installer extracted from the release.
+    $repository=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+    $blob=(git -C $repository hash-object -- windows/app/Uninstall-CodexProgress.ps1).Trim()
+    Check ($LASTEXITCODE -eq 0 -and $blob -ceq '7896cf57683b9ba76243640532c83d930844a2ca') 'Legacy uninstaller differs from the pinned release source.'
     $sourceHash=(Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
-    $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $powershell=[IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'))
+    $now=[DateTime]::UtcNow
+    $wrongPath=Join-Path $root 'different.exe'
+    Check (Test-CleanupIdentity 7 $now 7 $now $now $powershell $powershell $powershell) 'Matching process identity was rejected.'
+    Check (-not (Test-CleanupIdentity 7 $now 8 $now $now $powershell $powershell $powershell)) 'Incorrect parent was accepted.'
+    Check (-not (Test-CleanupIdentity 7 $now 7 $now $now.AddSeconds(1) $powershell $powershell $powershell)) 'Incorrect process creation time was accepted.'
+    Check (-not (Test-CleanupIdentity 7 $now 7 $now $now $wrongPath $powershell $powershell)) 'Incorrect observed process path was accepted.'
+    Check (-not (Test-CleanupIdentity 7 $now 7 $now $now $powershell $wrongPath $powershell)) 'Incorrect opened process path was accepted.'
+    # Warm the provider before starting a two-second cleanup process.
+    $null=Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $PID) -Property ProcessId
     $results=[Collections.Generic.List[object]]::new()
     foreach ($scenario in @('nested-junction','root-junction')) {
         Write-Output ('Starting synthetic scenario: ' + $scenario)
@@ -55,7 +80,7 @@ try {
         $start=[Diagnostics.ProcessStartInfo]::new()
         $start.FileName=$powershell; $start.WorkingDirectory=$case
         $start.UseShellExecute=$false; $start.CreateNoWindow=$true
-                $start.Environment.Clear()
+        $start.Environment.Clear()
         $values=@{
             SystemRoot=$env:SystemRoot; windir=$env:SystemRoot
             PATH=((Split-Path -Parent $powershell) + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot)
@@ -76,39 +101,60 @@ try {
         foreach ($arg in @('-NoProfile','-NonInteractive','-Command','exit 0')) { [void]$probe.ArgumentList.Add($arg) }
         $probeProcess=[Diagnostics.Process]::Start($probe)
         try {
-            if (-not $probeProcess.WaitForExit(12000)) { $probeProcess.Kill($true); throw 'Synthetic PowerShell startup timed out.' }
+            if (-not $probeProcess.WaitForExit(12000)) { throw 'Synthetic PowerShell startup timed out.' }
             Check ($probeProcess.ExitCode -eq 0) 'Synthetic PowerShell startup failed.'
         } finally { $probeProcess.Dispose() }
         Write-Output 'Synthetic PowerShell startup succeeded.'
         foreach ($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$uninstaller)) { [void]$start.ArgumentList.Add($arg) }
-        $process=[Diagnostics.Process]::Start($start)
-        try {
-            if (-not $process.WaitForExit(20000)) {
-                $children=@(Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $process.Id) | ForEach-Object { $_.Name })
-                Write-Output ('Timed-out synthetic process children: ' + ($children -join ','))
-                $process.Kill($true)
-                throw 'Synthetic uninstaller timed out.'
-            }
-            $exit=$process.ExitCode
-        } finally { $process.Dispose() }
         # The released script launches this command asynchronously. Identify and wait for
-        # that exact synthetic cleanup, rather than guessing that it finished after a delay.
+        # that exact synthetic cleanup. Keep the opened process handle through the wait;
+        # never act on a PID after a timeout.
         $literalTarget=$install.Replace("'","''")
         $cleanupCommand="Start-Sleep -Seconds 2; Remove-Item -LiteralPath '$literalTarget' -Recurse -Force"
         $cleanupEncoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cleanupCommand))
-        $cleanup=@(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($cleanupEncoded) })
-        Check ($cleanup.Count -eq 1) 'The synthetic cleanup process could not be identified.'
-        try { $cleanupProcess=[Diagnostics.Process]::GetProcessById([int]$cleanup[0].ProcessId) }
-        catch { throw 'The synthetic cleanup exited before it could be observed.' }
+        $process=[Diagnostics.Process]::Start($start)
+        $cleanupProcess=$null
         try {
-            if (-not $cleanupProcess.WaitForExit(20000)) { $cleanupProcess.Kill($true); throw 'The synthetic cleanup timed out.' }
-        } finally { $cleanupProcess.Dispose() }
+            $ownerId=$process.Id
+            $ownerStart=$process.StartTime.ToUniversalTime()
+            $clock=[Diagnostics.Stopwatch]::StartNew()
+            $candidate=$null
+            while ($null -eq $candidate -and $clock.Elapsed.TotalSeconds -lt 15) {
+                $matches=@(Get-CimInstance Win32_Process -Filter ("Name = 'powershell.exe' AND ParentProcessId = " + $ownerId) -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine |
+                    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($cleanupEncoded) })
+                Check ($matches.Count -le 1) 'More than one synthetic cleanup matched.'
+                if ($matches.Count -eq 1) { $candidate=$matches[0]; break }
+                if ($process.HasExited -and $process.ExitCode -ne 0) { throw 'Synthetic uninstaller failed before cleanup was observed.' }
+                Start-Sleep -Milliseconds 50
+            }
+            Check ($null -ne $candidate) 'The synthetic cleanup process could not be identified in time.'
+            try {
+                $observedStart=([DateTime]$candidate.CreationDate).ToUniversalTime()
+                $observedPath=[IO.Path]::GetFullPath([string]$candidate.ExecutablePath)
+                $cleanupProcess=[Diagnostics.Process]::GetProcessById([int]$candidate.ProcessId)
+                $cleanupHandle=$cleanupProcess.SafeHandle
+                Check (-not $cleanupHandle.IsInvalid -and -not $cleanupHandle.IsClosed) 'The cleanup process handle is unavailable.'
+                $openedStart=$cleanupProcess.StartTime.ToUniversalTime()
+                $openedPath=[IO.Path]::GetFullPath($cleanupProcess.MainModule.FileName)
+            } catch { throw 'The synthetic cleanup process could not be safely opened and identified.' }
+            Check (Test-CleanupIdentity $ownerId $ownerStart ([int]$candidate.ParentProcessId) $observedStart $openedStart $observedPath $openedPath $powershell) 'The opened cleanup process identity does not match the observed process.'
+            if (-not $process.WaitForExit(20000)) { throw 'Synthetic uninstaller timed out.' }
+            $exit=$process.ExitCode
+            Check ($exit -eq 0) 'Synthetic uninstaller returned a nonzero exit code.'
+            Check ($observedStart -le $process.ExitTime.ToUniversalTime().AddMilliseconds(20)) 'Cleanup started after the uninstaller exited.'
+            if (-not $cleanupProcess.WaitForExit(20000)) { throw 'The synthetic cleanup timed out.' }
+            $cleanupExit=$cleanupProcess.ExitCode
+            Check ($cleanupExit -eq 0) 'Synthetic cleanup returned a nonzero exit code.'
+        } finally {
+            if ($null -ne $cleanupProcess) { $cleanupProcess.Dispose() }
+            $process.Dispose()
+        }
         Check (-not [IO.Directory]::Exists($install)) 'The synthetic installation directory was not removed.'
         $preserved=[IO.File]::Exists($sentinel)
         if ($preserved) { $preserved=[Convert]::ToBase64String([IO.File]::ReadAllBytes($sentinel)) -ceq [Convert]::ToBase64String($sentinelBytes) }
-        $results.Add([pscustomobject]@{ Scenario=$scenario; Exit=$exit; ExternalPreserved=$preserved })
+        $results.Add([pscustomobject]@{ Scenario=$scenario; Exit=$exit; CleanupExit=$cleanupExit; ExternalPreserved=$preserved })
     }
-    foreach ($result in $results) { Write-Output ('Legacy uninstall {0}: exit {1}, outside synthetic file preserved {2}.' -f $result.Scenario,$result.Exit,$result.ExternalPreserved) }
+    foreach ($result in $results) { Write-Output ('Legacy uninstall {0}: exit {1}, cleanup exit {2}, outside synthetic file preserved {3}.' -f $result.Scenario,$result.Exit,$result.CleanupExit,$result.ExternalPreserved) }
     Check (@($results | Where-Object { -not $_.ExternalPreserved }).Count -eq 0) 'Legacy uninstall changed data outside its synthetic installation.'
 } finally {
     foreach ($scope in @('User','Machine')) {
