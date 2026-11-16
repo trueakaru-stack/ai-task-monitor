@@ -204,6 +204,8 @@ internal sealed class ClaudeSourcePump : IDisposable
         apply(Copy(lastPresented, false));
     }
 
+    internal static ClaudeSourceSnapshot AsUnconfirmed(ClaudeSourceSnapshot snapshot) => Copy(snapshot, true);
+
     private static ClaudeSourceSnapshot Copy(ClaudeSourceSnapshot snapshot, bool unconfirmed)
     {
         ClaudeTask[] tasks = snapshot.Tasks.Select(item =>

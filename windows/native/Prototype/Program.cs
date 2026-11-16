@@ -23,7 +23,19 @@ internal static class Program
         var window = (Window)XamlReader.Load(resource);
         var controller = new PrototypeWindow(window, options!);
         using var cloud = new CloudSourcePump(window.Dispatcher, controller.ApplyCloudSource, runner: null);
-        window.Closed += (_, _) => cloud.Dispose();
+        ClaudeRegisteredHookOwner? claude = null;
+        bool preview = options!.Offscreen || options.Scene != "empty" || options.Snapshot is not null ||
+            options.ReadyFile is not null || options.ExitAfterSnapshot;
+        if (!preview)
+        {
+            if (ClaudeRegisteredHookPaths.TryFromEnvironment(out ClaudeRegisteredHookPaths? paths))
+            {
+                claude = new ClaudeRegisteredHookOwner(window.Dispatcher, paths!, controller.ApplyClaudeSource);
+                claude.Start();
+            }
+            else controller.ApplyClaudeSource(new AITaskMonitor.Claude.ClaudeSourceSnapshot([], true));
+        }
+        window.Closed += (_, _) => { claude?.Dispose(); cloud.Dispose(); };
         if (options!.Offscreen)
         {
             window.WindowStartupLocation = WindowStartupLocation.Manual;
