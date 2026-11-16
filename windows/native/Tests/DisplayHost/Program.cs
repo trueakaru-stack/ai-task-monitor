@@ -94,6 +94,13 @@ internal static class Program
             ((SolidColorBrush)window.Resources["Surface"]).Color == (Color)ColorConverter.ConvertFromString("#F6F6F6"),
             "Theme selection changed legacy settings or the window did not update.");
         Capture(window, root, "settings-light-ru");
+        var sourceTask = new AITaskMonitor.Claude.Task
+        {
+            Id = "custom", Activity = "Пользовательский текст", Updated = DateTime.UtcNow, Started = DateTime.UtcNow,
+            StartKey = "test", Unconfirmed = false, PlanConfirmed = true,
+            Steps = [new AITaskMonitor.Claude.Step { id = "1", title = "Название от источника", status = "active", generated = false }]
+        };
+        first.Controller.ApplyClaudeSource(new AITaskMonitor.Claude.ClaudeSourceSnapshot([sourceTask], false));
         Click(window, "EnglishLanguageButton");
         using (JsonDocument saved = ReadTarget(target))
             Check(saved.RootElement.EnumerateObject().Count() == 2 && saved.RootElement.GetProperty("theme").GetString() == "light" &&
@@ -101,6 +108,9 @@ internal static class Program
         Check(Find<TextBlock>(window, "SettingsHeading").Text == "Settings" &&
             (string)Find<Button>(window, "SystemThemeButton").Content == "System" &&
             (string)Find<Button>(window, "RussianLanguageButton").Content == "Русский", "The settings labels were not translated correctly.");
+        SampleTask retained = first.Controller.CurrentTasks.Single(task => task.Id == "claude:custom");
+        Check(retained.Activity == "Пользовательский текст" && retained.Steps.Single().Title == "Название от источника" &&
+            retained.Title == "Claude Code task", "Changing language altered source text or failed to relocalize a generated title.");
         Capture(window, root, "settings-light-en");
         Click(window, "DarkThemeButton");
         Capture(window, root, "settings-dark-en");
@@ -117,6 +127,16 @@ internal static class Program
         Click(second.Window, "RussianLanguageButton");
         Check(Find<TextBlock>(second.Window, "SettingsHeading").Text == "Настройки", "Switching back to Russian failed.");
         Check(File.ReadAllBytes(old).AsSpan().SequenceEqual(original), "Changing language touched the old file.");
+        byte[] beforeLock = File.ReadAllBytes(target);
+        using (var held = new FileStream(target + ".lock", FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            Click(second.Window, "LightThemeButton");
+            Check(Visible(Find<TextBlock>(second.Window, "LanguageSettingsError")) &&
+                ((SolidColorBrush)second.Window.Resources["Surface"]).Color == (Color)ColorConverter.ConvertFromString("#202020") &&
+                File.ReadAllBytes(target).AsSpan().SequenceEqual(beforeLock), "A failed save changed the theme or target.");
+        }
+        Click(second.Window, "LightThemeButton");
+        Check(!Visible(Find<TextBlock>(second.Window, "LanguageSettingsError")), "A successful retry did not clear the save error.");
         second.Window.Close();
 
         string invalidOld = Path.Combine(work, "invalid.json"), partial = Path.Combine(work, "partial.json");
