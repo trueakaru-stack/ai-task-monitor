@@ -35,7 +35,22 @@ internal static class Program
             (args.Length == 6 && !args[5].StartsWith("--cursor=", StringComparison.Ordinal)))
             return 20;
 
+        string fixtureDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppContext.BaseDirectory));
+        DirectoryInfo? candidate = new DirectoryInfo(fixtureDir).Parent?.Parent?.Parent?.Parent;
+        if (candidate is null) return 29;
+        string root = candidate.FullName;
+        string runnerTemp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(
+            Environment.GetEnvironmentVariable("RUNNER_TEMP") ?? ""));
+        string expectedFixture = Path.Combine(root, "artifacts", "bin", "CodexCloudCommand.Fixture", "release");
+        if (!string.Equals(Directory.GetParent(root)?.FullName, runnerTemp, StringComparison.OrdinalIgnoreCase) ||
+            !Regex.IsMatch(Path.GetFileName(root), "^aitm-cloud-command-[0-9a-f]{32}$", RegexOptions.CultureInvariant) ||
+            !string.Equals(fixtureDir, expectedFixture, StringComparison.OrdinalIgnoreCase))
+            return 29;
         string temp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
+        if (!string.Equals(temp, Path.Combine(root, "isolated", "temp"), StringComparison.OrdinalIgnoreCase))
+            return 29;
+        for (DirectoryInfo? item = new(temp); item is not null; item = item.Parent)
+            if ((item.Attributes & FileAttributes.ReparsePoint) != 0) return 29;
         string cwd = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Environment.CurrentDirectory));
         if (!string.Equals(Directory.GetParent(cwd)?.FullName, temp, StringComparison.OrdinalIgnoreCase) ||
             !Regex.IsMatch(Path.GetFileName(cwd), "^aitm-cloud-[0-9a-f]{32}$", RegexOptions.CultureInvariant))

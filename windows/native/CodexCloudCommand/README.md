@@ -10,9 +10,9 @@ It uses ProcessStartInfo.ArgumentList, does not invoke a shell, closes stdin and
 never reads credentials or writes logs itself. The caller is responsible for
 selecting and validating the genuine official executable and its installation.
 A fully qualified .exe path is a syntax check, not an authenticity, identity or
-race-free filesystem check. As with a normal child process, the executable inherits
-the parent's environment and working directory and can access anything allowed to
-that account. The transport's own lack of logging does not constrain the child.
+race-free filesystem check. The child inherits the parent's environment and can
+access other paths allowed to its account. The transport's working directory is
+not a general sandbox.
 
 The official Codex CLI source for
 [rust-v0.169.0-alpha.11.1](https://github.com/openai/codex/blob/rust-v0.169.0-alpha.11.1/codex-rs/cloud-tasks/src/util.rs)
@@ -20,16 +20,31 @@ appends to a relative error.log. That version's cloud code can write an account
 identifier and input/output pagination cursors there
 ([authentication](https://github.com/openai/codex/blob/rust-v0.169.0-alpha.11.1/codex-rs/cloud-tasks/src/lib.rs),
 [listing](https://github.com/openai/codex/blob/rust-v0.169.0-alpha.11.1/codex-rs/cloud-tasks-client/src/http.rs)).
-This is a source inspection, not a real authenticated test or a statement about
-other CLI versions. The current transport does not isolate the working directory.
+This is source inspection, not a real authenticated test or a statement about
+other CLI versions.
 
-Before connecting a real CLI, the owner must provide and validate an isolated
-working directory, define safe handling and retention for any child-created
-files, and test that account identifiers, cursors and other sensitive material
-do not leak into user projects or unintended logs. It must also verify that the
-chosen working directory does not change the intended cloud listing. Cursors
-are passed as command-line arguments and may be observable to other local processes;
-they must not be logged.
+The candidate creates a unique temporary directory atomically, holds its
+validated non-reparse ancestors, denies creation of files and directories to
+the current user and verifies that denial before launch. It accepts only a
+fixed local drive and fails closed if validation fails. It removes only its
+own empty directory by handle, never its contents recursively. Only one workspace
+may be in use at once. If removal fails or the launched child's exit cannot be
+confirmed, further launches are disabled for the lifetime of the process.
+A retained directory remains subject to its access rules.
+
+These controls target accidental relative writes such as the inspected error.log;
+they do not prevent a child running as the same user from accessing or writing
+other locations, modifying security rules it owns, or launching descendants.
+They are not proof of behavior across filesystems, accounts or CLI versions.
+Cursors are passed as command-line arguments and may be observable to other local
+processes; they must not be logged.
+
+Changing the child's current directory may change which trusted project
+configuration layers Codex loads. The inspected CLI passes its current directory
+to [the configuration loader](https://github.com/openai/codex/blob/rust-v0.169.0-alpha.11.1/codex-rs/config/src/loader/mod.rs).
+The inspected cloud-list command has no independent cwd option that was shown to
+preserve that context. Actual cloud-list compatibility and provider coverage
+remain unverified; the synthetic tests cannot establish them.
 
 Stdout and stderr are read concurrently and capped during reads at 1 MiB and
 64 KiB. Exceeding either cap fails the request and attempts to stop the process.
@@ -82,32 +97,15 @@ user's computer or on a shared/untrusted runner. The fixture is synthetic and
 does not access an account or a network. Its child process inherits the hosted
 runner environment, so do not provide real account credentials or CI secrets.
 
-On a disposable GitHub-hosted Windows runner with .NET 10:
+The CI-only runner at `.github/cloud-acl-ci/Run.ps1` builds and runs the tests
+with an isolated profile, temporary directory and NuGet cache. It verifies the
+user, machine and process PATH before and after the tests, and sets
+DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0 for every child environment. Invoke it only on a
+disposable GitHub-hosted Windows runner; it must not be run on the user's computer.
 
-    if ($env:CI -ne 'true' -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') { throw 'Hosted Windows required.' }
-    $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH = '0'
-    $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
-    $env:DOTNET_GENERATE_ASPNET_CERTIFICATE = '0'
-    $root = Join-Path $env:RUNNER_TEMP ('aitm-cloud-command-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $root | Out-Null
-    $env:DOTNET_CLI_HOME = Join-Path $root 'dotnet-home'
-    $env:NUGET_PACKAGES = Join-Path $root 'packages'
-    $config = Join-Path $root 'NuGet.Config'
-    [IO.File]::WriteAllText($config, '<configuration><packageSources><clear /></packageSources></configuration>', [Text.UTF8Encoding]::new($false))
-    $artifacts = Join-Path $root 'artifacts'
-    dotnet build windows/native/CodexCloudCommand/Tests/CodexCloudCommand.Tests.csproj -c Release --configfile $config --artifacts-path $artifacts -p:NuGetAudit=false --nologo
-    if ($LASTEXITCODE -ne 0) { throw 'Synthetic command build failed.' }
-    $tests = Join-Path $artifacts 'bin/CodexCloudCommand.Tests/release/AITaskMonitor.CodexCloudCommand.Tests.dll'
-    dotnet $tests $root
-    if ($LASTEXITCODE -ne 0) { throw 'Synthetic command checks failed.' }
-
-The tests cover argument boundaries, stdin EOF, concurrent output limits, invalid
-UTF-8, exit failure, pre-cancellation, and signalled child cancellation and timeout
-with an OS mutex observing the synthetic child's lifetime. A separate injected
-termination test uses no process and checks expected aggregate failure, fallback,
-an unobserved exit, and propagation of an unexpected exception. They do not launch or
-authenticate a real CLI and do not establish actual backend compatibility, child
-tree termination in all races, or application readiness.
-
-The synthetic command checks passed 51 assertions with no build warnings in
-[CI run 43486330429](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43486330429).
+The synthetic fixtures exercise bounded output, cursor argument boundaries,
+cancellation, a non-writable child working directory, unchanged original working
+directory, rejected unavailable and redirected temporary directories, single
+workspace ownership and failed-cleanup behavior. They do not launch or authenticate
+a real Codex CLI and do not establish actual backend compatibility, descendant
+termination in all races, or application readiness.

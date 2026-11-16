@@ -44,6 +44,12 @@ internal static class Program
         for (DirectoryInfo? directory = new(root); directory is not null; directory = directory.Parent)
             Check((directory.Attributes & FileAttributes.ReparsePoint) == 0, "fixture ancestry has no reparse point");
 
+        string isolatedTemp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
+        Check(string.Equals(isolatedTemp, Path.Combine(root, "isolated", "temp"), StringComparison.OrdinalIgnoreCase),
+            "isolated temporary directory required");
+        for (DirectoryInfo? item = new(isolatedTemp); item is not null; item = item.Parent)
+            Check((item.Attributes & FileAttributes.ReparsePoint) == 0, "isolated temp has no reparse ancestor");
+
         string expectedTest = Path.Combine(root, "artifacts", "bin", "CodexCloudCommand.Tests", "release",
             "AITaskMonitor.CodexCloudCommand.Tests.dll");
         Check(string.Equals(Path.GetFullPath(Assembly.GetExecutingAssembly().Location), expectedTest,
@@ -368,10 +374,11 @@ internal static class Program
             Console.Error.WriteLine("Synthetic check failed: " + failure.Message);
             return 1;
         }
-        catch (Exception)
+        catch (Exception error)
         {
-            // Never print argument values, paths, cursors, or child output.
-            Console.Error.WriteLine("Codex Cloud command synthetic checks failed.");
+            // Report only exception type and a source line, never fixture values or child output.
+            string line = Regex.Match(error.StackTrace ?? "", @"line \d+", RegexOptions.CultureInvariant).Value;
+            Console.Error.WriteLine("Codex Cloud command synthetic checks failed: " + error.GetType().Name + " " + line);
             return 1;
         }
     }
