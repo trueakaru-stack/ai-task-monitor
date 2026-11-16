@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
@@ -10,6 +12,13 @@ using AITaskMonitor.CodexCloudCommand;
 
 internal static class Program
 {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security,
+        uint creation, uint flags, IntPtr template);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint securityInformation,
+        byte[] securityDescriptor);
+
     private const string DangerousCursor = "--leading \"quoted\" & %PATH% \\trailing\\";
     private const string Page = "{\"tasks\":[],\"cursor\":null}";
     private static int checks;
@@ -263,10 +272,15 @@ internal static class Program
                 ?? throw new CheckFailure("synthetic identity unavailable");
             var security = new DirectorySecurity();
             security.SetAccessRuleProtection(true, false);
-            security.SetOwner(user);
             security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl,
                 InheritanceFlags.None, PropagationFlags.None, AccessControlType.Allow));
-            new DirectoryInfo(path).SetAccessControl(security);
+            using (SafeFileHandle permission = CreateFileW(path, 0x00060000, 7, IntPtr.Zero, 3,
+                0x02000000 | 0x00200000, IntPtr.Zero))
+            {
+                if (permission.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+                if (!SetKernelObjectSecurity(permission, 4, security.GetSecurityDescriptorBinaryForm()))
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
             payload = new FileStream(Path.Combine(path, "owned-synthetic-payload.txt"), FileMode.CreateNew,
                 FileAccess.ReadWrite, FileShare.Read | FileShare.Delete, 4096, FileOptions.DeleteOnClose);
             payload.WriteByte(42);
