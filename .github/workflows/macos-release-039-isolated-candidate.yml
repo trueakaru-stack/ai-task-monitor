@@ -113,6 +113,128 @@ jobs:
           "$task_run" /bin/ln -s "$AITM_TEST_DENIED_FILE" "$AITM_TEST_TASK_ROOT/denied-link"
           if "$task_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out/deny" 2>&1; then echo 'Profile read through link was not denied.' >&2; exit 1; fi
           if "$task_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out/deny" 2>&1; then echo 'Profile write through link was not denied.' >&2; exit 1; fi
+      - name: Probe icon conversion with a single system service
+        id: icon
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          /bin/cp profile.sb profile-icon.sb
+          printf '%s\n' '(allow mach-lookup (global-name "com.apple.lsd.mapdb"))' >> profile-icon.sb
+          /usr/bin/sed 's@profile.sb@profile-icon.sb@' run-isolated > run-icon
+          chmod 700 run-icon
+          icon_run="$AITM_TEST_TASK_ROOT/run-icon"
+          "$icon_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          if "$icon_run" /bin/cat "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out/profile-check.stdout" 2>"$AITM_TEST_TASK_ROOT/out/profile-check.stderr"; then exit 1; fi
+          if "$icon_run" /usr/bin/touch "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out/profile-check.stdout" 2>"$AITM_TEST_TASK_ROOT/out/profile-check.stderr"; then exit 1; fi
+          if "$icon_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out/profile-check.stdout" 2>"$AITM_TEST_TASK_ROOT/out/profile-check.stderr"; then exit 1; fi
+          if "$icon_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out/profile-check.stdout" 2>"$AITM_TEST_TASK_ROOT/out/profile-check.stderr"; then exit 1; fi
+          cat > mach-probe.c <<'C'
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
+          #include <errno.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          int main(void) {
+              const char *blocked[] = {"com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon", "com.apple.bsd.dirhelper"};
+              for (unsigned i = 0; i < sizeof(blocked) / sizeof(blocked[0]); ++i) {
+                  mach_port_t service = MACH_PORT_NULL;
+                  kern_return_t result = bootstrap_look_up(bootstrap_port, blocked[i], &service);
+                  if (result == KERN_SUCCESS) mach_port_deallocate(mach_task_self(), service);
+                  if (result != BOOTSTRAP_NOT_PRIVILEGED) { fprintf(stderr, "Profile service not provably blocked: %d\n", result); return 1; }
+              }
+              int fd = socket(AF_INET, SOCK_STREAM, 0);
+              if (fd < 0) {
+                  if (errno != EPERM && errno != EACCES) return 2;
+              } else {
+                  struct sockaddr_in addr = {0};
+                  addr.sin_len = sizeof(addr);
+                  addr.sin_family = AF_INET;
+                  addr.sin_port = htons(9);
+                  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                  errno = 0;
+                  if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || (errno != EPERM && errno != EACCES)) {
+                      close(fd); fprintf(stderr, "Loopback network was not provably denied.\n"); return 3;
+                  }
+                  close(fd);
+              }
+              puts("Profile services and loopback network remain denied.");
+              return 0;
+          }
+          C
+          "$task_run" /usr/bin/clang -mmacosx-version-min=13.0 "$AITM_TEST_TASK_ROOT/mach-probe.c" -o "$AITM_TEST_TASK_ROOT/mach-probe"
+          "$task_run" "$AITM_TEST_TASK_ROOT/mach-probe"
+          "$icon_run" "$AITM_TEST_TASK_ROOT/mach-probe"
+          mkdir -p "$AITM_TEST_TASK_ROOT/icons/AppIcon.iconset"
+          task_icons="$AITM_TEST_TASK_ROOT/source/macos/assets/app-icon"
+          iconset="$AITM_TEST_TASK_ROOT/icons/AppIcon.iconset"
+          cp "$task_icons/icon-16.png" "$iconset/icon_16x16.png"
+          cp "$task_icons/icon-32.png" "$iconset/icon_16x16@2x.png"
+          cp "$task_icons/icon-32.png" "$iconset/icon_32x32.png"
+          cp "$task_icons/icon-64.png" "$iconset/icon_32x32@2x.png"
+          cp "$task_icons/icon-128.png" "$iconset/icon_128x128.png"
+          cp "$task_icons/icon-256.png" "$iconset/icon_128x128@2x.png"
+          cp "$task_icons/icon-256.png" "$iconset/icon_256x256.png"
+          cp "$task_icons/icon-512.png" "$iconset/icon_256x256@2x.png"
+          cp "$task_icons/icon-512.png" "$iconset/icon_512x512.png"
+          cp "$task_icons/icon-1024.png" "$iconset/icon_512x512@2x.png"
+          set +e
+          "$task_run" /usr/bin/iconutil -c icns "$iconset" -o "$AITM_TEST_TASK_ROOT/icons/strict.icns" > "$AITM_TEST_TASK_ROOT/strict-icon.log" 2>&1
+          strict_status=$?
+          set -e
+          echo "Strict iconutil exit status: $strict_status"
+          cat "$AITM_TEST_TASK_ROOT/strict-icon.log"
+          "$icon_run" /usr/bin/iconutil -c icns "$iconset" -o "$AITM_TEST_TASK_ROOT/icons/icon.icns"
+          test -s "$AITM_TEST_TASK_ROOT/icons/icon.icns"
+          /usr/bin/shasum -a 256 "$AITM_TEST_TASK_ROOT/icons/icon.icns"
+          "$icon_run" /usr/bin/iconutil -c iconset "$AITM_TEST_TASK_ROOT/icons/icon.icns" -o "$AITM_TEST_TASK_ROOT/icons/roundtrip.iconset"
+          for n in icon_16x16.png icon_16x16@2x.png icon_32x32.png icon_32x32@2x.png icon_128x128.png icon_128x128@2x.png icon_256x256.png icon_256x256@2x.png icon_512x512.png icon_512x512@2x.png; do
+            test -s "$AITM_TEST_TASK_ROOT/icons/roundtrip.iconset/$n"
+          done
+          echo 'Round-trip includes all ten icon sizes.'
+          printf '%s  %s\n' 'ec9ba4d716b1988dfad213127d9d2dffbb37e188199f8c7576d4325774e78e67' "$AITM_TEST_TASK_ROOT/icons/icon.icns" | /usr/bin/shasum -a 256 -c -
+          cat > "$AITM_TEST_TASK_ROOT/wrapper/iconutil" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test -z "${HOME+x}"
+          test -z "${CODEX_HOME+x}"
+          test "$(pwd -P)" = "$AITM_TEST_TASK_ROOT/source/macos"
+          test "$#" = 5
+          test "$1" = -c
+          test "$2" = icns
+          test "$4" = -o
+          test "$5" = "dist/AI Task Monitor.app/Contents/Resources/AppIcon.icns"
+          case "$3" in "$AITM_TEST_TASK_ROOT"/temp/tmp.*/AppIcon.iconset) ;; *) exit 1;; esac
+          test -d "$3"
+          test ! -L "$3"
+          test -z "$(find "$3" -type l -print)"
+          test "$(find "$3" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = 10
+          cmp "$3/icon_16x16.png" assets/app-icon/icon-16.png
+          cmp "$3/icon_16x16@2x.png" assets/app-icon/icon-32.png
+          cmp "$3/icon_32x32.png" assets/app-icon/icon-32.png
+          cmp "$3/icon_32x32@2x.png" assets/app-icon/icon-64.png
+          cmp "$3/icon_128x128.png" assets/app-icon/icon-128.png
+          cmp "$3/icon_128x128@2x.png" assets/app-icon/icon-256.png
+          cmp "$3/icon_256x256.png" assets/app-icon/icon-256.png
+          cmp "$3/icon_256x256@2x.png" assets/app-icon/icon-512.png
+          cmp "$3/icon_512x512.png" assets/app-icon/icon-512.png
+          cmp "$3/icon_512x512@2x.png" assets/app-icon/icon-1024.png
+          test -f "$AITM_TEST_TASK_ROOT/icons/icon.icns"
+          test ! -L "$AITM_TEST_TASK_ROOT/icons/icon.icns"
+          test ! -e "$5"
+          test ! -L "$5"
+          printf '%s  %s\n' 'ec9ba4d716b1988dfad213127d9d2dffbb37e188199f8c7576d4325774e78e67' "$AITM_TEST_TASK_ROOT/icons/icon.icns" | /usr/bin/shasum -a 256 -c -
+          /bin/cp "$AITM_TEST_TASK_ROOT/icons/icon.icns" "$5"
+          echo 'Installed independently verified icon from unchanged source assets.'
+          SCRIPT
+          chmod 700 "$AITM_TEST_TASK_ROOT/wrapper/iconutil"
       - name: Build exact universal candidate
         id: build
         shell: bash
@@ -127,6 +249,65 @@ jobs:
           test "$("$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = 0.3.9
           test "$("$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/plutil -extract CFBundleVersion raw -o - "$task_app/Contents/Info.plist")" = 12
           "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/codesign -dvv "$task_app" 2>&1 | tee "$AITM_TEST_TASK_ROOT/out/signature.txt"
+          "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/python3 -I -S -B - \
+            "$task_app" "$AITM_TEST_TASK_ROOT/source/macos" "$AITM_TEST_TASK_ROOT/source/.github/macos-final-build-20261109/bundle-resources.sha256" \
+            <<'PY' | tee "$AITM_TEST_TASK_ROOT/out/bundle.json"
+          import hashlib
+          import json
+          import os
+          from pathlib import Path, PurePosixPath
+          import plistlib
+          import stat
+          import sys
+          app, source, manifest = map(Path, sys.argv[1:])
+          if hashlib.sha256(manifest.read_bytes()).hexdigest() != "43ecc4a14501423eaf91946bdef279474b1759fe9ac0c43ebaddb55be40d628f":
+              raise SystemExit("Unexpected resource manifest.")
+          expected = {}
+          for line in manifest.read_text(encoding="ascii").splitlines():
+              checksum, name = line.split("  ", 1)
+              parts = PurePosixPath(name).parts
+              if (len(parts) < 2 or parts[0] != "integrations" or ".." in parts or
+                      PurePosixPath(name).is_absolute() or name in expected):
+                  raise SystemExit("Invalid resource manifest.")
+              expected[name] = checksum
+          if len(expected) != 27:
+              raise SystemExit("Unexpected resource manifest size.")
+          resources = app / "Contents/Resources"
+          integration_root = resources / "integrations"
+          if integration_root.is_symlink() or not integration_root.is_dir():
+              raise SystemExit("Unsafe integration root.")
+          for entry in integration_root.rglob("*"):
+              if entry.is_symlink():
+                  raise SystemExit("Linked integration resource.")
+          actual = {"integrations/" + path.relative_to(integration_root).as_posix()
+                    for path in integration_root.rglob("*") if path.is_file()}
+          if actual != set(expected):
+              raise SystemExit("Bundled integration resources differ.")
+          for name, checksum in expected.items():
+              if hashlib.sha256((resources / name).read_bytes()).hexdigest() != checksum:
+                  raise SystemExit("Wrong bundled resource: " + name)
+              if hashlib.sha256((source / name).read_bytes()).hexdigest() != checksum:
+                  raise SystemExit("Wrong source resource: " + name)
+          plist_path = app / "Contents/Info.plist"
+          if plist_path.is_symlink() or plist_path.read_bytes() != (source / "Info.plist").read_bytes():
+              raise SystemExit("Bundle version file differs from source.")
+          info = plistlib.loads(plist_path.read_bytes())
+          for key, value in {"AITaskMonitorReleaseVersion":"0.3.9-alpha", "CFBundleShortVersionString":"0.3.9",
+                             "CFBundleVersion":"12", "CFBundleExecutable":"AITaskMonitor",
+                             "LSMinimumSystemVersion":"13.0"}.items():
+              if info.get(key) != value:
+                  raise SystemExit("Unexpected bundle value: " + key)
+          icon = resources / "AppIcon.icns"
+          binary = app / "Contents/MacOS/AITaskMonitor"
+          if icon.is_symlink() or hashlib.sha256(icon.read_bytes()).hexdigest() != "ec9ba4d716b1988dfad213127d9d2dffbb37e188199f8c7576d4325774e78e67":
+              raise SystemExit("Unexpected application icon.")
+          if binary.is_symlink() or not binary.is_file() or not (stat.S_IMODE(binary.stat().st_mode) & 0o111) or not os.access(binary, os.X_OK):
+              raise SystemExit("Missing or non-executable application binary.")
+          print(json.dumps({"release":info["AITaskMonitorReleaseVersion"], "build":info["CFBundleVersion"],
+                            "iconSha256":hashlib.sha256(icon.read_bytes()).hexdigest(),
+                            "binarySha256":hashlib.sha256(binary.read_bytes()).hexdigest(),
+                            "integrationResourceCount":len(expected)}, sort_keys=True))
+          PY
       - name: Smoke test bundled Claude hook
         id: smoke
         shell: bash
@@ -145,8 +326,30 @@ jobs:
           "$AITM_TEST_TASK_ROOT/run-isolated" /bin/bash ./scripts/create-dmg.sh
           cd dist
           /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt
-          "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/hdiutil verify "$PWD/AITaskMonitor-macOS-0.3.9-alpha.dmg"
-          "$AITM_TEST_TASK_ROOT/run-isolated" /bin/cp "$PWD/AITaskMonitor-macOS-0.3.9-alpha.dmg" "$PWD/SHA256SUMS-macOS.txt" "$AITM_TEST_TASK_ROOT/out/"
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          task_dmg="$PWD/AITaskMonitor-macOS-0.3.9-alpha.dmg"
+          "$task_run" /usr/bin/hdiutil verify "$task_dmg"
+          "$task_run" /bin/cp "$task_dmg" "$PWD/SHA256SUMS-macOS.txt" "$AITM_TEST_TASK_ROOT/out/"
+          printf '%s\n' 'TEST CANDIDATE ONLY: ad-hoc signature; not notarized; not a published release.' > "$AITM_TEST_TASK_ROOT/out/NOT-A-RELEASE.txt"
+          task_mount="$AITM_TEST_TASK_ROOT/mount"
+          test -z "$(ls -A "$task_mount")"
+          "$task_run" /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "$task_mount" "$task_dmg"
+          attached=1
+          cleanup_mount() {
+            if test "$attached" = 1; then "$task_run" /usr/bin/hdiutil detach "$task_mount" || true; fi
+          }
+          trap cleanup_mount EXIT
+          test -d "$task_mount/AI Task Monitor.app"
+          test ! -L "$task_mount/AI Task Monitor.app"
+          test "$("$task_run" /usr/bin/readlink "$task_mount/Applications")" = /Applications
+          "$task_run" /usr/bin/cmp "$task_mount/AI Task Monitor.app/Contents/Info.plist" "$AITM_TEST_TASK_ROOT/source/macos/Info.plist"
+          "$task_run" /usr/bin/cmp "$task_mount/AI Task Monitor.app/Contents/MacOS/AITaskMonitor" "$AITM_TEST_TASK_ROOT/source/macos/dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
+          "$task_run" /usr/bin/cmp "$task_mount/AI Task Monitor.app/Contents/Resources/AppIcon.icns" "$AITM_TEST_TASK_ROOT/icons/icon.icns"
+          "$task_run" /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_mount/AI Task Monitor.app"
+          "$task_run" /usr/bin/hdiutil detach "$task_mount"
+          attached=0
+          trap - EXIT
+          echo 'Mounted DMG matches the verified candidate bundle.'
       - name: Build synthetic source and version tests
         id: test_build
         shell: bash
