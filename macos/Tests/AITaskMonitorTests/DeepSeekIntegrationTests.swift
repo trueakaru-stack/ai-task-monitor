@@ -54,7 +54,9 @@ final class DeepSeekIntegrationTests: XCTestCase {
               environment["RUNNER_ENVIRONMENT"] == "github-hosted", environment["RUNNER_OS"] == "macOS",
               environment["AITM_MACOS_TEST_SANDBOX"] == "1", environment["HOME"] == nil,
               environment["CODEX_HOME"] == nil,
-              let marker = environment["AITM_CI_DENIED_FILE"], marker.hasPrefix("/Users/") else {
+              let marker = environment["AITM_CI_DENIED_FILE"], marker.hasPrefix("/Users/"),
+              let fixtureRoot = environment["AITM_MACOS_TEST_ROOT"],
+              fixtureRoot.hasPrefix("/private/tmp/aitm-macos-tests.") else {
             XCTFail("Disposable macOS profile sandbox is required.")
             return
         }
@@ -66,8 +68,7 @@ final class DeepSeekIntegrationTests: XCTestCase {
             return
         }
         let manager = FileManager.default
-        let temp = URL(fileURLWithPath: environment["RUNNER_TEMP"] ?? manager.temporaryDirectory.path,
-                       isDirectory: true).resolvingSymlinksInPath()
+        let temp = URL(fileURLWithPath: fixtureRoot, isDirectory: true).resolvingSymlinksInPath()
         let root = temp.appendingPathComponent("aitm-swift-dsh-" + UUID().uuidString, isDirectory: true)
         try manager.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? manager.removeItem(at: root) }

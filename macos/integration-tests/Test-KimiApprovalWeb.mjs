@@ -38,6 +38,7 @@ const tests = dirname(fileURLToPath(import.meta.url));
 const project = dirname(tests);
 const assets = join(project, (await readdir(project)).includes('app') ? 'app/integrations/kimi-plugin' : 'integrations/kimi-plugin');
 const guard = join(tests, 'KimiNetworkGuard.cjs');
+const syntheticHomeGuard = join(tests, 'KimiSyntheticHomeGuard.cjs');
 const temp = await realpath(tmpdir());
 const fixture = await mkdtemp(join(temp, 'aitm-kimi-approval-'));
 let failures = [];
@@ -86,7 +87,8 @@ async function run(withPlugin) {
     KIMI_CODE_HOME: home, KIMI_DISABLE_TELEMETRY: '1', KIMI_MODEL_NAME: 'fixture', KIMI_MODEL_API_KEY: 'dummy-fixture',
     KIMI_MODEL_PROVIDER_TYPE: 'openai', KIMI_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`,
     KIMI_MODEL_CAPABILITIES: 'tool_use', AITM_FIXTURE_ROOT: root,
-    NODE_OPTIONS: `--require="${guard.replaceAll('\\', '/')}"`, NO_COLOR: '1',
+    NODE_OPTIONS: `--require="${syntheticHomeGuard.replaceAll('\\', '/')}" --require="${guard.replaceAll('\\', '/')}"`,
+    AITM_CI_DENIED_FILE: process.env.AITM_CI_DENIED_FILE, NO_COLOR: '1',
   });
   if (process.platform === 'win32') env.KIMI_SHELL_PATH = `${process.env.SystemRoot}\\System32\\cmd.exe`;
   const config = `default_model = "fixture"\ndefault_permission_mode = "manual"\ntelemetry = false\nauto_session_title = false\nmerge_all_available_skills = false\n\n[providers.fixture]\ntype = "openai"\nbase_url = "http://127.0.0.1:${modelPort}/v1"\napi_key = "dummy-fixture"\n\n[models.fixture]\nprovider = "fixture"\nmodel = "fixture"\nmax_context_size = 131072\ncapabilities = ["tool_use"]\n`;

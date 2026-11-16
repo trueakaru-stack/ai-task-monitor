@@ -65,7 +65,7 @@ jobs:
           set -euo pipefail
           exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 \
             CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 \
-            "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "NPM_CONFIG_CACHE=$AITM_TEST_TASK_ROOT/npm-cache" \
+            "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "AITM_MACOS_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "NPM_CONFIG_CACHE=$AITM_TEST_TASK_ROOT/npm-cache" \
             "NPM_CONFIG_USERCONFIG=$AITM_TEST_TASK_ROOT/npmrc" NPM_CONFIG_GLOBALCONFIG=/dev/null NPM_CONFIG_UPDATE_NOTIFIER=false \
             /usr/bin/sandbox-exec -D "TASK_PROFILE=$AITM_TEST_PROFILE" -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" \
               -D "TASK_NODE_ROOT=$AITM_TEST_NODE_ROOT" -D "TASK_PYTHON_ROOT=$AITM_TEST_PYTHON_ROOT" \
@@ -106,7 +106,7 @@ jobs:
           task_compiler=(/usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 swift)
           "${task_compiler[@]}" build --build-tests --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security"
           task_bin="$("${task_compiler[@]}" build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
-          "$task_run" /usr/bin/env "AITM_DSH_ANCHOR=$AITM_TEST_TASK_ROOT/dsh/node_modules/@deepseek-ai/dsh/package.json" "AITM_PNPM_SCRIPT=$AITM_TEST_TASK_ROOT/dsh/node_modules/pnpm/bin/pnpm.mjs" "AITM_NODE=$AITM_TEST_NODE_BIN" "AITM_CLAUDE_TEST_EXECUTABLE=$task_bin/AITaskMonitor" /bin/bash scripts/run-swift-tests.sh "${task_flags[@]}" --skip-build --filter DeepSeekIntegrationTests/testIsolatedUpstreamConnectionBridge | tee "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
+          "$task_run" /usr/bin/env "AITM_DSH_ANCHOR=$AITM_TEST_TASK_ROOT/dsh/node_modules/@deepseek-ai/dsh/package.json" "AITM_PNPM_SCRIPT=$AITM_TEST_TASK_ROOT/dsh/node_modules/pnpm/bin/pnpm.mjs" "AITM_NODE=$AITM_TEST_NODE_BIN" "AITM_CLAUDE_TEST_EXECUTABLE=$task_bin/AITaskMonitor" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.DeepSeekIntegrationTests/testIsolatedUpstreamConnectionBridge "$task_bin/AITaskMonitorPackageTests.xctest" | tee "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
           grep -q 'testIsolatedUpstreamConnectionBridge.*passed' "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
       - name: Exercise DeepSeek synthetic integration
         if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
