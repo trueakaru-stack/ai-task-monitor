@@ -202,6 +202,51 @@ File.WriteAllText(source, "{\"id\":\"large\",\"thread_name\":\"" + largeTitle +
 CodexIndexEntry largeEntry = new CodexIndexReader(source).Read([], []).Entries.Single();
 Check(largeEntry.Title.Length == largeTitle.Length, "A valid large tail row was rejected.");
 
+// The tail may be read from a large UTF-8 index without examining unrelated
+// earlier bytes, but a requested history scan must fit its complete budget.
+currentCase = "bounded-index";
+const int scanBytes = 8 * 1024 * 1024;
+string[] boundedRows = Enumerable.Range(0, 55).Select(i =>
+    "{\"id\":\"bounded-" + i + "\",\"thread_name\":\"Synthetic\"}").ToArray();
+using (var output = new FileStream(source, FileMode.Create, FileAccess.Write, FileShare.Read))
+{
+    byte[] old = Enumerable.Repeat((byte)'x', scanBytes + 32).ToArray();
+    output.Write(old);
+    output.WriteByte((byte)'\n');
+    byte[] tail = new UTF8Encoding(false).GetBytes(string.Join("\n", boundedRows) + "\n");
+    output.Write(tail);
+}
+var boundedReader = new CodexIndexReader(source);
+CodexIndexReadResult recent = boundedReader.Read([], []);
+Check(recent.Entries.Count == 50 && recent.Entries.Any(item => item.Id == "bounded-5") &&
+    recent.Entries.All(item => item.Id != "bounded-4"), "A complete 50-line UTF-8 tail was not retained.");
+CheckThrows<CodexIndexUnavailableException>(() => boundedReader.Read(["unknown"], []),
+    "A history scan beyond its budget returned a partial result.");
+
+File.WriteAllText(source, new string('x', scanBytes + 1), new UTF8Encoding(false));
+CheckThrows<CodexIndexUnavailableException>(() => new CodexIndexReader(source).Read([], []),
+    "An oversized unterminated UTF-8 line returned a partial result.");
+File.WriteAllText(source, new string('x', 2 * 1_048_576 + 1), new UTF8Encoding(false));
+CheckThrows<CodexIndexUnavailableException>(() => new CodexIndexReader(source).Read([], []),
+    "An over-budget tail line was accepted.");
+foreach (Encoding wide in new Encoding[] {
+    new UnicodeEncoding(false, true), new UnicodeEncoding(true, true),
+    new UTF32Encoding(false, true), new UTF32Encoding(true, true) })
+{
+    File.WriteAllText(source, new string('x', scanBytes / 2) + "\n", wide);
+    CheckThrows<CodexIndexUnavailableException>(() => new CodexIndexReader(source).Read([], []),
+        "An oversized wide-encoding forward scan was accepted.");
+}
+
+File.WriteAllLines(source, boundedRows, new UTF8Encoding(false));
+string[] atLimit = Enumerable.Range(0, 512).Select(i => "requested-" + i).ToArray();
+Check(new CodexIndexReader(source).Read(atLimit, []).Entries.Count == 50,
+    "The bounded requested-ID limit rejected an in-budget index.");
+CheckThrows<CodexIndexUnavailableException>(() => new CodexIndexReader(source).Read(atLimit, ["one-more"]),
+    "An over-budget requested-ID sequence was accepted.");
+
+currentCase = "extra";
+
 // One reader serializes its cache while callers concurrently use immutable data.
 string[] rows = Enumerable.Range(0, 80).Select(i => "{\"id\":\"i-" + i +
     "\",\"thread_name\":\"Synthetic\",\"updated_at\":\"2026-11-05\"}").ToArray();
