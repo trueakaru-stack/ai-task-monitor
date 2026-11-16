@@ -1,5 +1,5 @@
 ; Synthetic CI-only packaging experiment. This is not a product installer.
-; Its uninstaller intentionally retains the entire application payload.
+; This experiment tests removal of installed payload and preservation of unrelated data.
 #define PayloadDirectory GetEnv("AITM_SC_PAYLOAD")
 #define OutputDirectory GetEnv("AITM_SC_OUTPUT")
 #if (PayloadDirectory == "") || (OutputDirectory == "")
@@ -34,8 +34,8 @@ Compression=lzma2
 SolidCompression=yes
 
 [Files]
-; Retain all files, including nested files. Full safe removal is not implemented.
-Source: "{#PayloadDirectory}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs uninsneveruninstall
+; The uninstaller tracks these installed files. This remains a CI-only experiment.
+Source: "{#PayloadDirectory}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Code]
 function IsSyntheticCi: Boolean;
@@ -80,8 +80,71 @@ begin
     Result := 'Synthetic installation requires a new destination.';
 end;
 
-function InitializeUninstall: Boolean;
+// CI-only preflight: refuse existing redirected paths before uninstall.
+// This does not eliminate concurrent path replacement.
+function DirectoryAttributes(const Path: String): Cardinal;
+  external 'GetFileAttributesW@kernel32.dll stdcall uninstallonly';
+
+function PlainDirectory(const Path: String): Boolean;
+var
+  Attr: Cardinal;
 begin
-  Result := IsSyntheticCi and (CompareText(ExpandConstant('{app}'), TestDestination('')) = 0);
+  Attr := DirectoryAttributes(Path);
+  Result := (Attr <> $FFFFFFFF) and ((Attr and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
+    ((Attr and FILE_ATTRIBUTE_REPARSE_POINT) = 0);
+end;
+
+function PlainAncestors(const Path: String): Boolean;
+var
+  Current, Parent: String;
+  I: Integer;
+begin
+  Result := False;
+  Current := RemoveBackslashUnlessRoot(ExpandFileName(Path));
+  for I := 0 to 64 do begin
+    if not PlainDirectory(Current) then Exit;
+    Parent := RemoveBackslashUnlessRoot(ExtractFileDir(Current));
+    if CompareText(Parent, Current) = 0 then begin Result := True; Exit; end;
+    if (Parent = '') or (Length(Parent) >= Length(Current)) then Exit;
+    Current := Parent;
+  end;
+end;
+
+var
+  Examined: Integer;
+
+function PlainTree(const Path: String; const Depth: Integer): Boolean;
+var
+  Entry: TFindRec;
+begin
+  Result := False;
+  if (Depth > 32) or not PlainDirectory(Path) then Exit;
+  if not FindFirst(AddBackslash(Path) + '*', Entry) then Exit;
+  try
+    repeat
+      if (Entry.Name <> '.') and (Entry.Name <> '..') then begin
+        Examined := Examined + 1;
+        if Examined > 10000 then Exit;
+        if (Entry.Attributes and FILE_ATTRIBUTE_REPARSE_POINT) <> 0 then Exit;
+        if ((Entry.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and
+           not PlainTree(AddBackslash(Path) + Entry.Name, Depth + 1) then Exit;
+      end;
+    until not FindNext(Entry);
+  finally
+    FindClose(Entry);
+  end;
+  Result := True;
+end;
+
+function InitializeUninstall: Boolean;
+var
+  InstallPath: String;
+begin
+  InstallPath := ExpandConstant('{app}');
+  Result := IsSyntheticCi and (CompareText(InstallPath, TestDestination('')) = 0);
+  if Result then begin
+    Examined := 0;
+    Result := PlainAncestors(InstallPath) and PlainTree(InstallPath, 0);
+  end;
 end;
 
