@@ -109,6 +109,29 @@ $oldShortcutHash=(Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash
 $oldData=Join-Path $local 'CodexTaskProgress'
 [void][IO.Directory]::CreateDirectory($oldData)
 $oldSentinel=Join-Path $oldData 'user-note.txt';[IO.File]::WriteAllText($oldSentinel,'synthetic user data')
+# Compare hidden and normal startup in the same disposable profile.
+# Neither control opens agent or user data.
+$controlCode='Add-Type -AssemblyName PresentationFramework; $window=New-Object Windows.Window; $window.Title="AI task monitor"; [void]$window.ShowDialog()'
+$controlResults=@{}
+foreach($mode in @('hidden','normal')){
+    $control=New-IsolatedStart $SystemPowerShell $values
+    if($mode -eq 'hidden'){$control.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden}
+    foreach($arg in @('-NoProfile','-ExecutionPolicy','Bypass')){[void]$control.ArgumentList.Add($arg)}
+    if($mode -eq 'hidden'){foreach($arg in @('-WindowStyle','Hidden')){[void]$control.ArgumentList.Add($arg)}}
+    foreach($arg in @('-Sta','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($controlCode)))){[void]$control.ArgumentList.Add($arg)}
+    $controlProcess=[Diagnostics.Process]::Start($control)
+    try{
+        $controlVisible=$false
+        try{$controlWindow=Find-Window $controlProcess 20;$controlVisible=$null -ne $controlWindow}catch{}
+        $controlResults[$mode]=$controlVisible
+        Write-Output ('Synthetic WPF positive control '+$mode+': UIA window found='+$controlVisible+'; native windows='+(Get-NativeWindowSummary $controlProcess.Id))
+    }finally{
+        if(-not $controlProcess.HasExited){$controlProcess.Kill();[void]$controlProcess.WaitForExit(10000)}
+        $controlProcess.Dispose()
+    }
+}
+Check ([bool]$controlResults['normal']) 'The disposable runner WPF positive control did not show a window.'
+
 # Exercise the error after a synthetic Claude setup has changed test-only
 # settings. The shim replaces the new synthetic launcher, never a user file.
 $claudeDirectories=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -236,6 +259,7 @@ try{
         # Diagnostic only: repeat the installed launcher's exact PowerShell
         # arguments with output redirected, in the same synthetic environment.
         $direct=New-IsolatedStart $SystemPowerShell $values
+        $direct.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
         $direct.RedirectStandardOutput=$true;$direct.RedirectStandardError=$true
         foreach($arg in @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-Sta','-File',$appScript)){[void]$direct.ArgumentList.Add($arg)}
         $probeMonitor=[Diagnostics.Process]::Start($direct)
@@ -247,20 +271,6 @@ try{
             $observedErr=if($probeErr.IsCompleted){$probeErr.Result}else{'<stream still open>'}
             Write-Warning ('Direct installed-script diagnostic: exited='+$finished+'; stdout='+$observedOut+'; stderr='+$observedErr)
         }finally{$probeMonitor.Dispose()}
-        # Positive control in the same disposable profile and hidden-window
-        # process mode; this opens no agent or user data.
-        $controlCode='Add-Type -AssemblyName PresentationFramework; $window=New-Object Windows.Window; $window.Title="AI task monitor"; [void]$window.ShowDialog()'
-        $control=New-IsolatedStart $SystemPowerShell $values
-        foreach($arg in @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-Sta','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($controlCode)))){[void]$control.ArgumentList.Add($arg)}
-        $controlProcess=[Diagnostics.Process]::Start($control)
-        try{
-            $controlVisible=$false
-            try{$controlWindow=Find-Window $controlProcess 20;$controlVisible=$null -ne $controlWindow}catch{}
-            Write-Warning ('Synthetic WPF positive control: UIA window found='+$controlVisible+'; native windows='+(Get-NativeWindowSummary $controlProcess.Id))
-        }finally{
-            if(-not $controlProcess.HasExited){$controlProcess.Kill();[void]$controlProcess.WaitForExit(10000)}
-            $controlProcess.Dispose()
-        }
         # Insert checkpoints only into a synthetic copy in the fixture. The
         # installed resource itself remains unchanged.
         $checkpoint=Join-Path $FixtureRoot 'startup-checkpoints.txt'
@@ -294,6 +304,7 @@ try{
         }
         [IO.File]::WriteAllText($instrumented,$sourceText,[Text.UTF8Encoding]::new($true))
         $instrumentedStart=New-IsolatedStart $SystemPowerShell $values
+        $instrumentedStart.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
         foreach($arg in @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-Sta','-File',$instrumented)){[void]$instrumentedStart.ArgumentList.Add($arg)}
         $instrumentedProcess=[Diagnostics.Process]::Start($instrumentedStart)
         try{
