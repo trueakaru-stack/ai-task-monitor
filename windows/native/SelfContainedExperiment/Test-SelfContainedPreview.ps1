@@ -222,7 +222,7 @@ public static class AitmSelfContainedWindowCheck {
         }
         $coreRuntime = $runtimeModules | Where-Object { $_.Name -eq 'coreclr.dll' } | Select-Object -First 1
         $productVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($coreRuntime.Path).ProductVersion
-        Assert-Condition ($productVersion -match '^10\.0\.15(?:\+|$)') 'Loaded CoreCLR product version differs from the runtime pin.'
+        Assert-Condition ($productVersion -match '^10\.0\.15(?:\+|$)') ('Loaded CoreCLR product version differs from the runtime pin: ' + $productVersion)
         Assert-Condition ([AitmSelfContainedWindowCheck]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) 'Could not request preview shutdown.'
         Assert-Condition ($process.WaitForExit(10000) -and $process.ExitCode -eq 0) 'Self-contained preview did not exit cleanly.'
     } finally {
