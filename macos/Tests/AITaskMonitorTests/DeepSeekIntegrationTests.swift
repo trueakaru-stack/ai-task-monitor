@@ -107,9 +107,15 @@ final class DeepSeekIntegrationTests: XCTestCase {
         let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
         let context = DeepSeekIntegration.Context(node: node, home: dshHome, assets: project.appendingPathComponent("integrations"),
             installAnchor: anchor, pnpmScript: URL(fileURLWithPath: pnpmPath).resolvingSymlinksInPath().standardizedFileURL, environment: fixtureEnvironment)
+        print("AITM_SYNTHETIC_ANCHOR=\(anchor.path)")
+        print("AITM_SYNTHETIC_PNPM=\(context.pnpmScript.path)")
+        print("AITM_SYNTHETIC_PROFILE=\(dshHome.path)")
+        print("AITM_SYNTHETIC_ASSETS=\(context.assets.path)")
+        print("AITM_SYNTHETIC_STAGE=list")
         let first = try DeepSeekIntegration.profiles(context)
         XCTAssertEqual(first.map(\.name), ["тестовый-профиль"])
         XCTAssertEqual(first.first?.state, "disconnected")
+        print("AITM_SYNTHETIC_STAGE=connect")
         try DeepSeekIntegration.setConnected(true, profile: "тестовый-профиль", context: context)
         let connected = try XCTUnwrap(DeepSeekIntegration.profiles(context).first)
         XCTAssertEqual(connected.state, "connected", "Fixture profile error: \(connected.error ?? "none")")
