@@ -129,6 +129,12 @@ final class TaskStore: ObservableObject {
     private var previousClaude: [MonitoredTask] = []
     private var claudeRetainedTitlesOverflow = false
     private var previousExternal: [MonitoredTask] = []
+    private let maximumExternalCards = 512
+    // Reconnection does not prove that a rejected event's task has ended.
+    private var externalCapacityUnattributed: Set<TaskProvider> = []
+    private var externalCapacityScopes: [TaskProvider: Set<String>] = [:]
+    private var partialExternalSources: Set<TaskProvider> = []
+    private let maximumExternalScopeWarnings = 256
     private var externalRuntime: ExternalProviderRuntime?
     private var externalV2Runtime: ExternalProviderV2Runtime?
     private var parkedExternalProviderState: ExternalProviderStateStore?
@@ -777,8 +783,14 @@ final class TaskStore: ObservableObject {
     }
     var unavailableMessage: String {
         var messages: [String] = []
-        if !unavailableSources.isEmpty {
-            messages.append(tr("Нет данных от ", "No data from ") + unavailableSources.map(\.displayName).joined(separator: ", "))
+        let partial = unavailableSources.filter { partialExternalSources.contains($0) }
+        let absent = unavailableSources.filter { !partialExternalSources.contains($0) }
+        if !absent.isEmpty {
+            messages.append(tr("Нет данных от ", "No data from ") + absent.map(\.displayName).joined(separator: ", "))
+        }
+        if !partial.isEmpty {
+            let sources = partial.map(\.displayName).joined(separator: ", ")
+            messages.append(tr("Часть данных ", "Some ") + sources + tr(" недоступна", " data is unavailable"))
         }
         if codexPartiallyUnavailable && !unavailableSources.contains(.codex) {
             messages.append(tr("Часть данных Codex недоступна", "Some Codex data is unavailable"))
@@ -1004,9 +1016,37 @@ final class TaskStore: ObservableObject {
                       terminalIDs: terminalIDs, interruptedIDs: interruptedIDs, toolInputs: toolInputs)
     }
 
+    private static func externalScope(_ task: MonitoredTask) -> String? {
+        guard [.deepseek, .kimi, .hermes].contains(task.provider) else { return nil }
+        let prefix = task.provider == .deepseek && task.id.hasPrefix("deepseek-unassigned:")
+            ? "deepseek-unassigned:" : task.provider.rawValue + ":"
+        guard task.id.hasPrefix(prefix) else { return nil }
+        return ExternalProfileVisibility.scopedSession(String(task.id.dropFirst(prefix.count)))
+    }
+
+    private func rememberCapacity(_ provider: TaskProvider, scope: String? = nil) {
+        guard let scope else { externalCapacityUnattributed.insert(provider); return }
+        if (externalCapacityScopes[provider] ?? []).contains(scope) { return }
+        let count = externalCapacityScopes.values.reduce(0) { $0 + $1.count }
+        if count < maximumExternalScopeWarnings {
+            externalCapacityScopes[provider, default: []].insert(scope)
+        } else {
+            externalCapacityUnattributed.insert(provider)
+        }
+    }
+
+    private func rememberCapacity(from runtime: ExternalProviderRuntime) {
+        for provider in runtime.capacityUnattributedProviders { rememberCapacity(provider) }
+        for (provider, scopes) in runtime.capacityLimitedScopes {
+            for scope in scopes { rememberCapacity(provider, scope: scope) }
+        }
+    }
+
     private func refreshExternalProviders(unavailable: inout [TaskProvider]) {
         var allowed: Set<TaskProvider> = []
         var uncertain: Set<TaskProvider> = []
+        var partiallyUnavailable: Set<TaskProvider> = []
+        var failedRuntime: Set<TaskProvider> = []
         for provider in TaskProvider.allCases {
             do {
                 let state: ExternalProviderConnectionState
@@ -1023,6 +1063,7 @@ final class TaskStore: ObservableObject {
                     seenExternalConnections.insert(provider)
                     allowed.insert(provider)
                     unavailable.append(provider)
+                    partiallyUnavailable.insert(provider)
                 case .partial:
                     unavailable.append(provider)
                     if provider == .deepseek && externalConnections[.deepseek] == nil &&
@@ -1030,6 +1071,7 @@ final class TaskStore: ObservableObject {
                         // The receiver may collect only neutral evidence from
                         // ambiguous scopes while at least one profile is live.
                         allowed.insert(provider)
+                        partiallyUnavailable.insert(provider)
                     } else {
                         uncertain.insert(provider)
                     }
@@ -1061,10 +1103,26 @@ final class TaskStore: ObservableObject {
             uncertainScopes[.hermes] = hermesUncertainScopes
             ambiguousScopes[.hermes] = hermesHistory.ambiguous(Self.hermesHistoryProfiles(hermesProfiles))
         }
-        func filteredFallback(_ providers: Set<TaskProvider>) -> [MonitoredTask] {
+        defer {
+            for provider in TaskProvider.allCases where (allowed.contains(provider) || uncertain.contains(provider)) &&
+                !unavailable.contains(provider) {
+                let recorded = externalCapacityScopes[provider] ?? []
+                let visible = (scopes[provider] ?? []).union(uncertainScopes[provider] ?? [])
+                let missingMetadata = scopes[provider] == nil && uncertainScopes[provider] == nil
+                if externalCapacityUnattributed.contains(provider) ||
+                    !recorded.isDisjoint(with: visible) || (missingMetadata && !recorded.isEmpty) {
+                    unavailable.append(provider)
+                    if allowed.contains(provider) && !failedRuntime.contains(provider) {
+                        partiallyUnavailable.insert(provider)
+                    }
+                }
+            }
+            partialExternalSources = partiallyUnavailable.subtracting(failedRuntime).intersection(Set(unavailable))
+        }
+        func filteredFallback(_ providers: Set<TaskProvider>, onlyUnconfirmed: Bool = false) -> [MonitoredTask] {
             let allowedDeepSeek = scopes[.deepseek] ?? []
             let ambiguousDeepSeek = ambiguousScopes[.deepseek] ?? []
-            let candidates = unconfirmedExternalTasks(for: providers).compactMap { task -> MonitoredTask? in
+            let candidates = unconfirmedExternalTasks(for: providers, onlyUnconfirmed: onlyUnconfirmed).compactMap { task -> MonitoredTask? in
                 guard task.provider == .deepseek, task.id.hasPrefix("deepseek:"),
                       let scope = ExternalProfileVisibility.scopedSession(String(task.id.dropFirst("deepseek:".count))) else { return task }
                 if ambiguousDeepSeek.contains(scope) ||
@@ -1078,10 +1136,23 @@ final class TaskStore: ObservableObject {
                 deepSeekDisabledScopes: deepSeekDisabledScopes)
         }
         let retained = filteredFallback(uncertain)
+        // Hermes needs fresh observer evidence after a late monitor start.
+        let previouslyUnconfirmed = filteredFallback(allowed.subtracting([.hermes]), onlyUnconfirmed: true)
+        let partialProviders = Set(uncertainScopes.keys.filter { allowed.contains($0) && $0 != .hermes })
+        let partialScopes = filteredFallback(partialProviders).filter { task in
+            let prefix = task.provider == .deepseek && task.id.hasPrefix("deepseek-unassigned:")
+                ? "deepseek-unassigned:" : task.provider.rawValue + ":"
+            guard task.id.hasPrefix(prefix),
+                  let scope = ExternalProfileVisibility.scopedSession(String(task.id.dropFirst(prefix.count))) else { return false }
+            return (uncertainScopes[task.provider] ?? []).contains(scope)
+        }
         guard !allowed.isEmpty else {
             if let runtime = externalRuntime {
-                parkedExternalProviderState = runtime.parkState(markTransportGap: false)
+                rememberCapacity(from: runtime)
+                parkedExternalProviderState = runtime.parkState(markTransportGap: false, preservingKimi: uncertain.contains(.kimi))
                 runtime.stop()
+            } else {
+                parkedExternalProviderState?.retainProviders(uncertain.contains(.kimi) ? ["kimi"] : [])
             }
             externalRuntime = nil
             externalV2Runtime?.stop()
@@ -1099,10 +1170,27 @@ final class TaskStore: ObservableObject {
             guard let runtime = externalRuntime else { throw ExternalProviderRuntimeError.stopped }
             let current = runtime.snapshot(allowed: allowed, profileScopes: scopes,
                 uncertainScopes: uncertainScopes, ambiguousScopes: ambiguousScopes,
-                deepSeekHistoryLost: deepSeekHistory.historyLost, deepSeekDisabledScopes: deepSeekDisabledScopes)
+                deepSeekHistoryLost: deepSeekHistory.historyLost, deepSeekDisabledScopes: deepSeekDisabledScopes,
+                preservingKimi: uncertain.contains(.kimi))
+            rememberCapacity(from: runtime)
             guard !runtime.transportUnavailable else { throw ExternalProviderRuntimeError.stopped }
             var combined: [String: MonitoredTask] = [:]
-            for task in current + retained { combined[task.id] = task }
+            var pendingNew: [MonitoredTask] = []
+            var superseded: Set<String> = []
+            let previousIDs = Set(previousExternal.map(\.id))
+            func merge(_ task: MonitoredTask, preserving: Bool = false) {
+                if combined[task.id] != nil {
+                    combined[task.id] = task
+                } else if preserving || previousIDs.contains(task.id) {
+                    if combined.count < maximumExternalCards { combined[task.id] = task }
+                    else { rememberCapacity(task.provider, scope: Self.externalScope(task)) }
+                } else {
+                    pendingNew.append(task)
+                }
+            }
+            // Reserve space for visible evidence before accepting unseen tasks.
+            for task in retained + previouslyUnconfirmed + partialScopes { merge(task, preserving: true) }
+            for task in current { merge(task) }
             let v2Providers = allowed.intersection([.opencode, .deepseek])
             if externalV2Enabled && !v2Providers.isEmpty {
                 do {
@@ -1125,31 +1213,42 @@ final class TaskStore: ObservableObject {
                               (scopes[.deepseek] ?? []).contains(scope),
                               !(ambiguousScopes[.deepseek] ?? []).contains(scope) else { continue }
                         combined.removeValue(forKey: id)
+                        superseded.insert(id)
                     }
-                    for task in observed { combined[task.id] = task }
+                    for task in observed { merge(task) }
                     for scope in v2.capacityLimitedScopes {
-                        if let provider = TaskProvider(rawValue: scope.provider), !unavailable.contains(provider) { unavailable.append(provider) }
+                        if let provider = TaskProvider(rawValue: scope.provider) {
+                            rememberCapacity(provider, scope: provider == .opencode ? nil : scope.scope)
+                        }
+                    }
+                    for name in v2.capacityLimitedProviders {
+                        if let provider = TaskProvider(rawValue: name) { rememberCapacity(provider) }
                     }
                 } catch {
                     externalV2Failed = true
                     externalV2Runtime?.stop(); externalV2Runtime = nil
                     for provider in v2Providers where !unavailable.contains(provider) { unavailable.append(provider) }
-                    for task in filteredFallback(v2Providers) where combined[task.id] == nil { combined[task.id] = task }
+                    partiallyUnavailable.formUnion(v2Providers)
+                    for task in filteredFallback(v2Providers) where combined[task.id] == nil { merge(task, preserving: true) }
                 }
             } else if externalV2Runtime != nil {
                 externalV2Runtime?.stop(); externalV2Runtime = nil
             }
-            previousExternal = Array(combined.values)
-            for provider in runtime.capacityLimitedProviders where allowed.contains(provider) && !unavailable.contains(provider) {
-                unavailable.append(provider)
+            for task in pendingNew where !superseded.contains(task.id) {
+                if combined[task.id] != nil || combined.count < maximumExternalCards { combined[task.id] = task }
+                else { rememberCapacity(task.provider, scope: Self.externalScope(task)) }
             }
+            previousExternal = Array(combined.values)
         } catch {
+            failedRuntime.formUnion(allowed)
             for provider in TaskProvider.allCases where allowed.contains(provider) && !unavailable.contains(provider) {
                 unavailable.append(provider)
             }
             previousExternal = filteredFallback(uncertain.union(allowed))
             if let runtime = externalRuntime {
-                parkedExternalProviderState = runtime.parkState(markTransportGap: true)
+                rememberCapacity(from: runtime)
+                parkedExternalProviderState = runtime.parkState(markTransportGap: true,
+                    preservingKimi: allowed.contains(.kimi) || uncertain.contains(.kimi))
                 runtime.stop()
             }
             externalRuntime = nil
@@ -1158,6 +1257,17 @@ final class TaskStore: ObservableObject {
     }
 
     #if DEBUG
+    func testSetExternalAvailability(previous: [MonitoredTask], unavailable: [TaskProvider],
+                                     partiallyUnavailable: Set<TaskProvider> = []) {
+        precondition(!externalProvidersEnabled && diagnosticWorker == nil)
+        previousExternal = previous
+        tasks = previous
+        unavailableSources = unavailable
+        partialExternalSources = partiallyUnavailable
+    }
+
+    var testPartialExternalSources: Set<TaskProvider> { partialExternalSources }
+
     // Preview-only seam; tests must inject a synthetic runtime factory.
     func testExternalFallback(previous: [MonitoredTask], deepSeekRosters: [[DeepSeekProfile]],
                               hermesRosters: [[HermesProfile]] = [],
@@ -1186,8 +1296,8 @@ final class TaskStore: ObservableObject {
     }
     #endif
 
-    private func unconfirmedExternalTasks(for providers: Set<TaskProvider>) -> [MonitoredTask] {
-        previousExternal.filter { providers.contains($0.provider) }.map { task in
+    private func unconfirmedExternalTasks(for providers: Set<TaskProvider>, onlyUnconfirmed: Bool = false) -> [MonitoredTask] {
+        previousExternal.filter { providers.contains($0.provider) && (!onlyUnconfirmed || $0.isUnconfirmed) }.map { task in
             var copy = task
             copy.isActive = false
             copy.isWaiting = false
