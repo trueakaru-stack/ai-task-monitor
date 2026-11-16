@@ -83,17 +83,17 @@ try {
     $script = Join-Path $PSScriptRoot 'Harness.cjs'
     Check ([IO.File]::Exists($script)) 'Synthetic harness missing.'
 
-    # Prevent the Claude executable from reaching non-loopback addresses. This
+    # Deny outbound connections from the Claude executable. Windows may exempt loopback. This
     # rule exists only in the disposable hosted VM, and is removed in finally.
     $firewallName = 'AITM-claude-id-' + [Guid]::NewGuid().ToString('N')
-    $null = New-NetFirewallRule -Name $firewallName -DisplayName $firewallName -Direction Outbound -Action Block -Enabled True -Profile Any -Program $exe -RemoteAddress @('0.0.0.0-127.0.0.0','127.0.0.2-255.255.255.255','::/0')
+    $null = New-NetFirewallRule -Name $firewallName -DisplayName $firewallName -Direction Outbound -Action Block -Enabled True -Profile Any -Program $exe -RemoteAddress 'Any'
     $rule = Get-NetFirewallRule -Name $firewallName
     Check ($rule.Enabled -eq 'True' -and $rule.Direction -eq 'Outbound' -and $rule.Action -eq 'Block') 'Synthetic outbound block unavailable.'
     $applicationFilter = $rule | Get-NetFirewallApplicationFilter
     $addressFilter = $rule | Get-NetFirewallAddressFilter
     Check ([string]::Equals([string]$applicationFilter.Program, $exe, [StringComparison]::OrdinalIgnoreCase)) 'Unexpected executable in outbound block.'
     $addressText = @($addressFilter.RemoteAddress) -join ','
-    Check ($addressText.Contains('0.0.0.0-127.0.0.0') -and $addressText.Contains('127.0.0.2-255.255.255.255') -and $addressText.Contains('::/0')) 'Unexpected remote addresses in outbound block.'
+    Check ($addressText -ceq 'Any') 'Unexpected remote addresses in outbound block.'
 
 
     $start = [Diagnostics.ProcessStartInfo]::new()
