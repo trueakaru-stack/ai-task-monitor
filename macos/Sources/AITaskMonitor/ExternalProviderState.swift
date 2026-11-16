@@ -146,6 +146,8 @@ final class ExternalProviderStateStore {
     private var hermesScopes: Set<String> = []
     private var hermesUncertainScopes: Set<String> = []
     private(set) var capacityLimitedProviders: Set<String> = []
+    private(set) var capacityUnattributedProviders: Set<String> = []
+    private(set) var capacityLimitedScopes: [String: Set<String>] = [:]
     private let maximumSessions = 256
     private let staleAfter: TimeInterval = 1_800
     private let heartbeatLifetime: TimeInterval = 180
@@ -210,12 +212,17 @@ final class ExternalProviderStateStore {
                 if event.provider == "opencode" || event.provider == "deepseek" {
                     return rejectAtCapacity(provider: event.provider, scope: scope)
                 }
+                // Every unknown card is visible evidence, including Kimi and
+                // Hermes cards. Reclaim only a terminal, non-visible record.
                 let removable = states.filter { _, value in
-                    value.status != "active" && value.status != "waiting" &&
-                    !(value.status == "unknown" && (value.provider == "opencode" || value.provider == "deepseek"))
+                    !["active", "waiting", "unknown"].contains(value.status)
                 }.min { $0.value.updatedAt < $1.value.updatedAt }
                 guard let oldest = removable?.key else { return rejectAtCapacity(provider: event.provider, scope: scope) }
-                if states[oldest]?.provider == "hermes" { markGap(provider: "hermes") }
+                if let discarded = states[oldest], discarded.provider == "hermes" {
+                    let discardedScope = Self.sessionScope(discarded.session)
+                    if Self.validDeepSeekScope(discardedScope) { markHermesScopeGap(discardedScope) }
+                    else { markGap(provider: "hermes") }
+                }
                 states.removeValue(forKey: oldest)
             }
             states[key] = ExternalProviderTask(provider: event.provider, session: event.session, status: "unknown",
@@ -294,8 +301,23 @@ final class ExternalProviderStateStore {
         return true
     }
 
-    private func rejectAtCapacity(provider: String, scope: String) -> Bool {
+    private func recordCapacityLimit(provider: String, scope: String? = nil) {
         capacityLimitedProviders.insert(provider)
+        guard let scope, provider != "opencode", Self.validDeepSeekScope(scope) else {
+            capacityUnattributedProviders.insert(provider)
+            return
+        }
+        if (capacityLimitedScopes[provider] ?? []).contains(scope) { return }
+        let count = capacityLimitedScopes.values.reduce(0) { $0 + $1.count }
+        if count < maximumSessions {
+            capacityLimitedScopes[provider, default: []].insert(scope)
+        } else {
+            capacityUnattributedProviders.insert(provider)
+        }
+    }
+
+    private func rejectAtCapacity(provider: String, scope: String) -> Bool {
+        recordCapacityLimit(provider: provider, scope: scope)
         if provider == "deepseek" && Self.validDeepSeekScope(scope) {
             markSessionScopesGap(provider: provider, scopes: [scope])
         } else if provider == "hermes" && Self.validDeepSeekScope(scope) {
@@ -388,7 +410,7 @@ final class ExternalProviderStateStore {
             deepSeekOwnershipOverflow = true
             deepSeekUnassignedScopes.removeAll()
             deepSeekInitiallyTrustedScopes.removeAll()
-            capacityLimitedProviders.insert("deepseek")
+            recordCapacityLimit(provider: "deepseek")
             for key in Array(states.keys) where states[key]?.provider == "deepseek" {
                 if var state = states[key] {
                     state.deepSeekUnassigned = true
@@ -446,7 +468,8 @@ final class ExternalProviderStateStore {
     }
 
     func retainProviders(_ allowed: Set<String>) {
-        capacityLimitedProviders.formIntersection(allowed)
+        // A rejected event may have belonged to a task that is still running.
+        // A connection change alone cannot establish that the loss is resolved.
         let nextOpenCodeAllowed = allowed.contains("opencode"), nextDeepSeekAllowed = allowed.contains("deepseek")
         if !providerRosterInitialized && !nextDeepSeekAllowed { deepSeekScopesInitialized = true }
         if providerRosterInitialized && nextOpenCodeAllowed != openCodeAllowed { openCodeUnconfirmed = true }
@@ -483,6 +506,7 @@ final class ExternalProviderStateStore {
         let barrier = Self.monotonicNanoseconds()
         for scope in changed {
             if hermesScopeBarriers.count >= maximumSessions && hermesScopeBarriers[scope] == nil {
+                recordCapacityLimit(provider: "hermes")
                 markGap(provider: "hermes")
                 hermesScopeBarriers.removeAll()
             }
