@@ -81,15 +81,22 @@ async function run() {
       if (requests <= 6) console.log('Synthetic model shape ' + requests + ': ' + messages.map(m =>
         m.role + '[' + (Array.isArray(m.content) ? m.content.map(c => c && c.type || '?').join(',') : typeof m.content) + ']'
       ).join(' '));
-      let lastPrompt = -1;
+      let lastPrompt = -1, lastPromptBlock = -1;
       for (let i = 0; i < messages.length; i++) {
         const m = messages[i];
-        if (m.role === 'user' && (typeof m.content === 'string' ||
-            (Array.isArray(m.content) && m.content.some(c => c && c.type === 'text') &&
-             !m.content.some(c => c && c.type === 'tool_result')))) lastPrompt = i;
+        if (m.role !== 'user') continue;
+        if (typeof m.content === 'string') { lastPrompt = i; lastPromptBlock = -1; continue; }
+        if (!Array.isArray(m.content)) continue;
+        let lastText = -1, lastResult = -1;
+        for (let j = 0; j < m.content.length; j++) {
+          if (m.content[j] && m.content[j].type === 'text') lastText = j;
+          if (m.content[j] && m.content[j].type === 'tool_result') lastResult = j;
+        }
+        if (lastText > lastResult) { lastPrompt = i; lastPromptBlock = lastText; }
       }
-      const messageHasToolResult = messages.slice(lastPrompt + 1).some(m =>
-        Array.isArray(m.content) && m.content.some(c => c && c.type === 'tool_result'));
+      const messageHasToolResult = messages.some((m, i) =>
+        Array.isArray(m.content) && m.content.some((c, j) => c && c.type === 'tool_result' &&
+          (i > lastPrompt || (i === lastPrompt && j > lastPromptBlock))));
       const model = typeof request.model === 'string' ? request.model : 'claude-sonnet-4-5-20250929';
       if (!request.stream) {
         if (!messageHasToolResult) toolRounds++;
