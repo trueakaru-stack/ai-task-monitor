@@ -9,6 +9,7 @@ using Microsoft.Win32.SafeHandles;
 
 internal sealed class SafeInstallPaths : IDisposable
 {
+    private const uint ReadAttributes = 0x80;
     private const uint ShareRead = 1;
     private const uint ShareWrite = 2;
     private const uint OpenExistingDisposition = 3;
@@ -94,7 +95,7 @@ internal sealed class SafeInstallPaths : IDisposable
     private void Hold(string path)
     {
         string full = Normalize(path);
-        SafeFileHandle handle = CreateFile(full, 0, ShareRead | ShareWrite, IntPtr.Zero,
+        SafeFileHandle handle = CreateFile(full, ReadAttributes, ShareRead | ShareWrite, IntPtr.Zero,
             OpenExistingDisposition, BackupSemantics | OpenReparsePoint, IntPtr.Zero);
         if (handle.IsInvalid)
         {
