@@ -3,7 +3,7 @@ on:
   push:
     branches: ['codex/macos-corner-legacy-20261116']
     paths:
-      - '.github/workflows/macos-corner-audit-20261116.yml'
+      - '.github/workflows/macos-corner-legacy-20261116.yml'
       - 'macos/Tests/AITaskMonitorTests/CompactWindowCornerAuditTests.swift'
 permissions:
   contents: read
