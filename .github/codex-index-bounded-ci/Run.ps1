@@ -38,7 +38,7 @@ try {
     $sdk=Split-Path -Parent $dotnet
     $config=Join-Path $root 'NuGet.Config'
     [IO.File]::WriteAllText($config,'<configuration><packageSources><clear /></packageSources></configuration>',[Text.UTF8Encoding]::new($false))
-    function Invoke-Isolated([string]$executable, [string[]]$arguments) {
+    function Invoke-Isolated([string]$executable, [string[]]$arguments, [string]$expectedError='') {
         $start=[Diagnostics.ProcessStartInfo]::new()
         $start.FileName=$executable; $start.WorkingDirectory=$root; $start.UseShellExecute=$false; $start.CreateNoWindow=$true
         $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true; $start.Environment.Clear()
@@ -64,6 +64,10 @@ try {
         try {
             $stdout=$process.StandardOutput.ReadToEndAsync(); $stderr=$process.StandardError.ReadToEndAsync()
             if(-not $process.WaitForExit(180000)) { throw 'An isolated test timed out.' }
+            if($expectedError) {
+                if($process.ExitCode -eq 0 -or -not $stderr.Result.Contains($expectedError)) { throw 'An unsafe synthetic test path was not refused as expected.' }
+                return ''
+            }
             if($process.ExitCode -ne 0) { throw ('An isolated test failed: '+$stdout.Result+$stderr.Result) }
             if($stderr.Result) { Write-Host $stderr.Result.TrimEnd() }
             return [string]$stdout.Result
@@ -80,6 +84,11 @@ try {
     [IO.File]::WriteAllText($fixturePath,$fixture,[Text.UTF8Encoding]::new($false))
     $assembly=Join-Path $artifacts 'bin\CodexIndex.Tests\release\AITaskMonitor.CodexIndex.Tests.dll'
     Check ([IO.File]::Exists($assembly)) 'Synthetic index assembly is missing.'
+    $sentinel=Join-Path $root 'profile\untouched.txt'
+    [IO.File]::WriteAllText($sentinel,'synthetic user data',[Text.UTF8Encoding]::new($false))
+    $null=Invoke-Isolated $dotnet @($assembly,$fixturePath,(Join-Path $root 'profile')) 'Fixture, assembly and output must belong to the same unique temporary root.'
+    Check ([IO.File]::ReadAllText($sentinel) -ceq 'synthetic user data') 'The rejected synthetic profile was changed.'
+    Write-Output 'Synthetic profile output was refused and its sentinel remained unchanged.'
     Write-Output ((Invoke-Isolated $dotnet @($assembly,$fixturePath,(Join-Path $root 'fixtures'))).TrimEnd())
     Write-Output 'Only synthetic index files and a pinned historical source were read.'
 } finally {

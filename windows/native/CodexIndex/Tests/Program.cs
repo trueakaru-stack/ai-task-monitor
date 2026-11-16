@@ -2,13 +2,18 @@ using System.Text;
 using System.Text.Json;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Reflection;
+using System.Text.RegularExpressions;
 using AITaskMonitor.CodexIndex;
 
-if (args.Length != 2) throw new ArgumentException("Synthetic fixture and output roots are required.");
-string fixturePath = Path.GetFullPath(args[0]);
-string root = Path.GetFullPath(args[1]);
-Directory.CreateDirectory(root);
+// Fail before writing anything when invoked outside the disposable hosted job.
+(string fixturePath, string root) = RequireSyntheticInputs(args);
 Fixture[] fixtures = JsonSerializer.Deserialize<Fixture[]>(File.ReadAllText(fixturePath)) ?? throw new InvalidOperationException();
+var fixtureNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+foreach (Fixture fixture in fixtures)
+    if (fixture.Name is null || !Regex.IsMatch(fixture.Name, @"\A[A-Za-z0-9_-]{1,128}\z", RegexOptions.CultureInvariant) ||
+        fixture.Name.Equals("extra", StringComparison.OrdinalIgnoreCase) || !fixtureNames.Add(fixture.Name))
+        throw new InvalidOperationException("A synthetic fixture name is invalid or duplicated.");
 int assertions = 0, reads = 0, unsupported = 0, intentionalDifferences = 0;
 string currentCase = "setup";
 void Check(bool condition, string message)
@@ -16,6 +21,16 @@ void Check(bool condition, string message)
     assertions++;
     if (!condition) throw new InvalidOperationException(currentCase + ": " + message);
 }
+
+string guardTarget = Path.Combine(root, "guard-target");
+string guardNested = Path.Combine(guardTarget, "nested");
+Directory.CreateDirectory(guardNested);
+string guardLink = Path.Combine(root, "guard-link");
+Directory.CreateSymbolicLink(guardLink, guardTarget);
+bool rejectedLink = false;
+try { RequirePlainDirectories(Path.Combine(guardLink, "nested")); }
+catch (InvalidOperationException) { rejectedLink = true; }
+Check(rejectedLink, "A redirected output ancestor was accepted.");
 
 foreach (Fixture fixture in fixtures)
 {
@@ -251,6 +266,21 @@ Check(new CodexIndexReader(source).Read(atLimit, []).Entries.Count == 50,
 CheckThrows<CodexIndexUnavailableException>(() => new CodexIndexReader(source).Read(atLimit, ["one-more"]),
     "An over-budget requested-ID sequence was accepted.");
 
+// Force an append after opening and measuring the file, without blocking the
+// writer. A failed read must not publish a cache or return the original tail.
+bool appended = false;
+var appendingReader = new CodexIndexReader(source, () =>
+{
+    if (appended) return;
+    appended = true;
+    File.AppendAllText(source, "{\"id\":\"appended\",\"thread_name\":\"Synthetic\"}\n", new UTF8Encoding(false));
+});
+CheckThrows<CodexIndexUnavailableException>(() => appendingReader.Read(["bounded-0"], []),
+    "A growing index returned a stale or partially scanned list.");
+Check(appended, "The synthetic writer did not append while the reader was open.");
+CodexIndexReadResult afterAppend = appendingReader.Read(["bounded-0"], []);
+Check(afterAppend.Entries.Any(item => item.Id == "appended") && afterAppend.Entries.Any(item => item.Id == "bounded-0"),
+    "A later stable read did not recover after the append.");
 currentCase = "extra";
 
 // One reader serializes its cache while callers concurrently use immutable data.
@@ -344,6 +374,50 @@ static byte[] AccessList(FileSecurity security)
     var bytes = new byte[acl.BinaryLength];
     acl.GetBinaryForm(bytes, 0);
     return bytes;
+}
+
+static (string Fixture, string Root) RequireSyntheticInputs(string[] arguments)
+{
+    if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("CI") != "true" ||
+        Environment.GetEnvironmentVariable("GITHUB_ACTIONS") != "true" ||
+        Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") != "github-hosted" ||
+        Environment.GetEnvironmentVariable("RUNNER_OS") != "Windows" ||
+        Environment.GetEnvironmentVariable("DOTNET_ADD_GLOBAL_TOOLS_TO_PATH") != "0" ||
+        Environment.GetEnvironmentVariable("HOME") is not null || Environment.GetEnvironmentVariable("CODEX_HOME") is not null ||
+        arguments.Length != 2 || !Path.IsPathFullyQualified(arguments[0]) || !Path.IsPathFullyQualified(arguments[1]))
+        throw new InvalidOperationException("Disposable hosted Windows and absolute synthetic paths are required.");
+
+    string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(arguments[1]));
+    string fixture = Path.GetFullPath(arguments[0]);
+    string runner = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Environment.GetEnvironmentVariable("RUNNER_TEMP") ?? ""));
+    DirectoryInfo? baseDirectory = Directory.GetParent(root);
+    if (baseDirectory is null || !string.Equals(baseDirectory.Parent?.FullName, runner, StringComparison.OrdinalIgnoreCase) ||
+        !Regex.IsMatch(baseDirectory.Name, @"\Aaitm-codex-index-[0-9a-f]{32}\z", RegexOptions.CultureInvariant) ||
+        !string.Equals(root, Path.Combine(baseDirectory.FullName, "fixtures"), StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(fixture, Path.Combine(baseDirectory.FullName, "synthetic-fixtures.json"), StringComparison.OrdinalIgnoreCase) ||
+        !string.Equals(Path.GetFullPath(Assembly.GetExecutingAssembly().Location),
+            Path.Combine(baseDirectory.FullName, "artifacts", "bin", "CodexIndex.Tests", "release", "AITaskMonitor.CodexIndex.Tests.dll"), StringComparison.OrdinalIgnoreCase))
+        throw new InvalidOperationException("Fixture, assembly and output must belong to the same unique temporary root.");
+    foreach (string name in new[] { "USERPROFILE", "APPDATA", "LOCALAPPDATA" })
+    {
+        string suffix = name == "USERPROFILE" ? "profile" : name == "APPDATA" ? "appdata" : "localappdata";
+        if (!string.Equals(Path.GetFullPath(Environment.GetEnvironmentVariable(name) ?? ""),
+            Path.Combine(baseDirectory.FullName, suffix), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("A synthetic profile is required.");
+    }
+    RequirePlainDirectories(root);
+    var input = new FileInfo(fixture);
+    if (!input.Exists || (input.Attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0 ||
+        input.Length > 4 * 1024 * 1024 || Directory.EnumerateFileSystemEntries(root).Any())
+        throw new InvalidOperationException("A plain bounded fixture and empty output directory are required.");
+    return (fixture, root);
+}
+
+static void RequirePlainDirectories(string path)
+{
+    for (DirectoryInfo? directory = new(path); directory is not null; directory = directory.Parent)
+        if (!directory.Exists || (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("A synthetic directory is missing or redirected.");
 }
 
 sealed record Fixture(string Name, Step[] Steps);

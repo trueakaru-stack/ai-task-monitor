@@ -17,7 +17,8 @@ matched without case; the historical lookup uses the same quoted-text filter
 as the reference, so an escaped ID can be missed when no matching literal
 appears elsewhere on its line. The historical cache uses full path, byte
 length and last-write UTC ticks. Rewriting a file without changing those
-attributes can therefore leave a cached value stale, as in the reference.
+attributes can therefore leave a cached value stale, as in the reference. The
+cache is capped at 512 IDs and is rebuilt when another ID would exceed it.
 Order is not a compatibility contract.
 
 `HasUnsupportedRows` signals malformed or noncanonical rows in the tail or
@@ -32,13 +33,14 @@ flag. A future source controller must define how that flag affects uncertainty
 before integrating this reader. It must not interpret an unsupported row as
 proof that its task does not exist.
 
-Missing, inaccessible, locked, incorrectly encoded and oversized-history sources throw
+Missing, inaccessible, locked, incorrectly encoded and over-budget sources throw
 `CodexIndexUnavailableException` with no original path or line in the
 exception. One deliberate correction to the reference is transactional
 historical caching: a failed scan does not publish negative results. The
 reference can instead return a cached negative result on the next unchanged
-read after a failed scan. A valid long tail row is not subject to the
-history-only 1,048,576 UTF-16-code-unit limit.
+read after a failed scan. A tail row can contain up to 2,097,152 UTF-16 code
+units; a historical row remains limited to 1,048,576 UTF-16 code units. A
+request containing more than 512 observed and lock IDs in total is unavailable.
 
 UTF-8 without BOM and BOM-marked UTF-8, UTF-16 LE/BE and UTF-32 LE/BE use
 strict decoders. Invalid byte sequences fail the read instead of being
@@ -46,6 +48,12 @@ silently replaced, unlike the PowerShell reference. A correctly encoded
 U+FFFD remains valid content. A UTF-8 tail lookup does not decode earlier,
 unread bytes; it cannot report corruption there until a historical scan reads
 them. BOM-marked UTF-16/32 tail lookups decode forward through the file.
+Each backward or forward pass is limited to 8 MiB. A UTF-8 index larger than
+8 MiB can still provide its last 50 complete lines if they fit in the bounded
+tail; if an older ID requires scanning beyond the budget, the whole read is
+unavailable. A UTF-16/32 index beyond 8 MiB is unavailable because its current
+tail path scans forward. An oversized line, budget exhaustion or a timed-out
+regular expression produces the same unavailable result, never a partial list.
 
 IDs, titles and timestamp strings can contain private information. They remain
 available to the caller and may remain in memory in the cache. The reader does
@@ -54,40 +62,47 @@ values. This is not encryption, secure erasure, or a general-purpose redactor.
 Callers must avoid logging or disclosing fields. Error messages in the test
 runner refer only to synthetic case names.
 
-Each reader serializes its own calls and cache updates. Tail and historical
-scans are separate file operations with read/write/delete sharing: concurrent
-changes can produce results drawn from different moments, and a successful
-read is not an atomic snapshot. The library does not detect every change made
-while a file is read. The historical scan validates every line, which may cost
-more CPU than the reference's filter-first scan. Its historical scan, regular
-expression and tail-line allocation have no global size, duration or
-cancellation limit; large or hostile files can consume memory or block the
-calling thread. Do not use this reader on a UI thread without additional
-design and verification.
+Each reader serializes its own calls and cache updates. Tail and history share
+one handle opened with read/write/delete sharing and never decode past its
+initial length. The reader compares file length and last-write time again
+before returning; a detected append, truncation or timestamp change makes the
+whole read unavailable and does not commit a partial cache. Concurrent changes
+that preserve or restore the same metadata, and path replacement with identical
+metadata, can escape detection. This is not an atomic snapshot and cannot
+prove current task activity. The historical scan validates every line, which
+may cost more CPU than the reference's filter-first scan. Work is checked
+against a five-second cooperative deadline, and the historical regular
+expression has a 250 ms match timeout. Filesystem calls themselves cannot be
+cancelled by this deadline. Keep the reader off the UI thread.
 
 ## Verification
 
-On Windows, use an isolated .NET 10 SDK, the pinned PowerShell reference and
-an empty work directory outside the repository and user profile:
+Use the disposable hosted Windows workflow
+`.github/workflows/codex-index-bounded-synthetic-20261116.yml`. The test
+executable rejects non-hosted environments, output outside a unique temporary
+root, a nonempty output directory, mismatched synthetic profiles, redirected
+ancestors and unsafe fixture names before writing test data. It does not claim
+to be a sandbox against spoofed environment variables or concurrent path
+replacement. The historical `Test-CodexIndex.ps1` is not the launcher for this
+hosted-only executable and is not supported for this check.
 
-```powershell
-& "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass `
-  -File '.\windows\native\CodexIndex\Test-CodexIndex.ps1' `
-  -SdkRoot '<isolated-sdk-directory>' -WorkDirectory '<isolated-work-directory>' `
-  -ReferenceSource '<pinned-CodexProgress.ps1>'
-```
-
-The runner requires reference SHA-256
+The hosted runner requires reference SHA-256
 `DD9A401DFABDFC68623A8503746EF7808F154C0E606588CE9143F07A31FEDDB8`,
-copies and rechecks it, clears package sources and uses synthetic home,
-temporary and fixture directories. It extracts the actual `Prop`,
+clears package sources and uses synthetic profile, temporary and fixture
+directories. It extracts the actual `Prop`,
 `Lock-State` and `Codex-IndexCandidates` functions and compares their
 synthetic outputs with the native reader. Checks cover 50-line boundaries,
 history lookup and cache changes, IDs, Unicode titles, timestamps with
 offsets, BOM-marked encodings, line endings, a historical line at and above
 the size limit, malformed rows and missing IDs, invalid byte sequences and
 valid U+FFFD in tail and history, held locks, missing files, a synthetic
-Windows ACL denial and restoration, concurrent calls and 150 synthetic replacements.
+Windows ACL denial and restoration of the original ACEs and inheritance
+protection, concurrent calls and 150 synthetic replacements. Windows may
+recalculate the descriptor's auto-inherited bit during restoration.
+The bounded hosted check additionally exercises a complete UTF-8 tail after
+more than 8 MiB of unrelated history, oversized UTF-8 and UTF-16/32 inputs,
+the ID limit and an append after opening the file. Its profile and temporary
+files are synthetic; passing it does not establish live Codex compatibility.
 The intentional failed-cache and noncanonical differences are asserted
 separately. The native long-tail test uses a row above 1 MiB; the reference
 long-tail check uses 64 KiB because `Get-Content -Tail` is slow on unusually

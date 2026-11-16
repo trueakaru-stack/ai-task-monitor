@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Security;
 using System.Text;
@@ -25,36 +26,46 @@ public sealed class CodexIndexUnavailableException : IOException
 public sealed class CodexIndexReader
 {
     private const int TailCount = 50;
+    private const int MaximumScanBytes = 8 * 1024 * 1024;
     private const int MaximumHistoryLine = 1_048_576;
+    private const int MaximumTailLine = 2 * 1_048_576;
+    private const int MaximumRequestedIds = 512;
+    private static readonly TimeSpan MaximumWorkTime = TimeSpan.FromSeconds(5);
     private static readonly StringComparer Keys = StringComparer.OrdinalIgnoreCase;
     private static readonly Regex ValidId = new(@"\A[A-Za-z0-9_-]{1,128}\z", RegexOptions.CultureInvariant);
     private readonly object gate = new();
     private readonly string indexPath;
+    private readonly Action? afterSnapshot;
     private string? cacheVersion;
     private Dictionary<string, CodexIndexEntry?> historical = new(Keys);
     private bool historicalUnsupported;
 
     public CodexIndexReader(string indexFile)
+        : this(indexFile, null) { }
+
+    // The callback is an internal test seam; production never supplies one.
+    internal CodexIndexReader(string indexFile, Action? afterSnapshot)
     {
         if (string.IsNullOrWhiteSpace(indexFile) || !Path.IsPathFullyQualified(indexFile))
             throw new ArgumentException("An absolute index file path is required.", nameof(indexFile));
         indexPath = Path.GetFullPath(indexFile);
+        this.afterSnapshot = afterSnapshot;
     }
 
     public CodexIndexReadResult Read(IEnumerable<string> observedIds, IEnumerable<string> heldOrUnavailableLockIds)
     {
         ArgumentNullException.ThrowIfNull(observedIds);
         ArgumentNullException.ThrowIfNull(heldOrUnavailableLockIds);
-        // Materialize before changing cache state and serialize all calls on this reader.
-        string[] observed = observedIds.ToArray();
-        string[] locks = heldOrUnavailableLockIds.ToArray();
         lock (gate)
         {
             try
             {
+                int count = 0;
+                string[] observed = BoundedIds(observedIds, ref count);
+                string[] locks = BoundedIds(heldOrUnavailableLockIds, ref count);
                 return ReadCore(observed, locks);
             }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException or SecurityException or DecoderFallbackException)
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or SecurityException or DecoderFallbackException or RegexMatchTimeoutException)
             {
                 // Do not copy the source exception, file path, or row contents.
                 throw new CodexIndexUnavailableException();
@@ -62,12 +73,33 @@ public sealed class CodexIndexReader
         }
     }
 
+    private static string[] BoundedIds(IEnumerable<string> ids, ref int count)
+    {
+        var result = new List<string>();
+        foreach (string id in ids)
+        {
+            if (++count > MaximumRequestedIds) throw new IOException();
+            result.Add(id);
+        }
+        return result.ToArray();
+    }
+
     private CodexIndexReadResult ReadCore(string[] observed, string[] locks)
     {
+        var work = Stopwatch.StartNew();
+        using FileStream stream = Open();
+        long length = stream.Length;
+        var info = new FileInfo(indexPath);
+        info.Refresh();
+        if (!info.Exists || info.Length != length) throw new IOException();
+        long modified = info.LastWriteTimeUtc.Ticks;
+        IndexEncoding encoding = DetectEncoding(stream, length);
+        afterSnapshot?.Invoke();
         var entries = new Dictionary<string, CodexIndexEntry>(Keys);
         bool unsupported = false;
-        foreach (string line in ReadTail())
+        foreach (string line in ReadTail(stream, length, encoding, work))
         {
+            CheckTime(work);
             Row row = Parse(line);
             unsupported |= row.Unsupported;
             if (row.Entry is not null) entries[row.Entry.Id] = row.Entry;
@@ -80,19 +112,29 @@ public sealed class CodexIndexReader
             if (!entries.ContainsKey(id)) needed.Add(id);
         }
 
+        string? nextVersion = cacheVersion;
+        var nextHistory = historical;
+        bool nextUnsupported = historicalUnsupported;
         if (needed.Count > 0)
         {
-            var info = new FileInfo(indexPath);
-            info.Refresh();
-            string version = string.Concat(info.FullName, "|", info.Length.ToString(CultureInfo.InvariantCulture),
-                "|", info.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture));
-            if (!string.Equals(cacheVersion, version, StringComparison.Ordinal))
+            string version = string.Concat(info.FullName, "|", length.ToString(CultureInfo.InvariantCulture),
+                "|", modified.ToString(CultureInfo.InvariantCulture));
+            nextVersion = version;
+            nextHistory = new Dictionary<string, CodexIndexEntry?>(Keys);
+            nextUnsupported = false;
+            if (string.Equals(cacheVersion, version, StringComparison.Ordinal))
             {
-                cacheVersion = version;
-                historical = new Dictionary<string, CodexIndexEntry?>(Keys);
-                historicalUnsupported = false;
+                nextHistory = new Dictionary<string, CodexIndexEntry?>(historical, Keys);
+                nextUnsupported = historicalUnsupported;
             }
-            string[] missing = needed.Where(id => !historical.ContainsKey(id)).ToArray();
+            string[] missing = needed.Where(id => !nextHistory.ContainsKey(id)).ToArray();
+            if (nextHistory.Count + missing.Length > MaximumRequestedIds)
+            {
+                // Bound the long-lived cache as callers discover new IDs.
+                nextHistory.Clear();
+                nextUnsupported = false;
+                missing = needed.ToArray();
+            }
             if (missing.Length > 0)
             {
                 // Publish cache updates only after a successful scan. The old
@@ -100,13 +142,14 @@ public sealed class CodexIndexReader
                 var pending = missing.ToDictionary(id => id, _ => (CodexIndexEntry?)null, Keys);
                 bool scanUnsupported = false;
                 string filter = "\"(?:" + string.Join("|", missing.Select(Regex.Escape)) + ")\"";
-                var matcher = new Regex(filter, RegexOptions.IgnoreCase);
-                using var stream = Open();
-                IndexEncoding encoding = DetectEncoding(stream);
+                var matcher = new Regex(filter, RegexOptions.IgnoreCase, TimeSpan.FromMilliseconds(250));
+                CheckTime(work);
+                if (length > MaximumScanBytes) throw new IOException();
                 stream.Position = encoding.PreambleLength;
-                using var reader = new StreamReader(stream, encoding.Encoding, false);
+                using var reader = SnapshotReader(stream, length, encoding.Encoding);
                 while (reader.ReadLine() is string line)
                 {
+                    CheckTime(work);
                     if (line.Length > MaximumHistoryLine) throw new IOException();
                     Row row = Parse(line);
                     scanUnsupported |= row.Unsupported;
@@ -114,14 +157,22 @@ public sealed class CodexIndexReader
                     if (row.Entry is not null && pending.ContainsKey(row.Entry.Id))
                         pending[row.Entry.Id] = row.Entry;
                 }
-                foreach ((string id, CodexIndexEntry? entry) in pending) historical[id] = entry;
-                historicalUnsupported |= scanUnsupported;
+                foreach ((string id, CodexIndexEntry? entry) in pending) nextHistory[id] = entry;
+                nextUnsupported |= scanUnsupported;
             }
-            unsupported |= historicalUnsupported;
+            unsupported |= nextUnsupported;
             foreach (string id in needed)
-                if (historical.TryGetValue(id, out CodexIndexEntry? entry) && entry is not null)
+                if (nextHistory.TryGetValue(id, out CodexIndexEntry? entry) && entry is not null)
                     entries[id] = entry;
         }
+        CheckTime(work);
+        info.Refresh();
+        if (stream.Length != length || !info.Exists || info.Length != length || info.LastWriteTimeUtc.Ticks != modified)
+            throw new IOException();
+        // Publish the cache only after every read and the change check succeed.
+        cacheVersion = nextVersion;
+        historical = nextHistory;
+        historicalUnsupported = nextUnsupported;
         return new CodexIndexReadResult(entries.Values.ToArray(), unsupported);
     }
 
@@ -132,15 +183,16 @@ public sealed class CodexIndexReader
     // decoder with a replacement-fallback decoder.
     private sealed record IndexEncoding(Encoding Encoding, int PreambleLength, bool Wide);
 
-    private static IndexEncoding DetectEncoding(FileStream stream)
+    private static IndexEncoding DetectEncoding(FileStream stream, long length)
     {
         byte[] prefix = new byte[4];
         stream.Position = 0;
         int count = 0;
-        while (count < prefix.Length)
+        int prefixLength = (int)Math.Min(prefix.Length, length);
+        while (count < prefixLength)
         {
-            int read = stream.Read(prefix, count, prefix.Length - count);
-            if (read == 0) break;
+            int read = stream.Read(prefix, count, prefixLength - count);
+            if (read == 0) throw new IOException();
             count += read;
         }
         if (count >= 4 && prefix[0] == 0x00 && prefix[1] == 0x00 && prefix[2] == 0xfe && prefix[3] == 0xff)
@@ -158,34 +210,36 @@ public sealed class CodexIndexReader
 
     // Locate the final 50 UTF-8 lines backwards; BOM-marked UTF-16/32 is read
     // forwards because newline bytes are not independent code points there.
-    private IEnumerable<string> ReadTail()
+    private static IEnumerable<string> ReadTail(FileStream stream, long length, IndexEncoding encoding, Stopwatch work)
     {
-        using var stream = Open();
-        long length = stream.Length;
         if (length == 0) return Array.Empty<string>();
-        IndexEncoding encoding = DetectEncoding(stream);
-        long start = encoding.Wide ? encoding.PreambleLength : FindTailStart(stream, length);
+        if (encoding.Wide && length > MaximumScanBytes) throw new IOException();
+        long start = encoding.Wide ? encoding.PreambleLength : FindTailStart(stream, length, work);
         if (start == 0) start = encoding.PreambleLength;
         stream.Position = start;
-        using var reader = new StreamReader(stream, encoding.Encoding, false);
+        using var reader = SnapshotReader(stream, length, encoding.Encoding);
         var tail = new Queue<string>(TailCount);
         while (reader.ReadLine() is string line)
         {
+            CheckTime(work);
+            if (line.Length > MaximumTailLine) throw new IOException();
             if (tail.Count == TailCount) tail.Dequeue();
             tail.Enqueue(line);
         }
         return tail.ToArray();
     }
 
-    private static long FindTailStart(FileStream stream, long length)
+    private static long FindTailStart(FileStream stream, long length, Stopwatch work)
     {
         byte[] buffer = new byte[8192];
         long position = length;
+        long lower = Math.Max(0, length - MaximumScanBytes);
         int count = 0;
         bool skipPairedCr = false;
-        while (position > 0)
+        while (position > lower)
         {
-            int requested = (int)Math.Min(buffer.Length, position);
+            CheckTime(work);
+            int requested = (int)Math.Min(buffer.Length, position - lower);
             position -= requested;
             stream.Position = position;
             int read = 0;
@@ -210,7 +264,44 @@ public sealed class CodexIndexReader
                 if (++count == TailCount) return after;
             }
         }
+        if (lower != 0) throw new IOException();
         return 0;
+    }
+
+    private static void CheckTime(Stopwatch work)
+    {
+        if (work.Elapsed > MaximumWorkTime) throw new IOException();
+    }
+
+    private static StreamReader SnapshotReader(FileStream stream, long length, Encoding encoding) =>
+        new(new SnapshotStream(stream, length), encoding, false, 4096, false);
+
+    // StreamReader may otherwise follow a writer past the length captured at
+    // the start and keep extending a line while another process appends.
+    private sealed class SnapshotStream(FileStream source, long end) : Stream
+    {
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            long remaining = end - source.Position;
+            return remaining <= 0 ? 0 : source.Read(buffer, offset, (int)Math.Min(count, remaining));
+        }
+        public override int Read(Span<byte> buffer)
+        {
+            long remaining = end - source.Position;
+            return remaining <= 0 ? 0 : source.Read(buffer[..(int)Math.Min(buffer.Length, remaining)]);
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        // The caller owns the shared file handle, which is used for the final
+        // length check and optional historical scan after this wrapper closes.
+        protected override void Dispose(bool disposing) { base.Dispose(disposing); }
     }
 
     private sealed record Row(CodexIndexEntry? Entry, bool Unsupported);
