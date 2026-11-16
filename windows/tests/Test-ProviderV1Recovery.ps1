@@ -109,8 +109,16 @@ try{
  $connections.deepseek='connected';$scopes.deepseek=@($a,$b);$uncertain.deepseek=@()
  Poll-Group
  Assert ($state.Unavailable -contains 'DeepSeek Harness' -and $state.Tasks.Count -eq 256) 'Recovery forgot the scoped loss.'
+ $connections.deepseek=Get-DeepSeekMonitorConnectionState $deep
+ $scopes.deepseek=@(Get-DeepSeekAllowedScopes $deep)
+ $uncertain.deepseek=@(Get-DeepSeekUncertainScopes $deep)
+ $confirmed.deepseek=@(Get-DeepSeekConfirmedDisconnectedScopes $deep)
+ Poll-Group
+ Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_one') -and -not $_.Active}).Count -eq 1 -and
+         @($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*') -and $_.Active}).Count -eq 254 -and
+         $state.Unavailable -contains 'DeepSeek Harness') 'An unlocked profile listing removed A or affected healthy B in the real group flow.'
  # Synthetic proof exercises the reducer contract; the current bridge emits no such proof.
- $scopes.deepseek=@($b);$confirmed.deepseek=@($a)
+ $connections.deepseek='connected';$scopes.deepseek=@($b);$uncertain.deepseek=@();$confirmed.deepseek=@($a)
  Poll-Group
  Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_one')}).Count -eq 0 -and
          @($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*') -and $_.Active}).Count -eq 254 -and

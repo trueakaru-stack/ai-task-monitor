@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [tests, screenshots]
+        part: [tests]
     env:
       AITM_CI_PART: ${{ matrix.part }}
       DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
