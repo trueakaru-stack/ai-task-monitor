@@ -121,8 +121,13 @@ finally
         var restored = new FileSecurity();
         restored.SetSecurityDescriptorSddlForm(originalSddl, AccessControlSections.Access);
         fileInfo.SetAccessControl(restored);
-        Check(string.Equals(originalSddl, fileInfo.GetAccessControl(AccessControlSections.Access)
-            .GetSecurityDescriptorSddlForm(AccessControlSections.Access), StringComparison.Ordinal), "The synthetic ACL was not restored.");
+        string restoredSddl = fileInfo.GetAccessControl(AccessControlSections.Access).GetSecurityDescriptorSddlForm(AccessControlSections.Access);
+        if (!string.Equals(originalSddl, restoredSddl, StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine("Original synthetic ACL: " + System.Text.RegularExpressions.Regex.Replace(originalSddl, @"S-1-[0-9-]+", "SID"));
+            Console.Error.WriteLine("Restored synthetic ACL: " + System.Text.RegularExpressions.Regex.Replace(restoredSddl, @"S-1-[0-9-]+", "SID"));
+        }
+        Check(string.Equals(originalSddl, restoredSddl, StringComparison.Ordinal), "The synthetic ACL was not restored.");
     }
 }
 Check(lockedReader.Read([], []).Entries.Count == 1, "A source did not recover after ACL restoration.");
