@@ -1,0 +1,168 @@
+name: Official Codex CLI local endpoint probe (Windows)
+on:
+  push:
+    branches: [codex/official-codex-win-probe-20261116]
+    paths: [".github/workflows/official-codex-win-probe.yml"]
+permissions:
+  contents: read
+jobs:
+  real-codex-exec:
+    if: ${{ github.repository == 'trueakaru-stack/ai-task-monitor' }}
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - name: Prepare disposable fixture and pinned official CLI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') { throw 'Disposable GitHub-hosted Windows required.' }
+          if ($env:GITHUB_REPOSITORY -ne 'trueakaru-stack/ai-task-monitor') { throw 'Unexpected repository.' }
+          if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.codex')) { throw 'The runner profile is not empty.' }
+          $taskRoot = Join-Path $env:RUNNER_TEMP ('aitm-real-codex-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $taskRoot | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $taskRoot 'pkg'),(Join-Path $taskRoot 'out'),(Join-Path $taskRoot 'home'),(Join-Path $taskRoot 'temp'),(Join-Path $taskRoot 'work') | Out-Null
+          "AITM_REAL_CLI_ROOT=$taskRoot" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          $archive = Join-Path $taskRoot 'codex.tgz'
+          Invoke-WebRequest -Uri 'https://registry.npmjs.org/@openai/codex/-/codex-0.169.0-win32-x64.tgz' -OutFile $archive
+          $expected = [Convert]::ToHexString([Convert]::FromBase64String('nC+McFU8xRNL9tk3IhxcKdhcyOElwF/HhPO+gzSQCY7yjh3XdzSajX+MYWcHUVHWRHajfwn3/WgJYJK2wS+XWg=='))
+          if ((Get-FileHash -LiteralPath $archive -Algorithm SHA512).Hash -ne $expected) { throw 'Official archive integrity mismatch.' }
+          & tar.exe -xzf $archive -C (Join-Path $taskRoot 'pkg')
+          if ($LASTEXITCODE -ne 0) { throw 'Could not extract the verified package.' }
+          $executables = @(Get-ChildItem -LiteralPath (Join-Path $taskRoot 'pkg') -Filter codex.exe -Recurse -File)
+          if ($executables.Count -ne 1) { throw "Unexpected number of Codex executables: $($executables.Count)" }
+          "AITM_REAL_CODEX_BINARY=$($executables[0].FullName)" | Add-Content -LiteralPath $env:GITHUB_ENV -Encoding utf8
+          Write-Output 'Official Codex CLI 0.169.0 archive matches its pinned SHA-512 integrity.'
+      - name: Run official CLI with a local fixture and no account
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $taskRoot = $env:AITM_REAL_CLI_ROOT
+          if (-not $taskRoot.StartsWith($env:RUNNER_TEMP + '\aitm-real-codex-', [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected fixture directory.' }
+          $probe = Join-Path $taskRoot 'probe.cjs'
+          @'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const http = require('node:http');
+          const {spawn} = require('node:child_process');
+          const root = process.argv[2], binary = process.argv[3];
+          const home = path.join(root, 'home');
+          const work = path.join(root, 'work');
+          const out = path.join(root, 'out');
+          const env = {
+            SystemRoot:process.env.SystemRoot,
+            WINDIR:process.env.SystemRoot,
+            SystemDrive:process.env.SystemDrive,
+            ComSpec:process.env.ComSpec,
+            USERPROFILE:home,
+            APPDATA:path.join(home,'AppData','Roaming'),
+            LOCALAPPDATA:path.join(home,'AppData','Local'),
+            TEMP:path.join(root,'temp'),
+            TMP:path.join(root,'temp'),
+            PATH:path.join(process.env.SystemRoot,'System32') + ';' + process.env.SystemRoot,
+            CI:'true', NO_COLOR:'1', TERM:'dumb'
+          };
+          for (const name of ['HOME','CODEX_HOME','OPENAI_API_KEY','CODEX_API_KEY']) {
+            if (Object.hasOwn(env,name)) throw new Error('Unexpected credential or home override');
+          }
+          fs.mkdirSync(env.APPDATA,{recursive:true});
+          fs.mkdirSync(env.LOCALAPPDATA,{recursive:true});
+          let sawRequest = false, proc = null, output = '', errors = '', exited = null;
+          const server = http.createServer((req,res) => {
+            req.resume();
+            if (req.method === 'GET' && req.url.startsWith('/v1/models')) {
+              res.writeHead(200,{'content-type':'application/json'});
+              return res.end(JSON.stringify({object:'list',data:[{id:'gpt-5.4',object:'model'}]}));
+            }
+            if (req.method === 'POST' && req.url.startsWith('/v1/responses')) {
+              sawRequest = true;
+              res.writeHead(200,{'content-type':'text/event-stream','cache-control':'no-cache','connection':'keep-alive'});
+              return res.write('event: response.created\ndata: {"type":"response.created","response":{"id":"resp_fixture","object":"response","created_at":1,"status":"in_progress","model":"gpt-5.4","output":[]}}\n\n');
+            }
+            res.writeHead(404); res.end();
+          });
+          const delay = ms => new Promise(resolve => setTimeout(resolve,ms));
+          function sessionData() {
+            const codex = path.join(home,'.codex'), files = [];
+            function walk(dir) {
+              if (!fs.existsSync(dir)) return;
+              for (const entry of fs.readdirSync(dir,{withFileTypes:true})) {
+                const p = path.join(dir,entry.name);
+                if (entry.isDirectory()) walk(p);
+                else if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(p);
+              }
+            }
+            walk(path.join(codex,'sessions'));
+            const ids = new Set(), events = [];
+            for (const file of files) {
+              for (const line of fs.readFileSync(file,'utf8').split('\n').filter(Boolean)) {
+                try {
+                  const row = JSON.parse(line);
+                  if (row.type === 'session_meta' && typeof row.payload?.id === 'string') ids.add(row.payload.id);
+                  if (row.type === 'event_msg' && typeof row.payload?.type === 'string') events.push(row.payload.type);
+                } catch {}
+              }
+            }
+            const index = path.join(codex,'session_index.jsonl');
+            const indexPresent = fs.existsSync(index);
+            const entries = indexPresent ? fs.readFileSync(index,'utf8').split('\n').filter(Boolean).map(line=>JSON.parse(line)) : [];
+            return {sessionFiles:files.length,sessionIds:ids.size,eventTypes:[...new Set(events)].sort(),indexPresent,matchingIndexEntries:entries.filter(x=>ids.has(x.id)).length};
+          }
+          (async () => {
+            await new Promise((resolve,reject)=>server.once('error',reject).listen(0,'127.0.0.1',resolve));
+            const port = server.address().port;
+            const args = ['exec','--skip-git-repo-check','--json','-m','gpt-5.4',
+              '-c','model_provider="fixture"',
+              '-c','model_providers.fixture.name="Local fixture"',
+              '-c','model_providers.fixture.base_url="http://127.0.0.1:' + port + '/v1"',
+              '-c','model_providers.fixture.wire_api="responses"',
+              '-c','model_providers.fixture.requires_openai_auth=false',
+              'Synthetic test: reply OK.'];
+            proc = spawn(binary,args,{cwd:work,env,windowsHide:true});
+            proc.stdout.on('data',x=>output += x.toString().slice(0,32768));
+            proc.stderr.on('data',x=>errors += x.toString().slice(0,32768));
+            proc.on('error',e=>{errors += String(e); exited = -1;});
+            proc.on('exit',code=>exited = code);
+            for (let i=0;i<120 && !sawRequest && exited===null;i++) await delay(250);
+            if (!sawRequest) throw new Error('CLI did not reach the local endpoint; exit=' + exited + '\n' + errors.slice(-6000) + '\n' + output.slice(-6000));
+            let data;
+            for (let i=0;i<20;i++) {
+              data = sessionData();
+              if (data.sessionIds && data.eventTypes.includes('task_started')) break;
+              await delay(250);
+            }
+            const report = {cli:'0.169.0',source:'official codex exec',endpoint:'synthetic localhost; response held open',...data};
+            fs.writeFileSync(path.join(out,'session-report.json'),JSON.stringify(report,null,2)+'\n');
+            console.log(JSON.stringify(report));
+            if (!data.sessionIds || !data.eventTypes.includes('task_started')) throw new Error('No live task_started event was observed.');
+          })().then(()=>{ if(proc) proc.kill(); server.closeAllConnections(); server.close(); }).catch(e=>{ console.error(e.stack); if(proc) proc.kill(); server.closeAllConnections(); server.close(); process.exitCode=1; });
+          '@ | Set-Content -LiteralPath $probe -Encoding utf8
+          $ruleName = 'aitm-fixture-no-network-' + [guid]::NewGuid().ToString('N')
+          $ruleNames = [System.Collections.Generic.List[string]]::new()
+          try {
+            $binaries = @(Get-ChildItem -LiteralPath (Join-Path $taskRoot 'pkg') -Filter '*.exe' -Recurse -File)
+            if ($binaries.Count -lt 1) { throw 'No official CLI executables found.' }
+            foreach ($binary in $binaries) {
+              $name = $ruleName + '-' + $ruleNames.Count
+              $ruleNames.Add($name)
+              New-NetFirewallRule -Name $name -DisplayName $name -Direction Outbound -Action Block -Profile Any -Program $binary.FullName -RemoteAddress @('0.0.0.0-127.0.0.0','127.0.0.2-255.255.255.255','::/0') | Out-Null
+              $rule = Get-NetFirewallRule -Name $name
+              $addresses = @($rule | Get-NetFirewallAddressFilter | Select-Object -ExpandProperty RemoteAddress)
+              if ($rule.Enabled -ne 'True' -or $rule.Action -ne 'Block' -or $addresses.Count -lt 3) { throw 'CLI network rules could not be verified.' }
+            }
+            Write-Output 'Temporary rules block external IPv4 and IPv6 for package executables; 127.0.0.1 remains available.'
+            & node $probe $taskRoot $env:AITM_REAL_CODEX_BINARY
+            if ($LASTEXITCODE -ne 0) { throw 'The official CLI diagnostic did not complete.' }
+          } finally {
+            foreach ($name in $ruleNames) {
+              Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+            }
+          }
+          if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.codex')) { throw 'Unexpected writes outside the synthetic profile.' }
+      - name: Save synthetic diagnostic
+        if: ${{ always() && env.AITM_REAL_CLI_ROOT != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: real-codex-exec-local-endpoint-windows
+          path: ${{ env.AITM_REAL_CLI_ROOT }}\out\
+          if-no-files-found: warn
+          retention-days: 7
