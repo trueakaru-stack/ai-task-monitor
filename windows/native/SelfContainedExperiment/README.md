@@ -41,13 +41,14 @@ compile a CI-only installer using the pinned, signature-checked Inno Setup
 compiler, install only into a new synthetic directory, and verify the nested
 payload against the publish output. The test starts the installed executable
 with an empty runtime root and confirms that its runtime modules come from the
-install directory. It checks preservation of modified, locked and foreign nested
-files when running the synthetic uninstaller.
+install directory. It checks removal of unlocked installed files and preservation of locked,
+foreign and external synthetic data when running the synthetic uninstaller.
 
-The synthetic uninstaller intentionally retains the entire payload. It is not
-a complete uninstall and must not be used for release. Safe removal of owned
-nested files still needs a separate design and checks for redirected paths,
-reparse points, concurrent replacement, interrupted installation and other
-ownership cases. Never treat the experimental payload or its build output as a
-release or publish it to users.
+The CI-only candidate lets the Inno Setup uninstaller remove tracked installed
+files. It tests user data and unrelated files outside that tracked set, a locked
+file, and a redirected synthetic subdirectory. A modified tracked payload file
+is still considered part of the installed application and is removed if unlocked.
+This is an experiment, not a complete product uninstall: concurrent path
+replacement, interrupted installation, migration, shortcuts and upgrades are
+not established. Never publish this preview or use it on a user's computer.
 

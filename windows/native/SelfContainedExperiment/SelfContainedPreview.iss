@@ -1,5 +1,5 @@
 ; Synthetic CI-only packaging experiment. This is not a product installer.
-; Its uninstaller intentionally retains the entire application payload.
+; This experiment tests removal of installed payload and preservation of unrelated data.
 #define PayloadDirectory GetEnv("AITM_SC_PAYLOAD")
 #define OutputDirectory GetEnv("AITM_SC_OUTPUT")
 #if (PayloadDirectory == "") || (OutputDirectory == "")
@@ -34,8 +34,8 @@ Compression=lzma2
 SolidCompression=yes
 
 [Files]
-; Retain all files, including nested files. Full safe removal is not implemented.
-Source: "{#PayloadDirectory}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs uninsneveruninstall
+; The uninstaller tracks these installed files. This remains a CI-only experiment.
+Source: "{#PayloadDirectory}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Code]
 function IsSyntheticCi: Boolean;
