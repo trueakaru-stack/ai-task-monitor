@@ -9,7 +9,20 @@ path. If the separate target does not exist, the concrete file adapter returns
 or create a target. This applies even if the old file may be absent, because
 absence has not been verified against concurrent writers. A host must surface
 the deferred state and must not replace the user's theme or language silently.
-No user-approved initialization or migration UI is implemented.
+The target read can create the separate lock file even while migration is
+deferred. A caller may explicitly invoke `Initialize(theme, language)` only
+after the user has chosen both values. It does not inspect the legacy source,
+and creates a separate target containing exactly those two choices; `system`
+is accepted only when explicitly selected. Invalid or missing choices fail.
+An existing target causes a conflict; if a competing target appears after the
+snapshot, initialization does not overwrite it. The target lock can still be
+created in this case. No UI calls this operation automatically or otherwise.
+
+Explicit initialization does not migrate other settings from the old file;
+the old file remains untouched. A future application must retain access to
+those settings and must not treat the new display-only target as the complete
+old configuration. The initialization UI, other settings and their migration
+are not implemented.
 
 If a target already exists, it takes precedence and can be read or updated
 without opening the legacy file. Later changes to the old file are not
@@ -98,10 +111,11 @@ The tests create a unique fixture directory under the supplied work directory
 and do not delete it. They reject paths inside the current checkout, current
 profile/application-data directories, and reparse-point ancestors. These are
 not a general filesystem sandbox and depend on environment and path evidence.
-The deferred-state tests keep a synthetic old file exclusively open while
-checking that loading and saving neither open nor overwrite it. They also
-exercise an already-existing target, distinct synthetic edition roots and
-unconfirmed and unavailable synthetic sources. The Windows-only sharing fixture checks both the rejected concurrent writer and
+The deferred-state and explicit-initialization tests keep a synthetic old file
+exclusively open while checking that it is neither opened nor overwritten.
+They also exercise missing choices, a target appearing after a snapshot, an
+already-existing target, distinct synthetic edition roots and unconfirmed and
+unavailable synthetic sources. The Windows-only sharing fixture checks both the rejected concurrent writer and
 the resulting conflict with a legacy-style file replacement. It uses only
 synthetic files and is not part of the adapter's actual reading policy.
 They do not assign `HOME` or `CODEX_HOME`, launch agents, or change persistent

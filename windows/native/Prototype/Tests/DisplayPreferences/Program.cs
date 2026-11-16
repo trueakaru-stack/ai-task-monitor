@@ -96,6 +96,36 @@ var defaultStatus = new DisplayPreferenceService(new MemoryTarget(),
 Check(defaultStatus.Load().Status == PreferenceStatus.Unavailable &&
     defaultStatus.SaveTheme("light") == PreferenceStatus.Unavailable,
     "An unspecified legacy status was treated as a confirmed snapshot.");
+var initializeTarget = new MemoryTarget();
+bool legacyOpenedDuringInitialization = false;
+var initializeLegacy = new MemoryLegacy(legacyBytes)
+{
+    BeforeRead = () => { legacyOpenedDuringInitialization = true; }
+};
+var initializeService = new DisplayPreferenceService(initializeTarget, initializeLegacy);
+Check(initializeService.Initialize(null, "ru") == PreferenceStatus.InvalidMode &&
+    initializeService.Initialize("dark", null) == PreferenceStatus.InvalidMode &&
+    initializeService.Initialize("", "ru") == PreferenceStatus.InvalidMode &&
+    initializeService.Initialize("dark", "fr") == PreferenceStatus.InvalidMode &&
+    initializeTarget.Content is null && !legacyOpenedDuringInitialization,
+    "Initialization accepted a missing or invalid choice.");
+Check(initializeService.Initialize("dark", "ru") == PreferenceStatus.Success &&
+    !legacyOpenedDuringInitialization && Equal(initializeLegacy.Content, legacyBytes),
+    "Explicit initialization read or changed the legacy source.");
+using (JsonDocument initialized = Parse(initializeTarget.Content!))
+    Check(initialized.RootElement.EnumerateObject().Count() == 2 &&
+        initialized.RootElement.GetProperty("theme").GetString() == "dark" &&
+        initialized.RootElement.GetProperty("language").GetString() == "ru",
+        "Initialization did not save precisely the two selected choices.");
+byte[] initializedBeforeConflict = initializeTarget.Content!.ToArray();
+Check(initializeService.Initialize("light", "en") == PreferenceStatus.Conflict &&
+    Equal(initializeTarget.Content, initializedBeforeConflict), "Initialization replaced an existing target.");
+var initializeRaceTarget = new MemoryTarget();
+byte[] competingPreferences = Utf8("{\"theme\":\"light\",\"language\":\"en\",\"other\":2}");
+initializeRaceTarget.BeforeCommit = () => initializeRaceTarget.ExternalWrite(competingPreferences);
+Check(new DisplayPreferenceService(initializeRaceTarget, initializeLegacy).Initialize("dark", "ru") == PreferenceStatus.Conflict &&
+    Equal(initializeRaceTarget.Content, competingPreferences) && !legacyOpenedDuringInitialization,
+    "Initialization overwrote a target created concurrently.");
 var nativeTarget = new MemoryTarget(Utf8("{\"theme\":\"dark\",\"language\":\"ru\",\"other\":12}"));
 var existingNative = new DisplayPreferenceService(nativeTarget, deferredLegacy);
 Check(existingNative.Load().Modes == new DisplayModes("dark", "ru") &&
@@ -162,6 +192,7 @@ using (var legacyLock = new FileStream(oldFile, FileMode.Open, FileAccess.ReadWr
         "An unconfirmed legacy file created a native settings file.");
 }
 Check(Equal(File.ReadAllBytes(oldFile), legacyBytes), "Deferred migration modified the synthetic legacy file.");
+Check(File.Exists(newFile + ".lock"), "The separate target lock was not accounted for.");
 string missingOldFile = Path.Combine(work, "missing-old-settings.json");
 string missingNewFile = Path.Combine(work, "missing-native-settings.json");
 var missingFiles = new PreferenceFiles(missingOldFile, missingNewFile);
@@ -170,6 +201,26 @@ Check(missingLoad.Status == PreferenceStatus.MigrationDeferred && missingLoad.Mo
     missingFiles.Service.SaveTheme("dark") == PreferenceStatus.MigrationDeferred &&
     !File.Exists(missingOldFile) && !File.Exists(missingNewFile),
     "An unverified absent source was treated as a new installation.");
+string initializationOldFile = Path.Combine(work, "initialization-old-settings.json");
+string initializationNewFile = Path.Combine(work, "initialization-native-settings.json");
+File.WriteAllBytes(initializationOldFile, legacyBytes);
+var initializationFiles = new PreferenceFiles(initializationOldFile, initializationNewFile);
+using (var legacyLock = new FileStream(initializationOldFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+    Check(initializationFiles.Service.Initialize("light", "en") == PreferenceStatus.Success,
+        "Explicit initialization could not proceed while the legacy file was held exclusively.");
+Check(Equal(File.ReadAllBytes(initializationOldFile), legacyBytes), "Initialization modified the legacy file.");
+using (JsonDocument initialized = Parse(File.ReadAllBytes(initializationNewFile)))
+    Check(initialized.RootElement.EnumerateObject().Count() == 2 &&
+        initialized.RootElement.GetProperty("theme").GetString() == "light" &&
+        initialized.RootElement.GetProperty("language").GetString() == "en",
+        "Synthetic native initialization did not preserve the selected values.");
+string raceFile = Path.Combine(work, "racing-native-settings.json");
+var raceFiles = new PreferenceFiles(initializationOldFile, raceFile);
+Check(raceFiles.Target.TryRead(out PreferenceSnapshot beforeRace), "An absent target could not be observed.");
+File.WriteAllBytes(raceFile, competingPreferences);
+Check(raceFiles.Target.TryCommit(beforeRace.Revision, Utf8("{\"theme\":\"dark\"}")) == PreferenceCommit.Conflict &&
+    Equal(File.ReadAllBytes(raceFile), competingPreferences) && Equal(File.ReadAllBytes(initializationOldFile), legacyBytes),
+    "A native file created after the snapshot was overwritten.");
 File.WriteAllBytes(newFile, legacyBytes); // Only a synthetic already-existing native target.
 Check(filesA.Service.Load().Modes == new DisplayModes("dark", "ru") &&
     filesA.Service.SaveTheme("light") == PreferenceStatus.Success, "An existing native target was not updated.");

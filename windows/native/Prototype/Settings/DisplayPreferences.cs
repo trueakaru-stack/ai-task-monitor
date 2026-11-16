@@ -63,6 +63,30 @@ internal sealed class DisplayPreferenceService(IPreferenceTarget target, ILegacy
     internal PreferenceStatus SaveTheme(string mode) => Save("theme", mode);
     internal PreferenceStatus SaveLanguage(string mode) => Save("language", mode);
 
+    // Only an explicit caller action may initialize both display choices.
+    // Load and individual saves never call this and it does not inspect legacy.
+    internal PreferenceStatus Initialize(string? theme, string? language)
+    {
+        if (!DisplayPreferenceDocument.IsValidMode("theme", theme) ||
+            !DisplayPreferenceDocument.IsValidMode("language", language))
+            return PreferenceStatus.InvalidMode;
+        try
+        {
+            if (!target.TryRead(out PreferenceSnapshot snapshot)) return PreferenceStatus.Unavailable;
+            if (snapshot.Content is not null) return PreferenceStatus.Conflict;
+            if (!DisplayPreferenceDocument.TryUpdate(null, "theme", theme!, out byte[]? themed) ||
+                !DisplayPreferenceDocument.TryUpdate(themed, "language", language!, out byte[]? initialized))
+                return PreferenceStatus.Unavailable;
+            return target.TryCommit(snapshot.Revision, initialized!) switch
+            {
+                PreferenceCommit.Success => PreferenceStatus.Success,
+                PreferenceCommit.Conflict => PreferenceStatus.Conflict,
+                _ => PreferenceStatus.Unavailable
+            };
+        }
+        catch (Exception) { return PreferenceStatus.Unavailable; }
+    }
+
     private PreferenceStatus Save(string name, string mode)
     {
         if (!DisplayPreferenceDocument.IsValidMode(name, mode)) return PreferenceStatus.InvalidMode;
