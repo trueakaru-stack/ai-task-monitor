@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -396,6 +397,51 @@ internal static class Program
         finally { window.Close(); }
     }
 
+    private static void UnconfirmedExitBlocksNewScans()
+    {
+        // Construct an explicitly synthetic result without starting a process.
+        // The command component's actual kill behavior has separate process tests.
+        ConstructorInfo? constructor = typeof(CommandResult).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic, null,
+            [typeof(CommandOutcome), typeof(bool), typeof(bool), typeof(byte[])], null);
+        Check(constructor is not null, "synthetic command-result constructor exists");
+        int firstCalls = 0, secondCalls = 0;
+        Task<CommandResult> UnknownExit(string? cursor, TimeSpan timeout, CancellationToken cancellation)
+        {
+            Interlocked.Increment(ref firstCalls);
+            var result = (CommandResult)constructor!.Invoke([CommandOutcome.TerminationUnconfirmed, true, false, null]);
+            return Task.FromResult(result);
+        }
+        Task<CommandResult> SecondRunner(string? cursor, TimeSpan timeout, CancellationToken cancellation)
+        {
+            Interlocked.Increment(ref secondCalls);
+            return RunFixture(cursor, timeout, cancellation);
+        }
+
+        var (firstWindow, firstView) = Open("empty", "en", "dark");
+        var (secondWindow, secondView) = Open("empty", "en", "dark");
+        using var first = new CloudSourcePump(firstWindow.Dispatcher, firstView.ApplyCloudSource, UnknownExit,
+            pollInterval: TimeSpan.FromMinutes(1));
+        using var second = new CloudSourcePump(secondWindow.Dispatcher, secondView.ApplyCloudSource, SecondRunner,
+            pollInterval: TimeSpan.FromMinutes(1));
+        try
+        {
+            first.SetEnabled(true);
+            WaitUntil(() => !first.InFlight && HasText(firstWindow, "No data from Codex Cloud"),
+                "unconfirmed exit reports unavailable");
+            first.RequestRefresh();
+            Check(firstCalls == 1 && !first.InFlight, "unconfirmed exit blocks retry in same owner");
+            second.SetEnabled(true);
+            Check(secondCalls == 0 && !second.InFlight && HasText(secondWindow, "No data from Codex Cloud"),
+                "unconfirmed exit blocks a new owner");
+        }
+        finally
+        {
+            firstWindow.Close();
+            secondWindow.Close();
+        }
+    }
+
     private delegate bool EnumWindowsCallback(IntPtr window, IntPtr state);
 
     [DllImport("user32.dll")]
@@ -561,6 +607,7 @@ internal static class Program
             DeadlineAndSlot();
             AnotherOwnerCannotOverlap();
             CancelRunningChild();
+            UnconfirmedExitBlocksNewScans();
             app.Shutdown();
             Console.WriteLine("Synthetic cloud-to-WPF checks passed: " + checks);
             return 0;
