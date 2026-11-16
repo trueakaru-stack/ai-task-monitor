@@ -1012,6 +1012,26 @@ Check(changedAfterLoss.Unconfirmed && !changedAfterLoss.PlanConfirmed &&
     changedAfterLoss.Steps.All(step => step.status == "unknown"),
     "Loss after a reused step ID must retain both observed names as unconfirmed.");
 
+
+string unclearStop = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "observed", ["timestamp"] = now.AddSeconds(1).ToString("O"),
+    ["event"] = "Stop", ["active"] = false, ["stage_version"] = 1, ["stage_phase"] = "stop_uncertain" }) + "\n";
+var uncertainStopNames = new SessionReader();
+uncertainStopNames.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
+var awaitingStop = uncertainStopNames.Read(complete + unclearStop, "", now.AddSeconds(2),
+    DateTime.MinValue.ToUniversalTime()).Single();
+Check(awaitingStop.Unconfirmed, "An ambiguous stop must keep the task unconfirmed.");
+string unclearRenameJournal = complete + unclearStop + renamedAfterPrompt;
+var namesAfterUnclearStop = uncertainStopNames.Read(unclearRenameJournal, "", now.AddSeconds(5),
+    DateTime.MinValue.ToUniversalTime()).Single();
+var namesAfterUnclearStopAgain = uncertainStopNames.Read(unclearRenameJournal, "", now.AddSeconds(5),
+    DateTime.MinValue.ToUniversalTime()).Single();
+Check(new[] { namesAfterUnclearStop, namesAfterUnclearStopAgain }.All(task => task.Unconfirmed &&
+    task.Steps.Any(step => step.title == "First step") &&
+    task.Steps.Any(step => step.title == "New step") &&
+    task.Steps.All(step => step.status == "unknown")),
+    "An ambiguous stop must retain both conflicting names across repeated polls.");
+
 var sameTurnRename = new SessionReader();
 sameTurnRename.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
 var renamedInTurn = sameTurnRename.Read(complete + renamedAfterPrompt, "", now.AddSeconds(5),
@@ -1062,6 +1082,10 @@ Check(!cappedHistory.RetentionOverflow && !cappedHistory.SourceUncertain && evic
     "A session whose hidden history was evicted must not gain a confirmed plan when it returns.");
 
 
+string ShiftFixtureTimes(string value, int seconds) => System.Text.RegularExpressions.Regex.Replace(value,
+    "\"timestamp\":\"([^\"]+)\"", match =>
+        "\"timestamp\":\"" + DateTimeOffset.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)
+            .AddSeconds(seconds).ToString("O", System.Globalization.CultureInfo.InvariantCulture) + "\"");
 string cappedFile = Path.Combine(work, "stopped-cap-pending.jsonl");
 File.WriteAllText(cappedFile, "", utf8);
 using (var cappedSource = new ClaudeFileSource(cappedFile, null, DateTime.MinValue.ToUniversalTime()))
@@ -1070,17 +1094,19 @@ using (var cappedSource = new ClaudeFileSource(cappedFile, null, DateTime.MinVal
     for (int index = 0; index < 257; index++)
     {
         string id = "file-cap-" + index;
-        File.AppendAllText(cappedFile, Retarget(complete, id), utf8);
-        _ = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
-        File.AppendAllText(cappedFile, Retarget(completeStop, id), utf8);
-        ClaudeSourceSnapshot stopped = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
+        int shift = index * 20;
+        File.AppendAllText(cappedFile, ShiftFixtureTimes(Retarget(complete, id), shift), utf8);
+        _ = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(shift));
+        File.AppendAllText(cappedFile, ShiftFixtureTimes(Retarget(completeStop, id), shift), utf8);
+        ClaudeSourceSnapshot stopped = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(shift + 2));
         if (stopped.Unavailable && firstUnavailable < 0) firstUnavailable = index;
     }
+    DateTime resumedClock = now.AddSeconds(20 * 256);
     string returnEvent = JsonSerializer.Serialize(new Dictionary<string, object> {
-        ["session_id"] = "file-cap-0", ["timestamp"] = now.AddSeconds(3).ToString("O"),
+        ["session_id"] = "file-cap-0", ["timestamp"] = resumedClock.AddSeconds(3).ToString("O"),
         ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
     File.AppendAllText(cappedFile, returnEvent, utf8);
-    ClaudeSourceSnapshot returned = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(4));
+    ClaudeSourceSnapshot returned = cappedSource.Poll(ClaudeConnection.Connected, resumedClock.AddSeconds(4));
     Console.WriteLine("Synthetic hidden-history state: firstUnavailable=" + firstUnavailable +
         ", unavailable=" + returned.Unavailable + ", loss=" + cappedSource.HasObservedSourceLoss +
         ", count=" + returned.Tasks.Count + ", taskUnconfirmed=" + returned.Tasks.FirstOrDefault()?.Unconfirmed +
@@ -1089,20 +1115,52 @@ using (var cappedSource = new ClaudeFileSource(cappedFile, null, DateTime.MinVal
         returned.Tasks.Single().RetainedPlanIncomplete,
         "A returned session with evicted names must not make the whole source unavailable.");
     string pendingOther = JsonSerializer.Serialize(new Dictionary<string, object> {
-        ["session_id"] = "file-cap-neighbor", ["timestamp"] = now.AddSeconds(5).ToString("O"),
+        ["session_id"] = "file-cap-neighbor", ["timestamp"] = resumedClock.AddSeconds(5).ToString("O"),
         ["event"] = "PreToolUse", ["tool_name"] = "Read", ["active"] = true }) + "\n";
     int pendingCut = pendingOther.Length / 2;
     File.AppendAllText(cappedFile, pendingOther[..pendingCut], utf8);
-    ClaudeSourceSnapshot capPending = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(5));
+    ClaudeSourceSnapshot capPending = cappedSource.Poll(ClaudeConnection.Connected, resumedClock.AddSeconds(5));
     Check(capPending.Unavailable && !cappedSource.HasObservedSourceLoss,
         "A partial tail may be unavailable temporarily, but an already incomplete task must not create source loss.");
     File.AppendAllText(cappedFile, pendingOther[pendingCut..], utf8);
-    ClaudeSourceSnapshot capComplete = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(6));
+    ClaudeSourceSnapshot capComplete = cappedSource.Poll(ClaudeConnection.Connected, resumedClock.AddSeconds(6));
     Check(!capComplete.Unavailable && !cappedSource.HasObservedSourceLoss &&
         capComplete.Tasks.Single(x => x.Id == "file-cap-0").Unconfirmed &&
         capComplete.Tasks.Single(x => x.Id == "file-cap-0").RetainedPlanIncomplete &&
         !capComplete.Tasks.Single(x => x.Id == "file-cap-neighbor").Unconfirmed,
         "Completing the tail must restore source availability without confirming an incomplete session.");
+
+    var moreStages = new StringBuilder();
+    for (int index = 0; index < 126; index++)
+        moreStages.Append(JsonSerializer.Serialize(new Dictionary<string, object> {
+            ["session_id"] = "file-cap-0", ["timestamp"] = resumedClock.AddSeconds(7).AddTicks(index).ToString("O"),
+            ["event"] = "TaskCreated", ["active"] = true, ["task_id"] = "extra-" + index,
+            ["task_subject"] = "Synthetic extra " + index, ["task_status"] = "pending" })).Append('\n');
+    File.AppendAllText(cappedFile, moreStages.ToString(), utf8);
+    ClaudeSourceSnapshot previouslyIncomplete = cappedSource.Poll(ClaudeConnection.Connected, resumedClock.AddSeconds(8));
+    var fullKnown = previouslyIncomplete.Tasks.Single(x => x.Id == "file-cap-0");
+    Check(!previouslyIncomplete.Unavailable && !cappedSource.HasObservedSourceLoss &&
+        fullKnown.Unconfirmed && fullKnown.RetainedPlanIncomplete && fullKnown.Steps.Length == 128,
+        "The setup must have a locally incomplete retained plan with 128 names.");
+    string anotherStage = JsonSerializer.Serialize(new Dictionary<string, object> {
+        ["session_id"] = "file-cap-0", ["timestamp"] = resumedClock.AddSeconds(9).ToString("O"),
+        ["event"] = "TaskCreated", ["active"] = true, ["task_id"] = "extra-new",
+        ["task_subject"] = "Synthetic added stage", ["task_status"] = "pending" }) + "\n";
+    string secondPending = JsonSerializer.Serialize(new Dictionary<string, object> {
+        ["session_id"] = "file-cap-neighbor", ["timestamp"] = resumedClock.AddSeconds(10).ToString("O"),
+        ["event"] = "PreToolUse", ["tool_name"] = "Read", ["active"] = true }) + "\n";
+    int nextPendingCut = secondPending.Length / 2;
+    File.AppendAllText(cappedFile, anotherStage + secondPending[..nextPendingCut], utf8);
+    ClaudeSourceSnapshot cutWhilePending = cappedSource.Poll(ClaudeConnection.Connected, resumedClock.AddSeconds(10));
+    Check(cutWhilePending.Unavailable && cappedSource.HasObservedSourceLoss &&
+        cutWhilePending.Tasks.Single(x => x.Id == "file-cap-0").RetainedPlanIncomplete &&
+        cutWhilePending.Tasks.Single(x => x.Id == "file-cap-0").Steps.All(step => step.status == "unknown"),
+        "A new name discarded during a pending merge must record source loss even if the plan was already incomplete.");
+    File.AppendAllText(cappedFile, secondPending[nextPendingCut..], utf8);
+    ClaudeSourceSnapshot afterNewCut = cappedSource.Poll(ClaudeConnection.Connected, resumedClock.AddSeconds(11));
+    Check(afterNewCut.Unavailable && cappedSource.HasObservedSourceLoss &&
+        afterNewCut.Tasks.Single(x => x.Id == "file-cap-0").Unconfirmed,
+        "A new cut during a pending merge must remain unconfirmed after the record completes.");
 }
 
 
@@ -1124,9 +1182,9 @@ for (int index = 0; index < 1024; index++)
         EvidenceEvent(id, -2, "Stop", false, "stop_clear");
     uncertainSessionRetention.Read(hiddenEvidence, "", now, DateTime.MinValue.ToUniversalTime());
 }
-string laterClear = EvidenceEvent("uncertain-a", -4, "UserPromptSubmit", true) +
+string lateUncertainStopEvidence = EvidenceEvent("uncertain-a", -4, "UserPromptSubmit", true) +
     EvidenceEvent("uncertain-a", -2, "Stop", false, "stop_clear");
-var retainedAfterMany = uncertainSessionRetention.Read(laterClear, "", now, DateTime.MinValue.ToUniversalTime()).Single();
+var retainedAfterMany = uncertainSessionRetention.Read(lateUncertainStopEvidence, "", now, DateTime.MinValue.ToUniversalTime()).Single();
 Check(!uncertainSessionRetention.SourceUncertain && !uncertainSessionRetention.RetentionOverflow &&
     retainedAfterMany.Id == "uncertain-a" && retainedAfterMany.Unconfirmed,
     "A late stop must not erase a previously uncertain session after many other IDs.");

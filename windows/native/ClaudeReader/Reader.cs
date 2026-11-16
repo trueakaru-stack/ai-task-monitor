@@ -730,7 +730,7 @@ namespace AITaskMonitor.Claude {
      if(sourceLoss || uncertainSessions.Contains(item.Id) || uncertainPlans.Contains(item.Id) || item.Unconfirmed) {
       Task previous, hidden;
       retained.TryGetValue(item.Id, out previous);
-      bool preserveNames = sourceLoss || nameHistorySessions.Contains(item.Id);
+      bool preserveNames = sourceLoss || uncertainSessions.Contains(item.Id) || nameHistorySessions.Contains(item.Id);
       if(TryStopped(item.Id, out hidden)) {
        if(previous == null) previous = hidden;
        else if(preserveNames) previous = Freeze(previous, hidden, true);
@@ -742,9 +742,9 @@ namespace AITaskMonitor.Claude {
      }
     }
     var result = new List<Task>(tasks);
-    foreach(var entry in retained) if((prior || uncertainSessions.Contains(entry.Key)) && !visible.Contains(entry.Key)) result.Add(Freeze(entry.Value, null, sourceLoss || nameHistorySessions.Contains(entry.Key)));
+    foreach(var entry in retained) if((prior || uncertainSessions.Contains(entry.Key)) && !visible.Contains(entry.Key)) result.Add(Freeze(entry.Value, null, sourceLoss || uncertainSessions.Contains(entry.Key) || nameHistorySessions.Contains(entry.Key)));
     foreach(Task item in tasks) {
-     Task frozen = Freeze(item, null, sourceLoss || nameHistorySessions.Contains(item.Id));
+     Task frozen = Freeze(item, null, sourceLoss || uncertainSessions.Contains(item.Id) || nameHistorySessions.Contains(item.Id));
      if(retained.ContainsKey(item.Id)) retained[item.Id] = frozen;
      else if(retained.Count < MaximumRetained) retained.Add(item.Id, frozen);
      else overflow = true;
