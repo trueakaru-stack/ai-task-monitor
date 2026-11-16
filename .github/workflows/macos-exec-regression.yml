@@ -14,6 +14,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - runner: macos-15
+            developer: /Applications/Xcode_16.1.app/Contents/Developer
           - runner: macos-26
             developer: /Applications/Xcode.app/Contents/Developer
     runs-on: ${{ matrix.runner }}
@@ -107,15 +109,20 @@ jobs:
           task_bin="$("${task_compiler[@]}" build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
           test -d "$task_bin/AITaskMonitorPackageTests.xctest"
           printf 'AITM_TEST_BIN=%s\n' "$task_bin" >> "$GITHUB_ENV"
-      - name: Reproduce missing-index failure before product fix
+      - name: Run unindexed Codex regressions
         shell: bash
         run: |
           set -euo pipefail
           cd "$AITM_TEST_TASK_ROOT"
-          if "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
-              -XCTest AITaskMonitorTests.CodexExecDiscoveryTests/testExecWithoutIndexIsVisibleWithoutCreatingIndex \
-              "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" > "$AITM_TEST_TASK_ROOT/baseline.log" 2>&1; then
-            echo 'Regression did not reproduce against baseline.' >&2; exit 1
-          fi
-          /bin/cat "$AITM_TEST_TASK_ROOT/baseline.log"
-          /usr/bin/grep -q "testExecWithoutIndexIsVisibleWithoutCreatingIndex.*failed" "$AITM_TEST_TASK_ROOT/baseline.log"
+          "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
+            -XCTest AITaskMonitorTests.CodexExecDiscoveryTests \
+            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
+      - name: Run existing indexed and ambiguity regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          for suite in CodexRevertSafetyTests CodexSiblingDirectoryIndependentTests CodexColdCompressedIndependentTests CodexMultipleColdIndependentTests CodexSourceStalePlanTests; do
+            "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
+              -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
+          done
