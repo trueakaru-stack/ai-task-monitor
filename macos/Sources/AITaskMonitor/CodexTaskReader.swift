@@ -124,7 +124,14 @@ struct CodexTaskReader {
             guard let file = available[id] else { continue }
             do {
                 guard let record = try readUnindexedExec(file, id: id) else { continue }
-                if let observedSince, record.modified < observedSince && !previouslyObserved.contains(id) { continue }
+                var lateWithWriterFile = false
+                if let observedSince, record.modified < observedSince && !previouslyObserved.contains(id) {
+                    switch writerLockStatus(for: id) {
+                    case .present: lateWithWriterFile = true
+                    case .absent: continue
+                    case .unknown: result.isPartial = true; continue
+                    }
+                }
                 let state = CodexLifecycleState.parse(record.tail)
                 // A bounded tail without its start cannot establish which turn a
                 // later event belongs to. Keep the existing card uncertain.
@@ -148,7 +155,7 @@ struct CodexTaskReader {
                     }
                     continue
                 }
-                let currentSince = previouslyObserved.contains(id) ? nil : observedSince
+                let currentSince = (previouslyObserved.contains(id) || lateWithWriterFile) ? nil : observedSince
                 guard state.isRunning(observedSince: currentSince) else { continue }
                 if let observedSince {
                     result.toolEvents[id] = CodexToolEventParser.parse(tail: record.tail, since: observedSince, now: now)
@@ -310,7 +317,13 @@ struct CodexTaskReader {
                 partial = true
                 return
             }
-            if let observedSince, !previouslyObserved.contains(owner), modified < observedSince { return }
+            if let observedSince, !previouslyObserved.contains(owner), modified < observedSince {
+                switch writerLockStatus(for: owner) {
+                case .present: break
+                case .absent: return
+                case .unknown: partial = true; return
+                }
+            }
             if modifiedByOwner[owner].map({ modified > $0 }) ?? true { modifiedByOwner[owner] = modified }
             if fast { fastVariants[owner, default: [:]][url.standardizedFileURL.path] = url }
         }
@@ -322,7 +335,7 @@ struct CodexTaskReader {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
         var recentVisited = 0
-        for offset in [-1, 0, 1] {
+        for offset in [0, -1, 1] {
             guard let day = calendar.date(byAdding: .day, value: offset, to: now) else { continue }
             let parts = calendar.dateComponents([.year, .month, .day], from: day)
             guard let year = parts.year, let month = parts.month, let date = parts.day else { continue }
@@ -358,7 +371,9 @@ struct CodexTaskReader {
         if ordered.count > 16 { partial = true }
         let selected = Set(ordered.prefix(16).map(\.key))
         var fastFiles: [String: URL] = [:]
-        if fastComplete {
+        // A partial page can yield a verified exec record, but only as an
+        // unconfirmed card. Terminal events still require a complete scan.
+        do {
             for id in selected {
                 let lowerID = id.lowercased()
                 if unknownStems.contains(where: { $0 == lowerID || $0.hasSuffix("-" + lowerID) || $0.contains("-" + lowerID + "_") }) {
@@ -380,6 +395,22 @@ struct CodexTaskReader {
             }
         }
         return (selected, fastFiles, partial)
+    }
+
+    private enum WriterLockStatus {
+        case present, absent, unknown
+    }
+
+    /// Check only lock-file metadata, without opening or taking its lock.
+    private func writerLockStatus(for id: String) -> WriterLockStatus {
+        let directory = codexHome.appendingPathComponent("thread-writer-locks", isDirectory: true).path
+        let parent = directory.withCString { open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) }
+        guard parent >= 0 else { return errno == ENOENT ? .absent : .unknown }
+        defer { Darwin.close(parent) }
+        var info = stat()
+        let result = (id + ".lock").withCString { fstatat(parent, $0, &info, AT_SYMLINK_NOFOLLOW) }
+        guard result == 0 else { return errno == ENOENT ? .absent : .unknown }
+        return (info.st_mode & S_IFMT) == S_IFREG ? .present : .unknown
     }
 
     private struct UnindexedExecRecord {

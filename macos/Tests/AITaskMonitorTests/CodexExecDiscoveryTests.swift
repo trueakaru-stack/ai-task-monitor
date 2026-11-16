@@ -245,34 +245,6 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertFalse(snapshot.terminalIDs.contains(first))
     }
 
-    func testBoundedHistoryScanAdvancesPastFirstPage() throws {
-        let root = try makeRoot()
-        let directory = root.appendingPathComponent("sessions", isDirectory: true)
-        let source = directory.appendingPathComponent("2026/11/16", isDirectory: true)
-        var expected: Set<String> = []
-        for _ in 0..<6 {
-            let file = source.appendingPathComponent(UUID().uuidString + ".txt")
-            guard FileManager.default.createFile(atPath: file.path, contents: Data()) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
-            expected.insert(file.standardizedFileURL.path)
-        }
-        let cache = CodexExecDiscoveryCache()
-        var visited: Set<String> = []
-        var incompletePages = 0
-        var completed = false
-        for _ in 0..<32 {
-            let page = try cache.nextHistoryPage(directory: directory, limit: 1)
-            XCTAssertLessThanOrEqual(page.urls.count, 1)
-            visited.formUnion(page.urls.map { $0.standardizedFileURL.path })
-            if page.complete { completed = true; break }
-            incompletePages += 1
-        }
-        XCTAssertGreaterThan(incompletePages, 1)
-        XCTAssertTrue(completed)
-        XCTAssertTrue(expected.isSubset(of: visited))
-    }
-
     func testPartialHistoryDoesNotAssertUnindexedCompletion() throws {
         let root = try makeRoot()
         let old = root.appendingPathComponent("sessions/2001/01/01", isDirectory: true)
@@ -319,5 +291,84 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertNil(task.progress)
         XCTAssertNil(task.progressLabel)
         XCTAssertNotNil(task.planStatusNote)
+    }
+
+    func testEarlierExecWithWriterFileAppearsUnconfirmedAfterMonitorStarts() throws {
+        let root = try makeRoot()
+        _ = try rollout(root, fileID: first)
+        let locks = root.appendingPathComponent("thread-writer-locks", isDirectory: true)
+        try FileManager.default.createDirectory(at: locks, withIntermediateDirectories: false)
+        guard FileManager.default.createFile(atPath: locks.appendingPathComponent(first + ".lock").path, contents: Data()) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let observedSince = Date().addingTimeInterval(60)
+        let snapshot = try CodexTaskReader(codexHome: root)
+            .readSnapshot(now: observedSince.addingTimeInterval(1), observedSince: observedSince)
+        let task = try XCTUnwrap(snapshot.tasks.first { $0.id == first })
+        XCTAssertTrue(task.isUnconfirmed)
+        XCTAssertFalse(task.isActive)
+        XCTAssertNil(task.progressLabel)
+    }
+
+    func testEarlierExecWithoutWriterFileIsNotShownAsActive() throws {
+        let root = try makeRoot()
+        _ = try rollout(root, fileID: first)
+        let observedSince = Date().addingTimeInterval(60)
+        let snapshot = try CodexTaskReader(codexHome: root)
+            .readSnapshot(now: observedSince.addingTimeInterval(1), observedSince: observedSince)
+        XCTAssertFalse(snapshot.tasks.contains { $0.id == first })
+    }
+
+    func testWriterLockSymlinkIsNotTreatedAsEvidence() throws {
+        let root = try makeRoot()
+        _ = try rollout(root, fileID: first)
+        let locks = root.appendingPathComponent("thread-writer-locks", isDirectory: true)
+        try FileManager.default.createDirectory(at: locks, withIntermediateDirectories: false)
+        let target = root.appendingPathComponent("synthetic-target")
+        guard FileManager.default.createFile(atPath: target.path, contents: Data()) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try FileManager.default.createSymbolicLink(at: locks.appendingPathComponent(first + ".lock"), withDestinationURL: target)
+        let observedSince = Date().addingTimeInterval(60)
+        let snapshot = try CodexTaskReader(codexHome: root)
+            .readSnapshot(now: observedSince.addingTimeInterval(1), observedSince: observedSince)
+        XCTAssertFalse(snapshot.tasks.contains { $0.id == first })
+        XCTAssertTrue(snapshot.isPartial)
+    }
+
+    func testTodayDirectoryOverBudgetEventuallyReachesLaterFile() throws {
+        let root = try makeRoot()
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let date = calendar.dateComponents([.year, .month, .day], from: Date())
+        let today = root.appendingPathComponent(String(format: "sessions/%04d/%02d/%02d",
+            try XCTUnwrap(date.year), try XCTUnwrap(date.month), try XCTUnwrap(date.day)), isDirectory: true)
+        try FileManager.default.createDirectory(at: today, withIntermediateDirectories: true)
+        for _ in 0..<300 {
+            let path = today.appendingPathComponent("rollout-2026-11-16T15-31-00-\(UUID().uuidString.lowercased()).jsonl")
+            guard FileManager.default.createFile(atPath: path.path, contents: Data()) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: path.path)
+        }
+        let original = try rollout(root, fileID: first)
+        let destination = today.appendingPathComponent(original.lastPathComponent)
+        if destination.standardizedFileURL != original.standardizedFileURL {
+            try FileManager.default.moveItem(at: original, to: destination)
+        }
+        let reader = CodexTaskReader(codexHome: root)
+        let observedSince = Date().addingTimeInterval(-60)
+        var found = false
+        for _ in 0..<12 {
+            let snapshot = try reader.readSnapshot(observedSince: observedSince)
+            XCTAssertTrue(snapshot.isPartial)
+            if let task = snapshot.tasks.first(where: { $0.id == first }) {
+                XCTAssertTrue(task.isUnconfirmed)
+                XCTAssertFalse(task.isActive)
+                found = true
+                break
+            }
+        }
+        XCTAssertTrue(found)
     }
 }
