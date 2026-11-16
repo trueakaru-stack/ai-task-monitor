@@ -1,0 +1,15 @@
+import Foundation
+
+final class ReleaseRequest {
+    static var starts = 0
+    let completion: (Data?) -> Void
+    init(completion: @escaping (Data?) -> Void) { self.completion = completion }
+    func start() { Self.starts += 1 }
+    func finish(_ value: Data?) { completion(value) }
+}
+final class LegacyTaskStore {
+    let updateChecksEnabled = true
+    var releaseRequest: ReleaseRequest?
+    var lastUpdateCheck = Date.distantPast
+    var accepted = 0
+    func acceptReleaseData(_ data: Data) { accepted += 1 }

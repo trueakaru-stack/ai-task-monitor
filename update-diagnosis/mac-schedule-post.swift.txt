@@ -1,0 +1,23 @@
+
+}
+func check(_ value: @autoclosure () -> Bool, _ label: String) {
+    guard value() else { fputs("FAIL: \(label)\n", stderr); exit(1) }
+    print("PASS: \(label)")
+}
+func test(_ result: Data?, label: String) {
+    let store = LegacyTaskStore()
+    let initial = ReleaseRequest.starts
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    store.checkForUpdates(now: now)
+    check(ReleaseRequest.starts == initial + 1, "macOS 0.3.7 \(label): checks immediately")
+    store.releaseRequest?.finish(result)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    check(store.releaseRequest == nil, "macOS 0.3.7 \(label): original callback finishes")
+    store.checkForUpdates(now: now.addingTimeInterval(86399))
+    check(ReleaseRequest.starts == initial + 1, "macOS 0.3.7 \(label): not due before 24 hours")
+    store.checkForUpdates(now: now.addingTimeInterval(86400))
+    check(ReleaseRequest.starts == initial + 2, "macOS 0.3.7 \(label): retries after 24 hours")
+}
+test(nil, label: "failed request")
+test(Data("[]".utf8), label: "successful request")
+print("Original macOS scheduling method with a fake request and synthetic clock; no network or GUI.")

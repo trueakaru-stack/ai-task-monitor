@@ -1,0 +1,70 @@
+name: Synthetic released updater diagnosis
+on:
+  push:
+    branches: ['codex/update-diagnosis-20261116']
+permissions:
+  contents: read
+env:
+  DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+  DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+jobs:
+  windows-legacy-and-current:
+    runs-on: windows-2025
+    timeout-minutes: 12
+    steps:
+      - name: Exercise released Windows selectors and schedules
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          if ($env:CI -cne 'true' -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH -cne '0') { throw 'Hosted runner required.' }
+          $root=Join-Path $env:RUNNER_TEMP ('aitm-update-diagnostic-' + [guid]::NewGuid().ToString('N'))
+          $source=Join-Path $root 'source'
+          $template=Join-Path $root 'template'
+          $hooks=Join-Path $root 'hooks'
+          $null=New-Item -ItemType Directory -Path $source,$template,$hooks
+          $env:GIT_CONFIG_NOSYSTEM='1'
+          $env:GIT_CONFIG_GLOBAL=Join-Path $root 'empty.gitconfig'
+          [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL,'')
+          $env:GIT_TERMINAL_PROMPT='0'
+          git -c credential.helper= -c core.hooksPath="$hooks" init --quiet --template="$template" "$source"
+          if ($LASTEXITCODE -ne 0) { throw 'Git initialization failed.' }
+          foreach ($sha in @($env:GITHUB_SHA,'86973d272be1eac7dafd44670fe7271480478651','a04da15354b9d49b368df7ee0e46e0e2527b5d7c')) {
+            git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --quiet --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$sha"
+            if ($LASTEXITCODE -ne 0) { throw 'Exact source revision fetch failed.' }
+          }
+          git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach "$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'Synthetic harness checkout failed.' }
+          $env:AITM_DIAGNOSTIC_SOURCE=$source
+          $env:AITM_DIAGNOSTIC_ROOT=$root
+          & (Join-Path $source 'update-diagnosis/windows.ps1')
+  macos-legacy-and-current:
+    runs-on: macos-15
+    timeout-minutes: 12
+    steps:
+      - name: Exercise released macOS selectors and schedules
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CI" = true
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$DOTNET_ADD_GLOBAL_TOOLS_TO_PATH" = 0
+          root="$RUNNER_TEMP/aitm-update-diagnostic-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -e "$root"
+          mkdir -p "$root/source" "$root/template" "$root/hooks"
+          source="$root/source"
+          hooks="$root/hooks"
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_GLOBAL="$root/empty.gitconfig"
+          export GIT_TERMINAL_PROMPT=0
+          : > "$GIT_CONFIG_GLOBAL"
+          git -c credential.helper= -c core.hooksPath="$hooks" init --quiet --template="$root/template" "$source"
+          for sha in "$GITHUB_SHA" c034eef660922c9a06ee601e6ab9f8eac22b7889 3457773aeec8c5ac0e22c42a31cde44aaecc4160; do
+            git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --quiet --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$sha"
+          done
+          git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach "$GITHUB_SHA"
+          export AITM_DIAGNOSTIC_SOURCE="$source"
+          export AITM_DIAGNOSTIC_ROOT="$root"
+          /bin/bash "$source/update-diagnosis/mac.sh"

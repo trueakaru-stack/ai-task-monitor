@@ -1,0 +1,62 @@
+[
+  {
+    "tag_name": "v0.3.8-alpha",
+    "draft": false,
+    "prerelease": true,
+    "assets": [
+      {
+        "name": "AITaskMonitor-macOS-0.3.8-alpha.dmg",
+        "browser_download_url": "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.8-alpha/AITaskMonitor-macOS-0.3.8-alpha.dmg"
+      },
+      {
+        "name": "SHA256SUMS-macOS.txt",
+        "browser_download_url": "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.8-alpha/SHA256SUMS-macOS.txt"
+      }
+    ]
+  },
+  {
+    "tag_name": "v0.2.7-alpha",
+    "draft": false,
+    "prerelease": true,
+    "assets": [
+      {
+        "name": "AITaskMonitorSetup-0.2.7-alpha.exe",
+        "browser_download_url": "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.7-alpha/AITaskMonitorSetup-0.2.7-alpha.exe"
+      },
+      {
+        "name": "SHA256SUMS-windows.txt",
+        "browser_download_url": "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.7-alpha/SHA256SUMS-windows.txt"
+      }
+    ]
+  },
+  {
+    "tag_name": "v0.3.7-alpha",
+    "draft": false,
+    "prerelease": true,
+    "assets": [
+      {
+        "name": "AITaskMonitor-macOS-0.3.7-alpha.dmg",
+        "browser_download_url": "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.7-alpha/AITaskMonitor-macOS-0.3.7-alpha.dmg"
+      },
+      {
+        "name": "SHA256SUMS-macOS.txt",
+        "browser_download_url": "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.7-alpha/SHA256SUMS-macOS.txt"
+      }
+    ]
+  },
+  {
+    "tag_name": "v0.2.6-alpha",
+    "draft": false,
+    "prerelease": true,
+    "assets": [
+      {
+        "name": "AITaskMonitorSetup-0.2.6-alpha.exe",
+        "browser_download_url": "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.6-alpha/AITaskMonitorSetup-0.2.6-alpha.exe"
+      },
+      {
+        "name": "SHA256SUMS-windows.txt",
+        "browser_download_url": "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.6-alpha/SHA256SUMS-windows.txt"
+      }
+    ]
+  }
+]
