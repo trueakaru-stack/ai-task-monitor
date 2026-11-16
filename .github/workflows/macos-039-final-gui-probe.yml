@@ -79,6 +79,8 @@ jobs:
           #include <mach/mach.h>
           #include <servers/bootstrap.h>
           #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
           #include <errno.h>
           #include <stdio.h>
           #include <unistd.h>
@@ -91,9 +93,21 @@ jobs:
               if (r != BOOTSTRAP_NOT_PRIVILEGED) { fprintf(stderr, "Profile service block not verified: %d\n", r); return 1; }
             }
             int fd = socket(AF_INET, SOCK_STREAM, 0);
-            if (fd >= 0) { close(fd); fprintf(stderr, "Network socket allowed\n"); return 1; }
-            if (errno != EPERM && errno != EACCES) { perror("Unexpected socket failure"); return 1; }
-            puts("Profile services and network socket are denied");
+            if (fd < 0) {
+              if (errno != EPERM && errno != EACCES) return 2;
+            } else {
+              struct sockaddr_in addr = {0};
+              addr.sin_len = sizeof(addr);
+              addr.sin_family = AF_INET;
+              addr.sin_port = htons(9);
+              addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+              errno = 0;
+              if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || (errno != EPERM && errno != EACCES)) {
+                close(fd); fprintf(stderr, "Loopback network was not provably denied.\n"); return 3;
+              }
+              close(fd);
+            }
+            puts("Profile services and loopback network are denied");
             return 0;
           }
           C
