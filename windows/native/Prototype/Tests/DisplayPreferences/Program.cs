@@ -291,6 +291,30 @@ Check(ordinaryPaths.LegacyPath == Path.Combine(ordinaryRoot, "CodexTaskProgress"
     storePaths.LegacyPath == Path.Combine(storeRoot, ".ai-task-monitor", "settings.json") &&
     storePaths.TargetPath == Path.Combine(storeRoot, ".ai-task-monitor", "display-preferences.json"),
     "The edition roots do not match the published application paths.");
+string applicationDirectory = Path.Combine(work, "synthetic-application");
+Directory.CreateDirectory(applicationDirectory);
+Directory.CreateDirectory(Path.GetDirectoryName(ordinaryPaths.LegacyPath)!);
+Directory.CreateDirectory(Path.GetDirectoryName(storePaths.LegacyPath)!);
+byte[] standaloneOld = Utf8("{\"theme\":\"dark\",\"language\":\"ru\",\"other\":1}");
+byte[] storeOldBytes = Utf8("{\"theme\":\"light\",\"language\":\"en\",\"other\":2}");
+File.WriteAllBytes(ordinaryPaths.LegacyPath, standaloneOld);
+File.WriteAllBytes(storePaths.LegacyPath, storeOldBytes);
+var standaloneFactory = PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot);
+Check(standaloneFactory.Load().Modes == new DisplayModes("dark", "ru") &&
+    standaloneFactory.SaveLanguage("en") == PreferenceStatus.Success && File.Exists(ordinaryPaths.TargetPath) &&
+    !File.Exists(storePaths.TargetPath), "An unmarked application did not use the standalone root.");
+string marker = Path.Combine(applicationDirectory, "store-channel.marker");
+File.WriteAllText(marker, "", new UTF8Encoding(false));
+var storeFactory = PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot);
+Check(storeFactory.Load().Modes == new DisplayModes("light", "en") &&
+    storeFactory.SaveTheme("dark") == PreferenceStatus.Success && File.Exists(storePaths.TargetPath) &&
+    Equal(File.ReadAllBytes(ordinaryPaths.LegacyPath), standaloneOld) && Equal(File.ReadAllBytes(storePaths.LegacyPath), storeOldBytes),
+    "A marked application did not use the Store root safely.");
+File.Delete(marker);
+Directory.CreateDirectory(marker);
+Check(PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot).Load().Status == PreferenceStatus.Unavailable &&
+    PreferenceFiles.ForApplication(Path.Combine(work, "missing-application"), storeRoot, ordinaryRoot).Load().Status == PreferenceStatus.Unavailable,
+    "An ambiguous edition marker or missing application directory selected a fallback root.");
 string ordinaryOld = Path.Combine(ordinaryRoot, "settings.json"), storeOld = Path.Combine(storeRoot, "settings.json");
 File.WriteAllText(ordinaryOld, "{\"theme\":\"dark\",\"other\":1}", new UTF8Encoding(false));
 File.WriteAllText(storeOld, "{\"theme\":\"light\",\"other\":2}", new UTF8Encoding(false));

@@ -23,6 +23,42 @@ internal sealed class PreferenceFiles
         return (Path.Combine(directory, "settings.json"), Path.Combine(directory, "display-preferences.json"));
     }
 
+    // The caller supplies the executable directory and user roots. Failure to
+    // inspect the edition marker must not silently select the other edition.
+    internal static DisplayPreferenceService ForApplication(string applicationDirectory, string userProfile, string localAppData)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(applicationDirectory) || !Path.IsPathFullyQualified(applicationDirectory))
+                return Unavailable();
+            string directory = Path.GetFullPath(applicationDirectory);
+            if (!PlainDirectoryExists(directory)) return Unavailable();
+            string marker = Path.Combine(directory, "store-channel.marker");
+            bool store;
+            try
+            {
+                FileAttributes attributes = File.GetAttributes(marker);
+                if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) return Unavailable();
+                store = true;
+            }
+            catch (FileNotFoundException) { store = false; }
+            var paths = PathsForEdition(userProfile, localAppData, store);
+            return new PreferenceFiles(paths.LegacyPath, paths.TargetPath).Service;
+        }
+        catch (Exception error) when (IsStorageError(error)) { return Unavailable(); }
+    }
+
+    private static DisplayPreferenceService Unavailable() => new(new UnavailableTarget(), new UnavailableLegacy());
+    private sealed class UnavailableTarget : IPreferenceTarget
+    {
+        public bool TryRead(out PreferenceSnapshot snapshot) { snapshot = default; return false; }
+        public PreferenceCommit TryCommit(object expectedRevision, byte[] content) => PreferenceCommit.Unavailable;
+    }
+    private sealed class UnavailableLegacy : ILegacyPreferenceSource
+    {
+        public LegacyPreferenceStatus Read(out byte[]? content) { content = null; return LegacyPreferenceStatus.Unavailable; }
+    }
+
     internal PreferenceFiles(string legacyPath, string targetPath, Func<string>? temporaryToken = null)
     {
         if (!Path.IsPathFullyQualified(legacyPath) || !Path.IsPathFullyQualified(targetPath))

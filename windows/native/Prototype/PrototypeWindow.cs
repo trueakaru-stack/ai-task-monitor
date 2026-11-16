@@ -48,6 +48,7 @@ internal sealed class PrototypeWindow
     private readonly Dictionary<DependencyObject, string> staticNames = new();
     private string? themeMode, languageMode;
     private string preferenceError = "";
+    private bool navigationByKeyboard;
     private ClaudeSourceSnapshot? latestClaude;
     private CloudSnapshot? latestCloud;
     private readonly Color accent = SystemParameters.WindowGlassColor;
@@ -477,8 +478,14 @@ internal sealed class PrototypeWindow
                 if (child is DependencyObject element) DisableUnconnected(element);
         }
         DisableUnconnected(settings);
-        Find<Button>("SettingsFooterButton").Click += (_, _) => ShowSettings(true);
-        Find<Button>("SettingsBackButton").Click += (_, _) => ShowSettings(false);
+        Button footer = Find<Button>("SettingsFooterButton"), back = Find<Button>("SettingsBackButton");
+        foreach (Button button in new[] { footer, back })
+        {
+            button.PreviewMouseLeftButtonDown += (_, _) => { navigationByKeyboard = false; Keyboard.ClearFocus(); };
+            button.PreviewKeyDown += (_, e) => { if (e.Key is Key.Enter or Key.Space) navigationByKeyboard = true; };
+        }
+        footer.Click += (_, _) => { ShowSettings(true, navigationByKeyboard); navigationByKeyboard = false; };
+        back.Click += (_, _) => { ShowSettings(false, navigationByKeyboard); navigationByKeyboard = false; };
         Find<Button>("SettingsTaskbarMinimizeButton").Click += (_, _) => window.WindowState = WindowState.Minimized;
         Find<Button>("SettingsCloseButton").Click += (_, _) => window.Close();
         Find<Button>("SystemThemeButton").Click += (_, _) => SelectDisplayMode(true, "system");
@@ -507,12 +514,12 @@ internal sealed class PrototypeWindow
         UpdateDisplayControls();
     }
 
-    private void ShowSettings(bool show)
+    private void ShowSettings(bool show, bool keyboardNavigation)
     {
         expanded.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
         Find<Grid>("SettingsView").Visibility = show ? Visibility.Visible : Visibility.Collapsed;
-        if (show) Find<Button>("SettingsBackButton").Focus();
-        else Find<Button>("SettingsFooterButton").Focus();
+        if (keyboardNavigation) Find<Button>(show ? "SettingsBackButton" : "SettingsFooterButton").Focus();
+        else Keyboard.ClearFocus();
     }
 
     private void SelectDisplayMode(bool theme, string mode)

@@ -11,8 +11,10 @@ The adapter never copies unrelated old properties into the new file.
 
 The caller supplies distinct absolute legacy and target paths in trusted
 directories. The path helper reproduces the published standalone and Store
-directory conventions, but does not discover an installation. The target and
-its lock are separate. Reading an existing target directory can create its lock
+directory conventions. `ForApplication` accepts an executable directory and
+user roots and checks the published Store marker; an invalid or inaccessible
+marker or application directory makes the service unavailable instead of
+choosing the other edition. The target and its lock are separate. Reading an existing target directory can create its lock
 file; a missing directory is created only when a selection is saved. The
 existing `Initialize(theme, language)` operation remains available to an
 explicit caller but is not required for normal individual selections.

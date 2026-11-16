@@ -9,6 +9,7 @@ using System.Windows.Input;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using AITaskMonitor.Prototype;
 using AITaskMonitor.Prototype.Settings;
 using AITaskMonitor.NativeUpdateController;
@@ -37,13 +38,13 @@ internal static class Program
         using var output = new FileStream(Path.Combine(root, name + ".png"), FileMode.CreateNew, FileAccess.Write, FileShare.None);
         encoder.Save(output);
     }
-    private static (Window Window, PrototypeWindow Controller) Open(PreferenceFiles files)
+    private static (Window Window, PrototypeWindow Controller) Open(PreferenceFiles files, Func<bool?>? systemTheme = null)
     {
         using Stream layout = typeof(PrototypeWindow).Assembly.GetManifestResourceStream(
             "AITaskMonitor.Prototype.PublishedWindow.xaml") ?? throw new InvalidOperationException("Layout missing.");
         var window = (Window)XamlReader.Load(layout);
         var controller = new PrototypeWindow(window, new Options("dark", "ru", "active", false, true, null, null, false),
-            files.Service, () => false, () => "ru-RU");
+            files.Service, systemTheme ?? (() => false), () => "ru-RU");
         window.WindowStartupLocation = WindowStartupLocation.Manual;
         window.Left = -10000;
         window.Top = -10000;
@@ -80,7 +81,8 @@ internal static class Program
         File.WriteAllBytes(old, original);
         var files = new PreferenceFiles(old, target);
         var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-        var first = Open(files);
+        bool systemLight = false;
+        var first = Open(files, () => systemLight);
         Window window = first.Window;
         Check(Find<Button>(window, "SettingsFooterButton").IsEnabled, "The injected settings button is not available.");
         Click(window, "SettingsFooterButton");
@@ -131,6 +133,14 @@ internal static class Program
                 Find<TextBlock>(window, "SettingsHeading").Text == "Настройки" &&
                 ((SolidColorBrush)window.Resources["Surface"]).Color == (Color)ColorConverter.ConvertFromString("#202020"),
                 "The selected system modes did not use the supplied system preferences.");
+        systemLight = true;
+        var frame = new DispatcherFrame();
+        var stop = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(2300) };
+        stop.Tick += (_, _) => { stop.Stop(); frame.Continue = false; };
+        stop.Start();
+        Dispatcher.PushFrame(frame);
+        Check(((SolidColorBrush)window.Resources["Surface"]).Color == (Color)ColorConverter.ConvertFromString("#F6F6F6"),
+            "A later system-theme change was not applied.");
         Click(window, "EnglishLanguageButton");
         Click(window, "DarkThemeButton");
         first.Controller.ApplySyntheticUpdate(new UpdateInfo("0.2.7-alpha", "https://example.invalid/update"),
