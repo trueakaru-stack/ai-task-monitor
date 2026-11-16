@@ -39,7 +39,7 @@ try {
         throw ('Synthetic helper compilation failed: '+$compileOutput.Result+$compileError.Result)
     }
 } finally {$compileProcess.Dispose()}
-function Invoke-Synthetic([string[]]$arguments,[string]$payload,[bool]$capture,[bool]$addPowerShellPath){
+function Invoke-Synthetic([string[]]$arguments,[string]$payload,[bool]$capture,[bool]$addPowerShellPath,[bool]$addModulePath){
     $start=[Diagnostics.ProcessStartInfo]::new()
     $psDirectory=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0'
     $start.FileName=Join-Path $psDirectory 'powershell.exe'
@@ -56,6 +56,11 @@ function Invoke-Synthetic([string[]]$arguments,[string]$payload,[bool]$capture,[
         if($null -ne $value){$start.Environment[$name]=$value}
     }
     if($addPowerShellPath){$start.Environment['PATH']=$psDirectory+';'+$start.Environment['PATH']}
+    if($addModulePath){
+        $systemModules=[IO.Path]::Combine($psDirectory,'Modules')
+        $programModules=[IO.Path]::Combine($env:ProgramFiles,'WindowsPowerShell','Modules')
+        $start.Environment['PSModulePath']=$systemModules+';'+$programModules
+    }
     $start.Environment['DOTNET_ADD_GLOBAL_TOOLS_TO_PATH']='0'
     $start.Environment['DOTNET_GENERATE_ASPNET_CERTIFICATE']='0'
     $start.Environment['AI_TASK_MONITOR_AUDIT']='1'
@@ -63,7 +68,7 @@ function Invoke-Synthetic([string[]]$arguments,[string]$payload,[bool]$capture,[
     $process=[Diagnostics.Process]::Start($start)
     try {
         if($capture){$stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()}
-        $process.StandardInput.WriteLine($payload)
+        if($payload.Length -gt 0){$process.StandardInput.WriteLine($payload)}
         $process.StandardInput.Close()
         if(-not $process.WaitForExit(8000)){
             $process.Kill($true)
@@ -74,11 +79,14 @@ function Invoke-Synthetic([string[]]$arguments,[string]$payload,[bool]$capture,[
         return ('exit='+$process.ExitCode+' (output inherited)')
     } finally {$process.Dispose()}
 }
-$basic=Invoke-Synthetic @('-NoProfile','-NonInteractive','-Command','[Console]::Out.Write([Console]::In.ReadToEnd())') 'synthetic' $true $false
+$basic=Invoke-Synthetic @('-NoProfile','-NonInteractive','-Command','[Console]::Out.Write([Console]::In.ReadToEnd())') 'synthetic' $true $false $false
 Write-Output ('Simple input, all streams redirected: '+$basic)
+$joinArguments=@('-NoProfile','-NonInteractive','-Command','Join-Path $env:TEMP synthetic')
+Write-Output ('Join-Path without PSModulePath: '+(Invoke-Synthetic $joinArguments '' $true $false $false))
+Write-Output ('Join-Path with system PSModulePath: '+(Invoke-Synthetic $joinArguments '' $true $false $true))
 $trace=@'
 function Write-SyntheticTrace([string]$phase) {
- [IO.File]::AppendAllText((Join-Path $env:TEMP 'aitm-hook-trace.txt'), $phase+[Environment]::NewLine)
+ [IO.File]::AppendAllText(([IO.Path]::Combine($env:TEMP,'aitm-hook-trace.txt')), $phase+[Environment]::NewLine)
 }
 Write-SyntheticTrace 'script-entered'
 '@
@@ -95,7 +103,11 @@ $debug=Join-Path $install 'synthetic-debug-hook.ps1'
 [IO.File]::WriteAllText($debug,$script,[Text.UTF8Encoding]::new($false))
 $payload='{"hook_event_name":"UserPromptSubmit","session_id":"synthetic-session"}'
 $hookArguments=@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$debug)
-$result=Invoke-Synthetic $hookArguments $payload $true $false
-$tracePath=Join-Path $env:TEMP 'aitm-hook-trace.txt'
+$result=Invoke-Synthetic $hookArguments $payload $true $false $false
+$tracePath=[IO.Path]::Combine($env:TEMP,'aitm-hook-trace.txt')
 $phases=if([IO.File]::Exists($tracePath)){[IO.File]::ReadAllText($tracePath)}else{'no trace file'}
-Write-Output ('Instrumented synthetic hook: '+$result+'; phases='+$phases)
+Write-Output ('Instrumented hook without PSModulePath: '+$result+'; phases='+$phases)
+[IO.File]::WriteAllText($tracePath,'')
+$resultWithModules=Invoke-Synthetic $hookArguments $payload $true $false $true
+$phasesWithModules=if([IO.File]::Exists($tracePath)){[IO.File]::ReadAllText($tracePath)}else{'no trace file'}
+Write-Output ('Instrumented hook with system PSModulePath: '+$resultWithModules+'; phases='+$phasesWithModules)
