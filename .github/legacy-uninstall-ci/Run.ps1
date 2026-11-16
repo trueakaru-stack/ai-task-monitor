@@ -79,13 +79,20 @@ try {
             Check ($probeProcess.ExitCode -eq 0) 'Synthetic PowerShell startup failed.'
         } finally { $probeProcess.Dispose() }
         Write-Output 'Synthetic PowerShell startup succeeded.'
-        foreach ($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$uninstaller)) { [void]$start.ArgumentList.Add($arg) }
+        $wrapper=Join-Path $case 'trace-wrapper.ps1'
+        [IO.File]::WriteAllLines($wrapper, @('Set-PSDebug -Trace 1','$taskScript = $args[0]','& $taskScript'), [Text.UTF8Encoding]::new($false))
+        $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
+        foreach ($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$wrapper,$uninstaller)) { [void]$start.ArgumentList.Add($arg) }
         $process=[Diagnostics.Process]::Start($start)
+        $outTask=$process.StandardOutput.ReadToEndAsync(); $errTask=$process.StandardError.ReadToEndAsync()
         try {
             if (-not $process.WaitForExit(20000)) {
                 $children=@(Get-CimInstance Win32_Process -Filter ('ParentProcessId = ' + $process.Id) | ForEach-Object { $_.Name })
                 Write-Output ('Timed-out synthetic process children: ' + ($children -join ','))
                 $process.Kill($true)
+                $null=$process.WaitForExit(5000)
+                if ($outTask.Wait(2000)) { Write-Output ('Synthetic trace: ' + $outTask.Result) }
+                if ($errTask.Wait(2000)) { Write-Output ('Synthetic stderr: ' + $errTask.Result) }
                 throw 'Synthetic uninstaller timed out.'
             }
             $exit=$process.ExitCode
