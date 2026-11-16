@@ -90,7 +90,9 @@ try {
     Assert-Condition (-not [IO.File]::Exists($globalJson)) 'The disposable checkout already contains global.json.'
     [IO.File]::WriteAllText($globalJson, '{"sdk":{"version":"10.0.404","rollForward":"disable","allowPrerelease":false}}', [Text.UTF8Encoding]::new($false))
     $nugetConfig = Join-Path $testRoot 'NuGet.Config'
-    $configText = '<configuration><packageSources><clear /><add key="nuget.org" value="https://api.nuget.org/v3/index.json" /></packageSources><config><add key="signatureValidationMode" value="require" /></config></configuration>'
+    # Microsoft's published author-signing certificate, effective from 2026-09-23.
+    $signer = '9A1B131BEE0605433056A4EA3815478A8E177961A968C6C0027C1093D1FEB630'
+    $configText = '<configuration><packageSources><clear /><add key="nuget.org" value="https://api.nuget.org/v3/index.json" /></packageSources><config><add key="signatureValidationMode" value="require" /></config><trustedSigners><clear /><author name="Microsoft"><certificate fingerprint="' + $signer + '" hashAlgorithm="SHA256" allowUntrustedRoot="false" /></author></trustedSigners></configuration>'
     [IO.File]::WriteAllText($nugetConfig, $configText, [Text.UTF8Encoding]::new($false))
 
     function New-IsolatedStart([string]$Executable, [string]$RuntimeRoot, [bool]$IncludeSdk) {

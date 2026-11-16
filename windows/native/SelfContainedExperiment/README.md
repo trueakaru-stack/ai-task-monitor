@@ -11,7 +11,10 @@ validates archive paths and extracts it under a new runner-temp directory. A
 temporary checkout-local `global.json` pins the SDK with roll-forward disabled.
 The test pins `RuntimeFrameworkVersion` to 10.0.15 and restores only through the
 official NuGet feed, using a fresh isolated package cache and required NuGet
-signature validation. Package identities and SHA-512 values are saved in a
+signature validation against the Microsoft author-signing certificate
+`9A1B131BEE0605433056A4EA3815478A8E177961A968C6C0027C1093D1FEB630`,
+[published by Microsoft](https://devblogs.microsoft.com/dotnet/microsoft-author-signing-certificate-update-2026/).
+Package identities and SHA-512 values are saved in a
 synthetic inventory; other SDK-selected packages may be needed. No machine or
 user-wide SDK installation is performed.
 
