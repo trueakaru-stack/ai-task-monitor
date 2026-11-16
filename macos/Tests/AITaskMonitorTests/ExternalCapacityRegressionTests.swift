@@ -681,5 +681,117 @@ final class ExternalCapacityRegressionTests: XCTestCase {
         }
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path).count, 48)
     }
+
+    @MainActor
+    func testRenderExistingHintAsLongWarningExample() throws {
+        let path = try directory("hint-demo")
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: false)
+        let output = URL(fileURLWithPath: path, isDirectory: true).appendingPathComponent("renders", isDirectory: true)
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        defer { AppLanguage.previewOverride = nil }
+        for language in [AppLanguage.ru, .en] {
+            AppLanguage.previewOverride = language
+            for dark in [false, true] {
+                let item = MonitoredTask(id: "deepseek:synthetic", provider: .deepseek,
+                    title: tr("Проверка задачи", "Synthetic task"),
+                    activity: tr("Статус не подтверждён", "Status unconfirmed"), isActive: false,
+                    progress: nil, progressKind: .none, steps: [], updatedAt: Date(), isUnconfirmed: true)
+                let store = TaskStore(codexReader: CodexTaskReader(codexHome: URL(fileURLWithPath: path + "/fake-codex")),
+                                      claudeReader: ClaudeTaskReader(eventFile: URL(fileURLWithPath: path + "/fake-events")),
+                                      previewTasks: [item])
+                store.testSetExternalAvailability(previous: [item],
+                    unavailable: [.codex, .claude, .kimi, .deepseek, .hermes, .opencode],
+                    partiallyUnavailable: [.deepseek, .hermes, .opencode])
+                store.isCompact = true
+                let warning = store.unavailableMessage
+                XCTAssertGreaterThan(warning.count, 100)
+                let root = RootView().environmentObject(store).environment(\.colorScheme, dark ? .dark : .light)
+                let hosting = NSHostingView(rootView: root)
+                hosting.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                hosting.frame = NSRect(x: 0, y: 0, width: 372, height: 206)
+                let window = NSWindow(contentRect: hosting.bounds, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentView = hosting
+                window.orderFrontRegardless()
+                hosting.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+                hosting.layoutSubtreeIfNeeded()
+                let appBitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+                hosting.cacheDisplay(in: hosting.bounds, to: appBitmap)
+                let appImage = NSImage(size: hosting.bounds.size)
+                appImage.addRepresentation(appBitmap)
+
+                // Illustrative composition only. The current warning's hover
+                // handler is not changed or exercised by this snapshot.
+                let field = TruncatingTextField(labelWithString: "")
+                field.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                let panel = field.makeHintPanel(text: warning)
+                let hintView = try XCTUnwrap(panel.contentView)
+                hintView.layoutSubtreeIfNeeded()
+                let label = try XCTUnwrap(hintView.subviews.compactMap { $0 as? NSTextField }.first)
+                XCTAssertEqual(label.stringValue, warning)
+                XCTAssertEqual(label.maximumNumberOfLines, 0)
+                let labelFont = try XCTUnwrap(label.font)
+                let needed = (warning as NSString).boundingRect(
+                    with: NSSize(width: label.bounds.width, height: 1_000),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    attributes: [.font: labelFont]).integral.height
+                XCTAssertLessThanOrEqual(needed, label.bounds.height + 1, "The entire warning must fit in the existing hint.")
+                let hintBitmap = try XCTUnwrap(hintView.bitmapImageRepForCachingDisplay(in: hintView.bounds))
+                hintView.cacheDisplay(in: hintView.bounds, to: hintBitmap)
+                let hintImage = NSImage(size: hintView.bounds.size)
+                hintImage.addRepresentation(hintBitmap)
+
+                // Compute the hint origin using the existing cursor placement
+                // function, with a synthetic pointer near the warning's end.
+                let appOrigin = NSPoint(x: 50, y: 100)
+                let pointer = NSPoint(x: appOrigin.x + hosting.bounds.width - 25, y: appOrigin.y + 42)
+                let hintOrigin = cursorHintOrigin(pointer: pointer, size: hintView.bounds.size,
+                    workArea: NSRect(x: 0, y: 0, width: 1000, height: 800))
+                let appRect = NSRect(origin: appOrigin, size: hosting.bounds.size)
+                let hintRect = NSRect(origin: hintOrigin, size: hintView.bounds.size)
+                let canvas = appRect.union(hintRect).insetBy(dx: -8, dy: -8).integral
+                let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil,
+                    pixelsWide: Int(canvas.width), pixelsHigh: Int(canvas.height), bitsPerSample: 8,
+                    samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                    bytesPerRow: 0, bitsPerPixel: 0))
+                bitmap.size = canvas.size
+                if let bytes = bitmap.bitmapData {
+                    memset(bytes, 0, bitmap.bytesPerRow * bitmap.pixelsHigh)
+                }
+                let context = try XCTUnwrap(NSGraphicsContext(bitmapImageRep: bitmap))
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = context
+                appImage.draw(in: appRect.offsetBy(dx: -canvas.minX, dy: -canvas.minY),
+                              from: .zero, operation: .sourceOver, fraction: 1)
+                hintImage.draw(in: hintRect.offsetBy(dx: -canvas.minX, dy: -canvas.minY),
+                               from: .zero, operation: .sourceOver, fraction: 1)
+                context.flushGraphics()
+                NSGraphicsContext.restoreGraphicsState()
+                let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                let destination = output.appendingPathComponent("hint-example-\(language.rawValue)-\(dark ? "dark" : "light").png").path
+                guard destination.hasPrefix(output.path + "/") else { throw FixtureFailure.unsafeRoot }
+                let descriptor = destination.withCString {
+                    open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+                }
+                guard descriptor >= 0 else { throw FixtureFailure.writeFailed }
+                defer { close(descriptor) }
+                var written = 0
+                while written < png.count {
+                    let count = png.withUnsafeBytes { buffer in
+                        Darwin.write(descriptor, buffer.baseAddress!.advanced(by: written), png.count - written)
+                    }
+                    if count < 0 && errno == EINTR { continue }
+                    guard count > 0 else { throw FixtureFailure.writeFailed }
+                    written += count
+                }
+                panel.close()
+                window.close()
+            }
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path).count, 4)
+    }
     #endif
 }
