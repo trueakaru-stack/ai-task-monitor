@@ -71,16 +71,16 @@ detected during the read produces a hidden or unconfirmed result and retains
 names from before the read. `IsCurrent` alone cannot make checking and UI
 presentation atomic: the owner must serialize notifications, the check and
 presentation, and serialize polls. A connection change never reported to the
-source cannot be detected. The prototype pump uses this contract in synthetic
-tests, but the application entry point does not start it and live in-flight
-protection remains unverified.
+source cannot be detected. The experimental application owner starts one
+prototype pump for a detected standalone global hook. Synthetic tests exercise
+this contract, but live in-flight protection remains unverified.
 
 `NotifyUnavailable` can signal source loss without waiting for a blocked poll's
 read lock. The pump supplies a previously displayed, source-owned bounded
 fallback so a late stop cannot erase earlier names. The signal invalidates the
 prior generation but cannot cancel physical I/O or prove event delivery. The
 owner must serialize presentation and ensure one lifetime pump as documented in
-the prototype; no real-profile integration is enabled by this behavior.
+the prototype; this behavior alone does not establish delivery from a real hook.
 
 Pending snapshots use the session reader's existing retention rules: at most
 256 cards and 128 retained steps per card, with bounded step titles and IDs.
@@ -105,9 +105,10 @@ on a worker without waiting on the dispatcher.
 
 The source cannot tell a live partial write from a permanently interrupted one,
 cannot guarantee a future completion or notice every writer failure, and its
-memory of loss does not survive a process restart. It does not discover a real
-profile, register hooks, or start itself in the application. Synthetic tests
-of bounded input and known failures do not establish behavior for a real Claude
+memory of loss does not survive a process restart. The reader itself does not
+discover a profile, register hooks, or start itself; the experimental owner
+supplies paths for the previously configured standalone hook. Synthetic tests of
+bounded input and known failures do not establish behavior for a real Claude
 installation.
 
 The remaining read races, connection and lifecycle limitations prevent this

@@ -242,7 +242,7 @@
      <Border Grid.Row="1" BorderBrush="{DynamicResource Divider}" BorderThickness="0,0,0,1">
      <Grid Margin="20,18,20,17">
       <StackPanel x:Name="TaskHeaderStack">
-       <TextBlock Text="Ход выполнения" FontFamily="Segoe UI Variable Display Semibold" FontSize="22" Foreground="{DynamicResource TextPrimary}"/>
+       <TextBlock x:Name="ProgressHeading" Text="Ход выполнения" FontFamily="Segoe UI Variable Display Semibold" FontSize="22" Foreground="{DynamicResource TextPrimary}"/>
        <Grid x:Name="ProviderTabsHost" Visibility="Collapsed" Margin="0,16,0,0" HorizontalAlignment="Stretch" MaxWidth="{Binding ActualWidth, ElementName=TaskHeaderStack}">
         <Path x:Name="ProviderTabsShape" Fill="{DynamicResource Track}" Opacity="0.36"/>
         <Border Padding="4"><ScrollViewer x:Name="ProviderTabsScroll" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled" CanContentScroll="False" PanningMode="HorizontalOnly" Focusable="False"><StackPanel x:Name="ProviderTabsPanel" Orientation="Horizontal"/></ScrollViewer></Border>
@@ -363,7 +363,7 @@
          <TextBlock x:Name="ClaudeSourceStatus" Grid.Column="1" Margin="0,0,8,0" VerticalAlignment="Center" FontSize="12" Foreground="{DynamicResource TextSecondary}"/>
          <Button x:Name="ClaudeSourceAction" Grid.Column="2" Style="{StaticResource SourceActionStyle}"/>
         </Grid>
-        <TextBlock Margin="0,0,0,12" Text="Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
+        <TextBlock Margin="0,0,0,12" Text="Перед подключением обновите все используемые копии Claude Code, в том числе в Claude Desktop, до версии 2.1.101 или новее. Перед подключением или отключением закройте Claude Code, Claude Desktop и другие программы, которые могут изменять настройки Claude Code, включая их фоновые процессы. Приложение не проверяет версии и закрытие программ автоматически. Приложение добавит локальные hooks в настройки Claude Code. Права администратора, токены и вход в аккаунт не нужны. После подключения перезапустите Claude Desktop или Claude Code. Пока отслеживаются только локальные сессии." TextWrapping="Wrap" FontSize="11.5" LineHeight="16" Foreground="{DynamicResource TextMuted}"/>
         <Border Height="1" Background="{DynamicResource Divider}"/>
         <Grid Height="50">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

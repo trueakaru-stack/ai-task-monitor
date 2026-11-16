@@ -1,7 +1,7 @@
 name: Synthetic Claude registered-hook-to-WPF
 on:
   push:
-    branches: ['codex/claude-real-source-safe-20261116']
+    branches: ['windows', 'codex/claude-settings-integrated-20261116']
 permissions:
   contents: read
 jobs:

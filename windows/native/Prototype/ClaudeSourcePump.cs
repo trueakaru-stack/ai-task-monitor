@@ -10,7 +10,7 @@ namespace AITaskMonitor.Prototype;
 // The pump owns its source and disposes it off the dispatcher.
 // The owner must report connection changes through this pump on the dispatcher.
 // Polling runs off that thread; verification and presentation stay ordered with
-// connection notifications on it. The application entry point does not start it.
+// connection notifications on it. The application owner controls its lifetime.
 internal sealed class ClaudeSourcePump : IDisposable
 {
     private readonly Dispatcher dispatcher;

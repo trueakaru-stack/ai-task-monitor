@@ -3,18 +3,24 @@
 This WPF prototype is not a replacement for the released application. The
 normal entry point attempts to detect the previously configured standalone
 Windows Claude hook and read its local event journal. Preview and screenshot
-scenarios use synthetic data and do not start this detection. The prototype
-does not yet provide source configuration, saved preferences, diagnostics or
-installed-app updates; its settings button remains inactive.
+scenarios use synthetic data and do not start this detection. In the normal
+standalone launch the existing settings screen can read the old theme and
+language choices and save explicit display changes to a separate file. Source
+actions, About, diagnostics and installed-app updates remain disabled or absent.
 
 The detection reads the existing global Claude settings and the standalone
 monitor journal without changing them. It recognizes only the expected hook at
 `%LOCALAPPDATA%\AITaskMonitor\ClaudeTaskHook.ps1`; Store hooks, other profile
 paths, local project settings and managed policy are not covered. Registration
 does not prove effective policy, event delivery or live activity, so every
-Claude card is presented as unconfirmed. An empty recognized source reports
-that task status is unconfirmed rather than claiming that all tasks are absent.
-Other integrations remain synthetic or disabled. The user must already have
+Claude card is presented as unconfirmed. The settings screen shows an
+unconfirmed registration status for an observed or absent global hook and
+"No data" for a read error or invalid settings. It does not infer that other
+scopes are disconnected. An empty source reports that task status is
+unconfirmed rather than claiming that all tasks are absent. A task whose only
+known activity predates this monitor launch is not displayed until an eligible
+later active event arrives; earlier records may then contribute context. Other
+integrations remain synthetic or disabled. The user must already have
 authorized and configured the old hook; this prototype neither installs nor
 runs it.
 

@@ -13,6 +13,7 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using AITaskMonitor.Claude;
 using AITaskMonitor.Prototype;
+using AITaskMonitor.Prototype.Settings;
 
 internal static class Program
 {
@@ -130,12 +131,13 @@ internal static class Program
         Check(condition(), description);
     }
 
-    private static Window NewWindow(string language, string theme, bool compact, out PrototypeWindow controller)
+    private static Window NewWindow(string language, string theme, bool compact, out PrototypeWindow controller,
+        DisplayPreferenceService? preferences = null)
     {
         using Stream resource = typeof(PrototypeWindow).Assembly.GetManifestResourceStream(
             "AITaskMonitor.Prototype.PublishedWindow.xaml") ?? throw new InvalidOperationException();
         var window = (Window)XamlReader.Load(resource);
-        controller = new PrototypeWindow(window, new Options(theme, language, "empty", compact, true, null, null, false));
+        controller = new PrototypeWindow(window, new Options(theme, language, "empty", compact, true, null, null, false), preferences);
         window.WindowStartupLocation = WindowStartupLocation.Manual;
         window.Left = -10000; window.Top = -10000; window.ShowActivated = false; window.ShowInTaskbar = false;
         window.Show(); window.UpdateLayout();
@@ -185,22 +187,83 @@ internal static class Program
         catch (InvalidOperationException) { return false; }
     }
 
+    private static AutomationElement? FindById(Process host, string id)
+    {
+        try
+        {
+            host.Refresh();
+            if (host.HasExited || host.MainWindowHandle == IntPtr.Zero) return null;
+            AutomationElement? root = AutomationElement.FromHandle(host.MainWindowHandle);
+            return root?.FindFirst(TreeScope.Descendants,
+                new PropertyCondition(AutomationElement.AutomationIdProperty, id));
+        }
+        catch (ElementNotAvailableException) { return null; }
+        catch (InvalidOperationException) { return null; }
+    }
+
+    private static void InvokeControl(Process host, string id)
+    {
+        WaitUntil(() => { AutomationElement? element = FindById(host, id); return element is not null && element.Current.IsEnabled; },
+            "Synthetic control unavailable: " + id);
+        AutomationElement element = FindById(host, id) ?? throw new InvalidOperationException(id);
+        ((InvokePattern)element.GetCurrentPattern(InvokePattern.Pattern)).Invoke();
+    }
+
+    private static void HoldWithoutCard(Process host, int milliseconds)
+    {
+        DateTime until = DateTime.UtcNow.AddMilliseconds(milliseconds);
+        var frame = new DispatcherFrame();
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        bool observed = false;
+        timer.Tick += (_, _) =>
+        {
+            observed |= HasName(host, "Задача Claude Code");
+            if (observed || DateTime.UtcNow >= until) frame.Continue = false;
+        };
+        timer.Start(); Dispatcher.PushFrame(frame); timer.Stop();
+        Check(!observed && !host.HasExited, "A pre-start event must not be presented as a current task.");
+    }
+
     private static void CheckActualEntryPoint(string root, ClaudeRegisteredHookPaths paths)
     {
         string exe = Path.Combine(root, "artifacts", "bin", "Prototype", "release", "AI Task Monitor.exe");
         Check(File.Exists(exe), "The synthetic WPF executable is missing.");
+        string directory = Path.GetDirectoryName(paths.CurrentJournal)!;
+        string legacy = Path.Combine(directory, "settings.json");
+        string display = Path.Combine(directory, "display-preferences.json");
+        byte[] original = Encoding.UTF8.GetBytes("{\"theme\":\"dark\",\"language\":\"ru\",\"unrelated\":\"preserve\"}");
+        File.WriteAllBytes(legacy, original);
+        Check(!File.Exists(display), "The synthetic display preferences already exist.");
+        // The existing prompt predates the monitor. It cannot prove activity now.
+        Emit(paths.Hook, new { hook_event_name = "UserPromptSubmit", session_id = "host-fixture" }, root);
+        System.Threading.Thread.Sleep(250);
         var start = new ProcessStartInfo(exe) { UseShellExecute = false, WorkingDirectory = root };
         ApplySyntheticEnvironment(start);
         using Process host = Process.Start(start) ?? throw new InvalidOperationException("The synthetic host did not start.");
         try
         {
             WaitUntil(() => HasName(host, "Статус задач не подтверждён"), "The normal entry point did not discover the synthetic registration.");
-            Emit(paths.Hook, new { hook_event_name = "UserPromptSubmit", session_id = "host-fixture" }, root);
+            HoldWithoutCard(host, 2500);
+            Check(!HasName(host, "Источники не подключены") && !HasName(host, "Активных задач сейчас нет"),
+                "A missing pre-start card was presented as a definitive absence.");
+            // A later active event from the same session can make its prior context visible.
+            Emit(paths.Hook, new { hook_event_name = "PreToolUse", session_id = "host-fixture", tool_name = "Read" }, root);
             WaitUntil(() => HasName(host, "Задача Claude Code") && HasName(host, "Статус не подтверждён"),
-                "The normal entry point did not render the released hook event as unconfirmed.");
+                "The normal entry point did not render later same-session activity as unconfirmed.");
+            InvokeControl(host, "SettingsFooterButton");
+            WaitUntil(() => HasName(host, "Настройки") && HasName(host, "Статус не подтверждён"),
+                "The loaded Russian preferences or Claude registration status was not shown.");
+            InvokeControl(host, "EnglishLanguageButton");
+            WaitUntil(() => HasName(host, "Settings") && HasName(host, "Status unconfirmed"),
+                "The real entry point did not preserve the Claude status through language selection.");
+            WaitUntil(() => File.Exists(display), "The real entry point did not save synthetic display preferences.");
+            using (JsonDocument saved = JsonDocument.Parse(File.ReadAllBytes(display)))
+                Check(saved.RootElement.GetProperty("language").GetString() == "en", "The selected language was not saved.");
+            Check(File.ReadAllBytes(legacy).AsSpan().SequenceEqual(original), "The old synthetic settings were changed.");
+            InvokeControl(host, "SettingsBackButton");
             Emit(paths.Hook, new { hook_event_name = "Stop", session_id = "host-fixture",
                 background_tasks = Array.Empty<object>(), session_crons = Array.Empty<object>() }, root);
-            WaitUntil(() => !HasName(host, "Задача Claude Code") && HasName(host, "Статус задач не подтверждён"),
+            WaitUntil(() => !HasName(host, "Claude Code task") && HasName(host, "Task status unconfirmed"),
                 "The normal entry point did not update after the synthetic stop.");
             Check(host.CloseMainWindow() && host.WaitForExit(8000), "The synthetic host did not close gracefully.");
         }
@@ -233,8 +296,18 @@ internal static class Program
                 "A redirected settings file must not be treated as verified.");
 
             var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-            Window window = NewWindow("ru", "dark", false, out PrototypeWindow controller);
+            string preferenceRoot = Path.Combine(root, "owner-preferences");
+            Directory.CreateDirectory(preferenceRoot);
+            string oldPreferences = Path.Combine(preferenceRoot, "old.json");
+            File.WriteAllText(oldPreferences, "{\"theme\":\"dark\",\"language\":\"ru\"}", new UTF8Encoding(false));
+            var preferences = new PreferenceFiles(oldPreferences, Path.Combine(preferenceRoot, "display.json"));
+            Window window = NewWindow("ru", "dark", false, out PrototypeWindow controller, preferences.Service);
+            Check(!((Button)window.FindName("ClaudeSourceAction")).IsEnabled &&
+                !((Button)window.FindName("AboutSettingsButton")).IsEnabled,
+                "Unfinished connection or About actions must remain disabled.");
+            File.WriteAllText(paths.Settings, "{\"hooks\":{}}", new UTF8Encoding(false));
             ClaudeSourceSnapshot? latest = null;
+            ClaudeRegistration? registration = null;
             int presentations = 0;
             using var inspectionEntered = new ManualResetEventSlim();
             using var inspectionRelease = new ManualResetEventSlim();
@@ -252,12 +325,38 @@ internal static class Program
                     if (!inspectionRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException("Synthetic inspection was not released.");
                 }
                 return ClaudeRegisteredHookOwner.Inspect(paths);
-            }, interval: TimeSpan.FromHours(1));
+            }, interval: TimeSpan.FromHours(1), reportRegistration: value =>
+            {
+                registration = value;
+                controller.ApplyClaudeRegistration(value);
+            });
             try
             {
                 owner.Start();
-                WaitUntil(() => presentations > 0, "The synthetic registration was not polled.");
+                WaitUntil(() => registration == ClaudeRegistration.Absent, "The absent global hook was not inspected.");
+                Check(((TextBlock)window.FindName("ClaudeSourceStatus")).Text == "Статус не подтверждён",
+                    "Absence in one file was presented as all Claude integrations disconnected.");
+                Check(((StackPanel)window.FindName("TasksPanel")).Children.OfType<TextBlock>()
+                    .Any(text => text.Text == "Статус задач не подтверждён"),
+                    "An absent global hook was presented as absence of all sources.");
+                File.WriteAllText(paths.Settings, "{", new UTF8Encoding(false));
+                owner.RequestInspection();
+                WaitUntil(() => registration == ClaudeRegistration.Unavailable, "Invalid settings were not reported unavailable.");
+                Check(((TextBlock)window.FindName("ClaudeSourceStatus")).Text == "Нет данных",
+                    "Invalid settings must not produce a registration conclusion.");
+                File.WriteAllText(paths.Settings, complete, new UTF8Encoding(false));
+                owner.RequestInspection();
+                WaitUntil(() => registration == ClaudeRegistration.Registered && latest is { Unavailable: false },
+                    "The synthetic registration was not polled.");
                 Check(controller.CurrentTasks.Count == 0 && latest is { Unavailable: false }, "The empty source state is wrong.");
+                Check(((TextBlock)window.FindName("ClaudeSourceStatus")).Text == "Статус не подтверждён",
+                    "A known global hook must not imply all registrations or delivery are confirmed.");
+                ((Button)window.FindName("EnglishLanguageButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Check(((TextBlock)window.FindName("ClaudeSourceStatus")).Text == "Status unconfirmed",
+                    "The source status did not switch to English.");
+                ((Button)window.FindName("RussianLanguageButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Check(((TextBlock)window.FindName("ClaudeSourceStatus")).Text == "Статус не подтверждён",
+                    "The source status did not switch back to Russian.");
                 Emit(paths.Hook, new { hook_event_name = "UserPromptSubmit", session_id = "synthetic-session" }, root);
                 Emit(paths.Hook, new { hook_event_name = "TaskCreated", session_id = "synthetic-session",
                     task_id = "step-1", task_subject = "Synthetic step" }, root);
@@ -275,7 +374,9 @@ internal static class Program
                 WaitUntil(() => controller.CurrentTasks.Any(task => task.Provider == "claude"), "A subsequent synthetic task was not shown.");
                 File.WriteAllText(paths.Settings, partial, new UTF8Encoding(false));
                 owner.RequestInspection();
-                WaitUntil(() => latest is { Unavailable: true }, "Partial registration did not make the source unavailable.");
+                WaitUntil(() => latest is { Unavailable: true } && registration == ClaudeRegistration.Partial, "Partial registration did not make the source unavailable.");
+                Check(((TextBlock)window.FindName("ClaudeSourceStatus")).Text == "Статус не подтверждён",
+                    "Partial registration did not retain an unconfirmed source status.");
                 Check(controller.CurrentTasks.Single(task => task.Provider == "claude").Status == "unknown",
                     "A partial source retained a confirmed card.");
                 int beforeDelayedStop = presentations;
@@ -286,8 +387,10 @@ internal static class Program
                     "Connection loss must retain the known unconfirmed card.");
                 File.WriteAllText(paths.Settings, "{\"hooks\":{}}", new UTF8Encoding(false));
                 owner.RequestInspection();
-                WaitUntil(() => controller.CurrentTasks.All(task => task.Provider != "claude") && latest is { Unavailable: false },
-                    "Removing the known global hook did not clear its cards.");
+                WaitUntil(() => controller.CurrentTasks.All(task => task.Provider != "claude") && latest is { Unavailable: false }
+                    && registration == ClaudeRegistration.Absent, "Removing the known global hook did not clear its cards.");
+                Check(((TextBlock)window.FindName("ClaudeSourceStatus")).Text == "Статус не подтверждён",
+                    "Removing one global hook was presented as absence of all integrations.");
                 File.WriteAllText(paths.Settings, complete, new UTF8Encoding(false));
                 owner.RequestInspection();
                 WaitUntil(() => !owner.InspectionPending, "Reconnect inspection did not finish.");

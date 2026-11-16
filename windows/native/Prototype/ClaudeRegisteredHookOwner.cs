@@ -44,23 +44,26 @@ internal sealed class ClaudeRegisteredHookOwner : IDisposable
     private readonly Dispatcher dispatcher;
     private readonly ClaudeRegisteredHookPaths paths;
     private readonly Action<ClaudeSourceSnapshot> apply;
+    private readonly Action<ClaudeRegistration>? reportRegistration;
     private readonly Func<ClaudeRegistration> inspect;
     private readonly Func<DateTime> utcNow;
     private readonly TimeSpan timeout;
     private readonly DispatcherTimer timer;
     private DispatcherTimer? deadline;
     private ClaudeSourcePump? pump;
-    private bool started, inFlight, timedOut, disposed, everUnavailable, enabled = true;
+    private bool started, inFlight, timedOut, disposed, enabled = true;
     private long inspectionStarted, revision;
     internal bool InspectionPending => inFlight;
 
     internal ClaudeRegisteredHookOwner(Dispatcher dispatcher, ClaudeRegisteredHookPaths paths,
         Action<ClaudeSourceSnapshot> apply, Func<ClaudeRegistration>? inspect = null,
-        Func<DateTime>? utcNow = null, TimeSpan? interval = null, TimeSpan? timeout = null)
+        Func<DateTime>? utcNow = null, TimeSpan? interval = null, TimeSpan? timeout = null,
+        Action<ClaudeRegistration>? reportRegistration = null)
     {
         this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         this.paths = paths ?? throw new ArgumentNullException(nameof(paths));
         this.apply = apply ?? throw new ArgumentNullException(nameof(apply));
+        this.reportRegistration = reportRegistration;
         this.inspect = inspect ?? (() => Inspect(paths));
         this.utcNow = utcNow ?? (() => DateTime.UtcNow);
         this.timeout = timeout ?? TimeSpan.FromSeconds(10);
@@ -155,6 +158,7 @@ internal sealed class ClaudeRegisteredHookOwner : IDisposable
         timedOut = true;
         if (pump is not null) pump.DisconnectAndForget();
         else apply(new ClaudeSourceSnapshot([], false));
+        reportRegistration?.Invoke(ClaudeRegistration.Absent);
     }
 
     internal void Resume()
@@ -182,6 +186,7 @@ internal sealed class ClaudeRegisteredHookOwner : IDisposable
                 pump.Start();
             }
             else pump.NotifyConnection(connection);
+            reportRegistration?.Invoke(registration);
             return;
         }
         if (registration == ClaudeRegistration.Absent)
@@ -189,12 +194,13 @@ internal sealed class ClaudeRegisteredHookOwner : IDisposable
             // This owner covers only the legacy global standalone hook. Other
             // Claude settings and sources may still exist.
             if (pump is not null) pump.DisconnectAndForget();
-            else if (everUnavailable) apply(new ClaudeSourceSnapshot([], false));
+            else apply(new ClaudeSourceSnapshot([], false));
+            reportRegistration?.Invoke(registration);
             return;
         }
-        everUnavailable = true;
         if (pump is not null) pump.NotifyConnection(ClaudeConnection.Partial);
         else apply(new ClaudeSourceSnapshot([], true));
+        reportRegistration?.Invoke(registration);
     }
 
     // Registration does not establish event delivery or current task activity.

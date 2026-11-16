@@ -6,6 +6,7 @@ using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using AITaskMonitor.Prototype.Settings;
 
 namespace AITaskMonitor.Prototype;
 
@@ -21,19 +22,28 @@ internal static class Program
             "AITaskMonitor.Prototype.PublishedWindow.xaml")
             ?? throw new InvalidOperationException("Published WPF layout is missing.");
         var window = (Window)XamlReader.Load(resource);
-        var controller = new PrototypeWindow(window, options!);
+        var controller = args.Length == 0
+            ? new PrototypeWindow(window, options!, PreferenceFiles.ForApplication(AppContext.BaseDirectory,
+                Environment.GetEnvironmentVariable("USERPROFILE") ?? "", Environment.GetEnvironmentVariable("LOCALAPPDATA") ?? ""))
+            : new PrototypeWindow(window, options!);
         using var cloud = new CloudSourcePump(window.Dispatcher, controller.ApplyCloudSource, runner: null);
         ClaudeRegisteredHookOwner? claude = null;
-        bool preview = options!.Offscreen || options.Scene != "empty" || options.Snapshot is not null ||
-            options.ReadyFile is not null || options.ExitAfterSnapshot;
+        bool preview = args.Length != 0;
         if (!preview)
         {
             if (ClaudeRegisteredHookPaths.TryFromEnvironment(out ClaudeRegisteredHookPaths? paths))
             {
-                claude = new ClaudeRegisteredHookOwner(window.Dispatcher, paths!, controller.ApplyClaudeSource);
+                // Absence of a known global hook is not evidence that all sources are disconnected.
+                controller.ApplyClaudeSource(new AITaskMonitor.Claude.ClaudeSourceSnapshot([], false));
+                claude = new ClaudeRegisteredHookOwner(window.Dispatcher, paths!, controller.ApplyClaudeSource,
+                    reportRegistration: controller.ApplyClaudeRegistration);
                 claude.Start();
             }
-            else controller.ApplyClaudeSource(new AITaskMonitor.Claude.ClaudeSourceSnapshot([], true));
+            else
+            {
+                controller.ApplyClaudeRegistration(ClaudeRegistration.Unavailable);
+                controller.ApplyClaudeSource(new AITaskMonitor.Claude.ClaudeSourceSnapshot([], true));
+            }
         }
         window.Closed += (_, _) => { claude?.Dispose(); cloud.Dispose(); };
         if (options!.Offscreen)
