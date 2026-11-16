@@ -111,6 +111,21 @@ final class DeepSeekIntegrationTests: XCTestCase {
         print("AITM_SYNTHETIC_PNPM=\(context.pnpmScript.path)")
         print("AITM_SYNTHETIC_PROFILE=\(dshHome.path)")
         print("AITM_SYNTHETIC_ASSETS=\(context.assets.path)")
+        func traceComponents(_ label: String, _ url: URL) {
+            var item = URL(fileURLWithPath: "/", isDirectory: true)
+            for component in url.standardizedFileURL.pathComponents.dropFirst() {
+                item.appendPathComponent(component)
+                if let attributes = try? manager.attributesOfItem(atPath: item.path),
+                   let kind = attributes[.type] as? FileAttributeType, kind == .typeSymbolicLink {
+                    print("AITM_SYNTHETIC_LINK_\(label)=\(item.path)")
+                }
+            }
+        }
+        traceComponents("anchor", anchor)
+        traceComponents("pnpm", context.pnpmScript)
+        traceComponents("home", dshHome)
+        traceComponents("profile", dshHome.appendingPathComponent("profiles/тестовый-профиль/package.json"))
+        traceComponents("assets", context.assets)
         print("AITM_SYNTHETIC_STAGE=list")
         let first = try DeepSeekIntegration.profiles(context)
         XCTAssertEqual(first.map(\.name), ["тестовый-профиль"])
