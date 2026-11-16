@@ -48,6 +48,7 @@ internal sealed class PreferenceFiles
             }
             catch (FileNotFoundException) { }
             var paths = PathsForEdition(userProfile, localAppData, false);
+            if (!PlainDirectoryExists(Path.GetFullPath(localAppData))) return Unavailable();
             return new PreferenceFiles(paths.LegacyPath, paths.TargetPath).Service;
         }
         catch (Exception error) when (IsStorageError(error)) { return Unavailable(); }

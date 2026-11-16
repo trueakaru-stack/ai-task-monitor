@@ -309,6 +309,10 @@ Check(PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRo
     "A package without a marker changed standalone settings.");
 Check(PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot, () => PackageIdentityStatus.Unknown)
     .Load().Status == PreferenceStatus.Unavailable, "An unknown package identity was treated as standalone.");
+string missingLocalRoot = Path.Combine(work, "missing-local-app-data");
+Check(PreferenceFiles.ForApplication(applicationDirectory, storeRoot, missingLocalRoot, () => PackageIdentityStatus.Unpackaged)
+    .SaveTheme("dark") == PreferenceStatus.Unavailable && !Directory.Exists(missingLocalRoot),
+    "A missing application-data root was created by the factory.");
 string marker = Path.Combine(applicationDirectory, "store-channel.marker");
 File.WriteAllText(marker, "", new UTF8Encoding(false));
 var storeFactory = PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot, () => PackageIdentityStatus.Packaged);

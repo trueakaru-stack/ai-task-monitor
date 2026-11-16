@@ -16,6 +16,8 @@ user roots, checks Windows package identity and the published Store marker, and
 currently enables only an unpackaged standalone launch with no marker. A
 packaged process, marker, unknown identity or inaccessible application
 directory makes the service unavailable instead of choosing the wrong edition.
+The standalone `LOCALAPPDATA` root must already be a plain directory; the
+factory does not create a missing or redirected root.
 No native C# Store package has yet been built or verified. The target and its lock are separate. Reading an existing target directory can create its lock
 file; a missing directory is created only when a selection is saved. The
 existing `Initialize(theme, language)` operation remains available to an
