@@ -8,6 +8,8 @@ import XCTest
 /// Opt-in comparison using one synthetic window on an ephemeral CI runner.
 final class WindowShadowAuditTests: XCTestCase {
     @MainActor func testOwnWindowShadowAgainstHostBitmap() async throws {
+        func trace(_ phase: String) { FileHandle.standardError.write(Data(("Synthetic shadow phase: " + phase + "\n").utf8)) }
+        trace("entered test")
         let env = ProcessInfo.processInfo.environment
         guard env["AITM_LAYOUT_CAPTURE_OWN_WINDOW"] == "1" else {
             throw XCTSkip("Own-window shadow capture is opt-in.")
@@ -30,8 +32,11 @@ final class WindowShadowAuditTests: XCTestCase {
         }
         #if compiler(>=6.2)
         guard #available(macOS 14.4, *) else { try skip("api_unavailable") }
+        trace("checking capture permission")
         guard CGPreflightScreenCaptureAccess() else { try skip("capture_permission_unavailable") }
+        trace("capture permission available")
 
+        trace("creating application")
         _ = NSApplication.shared
         AppLanguage.previewOverride = .ru
         defer { AppLanguage.previewOverride = nil }
@@ -48,11 +53,14 @@ final class WindowShadowAuditTests: XCTestCase {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.contentView = host
+        trace("showing synthetic window")
         window.makeKeyAndOrderFront(nil)
         defer { window.close() }
         host.layoutSubtreeIfNeeded()
         window.displayIfNeeded()
+        trace("waiting for synthetic layout")
         try await Task.sleep(nanoseconds: 1_200_000_000)
+        trace("layout wait returned")
         host.layoutSubtreeIfNeeded()
         guard window.isVisible, window.windowNumber > 0,
               window.windowNumber <= Int(UInt32.max), host.window === window else {
@@ -61,7 +69,9 @@ final class WindowShadowAuditTests: XCTestCase {
 
         let shareable: SCShareableContent
         do {
+            trace("requesting own shareable content")
             shareable = try await SCShareableContent.currentProcess
+            trace("own shareable content returned")
         } catch {
             try skip("shareable_content_unavailable")
         }
@@ -89,6 +99,7 @@ final class WindowShadowAuditTests: XCTestCase {
         let withShadow: CGImage
         let withoutShadow: CGImage
         do {
+            trace("capturing own window")
             withShadow = try await SCScreenshotManager.captureImage(contentFilter: filter,
                                                                      configuration: configuration(ignoreShadow: false))
             withoutShadow = try await SCScreenshotManager.captureImage(contentFilter: filter,
@@ -125,6 +136,7 @@ final class WindowShadowAuditTests: XCTestCase {
                 }
             }
         }
+        trace("writing synthetic captures")
         try save(hostBitmap, as: "window-shadow-host.png")
         try save(systemWithShadow, as: "window-shadow-system-with.png")
         try save(systemWithoutShadow, as: "window-shadow-system-without.png")
