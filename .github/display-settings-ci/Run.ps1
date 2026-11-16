@@ -92,7 +92,7 @@ try{
  if($first -lt 0 -or $sourceText.LastIndexOf($marker,[StringComparison]::Ordinal) -ne $first){throw 'The synthetic reference marker is not unique.'}
  $probe='  $dpi=[Windows.Media.VisualTreeHelper]::GetDpi($window); Write-Output ("Reference scroll "+$script:resolvedTheme+"-"+$script:resolvedLanguage+" source="+[bool]$PreviewSources+": viewport="+$settingsScroll.ViewportHeight+", extent="+$settingsScroll.ExtentHeight+", offset="+$settingsScroll.VerticalOffset+", dpi="+$dpi.DpiScaleX+"/"+$dpi.DpiScaleY)'
  $probeScript=Join-Path (Split-Path -Parent $releasedScript) 'CodexProgress.visualprobe.ps1'
- [IO.File]::WriteAllText($probeScript,$sourceText.Replace($marker,$probe+"\r\n"+$marker),[Text.UTF8Encoding]::new($true))
+ [IO.File]::WriteAllText($probeScript,$sourceText.Replace($marker,$probe+[Environment]::NewLine+$marker),[Text.UTF8Encoding]::new($true))
  $releasedScript=$probeScript
  $shell=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
  foreach($theme in @('dark')){foreach($language in @('ru','en')){
