@@ -46,7 +46,7 @@
  [ValidateRange(0,5000)][int]$PreviewStartupDelayMilliseconds = 0,
  [ValidateRange(-1,6)][int]$PreviewActiveTasks = -1,
  [switch]$PreviewManyProviders,
- [ValidateSet('','partial-data','partial-connection','unavailable')][string]$PreviewSourceWarning = '',
+ [ValidateSet('','partial-data','partial-connection','partial-both','unavailable')][string]$PreviewSourceWarning = '',
  [switch]$PreviewTabsUiTest,
  [ValidateSet("default","planned","unplanned")][string]$PreviewScenario = "default",
  [switch]$PreviewActivityUiTest,
@@ -3774,7 +3774,7 @@ function Update-View {
   $previousAllTasks=@($script:lastAllTasks)
   $sourceSnapshot=if($PreviewActiveTasks -ge 0){
    $previewWarning=if($PreviewSourceWarning){@('DeepSeek Harness')}else{@()}
-   [PSCustomObject]@{Tasks=@();Unavailable=$previewWarning;PartialConnection=$(if($PreviewSourceWarning -eq 'partial-connection'){$previewWarning}else{@()});PartialData=$(if($PreviewSourceWarning -eq 'partial-data'){$previewWarning}else{@()})}
+   [PSCustomObject]@{Tasks=@();Unavailable=$previewWarning;PartialConnection=$(if($PreviewSourceWarning -in @('partial-connection','partial-both')){$previewWarning}else{@()});PartialData=$(if($PreviewSourceWarning -in @('partial-data','partial-both')){$previewWarning}else{@()})}
   }else{Source-Snapshot}
   $allTasks=@($sourceSnapshot.Tasks)
   $script:sourceErrors=@($sourceSnapshot.Unavailable)

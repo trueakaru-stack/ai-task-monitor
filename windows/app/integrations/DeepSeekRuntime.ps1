@@ -150,6 +150,8 @@ function Update-DeepSeekMonitorController {
          if(@($Controller.Profiles | Where-Object {$_.Name -ceq $item.Name}).Count -ne 1 -or
             ($prior -and $prior -cne $item.Scope) -or (Test-DeepSeekScopeConflict $Controller $item.Name $item.Scope)){
           Add-DeepSeekAmbiguousScope $Controller $prior;Add-DeepSeekAmbiguousScope $Controller $item.Scope
+         }elseif(-not $Controller.Seen.ContainsKey($item.Name) -and $Controller.Seen.Count -ge 256){
+          $Controller.ScopeHistoryLost=$true;Add-DeepSeekAmbiguousScope $Controller $item.Scope
          }else{
           $Controller.Seen[$item.Name]=$item.Scope
           [void]$Controller.ConfirmedDisconnectedScopes.Remove([string]$item.Scope)

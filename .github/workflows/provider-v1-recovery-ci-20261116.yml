@@ -118,19 +118,21 @@ jobs:
             }
             $screenshots = Join-Path $root 'screenshots'
             $null = [IO.Directory]::CreateDirectory($screenshots)
-            foreach ($theme in @('light','dark')) {
-              foreach ($language in @('ru','en')) {
-                foreach ($mode in @('expanded','compact')) {
-                  $stem = "$theme-$language-$mode"
+            foreach ($warning in @('partial-data','partial-both')) {
+              foreach ($theme in @('light','dark')) {
+                foreach ($language in @('ru','en')) {
+                  foreach ($mode in @('expanded','compact')) {
+                  $stem = "$warning-$theme-$language-$mode"
                   $arguments = @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',
                     (Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewUnconfirmed',
-                    '-PreviewSourceWarning','partial-data','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,
+                    '-PreviewSourceWarning',$warning,'-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,
                     '-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),
                     '-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),
                     '-SnapshotFile',(Join-Path $screenshots "$stem.png"))
                   if ($mode -eq 'compact') { $arguments += '-CompactMode' }
                   Invoke-Isolated $powershell $arguments
                   if (-not [IO.File]::Exists((Join-Path $screenshots "$stem.png"))) { throw "Missing $stem screenshot." }
+                  }
                 }
               }
             }

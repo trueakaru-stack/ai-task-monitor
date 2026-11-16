@@ -56,6 +56,11 @@ Feed-DeepSeek $collision @((Profile 'A' 'connected' $a),(Profile 'B' 'connected'
 Feed-DeepSeek $collision @((Profile 'A' 'connected' $b),(Profile 'B' 'connected' $b))
 Feed-DeepSeek $collision @((Profile 'A' 'disconnected'),(Profile 'B' 'connected' $b))
 Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $collision).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $collision).Count -ge 1) 'An identity collision was accepted as a confirmed disconnect.'
+$many=New-DeepSeekMonitorController -AppRoot $appRoot
+$manyProfiles=@(for($i=0;$i -lt 256;$i++){Profile ('P'+$i) 'connected' ('{0:x32}' -f $i)})
+Feed-DeepSeek $many $manyProfiles
+Feed-DeepSeek $many @((Profile 'Overflow' 'connected' ('{0:x32}' -f 256)))
+Assert ($many.Seen.Count -eq 256 -and $many.ScopeHistoryLost -and @(Get-DeepSeekConfirmedDisconnectedScopes $many).Count -eq 0) 'DeepSeek profile history grew without a safe bound.'
 
 $pipe='AITaskMonitor.Test.'+[Guid]::NewGuid().ToString('N')
 $controller=New-ExternalProviderController -PipeName $pipe
@@ -108,6 +113,14 @@ try{
  $connections.deepseek='connected';$scopes.deepseek=@($b);$uncertain.deepseek=@();$confirmed=@{}
  Poll-Group
  Assert ($state.Unavailable -contains 'DeepSeek Harness' -and $state.Unavailable -notcontains 'OpenCode') 'Source loss warning did not persist across recovery.'
+ $broken=[IO.Pipes.NamedPipeClientStream]::new('.',$pipe,[IO.Pipes.PipeDirection]::InOut)
+ try{$broken.Connect(2000);$broken.WriteByte(1);$broken.Flush()}finally{$broken.Dispose()}
+ $deadline=[DateTime]::UtcNow.AddSeconds(3)
+ do{if($controller.Channel.DiagnosticCounts -match 'invalid=[1-9]'){break};Start-Sleep -Milliseconds 20}while([DateTime]::UtcNow -lt $deadline)
+ Assert ($controller.Channel.DiagnosticCounts -match 'invalid=[1-9]') 'The channel did not observe the malformed frame.'
+ Poll-Group
+ Assert ($state.Unavailable -contains 'DeepSeek Harness' -and $state.Unavailable -contains 'OpenCode' -and
+         @($state.Tasks | Where-Object {$_.Active -or $_.Paused}).Count -eq 0) 'An unidentifiable channel loss did not invalidate every affected source.'
  $controller.Channel.Dispose()
  Poll-Group
  Assert ([object]::ReferenceEquals($controller.Store,$originalStore) -and $state.Tasks.Count -eq 255 -and

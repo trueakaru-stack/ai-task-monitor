@@ -15,6 +15,9 @@ void Check(bool condition, string message) { checks++; if (!condition) throw new
 Event Frame(string provider, string session, string kind) =>
     EventParser.Parse(JsonSerializer.Serialize(new { version = 1, provider, session, kind }))
     ?? throw new InvalidOperationException("Invalid synthetic frame.");
+Event Plan(string provider, string session) =>
+    EventParser.Parse(JsonSerializer.Serialize(new { version = 1, provider, session, kind = "plan", steps = new[] { new { title = "One", status = "pending" } } }))
+    ?? throw new InvalidOperationException("Invalid synthetic plan.");
 long Nano()
 {
     long ticks = Stopwatch.GetTimestamp(), frequency = Stopwatch.Frequency;
@@ -71,16 +74,37 @@ Check(reconnect.Apply(Frame("opencode", "delayed", "active"), now) &&
 Check(reconnect.Apply(Frame("opencode", "delayed", "completed"), now) &&
     reconnect.Snapshot(now).Single().Status == "unknown", "A delayed terminal event confirmed completion after reconnect.");
 
+var closed = new StateStore();
+closed.RetainProviders(["opencode"]);
+Check(closed.Apply(Frame("opencode", "closed", "active"), now) &&
+    closed.Apply(Frame("opencode", "closed", "completed"), now) && closed.Snapshot(now).Length == 0,
+    "Terminal fixture did not close.");
+closed.MarkProviderGap("opencode");
+Check(closed.Apply(Frame("opencode", "closed", "completed"), now) &&
+    closed.Apply(Plan("opencode", "closed"), now) && closed.Snapshot(now).Length == 0,
+    "Delayed terminal or plan revived a previously closed card after loss.");
+Check(closed.Apply(Frame("opencode", "closed", "started"), now) &&
+    closed.Snapshot(now).Single().Status == "unknown", "A later start after loss was treated as confirmed.");
+
 var bounded = new StateStore();
 bounded.RetainProviders(["opencode", "deepseek"]);
 for (int i = 0; i < 256; i++) Check(bounded.Apply(Frame("opencode", "s" + i, "active"), now), "Could not fill the store.");
+bounded.MarkProviderGap("opencode");
+Check(bounded.Snapshot(now).All(x => x.Status == "unknown"), "The fixture did not contain 256 visible unknown cards.");
 for (int i = 0; i < 300; i++)
     Check(!bounded.Apply(Frame("deepseek", i.ToString("x32") + "_overflow", "active"), now), "A full store lost a card.");
 Check(bounded.CapacityLimitedScopes("deepseek").Length <= 256 && bounded.CapacityLimitedProviders.Contains("deepseek") &&
     bounded.Snapshot(now).Length == 256, "Loss accounting exceeded its bound or hid existing cards.");
+for (int i = 0; i < 300; i++) bounded.ConfirmDeepSeekDisconnectedScopes([i.ToString("x32")]);
+object retiredScopes = typeof(StateStore).GetField("retiredDeepSeekScopes", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(bounded)!;
+Check((int)retiredScopes.GetType().GetProperty("Count")!.GetValue(retiredScopes)! <= 256 &&
+    bounded.LossAffectedProviders.Contains("deepseek"), "Reconnect history was unbounded or silently lost.");
 
 var hermes = new StateStore();
 hermes.RetainProviders(["hermes"]);
+Thread.Sleep(2);
+Event priorScopeBarrier = Hermes(b + "_too_old", "started");
+Thread.Sleep(2);
 hermes.RetainSessionScopes("hermes", [a, b]);
 Thread.Sleep(2);
 Check(hermes.Apply(Hermes(a + "_one", "started"), now) && hermes.Apply(Hermes(b + "_two", "started"), now),
@@ -97,10 +121,38 @@ Check(hermes.Apply(Hermes(a + "_new", "started"), now) &&
 for (int i = 0; i < 300; i++)
     Check(hermes.Apply(Hermes(i.ToString("x32") + "_gap", "gap"), now), "A bounded Hermes gap was rejected.");
 Check(hermes.Snapshot(now).Single(x => x.Session == b + "_two").Status == "active", "Bounded loss history degraded a healthy profile.");
+Check(!hermes.Apply(priorScopeBarrier, now) && hermes.Snapshot(now).All(x => x.Session != b + "_too_old"),
+    "Barrier overflow admitted an event older than an already authorized scope.");
 foreach (string field in new[] { "hermesLostScopes", "hermesTrustedAtOverflow", "hermesScopeBarriers" })
 {
     object value = typeof(StateStore).GetField(field, BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(hermes)!;
     int count = (int)value.GetType().GetProperty("Count")!.GetValue(value)!;
     Check(count <= 256, "Hermes loss history exceeded its bound.");
 }
+
+var eviction = new StateStore();
+eviction.RetainProviders(["hermes", "opencode"]);
+eviction.RetainSessionScopes("hermes", [a, b]);
+Thread.Sleep(2);
+Check(eviction.Apply(Hermes(a + "_closed", "started"), now) &&
+    eviction.Apply(Hermes(a + "_closed", "completed"), now) &&
+    eviction.Apply(Hermes(b + "_live", "started"), now), "Hermes eviction fixture could not start.");
+for (int i = 0; i < 254; i++) Check(eviction.Apply(Frame("opencode", "evict" + i, "active"), now), "Eviction fixture could not fill the store.");
+Check(eviction.Apply(Frame("opencode", "next", "active"), now), "A terminal Hermes entry could not be evicted.");
+Check(eviction.Snapshot(now).Single(x => x.Session == b + "_live").Status == "active" &&
+    eviction.LossAffectedProviders.Contains("hermes"), "Terminal Hermes eviction degraded a healthy scope or hid the loss.");
+Thread.Sleep(2);
+Check(eviction.Apply(Hermes(a + "_closed", "started"), now) &&
+    eviction.Snapshot(now).All(x => x.Session != a + "_closed"), "A stale Hermes event revived the evicted scope.");
+var unscopedEviction = new StateStore();
+unscopedEviction.RetainProviders(["hermes", "opencode"]);
+unscopedEviction.RetainSessionScopes("hermes", [b]);
+Thread.Sleep(2);
+Check(unscopedEviction.Apply(Hermes("legacy_closed", "started"), now) &&
+    unscopedEviction.Apply(Hermes("legacy_closed", "completed"), now) &&
+    unscopedEviction.Apply(Hermes(b + "_live", "started"), now), "Unscoped eviction fixture could not start.");
+for (int i = 0; i < 254; i++) Check(unscopedEviction.Apply(Frame("opencode", "unscoped" + i, "active"), now), "Unscoped fixture could not fill the store.");
+Check(unscopedEviction.Apply(Frame("opencode", "after_unscoped", "active"), now) &&
+    unscopedEviction.Snapshot(now).Single(x => x.Session == b + "_live").Status == "unknown" &&
+    unscopedEviction.LossAffectedProviders.Contains("hermes"), "Unknown Hermes scope did not trigger the global fallback.");
 Console.WriteLine($"Provider V1 recovery: {checks} synthetic checks passed.");

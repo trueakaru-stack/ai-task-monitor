@@ -242,9 +242,10 @@ namespace AITaskMonitor.ExternalProviders
                 if (states.TryGetValue(key, out state) && !IsTerminal(state.Status)) MakeUnconfirmed(state);
                 return true;
             }
-            if (legacyUnconfirmed && !states.ContainsKey(key) &&
+            if (legacyUnconfirmed &&
                 (input.Kind == "heartbeat" || input.Kind == "idle" || input.Kind == "completed" ||
-                 input.Kind == "failed" || input.Kind == "interrupted" || input.Kind == "plan" || input.Kind == "tool_finished"))
+                 input.Kind == "failed" || input.Kind == "interrupted" || input.Kind == "plan" || input.Kind == "tool_finished") &&
+                (!states.TryGetValue(key, out state) || IsTerminal(state.Status)))
                 return true;
             // A heartbeat is only evidence about a previously observed session.
             // It cannot create a task after the monitor starts or revive one after a gap.
@@ -264,7 +265,12 @@ namespace AITaskMonitor.ExternalProviders
                     var oldest = states.Where(pair => IsTerminal(pair.Value.Status))
                         .OrderBy(pair => pair.Value.Updated).FirstOrDefault();
                     if (oldest.Key == null) { RejectAtCapacity(input.Provider, scope); return false; }
-                    if (oldest.Value.Provider == "hermes") MarkProviderGap("hermes");
+                    if (oldest.Value.Provider == "hermes")
+                    {
+                        string evictedScope = SessionScope(oldest.Value.Session);
+                        if (IsScope(evictedScope)) MarkHermesScopeGap(evictedScope);
+                        else MarkProviderGap("hermes");
+                    }
                     states.Remove(oldest.Key);
                 }
                 state = new TaskState { Provider = input.Provider, Session = input.Session, Status = "unknown",
@@ -395,7 +401,7 @@ namespace AITaskMonitor.ExternalProviders
             {
                 if (provider != null && state.Provider != provider) continue;
                 if (state.Provider == "hermes") { state.HermesUncertain = true; state.HermesRequests.Clear(); }
-                if (state.Steps.Length > 0) state.PlanConfirmed = false;
+                state.PlanConfirmed = false;
                 if (state.Status == "active" || state.Status == "waiting") { state.Status = "unknown"; state.Calls.Clear(); }
                 state.LastHeartbeat = null;
             }
@@ -479,7 +485,7 @@ namespace AITaskMonitor.ExternalProviders
             {
                 if (state.Provider != provider || !uncertain.Contains(SessionScope(state.Session))) continue;
                 if (provider == "hermes") { state.HermesUncertain = true; state.HermesRequests.Clear(); }
-                if (state.Steps.Length > 0) state.PlanConfirmed = false;
+                state.PlanConfirmed = false;
                 if (state.Status == "active" || state.Status == "waiting") { state.Status = "unknown"; state.Calls.Clear(); }
                 state.LastHeartbeat = null;
             }
@@ -494,7 +500,7 @@ namespace AITaskMonitor.ExternalProviders
             {
                 if (state.Provider != "hermes" || SessionScope(state.Session) != scope) continue;
                 state.HermesUncertain = true; state.HermesRequests.Clear();
-                if (state.Steps.Length > 0) state.PlanConfirmed = false;
+                state.PlanConfirmed = false;
                 if (state.Status == "active" || state.Status == "waiting") { state.Status = "unknown"; state.Calls.Clear(); }
                 state.LastHeartbeat = null;
             }
@@ -513,6 +519,11 @@ namespace AITaskMonitor.ExternalProviders
                         (item.Status == "active" || item.Status == "waiting")))
                     {
                         string known = SessionScope(item.Session);
+                        if (IsScope(known) && known != scope && !hermesLostScopes.Contains(known)) hermesTrustedAtOverflow.Add(known);
+                    }
+                    foreach (string known in hermesScopes)
+                    {
+                        if (hermesTrustedAtOverflow.Count >= MaximumSessions) break;
                         if (IsScope(known) && known != scope && !hermesLostScopes.Contains(known)) hermesTrustedAtOverflow.Add(known);
                     }
                 }
@@ -544,10 +555,11 @@ namespace AITaskMonitor.ExternalProviders
             {
                 if (hermesScopeBarriers.Count >= MaximumSessions && !hermesScopeBarriers.ContainsKey(scope))
                 {
-                    // Preserve already observed healthy scopes; unknown scopes
-                    // cannot regain confidence after history is exhausted.
+                    // Keep every existing barrier: removing one could accept a
+                    // delayed event that predates its scope authorization.
+                    RecordScopeLoss("hermes", scope);
                     RecordHermesScopeLoss(scope);
-                    hermesScopeBarriers.Clear();
+                    continue;
                 }
                 hermesScopeBarriers[scope] = barrier;
             }
