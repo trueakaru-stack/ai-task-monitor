@@ -273,6 +273,33 @@ Write-Event $noIndexPath 'task_complete' $noIndexTurn
 $finished=Source-Snapshot
 Require (@($finished.Tasks|Where-Object Id -eq $noIndexId).Count -eq 0) 'A matching terminal event did not hide an unindexed task.'
 
+# Exercise both discovery limits with synthetic directories.
+$originalSessionsDirectory=$sessionsDirectory
+try{
+ $budgetRoot=Join-Path $fixture 'bounded-file-count'
+ $budgetDay=Join-Path (Join-Path (Join-Path $budgetRoot ([DateTime]::UtcNow.ToString('yyyy'))) ([DateTime]::UtcNow.ToString('MM'))) ([DateTime]::UtcNow.ToString('dd'))
+ [void][IO.Directory]::CreateDirectory($budgetDay)
+ for($i=0;$i -lt 300;$i++){
+  $path=Join-Path $budgetDay ('rollout-synthetic-'+$i+'.jsonl')
+  [IO.File]::WriteAllText($path,'{}',[Text.UTF8Encoding]::new($false))
+ }
+ $sessionsDirectory=$budgetRoot;$script:unindexedScan=$null
+ $none=@(Codex-UnindexedCandidates)
+ Require ($none.Count -eq 0 -and $script:unindexedScan.CheckedFiles -eq 256 -and $script:unindexedScan.BytesRead -eq 0) 'The file-count budget was not enforced.'
+ $budgetRoot=Join-Path $fixture 'bounded-byte-count'
+ $budgetDay=Join-Path (Join-Path (Join-Path $budgetRoot ([DateTime]::UtcNow.ToString('yyyy'))) ([DateTime]::UtcNow.ToString('MM'))) ([DateTime]::UtcNow.ToString('dd'))
+ [void][IO.Directory]::CreateDirectory($budgetDay)
+ for($i=0;$i -lt 70;$i++){
+  $id=[Guid]::NewGuid().ToString()
+  $path=Join-Path $budgetDay ('rollout-'+$filenameTime+'-'+$id+'.jsonl')
+  $meta=@{type='session_meta';payload=@{id=$id}}|ConvertTo-Json -Compress
+  [IO.File]::WriteAllText($path,($meta+"`n"+('x'*65536)),[Text.UTF8Encoding]::new($false))
+ }
+ $sessionsDirectory=$budgetRoot;$script:unindexedScan=$null
+ [void]@(Codex-UnindexedCandidates)
+ Require ($script:unindexedScan.CheckedFiles -le 256 -and $script:unindexedScan.BytesRead -eq 4194304) 'The byte budget was not enforced.'
+}finally{$sessionsDirectory=$originalSessionsDirectory;$script:unindexedScan=$null}
+
 # Oversized and incomplete indices cannot be returned as complete empty lists.
 $script:lastCodexTasks=@($older.Tasks)
 [IO.File]::WriteAllText($sessionIndex,('x'*16777217),[Text.UTF8Encoding]::new($false))
