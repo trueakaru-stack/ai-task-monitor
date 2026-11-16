@@ -32,6 +32,7 @@ Replace the released Windows PowerShell-hosted monitor with a standalone C# appl
 - [x] (2026-11-16) Independently reviewed and tested the synthetic Codex Cloud-to-WPF slice. Hosted Windows CI passed 264 assertions, including process ownership, source isolation, uncertain cloud status, cancellation and compact-count grammar. The default preview uses its own executable and starts with no connected sources; real runners and settings remain disconnected.
 - [x] (2026-11-16) Investigated official Codex hooks as a non-blocking source of historical evidence and tested an isolated in-memory parser. Hosted Windows CI passed 194 synthetic checks. This does not register a hook, connect Codex or establish current activity or completion.
 - [x] (2026-11-16) Tested a bounded synthetic local Codex hook helper and channel with current-user pipe controls. It is not registered or connected to the application and cannot confirm a task's current state.
+- [x] (2026-11-16) Tested a self-contained Windows preview and CI-only installer with a bundled signed runtime and nested payload. The installed executable owned its window with an empty runtime root; uninstall intentionally retains the payload and is not release-ready.
 - [ ] Establish a reliable Codex source path in C#, including bounded journal reading, lifecycle handling, lock observation, source errors, and uncertainty. The integrated slice is synthetic only; real locks and profiles are not approved for unsafe probing.
 - [ ] Resolve the provider-channel reconnection race and retain per-source and per-profile uncertainty without affecting healthy sources.
 - [ ] Integrate and verify the accepted Claude Code, OpenCode, DeepSeek, Hermes, Kimi, and available official cloud-monitoring behavior. Distinguish local and cloud support and do not invent unsupported statuses.
@@ -216,6 +217,11 @@ The implementation uses C#/.NET 10 and WPF for Windows. The native Codex source 
 
 - The unconnected synthetic Codex hook helper and local named-pipe controller passed 22 checks in [43838639552](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43838639552), with unchanged user and machine PATH. The test checked actual current-user DACL and same-name collision on a hosted runner, but did not test a second user, remote clients, real Codex, endpoint discovery or registration. Same-user processes can forge events, and event delivery or current activity is not confirmed.
 
+- A self-contained C# preview and CI-only installer passed [43839708005](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43839708005). The test installed 408 files, including 156 nested files, launched the installed executable with an empty runtime root and confirmed that the observed CoreCLR matched the signed bundled runtime package. It preserved the synthetic nested files by intentionally retaining the entire payload on uninstall. The hosted runner did have an SDK installed, so a machine without .NET installed was not separately tested. This is not a complete installer, update, migration, real source test or visual acceptance.
+- The narrow Windows provider-capacity candidate [43839083828](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43839083828) passed initial synthetic checks, but independent review found lost warnings during partial reconnection, overly broad profile warnings and later events that can re-confirm or hide uncertain cards. Candidate `1ead4c106a4373d4f5142a772859b06630120462` remains outside the primary branch; its identified defects remain unresolved.
+
+- The macOS provider-bundle test fixture omitted the sender imported by the real DeepSeek plugin. The one-line fixture correction was independently reviewed and passed on macOS 15 and 26 in [43840222431](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43840222431); it was integrated into `macos` at `2b2722a518fa5833ac5b55398449e17d1d75038e`. This verifies the targeted fixture only, not the full `tests-only` suite or live-agent behavior.
+
 ## Revision Note
 
 - 2026-11-13: Created the plan from the user's accepted C# migration, test-safety decisions, published source state, and verified synthetic evidence.
@@ -260,3 +266,4 @@ The implementation uses C#/.NET 10 and WPF for Windows. The native Codex source 
 - 2026-11-16: Recorded a synthetic Codex hook-evidence experiment and distinguished historical evidence from live task status.
 - 2026-11-16: Recorded the guarded WPF preview installer, feedback snapshots and the repeated synthetic macOS click-test failure. These are not release acceptance.
 - 2026-11-16: Recorded the synthetic Codex hook transport, the constrained scope of its security checks, and the remaining integration limitations.
+- 2026-11-16: Recorded the self-contained preview installer experiment and the independently identified blockers in the initial provider-capacity candidate.
