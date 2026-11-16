@@ -1,0 +1,227 @@
+name: Diagnose candidate shell and disk-image environment
+on:
+  push:
+    branches: ['codex/macos-release-0-3-9-candidate-20261116']
+    paths: ['.github/workflows/macos-release-039-environment-probe.yml']
+permissions:
+  contents: read
+jobs:
+  windowgroup:
+    runs-on: macos-15
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.1.app/Contents/Developer
+    steps:
+      - name: Prepare disposable source and strict sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-card-tests.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
+          printf 'synthetic-only\n' > "$task_marker"
+          task_path="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin:$DEVELOPER_DIR/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          task_python=/usr/bin/python3
+          test -x "$task_python"
+          mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" \
+            "$task_root/swift-cache" "$task_root/swift-config" "$task_root/swift-security" "$task_root/clang-cache" "$task_root/baseline"
+          task_git() {
+            /usr/bin/env -i "PATH=$task_path" "DEVELOPER_DIR=$DEVELOPER_DIR" GIT_CONFIG_GLOBAL=/dev/null \
+              GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 git "$@"
+          }
+          task_git -c credential.helper= -c core.hooksPath="$task_root/hooks" \
+            -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
+          task_git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" \
+            fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          task_git -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
+          test "$(task_git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(task_git -C "$task_root/source/macos" hash-object Package.swift)" = "144202dfc5f413e896867b219af2e0c3dc621897"
+          cat > "$task_root/profile.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (deny mach-lookup)
+          (allow mach-lookup (global-name "com.apple.windowserver.active") (global-name "com.apple.windowserver.session")
+                             (global-name "com.apple.CARenderServer") (global-name "com.apple.windowmanager.server"))
+          PROFILE
+          cat > "$task_root/run-isolated" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" \
+            "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 \
+            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 \
+            "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "AITM_SYNTHETIC_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" -f "$AITM_TEST_TASK_ROOT/profile.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-isolated"
+          {
+            printf 'AITM_TEST_TASK_ROOT=%s\n' "$task_root"
+            printf 'AITM_TEST_DENIED_FILE=%s\n' "$task_marker"
+            printf 'AITM_TEST_PYTHON_BIN=%s\n' "$task_python"
+            printf 'AITM_TASK_PATH=%s\n' "$task_path"
+          } >> "$GITHUB_ENV"
+      - name: Check synthetic shell working-directory diagnosis
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          cd "$AITM_TEST_TASK_ROOT"
+          "$task_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          if "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >out 2>err; then exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_DENIED_FILE" >out 2>err; then exit 1; fi
+          "$task_run" /bin/ln -s "$AITM_TEST_DENIED_FILE" "$AITM_TEST_TASK_ROOT/denied-link"
+          if "$task_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >out 2>err; then exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >out 2>err; then exit 1; fi
+          cd "$GITHUB_WORKSPACE"
+          "$task_run" /usr/bin/env -i "CFFIXED_USER_HOME=$AITM_TEST_TASK_ROOT/temp" PATH=/usr/bin:/bin \
+            /bin/sh -c '/usr/bin/true' 2>"$AITM_TEST_TASK_ROOT/cwd-denied.stderr"
+          cat "$AITM_TEST_TASK_ROOT/cwd-denied.stderr"
+          grep -F 'getcwd: cannot access parent directories' "$AITM_TEST_TASK_ROOT/cwd-denied.stderr"
+          cd "$AITM_TEST_TASK_ROOT"
+          "$task_run" /usr/bin/env -i "CFFIXED_USER_HOME=$AITM_TEST_TASK_ROOT/temp" PATH=/usr/bin:/bin \
+            /bin/sh -c '/usr/bin/true' 2>"$AITM_TEST_TASK_ROOT/cwd-allowed.stderr"
+          test ! -s "$AITM_TEST_TASK_ROOT/cwd-allowed.stderr"
+          echo 'The same shell command emits no stderr from the permitted working directory.'
+      - name: Check disposable disk image without profile data
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          mkdir -p "$AITM_TEST_TASK_ROOT/system-home" "$AITM_TEST_TASK_ROOT/sample" "$AITM_TEST_TASK_ROOT/mount"
+          printf 'synthetic installer content\n' > "$AITM_TEST_TASK_ROOT/sample/sample.txt"
+          ln -s /Applications "$AITM_TEST_TASK_ROOT/sample/Applications"
+          cat > "$AITM_TEST_TASK_ROOT/dmg-probe.py" <<'PY'
+          import errno
+          import os
+          from pathlib import Path
+          import plistlib
+          import re
+          import signal
+          import socket
+          import subprocess
+          import sys
+
+          if (sys.platform != "darwin" or os.environ.get("GITHUB_ACTIONS") != "true" or
+                  os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or os.environ.get("RUNNER_OS") != "macOS" or
+                  "HOME" in os.environ or "CODEX_HOME" in os.environ):
+              raise SystemExit("Disposable macOS runner with an empty environment is required.")
+          root = Path(os.environ["AITM_TEST_TASK_ROOT"])
+          if (re.fullmatch(r"/Users/runner/work/_temp/aitm-card-tests\.[A-Za-z0-9]{8}", str(root)) is None or
+                  root.resolve(strict=True) != root):
+              raise SystemExit("Unexpected synthetic root.")
+          synthetic_home, source, mount = (root / "system-home", root / "sample", root / "mount")
+          image = root / "synthetic.dmg"
+          for path in (synthetic_home, source, mount):
+              if path.is_symlink() or not path.is_dir() or path.resolve(strict=True) != path:
+                  raise SystemExit("Unsafe synthetic path.")
+          if os.environ.get("CFFIXED_USER_HOME") != str(synthetic_home):
+              raise SystemExit("Synthetic system preferences root is required.")
+          if image.exists() or image.is_symlink() or any(mount.iterdir()) or os.path.ismount(mount):
+              raise SystemExit("Synthetic image or mount point is not fresh.")
+          try:
+              sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+              sock.settimeout(2)
+              try:
+                  sock.connect(("127.0.0.1", 9))
+              except OSError as error:
+                  if error.errno not in (errno.EPERM, errno.EACCES):
+                      raise SystemExit("TCP loopback denial was not established.")
+              else:
+                  raise SystemExit("TCP loopback was not denied.")
+              finally:
+                  sock.close()
+          except OSError as error:
+              if error.errno not in (errno.EPERM, errno.EACCES):
+                  raise
+
+          def run(args, timeout=120):
+              result = subprocess.run(args, check=True, timeout=timeout, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+              return result.stdout
+
+          def info():
+              value = plistlib.loads(run(["/usr/bin/hdiutil", "info", "-plist"], timeout=30))
+              if not isinstance(value.get("images"), list):
+                  raise RuntimeError("Invalid hdiutil info.")
+              return value["images"]
+
+          def own_attachment():
+              matches = []
+              for item in info():
+                  entities = item.get("system-entities", [])
+                  if not isinstance(entities, list) or not all(isinstance(x, dict) for x in entities):
+                      raise RuntimeError("Invalid disk entity list.")
+                  points = [Path(x["mount-point"]).resolve() for x in entities if isinstance(x.get("mount-point"), str)]
+                  is_ours = isinstance(item.get("image-path"), str) and Path(item["image-path"]).resolve() == image
+                  if mount in points and not is_ours:
+                      raise RuntimeError("Synthetic mount belongs to a different image.")
+                  if is_ours:
+                      if any(point != mount for point in points):
+                          raise RuntimeError("Synthetic image has unexpected mounts.")
+                      devices = {x.get("dev-entry") for x in entities if isinstance(x.get("dev-entry"), str)
+                                 and re.fullmatch(r"/dev/disk[0-9]+", x["dev-entry"])}
+                      matches.append((points, devices))
+              if len(matches) > 1:
+                  raise RuntimeError("Duplicate synthetic attachment.")
+              return matches[0] if matches else None
+
+          def detach_ours():
+              attached = own_attachment()
+              if attached is None:
+                  if os.path.ismount(mount):
+                      raise RuntimeError("Unknown device at synthetic mount.")
+                  return
+              points, devices = attached
+              if points:
+                  target = str(mount)
+              elif len(devices) == 1:
+                  target = next(iter(devices))
+              else:
+                  raise RuntimeError("Cannot identify partial synthetic attachment.")
+              run(["/usr/bin/hdiutil", "detach", target, "-quiet"], timeout=60)
+              if own_attachment() is not None or os.path.ismount(mount):
+                  raise RuntimeError("Synthetic image remains attached.")
+
+          def interrupt(signum, frame):
+              raise InterruptedError("Probe interrupted.")
+
+          previous = signal.signal(signal.SIGTERM, interrupt)
+          try:
+              run(["/usr/bin/hdiutil", "create", "-volname", "AITM Synthetic", "-srcfolder", str(source),
+                   "-format", "UDZO", str(image)])
+              if image.is_symlink() or image.resolve(strict=True) != image or not image.is_file():
+                  raise RuntimeError("Unsafe image.")
+              run(["/usr/bin/hdiutil", "verify", str(image)])
+              if own_attachment() is not None:
+                  raise RuntimeError("Synthetic image was already attached.")
+              try:
+                  run(["/usr/bin/hdiutil", "attach", "-plist", "-readonly", "-nobrowse", "-noautoopen",
+                       "-mountpoint", str(mount), str(image)], timeout=180)
+                  attached = own_attachment()
+                  if attached is None or mount not in attached[0] or not os.path.ismount(mount):
+                      raise RuntimeError("Synthetic image mount identity is unverified.")
+                  if (mount / "sample.txt").read_bytes() != b"synthetic installer content\n":
+                      raise RuntimeError("Synthetic image content mismatch.")
+                  if os.readlink(mount / "Applications") != "/Applications":
+                      raise RuntimeError("Synthetic Applications link mismatch.")
+                  print("Synthetic DMG was created, verified, mounted and compared.", flush=True)
+              finally:
+                  detach_ours()
+                  print("Verified synthetic attachment detached.", flush=True)
+          finally:
+              signal.signal(signal.SIGTERM, previous)
+          PY
+          profile='(version 1) (allow default) (deny network*) (allow network* (local unix-socket)) (allow network-outbound (remote unix-socket))'
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$AITM_TEST_TASK_ROOT/temp" \
+            "CFFIXED_USER_HOME=$AITM_TEST_TASK_ROOT/system-home" "AITM_TEST_TASK_ROOT=$AITM_TEST_TASK_ROOT" \
+            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS \
+            /usr/bin/sandbox-exec -p "$profile" /usr/bin/python3 -I -S -B "$AITM_TEST_TASK_ROOT/dmg-probe.py"
