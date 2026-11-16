@@ -64,7 +64,8 @@ $hookPath=Join-Path $install 'ClaudeTaskHook.ps1'
 $encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& '"+$hookPath.Replace("'","''")+"'"))
 $command='powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$encoded
 $settings=[ordered]@{model='synthetic-preserved';hooks=[ordered]@{Stop=@([ordered]@{hooks=@([ordered]@{type='command';command=$command;timeout=10},[ordered]@{type='command';command='echo synthetic-other'})})}}|ConvertTo-Json -Depth 8 -Compress
-[IO.File]::WriteAllText((Join-Path $claude 'settings.json'),$settings,[Text.UTF8Encoding]::new($false))
+$settingsPath=Join-Path $claude 'settings.json'
+[void][IO.Directory]::CreateDirectory($settingsPath)
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 Add-Type -TypeDefinition @'
 using System;
@@ -105,6 +106,23 @@ try{
  $out=$process.StandardOutput.ReadToEndAsync();$err=$process.StandardError.ReadToEndAsync()
  $question=Find-Dialog $process 'Disconnect Claude Code'
  Press-Button $question $process 'Yes'
+ $blocked=Find-Dialog $process 'Automatic removal stopped.'
+ Press-Button $blocked $process 'OK'
+ Check ($process.WaitForExit(15000) -and $process.ExitCode -eq 1) 'Ambiguous Claude settings did not stop removal.'
+}finally{if(-not $process.HasExited){$process.Kill($true);[void]$process.WaitForExit(5000)};$process.Dispose()}
+Check ([IO.File]::Exists((Join-Path $install 'CodexProgress.ps1')) -and [IO.Directory]::Exists($settingsPath)) 'Ambiguous Claude settings changed a synthetic file.'
+$resolvedSettings=[IO.Path]::GetFullPath($settingsPath)
+Check ([string]::Equals([IO.Directory]::GetParent($resolvedSettings).FullName,[IO.Path]::GetFullPath($claude),[StringComparison]::OrdinalIgnoreCase) -and
+      (([IO.File]::GetAttributes($resolvedSettings) -band [IO.FileAttributes]::ReparsePoint) -eq 0)) 'Unsafe synthetic settings directory.'
+[IO.Directory]::Delete($resolvedSettings,$false)
+[IO.File]::WriteAllText($settingsPath,$settings,[Text.UTF8Encoding]::new($false))
+$start=New-Start $powershell;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+foreach($arg in @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',$generated)){[void]$start.ArgumentList.Add($arg)}
+$process=[Diagnostics.Process]::Start($start)
+try{
+ $out=$process.StandardOutput.ReadToEndAsync();$err=$process.StandardError.ReadToEndAsync()
+ $question=Find-Dialog $process 'Disconnect Claude Code'
+ Press-Button $question $process 'Yes'
  $result=Find-Dialog $process 'Claude Code disconnection was checked.'
  Press-Button $result $process 'OK'
  Check ($process.WaitForExit(15000) -and $process.ExitCode -eq 0) 'The synthetic uninstaller did not complete.'
@@ -119,4 +137,4 @@ $remaining=[IO.File]::ReadAllText((Join-Path $claude 'settings.json'))|ConvertFr
 Check ($remaining.model -ceq 'synthetic-preserved') 'Unrelated Claude settings were changed.'
 $commands=@($remaining.hooks.Stop|ForEach-Object {$_.hooks}|ForEach-Object {$_.command})
 Check ($commands -ccontains 'echo synthetic-other' -and $commands -cnotcontains $command) 'Claude hook removal changed another hook or retained its own.'
-Write-Output 'Synthetic uninstall: owned file removed; modified and foreign files, junction target and unconfirmed providers preserved; Claude own hook removed and other hook retained.'
+Write-Output 'Synthetic uninstall: ambiguous Claude settings refused; owned file removed; modified and foreign files, junction target and unconfirmed providers preserved; Claude own hook removed and other hook retained.'

@@ -11,12 +11,34 @@ function Hash-Bytes([byte[]]$bytes){
  $algorithm=[Security.Cryptography.SHA256]::Create()
  try{return [BitConverter]::ToString($algorithm.ComputeHash($bytes)).Replace('-','')}finally{$algorithm.Dispose()}
 }
-function Open-ConfirmedClaudeSettings {
+function Get-ClaudeSettingsLocation {
  $profile=[string]$env:USERPROFILE
  if(-not $profile){throw 'Claude profile is unavailable.'}
- $path=Join-Path (Join-Path $profile '.claude') 'settings.json'
- if(-not [IO.File]::Exists($path)){return $null}
- if(([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Claude settings use a redirected file.'}
+ $profile=[IO.Path]::GetFullPath($profile)
+ $drive=[IO.Path]::GetPathRoot($profile)
+ if(-not $drive -or $drive.Length -ne 3 -or $drive[1] -ne ':'){throw 'Claude profile is not local.'}
+ $current=$drive
+ foreach($part in $profile.Substring($drive.Length).Split([char]'\')){
+  if(-not $part){continue}
+  $current=Join-Path $current $part
+  $attributes=[IO.File]::GetAttributes($current)
+  if(($attributes -band [IO.FileAttributes]::Directory) -eq 0 -or ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Claude profile is redirected or unavailable.'}
+ }
+ $directory=Join-Path $profile '.claude'
+ try{$attributes=[IO.File]::GetAttributes($directory)}
+ catch [IO.FileNotFoundException]{return $null}
+ catch [IO.DirectoryNotFoundException]{return $null}
+ if(($attributes -band [IO.FileAttributes]::Directory) -eq 0 -or ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Claude settings directory is redirected or unavailable.'}
+ $path=Join-Path $directory 'settings.json'
+ try{$attributes=[IO.File]::GetAttributes($path)}
+ catch [IO.FileNotFoundException]{return $null}
+ catch [IO.DirectoryNotFoundException]{return $null}
+ if(($attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) -ne 0){throw 'Claude settings use a redirected file.'}
+ return $path
+}
+function Open-ConfirmedClaudeSettings {
+ $path=Get-ClaudeSettingsLocation
+ if(-not $path){return $null}
  $file=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
  try{
   if($file.Length -gt 4194304){throw 'Claude settings are too large to verify.'}
@@ -110,6 +132,7 @@ try{
  }
  $answer=[System.Windows.Forms.MessageBox]::Show($question,'AI task monitor',[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning)
  if($answer -ne [System.Windows.Forms.DialogResult]::Yes){exit 0}
+ $null=Get-ClaudeSettingsLocation
  $configure=$guard.HoldVerified('Configure-ClaudeIntegration.ps1',[string]$manifest.files.'Configure-ClaudeIntegration.ps1')
  try{
   $ps=[IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'WindowsPowerShell\v1.0\powershell.exe')
