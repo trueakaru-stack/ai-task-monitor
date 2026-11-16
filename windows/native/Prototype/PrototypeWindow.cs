@@ -46,7 +46,7 @@ internal sealed class PrototypeWindow
     private bool showProviderLabels;
     private bool equalProviderWidths;
     private string lastRenderedProvider = "";
-    private bool claudeSourceUnavailable;
+    private bool claudeSourceUnavailable, claudeSourceObserved;
     private bool cloudEnabled, cloudScanned, cloudUnavailable;
     private readonly HashSet<string> cloudTaskIds = new(StringComparer.Ordinal);
     private Dictionary<string, LoopWarningView> loopWarnings = new(StringComparer.Ordinal);
@@ -201,6 +201,7 @@ internal sealed class PrototypeWindow
     {
         if (!window.Dispatcher.CheckAccess()) throw new InvalidOperationException("UI updates must run on the window dispatcher.");
         ArgumentNullException.ThrowIfNull(snapshot);
+        claudeSourceObserved = true;
         claudeSourceUnavailable = snapshot.Unavailable;
         var combined = samples.Where(task => task.Provider != "claude").ToList();
         combined.AddRange(snapshot.Tasks.Select(task => ClaudePresentation.Map(task, options.Language)));
@@ -440,7 +441,11 @@ internal sealed class PrototypeWindow
                 ? cloudScanned
                     ? english ? "Cloud task status unconfirmed" : "Статус облачных задач не подтверждён"
                     : english ? "Checking Codex Cloud" : "Проверка Codex Cloud"
-                : english ? "No active tasks" : "Активных задач сейчас нет";
+                : claudeSourceObserved
+                    ? english ? "Task status unconfirmed" : "Статус задач не подтверждён"
+                    : options.Scene == "empty"
+                        ? english ? "No sources connected" : "Источники не подключены"
+                        : english ? "No active tasks" : "Активных задач сейчас нет";
             if (warningText.Length == 0) { var empty = Text(text, 14, "Secondary"); empty.Margin = new Thickness(4, 24, 0, 0); tasks.Children.Add(empty); }
             var compactEmpty = Text(warningText.Length != 0 ? warningText : text, 12.5, "Activity"); compactEmpty.Margin = new Thickness(0, 5, 0, 5); compactTasks.Children.Add(compactEmpty);
             dots.Visibility = Visibility.Collapsed;

@@ -19,7 +19,7 @@ internal sealed class CloudSourcePump : IDisposable
     private readonly DispatcherTimer deadlineTimer;
     private readonly TimeSpan scanLimit;
     private readonly TimeSpan pageLimit;
-    private bool enabled, disposed, inFlight, workerFinished, rerun;
+    private bool enabled, disposed, inFlight, workerFinished, rerun, publishingLeaseFailure;
     private object generation = new();
     private CancellationTokenSource? cancellation;
     private CloudPageRequest? firstRequest;
@@ -94,7 +94,7 @@ internal sealed class CloudSourcePump : IDisposable
     private void StartScan()
     {
         dispatcher.VerifyAccess();
-        if (disposed || !enabled || inFlight || runner is null) return;
+        if (disposed || !enabled || inFlight || runner is null || publishingLeaseFailure) return;
         CloudPageRequest? request;
         object currentGeneration;
         lock (gate)
@@ -106,7 +106,11 @@ internal sealed class CloudSourcePump : IDisposable
         if (Interlocked.CompareExchange(ref processLease, 1, 0) != 0)
         {
             lock (gate) { source.ReportFailure(request); }
-            present(source.GetSnapshot());
+            // A view callback may synchronously ask to refresh; retrying here
+            // would recursively report the same busy lease without progress.
+            publishingLeaseFailure = true;
+            try { present(source.GetSnapshot()); }
+            finally { publishingLeaseFailure = false; }
             return;
         }
 

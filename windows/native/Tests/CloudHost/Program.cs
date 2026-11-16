@@ -230,12 +230,29 @@ internal static class Program
         }, RunFixture, pollInterval: TimeSpan.FromMinutes(1));
         try
         {
+            Check(HasText(window, "No sources connected"), "default empty view reports no connected sources");
             host.SetEnabled(true);
             WaitUntil(() => !host.InFlight && snapshots.Any(snapshot => snapshot.Scanned), "empty response completes");
             Check(view.CurrentTasks.Count == 0 && HasText(window, "Cloud task status unconfirmed") &&
-                  !HasText(window, "No active tasks"), "empty CLI response does not prove all cloud tasks absent");
+                  !HasText(window, "No active tasks") && !HasText(window, "No sources connected"),
+                "empty CLI response does not prove all cloud tasks absent");
             host.SetEnabled(false);
-            Check(HasText(window, "No active tasks"), "disabled cloud restores normal empty state");
+            Check(HasText(window, "No sources connected"), "disabled cloud restores disconnected empty state");
+        }
+        finally { window.Close(); }
+    }
+
+    private static void EmptyClaudeUncertain()
+    {
+        var (window, view) = Open("empty", "en", "dark");
+        try
+        {
+            view.ApplyClaudeSource(new AITaskMonitor.Claude.ClaudeSourceSnapshot([], false));
+            Check(HasText(window, "Task status unconfirmed") && !HasText(window, "No active tasks") &&
+                  !HasText(window, "No sources connected"), "empty Claude snapshot does not prove connection or completion");
+            view.ApplyClaudeSource(new AITaskMonitor.Claude.ClaudeSourceSnapshot([], true));
+            Check(HasText(window, "No data from Claude Code") && !HasText(window, "No active tasks"),
+                "unavailable Claude source does not look idle");
         }
         finally { window.Close(); }
     }
@@ -390,7 +407,7 @@ internal static class Program
         var (firstWindow, firstView) = Open("empty", "en", "dark");
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        int firstPresentations = 0, secondCalls = 0;
+        int firstPresentations = 0, secondCalls = 0, secondFailures = 0;
         async Task<CommandResult> HeldRunner(string? cursor, TimeSpan timeout, CancellationToken token)
         {
             CommandResult result = await RunFixture(cursor, timeout, token).ConfigureAwait(false);
@@ -418,11 +435,15 @@ internal static class Program
             int presentationsAtDispose = firstPresentations;
             var opened = Open("empty", "en", "dark");
             secondWindow = opened.Window;
-            second = new CloudSourcePump(secondWindow.Dispatcher, opened.View.ApplyCloudSource, SecondRunner,
-                pollInterval: TimeSpan.FromMinutes(1));
+            second = new CloudSourcePump(secondWindow.Dispatcher, snapshot =>
+            {
+                opened.View.ApplyCloudSource(snapshot);
+                if (snapshot.Unavailable && ++secondFailures <= 16)
+                    second!.RequestRefresh();
+            }, SecondRunner, pollInterval: TimeSpan.FromMinutes(1));
             second.SetEnabled(true);
-            Check(secondCalls == 0 && !second.InFlight && HasText(secondWindow, "No data from Codex Cloud"),
-                "second owner cannot overlap disposed in-flight owner");
+            Check(secondCalls == 0 && secondFailures == 1 && !second.InFlight && HasText(secondWindow, "No data from Codex Cloud"),
+                "reentrant refresh reports busy lease once without overlapping or recursing");
             release.TrySetResult();
             WaitUntil(() => !first.InFlight, "disposed owner completes");
             Check(firstPresentations == presentationsAtDispose, "disposed owner does not present late results");
@@ -649,7 +670,8 @@ internal static class Program
             IntPtr handle = IntPtr.Zero;
             WaitUntil(() => (handle = FindOwnedWindow(process.Id)) != IntPtr.Zero, "product window is owned by executable");
             Check(GetWindowThreadProcessId(handle, out uint owner) != 0 && owner == (uint)process.Id, "window owner matches process");
-            WaitUntil(() => HasAutomationText(handle, "Активных задач сейчас нет"), "default empty text is visible");
+            WaitUntil(() => HasAutomationText(handle, "Источники не подключены"), "default disconnected text is visible");
+            Check(!HasAutomationText(handle, "Активных задач сейчас нет"), "default window does not claim a completed check");
             Check(!HasAutomationText(handle, "Создать индикатор прогресса задач") &&
                   !HasAutomationText(handle, "Задача Claude Code"), "default window has no demonstration cards");
             Check(!process.Modules.Cast<ProcessModule>().Any(module =>
@@ -688,6 +710,7 @@ internal static class Program
                 foreach (string theme in new[] { "dark", "light" })
                     Flow(language, theme);
             EmptyCoverage();
+            EmptyClaudeUncertain();
             CloudAndClaudeIsolation();
             CompactCountGrammar();
             LateAfterReconnect();
