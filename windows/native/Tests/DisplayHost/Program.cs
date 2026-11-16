@@ -47,6 +47,8 @@ internal static class Program
         scroll.ScrollToVerticalOffset(Math.Max(0, scroll.VerticalOffset + point.Y - 290));
         window.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(() => { }));
         window.UpdateLayout();
+        DpiScale dpi = VisualTreeHelper.GetDpi(window);
+        Console.WriteLine($"Candidate scroll {stem}: viewport={scroll.ViewportHeight:F2}, extent={scroll.ExtentHeight:F2}, offset={scroll.VerticalOffset:F2}, dpi={dpi.DpiScaleX:F2}/{dpi.DpiScaleY:F2}");
         Capture(window, root, "source-unconfirmed-" + stem);
         controller.ApplyClaudeRegistration(ClaudeRegistration.Unavailable);
         window.UpdateLayout();
