@@ -41,8 +41,8 @@ jobs:
           task_python_root="$("$task_python" -I -S -B -c 'import os,sys; print(os.path.realpath(sys.base_prefix))')"
           case "$task_node_root" in /|/Users|"$task_profile_dir") echo 'Unsafe Node root.' >&2; exit 1;; esac
           case "$task_python_root" in /|/Users|"$task_profile_dir") echo 'Unsafe Python root.' >&2; exit 1;; esac
-          task_path="$task_node_bin:$(dirname "$task_python"):/usr/bin:/bin:/usr/sbin:/sbin"
-          mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" "$task_root/npm-cache" "$task_root/swift-cache" "$task_root/swift-config" "$task_root/swift-security"
+          task_path="$task_node_bin:$(dirname "$task_python"):$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin:$DEVELOPER_DIR/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" "$task_root/npm-cache" "$task_root/swift-cache" "$task_root/swift-config" "$task_root/swift-security" "$task_root/clang-cache"
           : > "$task_root/npmrc"
           git -c credential.helper= -c core.hooksPath="$task_root/hooks" -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
           git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
@@ -62,7 +62,7 @@ jobs:
           cat > "$task_root/run-isolated" <<'SCRIPT'
           #!/bin/bash
           set -euo pipefail
-          exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" \
+          exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 \
             CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 \
             "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "NPM_CONFIG_CACHE=$AITM_TEST_TASK_ROOT/npm-cache" \
             "NPM_CONFIG_USERCONFIG=$AITM_TEST_TASK_ROOT/npmrc" NPM_CONFIG_GLOBALCONFIG=/dev/null NPM_CONFIG_UPDATE_NOTIFIER=false \
@@ -82,6 +82,7 @@ jobs:
           if "$task_run" /usr/bin/touch "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write was not denied.' >&2; exit 1; fi
           "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import os; assert "HOME" not in os.environ and "CODEX_HOME" not in os.environ'
       - name: Prepare pinned synthetic upstream packages
+        id: upstream
         shell: bash
         run: |
           set -euo pipefail
@@ -105,8 +106,16 @@ jobs:
           task_bin="$("$task_run" swift build --show-bin-path "${task_flags[@]}")"
           "$task_run" /usr/bin/env "AITM_DSH_ANCHOR=$AITM_TEST_TASK_ROOT/dsh/node_modules/@deepseek-ai/dsh/package.json" "AITM_PNPM_SCRIPT=$AITM_TEST_TASK_ROOT/dsh/node_modules/pnpm/bin/pnpm.mjs" "AITM_NODE=$AITM_TEST_NODE_BIN" "AITM_CLAUDE_TEST_EXECUTABLE=$task_bin/AITaskMonitor" /bin/bash scripts/run-swift-tests.sh "${task_flags[@]}" --filter DeepSeekIntegrationTests/testIsolatedUpstreamConnectionBridge | tee "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
           grep -q 'testIsolatedUpstreamConnectionBridge.*passed' "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
+      - name: Exercise DeepSeek synthetic integration
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
           "$task_run" node integration-tests/Test-DeepSeekIntegration.mjs "$AITM_TEST_TASK_ROOT/dsh/node_modules/@deepseek-ai/dsh/package.json" "$AITM_TEST_TASK_ROOT/dsh/node_modules/pnpm/bin/pnpm.mjs"
-      - name: Exercise Hermes and Kimi synthetic integrations
+      - name: Exercise Hermes synthetic integrations
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -116,4 +125,11 @@ jobs:
           "$task_run" "$AITM_TEST_TASK_ROOT/hermes-python/bin/python" -I -B integration-tests/Test-HermesManager.py integrations "$AITM_TEST_TASK_ROOT/hermes-source"
           "$task_run" "$AITM_TEST_PYTHON_BIN" -B integration-tests/Test-HermesLiveness.py "$AITM_TEST_TASK_ROOT/hermes-source/hermes_cli/active_sessions.py"
           "$task_run" "$AITM_TEST_TASK_ROOT/hermes-python/bin/python" -B integration-tests/Test-HermesPublication.py "$AITM_TEST_TASK_ROOT/hermes-source"
+      - name: Exercise Kimi synthetic integration
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
           "$task_run" node integration-tests/Test-KimiApprovalWeb.mjs "$AITM_TEST_TASK_ROOT/kimi"
