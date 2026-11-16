@@ -3205,6 +3205,10 @@ function Render-CompactTasks($tasks) {
    $warning=Text $warningText 11.5 $script:palette.Muted
    $warning.Margin=New-Object Windows.Thickness(12,0,0,6)
    $warning.Tag='source-warning'
+   if($HintSnapshotFile -and $PreviewActiveTasks -ge 0){
+    $warning.ToolTip=New-CursorHint $warning $warningText
+    $script:previewHintTarget=$warning
+   }
    $compactTasksPanel.Children.Add($warning)|Out-Null
   }
   if($visibleTasks.Count -gt 1){
