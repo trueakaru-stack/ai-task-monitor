@@ -8,7 +8,7 @@ permissions:
 jobs:
   real-codex-exec:
     if: ${{ github.repository == 'trueakaru-stack/ai-task-monitor' }}
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 8
     steps:
       - name: Create disposable, empty fixture directories
