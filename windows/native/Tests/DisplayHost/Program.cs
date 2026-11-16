@@ -38,6 +38,25 @@ internal static class Program
         using var output = new FileStream(Path.Combine(root, name + ".png"), FileMode.CreateNew, FileAccess.Write, FileShare.None);
         encoder.Save(output);
     }
+    private static void CaptureClaudeSource(Window window, PrototypeWindow controller, string root, string stem)
+    {
+        ScrollViewer scroll = Find<ScrollViewer>(window, "SettingsScroll");
+        Button target = Find<Button>(window, "OpenCodeSourceAction");
+        window.UpdateLayout();
+        Point point = target.TranslatePoint(new Point(0, 0), scroll);
+        scroll.ScrollToVerticalOffset(Math.Max(0, scroll.VerticalOffset + point.Y - 290));
+        window.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(() => { }));
+        window.UpdateLayout();
+        Capture(window, root, "source-unconfirmed-" + stem);
+        controller.ApplyClaudeRegistration(ClaudeRegistration.Unavailable);
+        window.UpdateLayout();
+        Capture(window, root, "source-unavailable-" + stem);
+        controller.ApplyClaudeRegistration(ClaudeRegistration.Registered);
+        scroll.ScrollToVerticalOffset(0);
+        window.Dispatcher.Invoke(DispatcherPriority.ApplicationIdle, new Action(() => { }));
+        window.UpdateLayout();
+    }
+
     private static (Window Window, PrototypeWindow Controller) Open(PreferenceFiles files, Func<bool?>? systemTheme = null)
     {
         using Stream layout = typeof(PrototypeWindow).Assembly.GetManifestResourceStream(
@@ -98,6 +117,7 @@ internal static class Program
             !Find<Button>(window, "AboutSettingsButton").IsEnabled,
             "Claude registration or unfinished actions were presented incorrectly.");
         Capture(window, root, "settings-dark-ru");
+        CaptureClaudeSource(window, first.Controller, root, "dark-ru");
 
         Click(window, "LightThemeButton");
         using (JsonDocument saved = ReadTarget(target))
@@ -107,6 +127,7 @@ internal static class Program
             ((SolidColorBrush)window.Resources["Surface"]).Color == (Color)ColorConverter.ConvertFromString("#F6F6F6"),
             "Theme selection changed legacy settings or the window did not update.");
         Capture(window, root, "settings-light-ru");
+        CaptureClaudeSource(window, first.Controller, root, "light-ru");
         var sourceTask = new AITaskMonitor.Claude.Task
         {
             Id = "custom", Activity = "Пользовательский текст", Updated = DateTime.UtcNow, Started = DateTime.UtcNow,
@@ -131,8 +152,10 @@ internal static class Program
         Check(retained.Activity == "Пользовательский текст" && retained.Steps.Single().Title == "Название от источника" &&
             retained.Title == "Claude Code task", "Changing language altered source text or failed to relocalize a generated title.");
         Capture(window, root, "settings-light-en");
+        CaptureClaudeSource(window, first.Controller, root, "light-en");
         Click(window, "DarkThemeButton");
         Capture(window, root, "settings-dark-en");
+        CaptureClaudeSource(window, first.Controller, root, "dark-en");
         Click(window, "SystemThemeButton");
         Click(window, "SystemLanguageButton");
         using (JsonDocument saved = ReadTarget(target))
