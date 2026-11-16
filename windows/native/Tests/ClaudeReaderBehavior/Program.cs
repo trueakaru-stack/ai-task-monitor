@@ -114,8 +114,8 @@ internal static class Program
                 ? "Difference: native rejects a 129-unit session ID."
                 : "Difference: embedded reader accepts a 129-unit session ID.");
 
-            // The readers also differ after a known step is cleanly stopped
-            // and a later truncated history reports loss before the next turn.
+            // A known step remains unconfirmed after a clean stop followed by
+            // history loss and a later prompt in the same session.
             var stoppedHistory = new SessionReader();
             Task beforeStop = stoppedHistory.Read(prompt + "\n" + oldStep, "", now, boundary).Single();
             Check(beforeStop.Steps.Any(step => step.title == "Synthetic step"), "The initial synthetic step name was not observed.");
@@ -124,18 +124,22 @@ internal static class Program
             string loss = "{\"session_id\":\"\",\"timestamp\":\"" + start.AddSeconds(4).ToString("o", CultureInfo.InvariantCulture) +
                 "\",\"event\":\"Unknown\",\"active\":null,\"stage_version\":1,\"stage_phase\":\"source_uncertain\"}";
             string newTurn = Event("observed", "UserPromptSubmit", start.AddSeconds(5), true, "");
+            Check(stoppedHistory.Read(loss, "", now, boundary).Length == 0,
+                "Loss alone must not revive a stopped session.");
             Task afterStopLoss = stoppedHistory.Read(loss + "\n" + newTurn, "", now, boundary).Single();
-            bool oldName = afterStopLoss.Steps.Any(step => step.title == "Synthetic step");
-            Check(afterStopLoss.Unconfirmed, "A session after history loss was not marked unconfirmed.");
-            if (!native)
-            {
-                Check(oldName, "The embedded reader lost the stopped step name in the synthetic scenario.");
-                Console.WriteLine("Observed: embedded reader retains the stopped step name after a later history loss.");
-            }
-            else if (!oldName)
-                Console.WriteLine("OPEN DEFECT: native reader loses the stopped step name after a later history loss.");
-            else
-                Console.WriteLine("Observed: native reader retains the stopped step name; re-evaluate the documented open defect.");
+            Check(afterStopLoss.Unconfirmed && !afterStopLoss.PlanConfirmed &&
+                afterStopLoss.KnownStepCount == 0 && afterStopLoss.KnownDoneCount == 0 &&
+                afterStopLoss.Steps.Any(step => step.title == "Synthetic step") &&
+                afterStopLoss.Steps.All(step => step.status == "unknown"),
+                "A later turn after history loss must retain old names without confirming them.");
+
+            var isolatedHistory = new SessionReader();
+            isolatedHistory.Read(prompt + "\n" + oldStep, "", now, boundary);
+            isolatedHistory.Read(prompt + "\n" + oldStep + "\n" + laterStop, "", now, boundary);
+            string differentSession = Event("another-session", "UserPromptSubmit", start.AddSeconds(5), true, "");
+            Task isolated = isolatedHistory.Read(loss + "\n" + differentSession, "", now, boundary).Single();
+            Check(isolated.Id == "another-session" && isolated.Steps.All(step => step.title != "Synthetic step"),
+                "A stopped session's retained title leaked to a different session.");
 
             string bulk = Event("bulk", "PreToolUse", start, true, ",\"tool_name\":\"Read\"");
             string events = String.Join("\n", Enumerable.Repeat(bulk, 5000));

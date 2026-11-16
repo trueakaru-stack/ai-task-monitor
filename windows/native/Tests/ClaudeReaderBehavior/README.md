@@ -9,8 +9,11 @@ open files, profiles, hooks, accounts or network connections.
 The common checks cover current and pre-start sessions, legacy-only sessions,
 legacy step-name preservation, quiet and later activity, prompt identity,
 generated activity privacy, a malformed current record, inferred and unnamed
-old steps, an unambiguous clear stop and 10,000 synthetic events. The test also
-records these observed differences:
+old steps, an unambiguous clear stop, retained names after a later history gap,
+session isolation, and 10,000 synthetic events. Both readers must preserve a
+previously observed name as unconfirmed after a stop and subsequent loss,
+without reviving a card solely from the retained name. The test also records
+these observed differences:
 
 - A simultaneous active and clear-stop event in one file hides the task in
   the embedded reader; the native reader keeps it unconfirmed.
@@ -19,12 +22,6 @@ records these observed differences:
   later observed session.
 - An embedded reader accepts a 129-unit session ID; the native reader
   rejects it rather than merging or truncating it.
-- After a previously visible task stops and its history is later lost, the
-  embedded reader retains the old step name as unconfirmed; the native reader
-  does not retain that stopped name in this scenario. This is an **open C#
-  behavior defect** against the agreed preservation of known step names. The
-  test reports whether the defect remains; it does not require it to persist.
-
 These are selected behaviors, not an exhaustive diff or proof of equivalence.
 Phase-aware events, real hook delivery, arbitrary clock races, file identity,
 UI and installer behavior require separate checks.

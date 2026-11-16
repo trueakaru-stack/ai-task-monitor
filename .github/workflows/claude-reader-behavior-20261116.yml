@@ -1,7 +1,7 @@
 name: Synthetic Claude reader behavior
 on:
   push:
-    branches: [windows]
+    branches: [windows, 'codex/claude-stopped-history-20261116']
 permissions:
   contents: read
 jobs:

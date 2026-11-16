@@ -9,7 +9,8 @@ This also applies when the same step ID is reused for different observed
 names, including when both arrive before the first read. Without observed loss
 or session uncertainty, an ordinary rename keeps its latest name. Retained
 history is limited to 128 entries per session and is marked incomplete when
-bounded; an overlong step ID is represented internally by a SHA-256 identity and
+bounded; hidden stopped sessions with names are limited to 256 entries. Reaching
+this limit records overflow and makes other visible tasks unconfirmed; an overlong step ID is represented internally by a SHA-256 identity and
 also marks the retained plan incomplete. Values no longer present or observed
 cannot be recovered.
 
@@ -156,12 +157,11 @@ synthetic fixture against the current PowerShell-embedded reader and the
 native reader. It checks session startup, legacy-only sessions and step names,
 quiet and resumed activity, prompt identity, activity privacy, malformed input,
 old-step status, an unambiguous stop and 10,000 synthetic events. It separately asserts the differences for
-simultaneous active/stop events, malformed legacy-only input, 129-unit session
-IDs and stopped-name retention after a later loss. The
+simultaneous active/stop events, malformed legacy-only input and 129-unit session
+IDs. Both readers must retain an observed stopped step name as unconfirmed if
+history is later lost and the same session becomes active, without creating a
+card solely from stored names. The
 [test README](../Tests/ClaudeReaderBehavior/README.md)
-describes those cases and the deliberately failing old assertion. The native
-reader's loss of a previously observed stopped step name after later history
-loss is an open defect against the agreed preservation of known names. These
-selected checks do not establish full behavioral equivalence. Real Claude
-sessions, final application integration and installer behavior remain
-unverified.
+describes those cases and the deliberately failing old assertion. These selected
+checks do not establish full behavioral equivalence. Real Claude sessions,
+final application integration and installer behavior remain unverified.

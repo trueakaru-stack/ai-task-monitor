@@ -921,6 +921,62 @@ using (var forgotten = new ClaudeFileSource(forgottenPath, null, DateTime.MinVal
         snapshot.Tasks[0].Unconfirmed, "Only the new event should appear after an explicit reconnect.");
 }
 
+
+string stoppedHistoryPath = Path.Combine(work, "stopped-history-source-loss.jsonl");
+File.WriteAllText(stoppedHistoryPath, complete, utf8);
+using (var stoppedHistorySource = new ClaudeFileSource(stoppedHistoryPath, null, DateTime.MinValue.ToUniversalTime()))
+{
+    ClaudeSourceSnapshot beforeStop = stoppedHistorySource.Poll(ClaudeConnection.Connected, now);
+    Check(beforeStop.Tasks.Single().Steps.Any(step => step.title == "First step"), "Stopped-history setup lost the observed title.");
+    File.AppendAllText(stoppedHistoryPath, completeStop, utf8);
+    Check(stoppedHistorySource.Poll(ClaudeConnection.Connected, now.AddSeconds(2)).Tasks.Count == 0,
+        "A clean stop must hide the finished synthetic session.");
+    File.WriteAllText(stoppedHistoryPath, "", utf8);
+    ClaudeSourceSnapshot missing = stoppedHistorySource.Poll(ClaudeConnection.Connected, now.AddSeconds(3));
+    Check(missing.Tasks.Count == 0, "Source loss alone must not revive a stopped session.");
+    string resumedPrompt = JsonSerializer.Serialize(new Dictionary<string, object> {
+        ["session_id"] = "observed", ["timestamp"] = now.AddSeconds(4).ToString("O"),
+        ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
+    File.AppendAllText(stoppedHistoryPath, resumedPrompt, utf8);
+    ClaudeSourceSnapshot resumedAfterLoss = stoppedHistorySource.Poll(ClaudeConnection.Connected, now.AddSeconds(5));
+    var resumedTask = resumedAfterLoss.Tasks.Single();
+    Check(resumedAfterLoss.Unavailable && resumedTask.Unconfirmed && !resumedTask.PlanConfirmed &&
+        resumedTask.KnownStepCount == 0 && resumedTask.KnownDoneCount == 0 &&
+        resumedTask.Steps.Any(step => step.title == "First step") &&
+        resumedTask.Steps.All(step => step.status == "unknown"),
+        "A resumed session must retain stopped titles as unconfirmed after file history loss.");
+    stoppedHistorySource.NotifyConnection(ClaudeConnection.Disconnected);
+    stoppedHistorySource.ForgetBefore(now.AddSeconds(6));
+    stoppedHistorySource.NotifyConnection(ClaudeConnection.Connected);
+    string afterForgetPrompt = JsonSerializer.Serialize(new Dictionary<string, object> {
+        ["session_id"] = "observed", ["timestamp"] = now.AddSeconds(7).ToString("O"),
+        ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
+    File.AppendAllText(stoppedHistoryPath, afterForgetPrompt, utf8);
+    ClaudeSourceSnapshot afterForget = stoppedHistorySource.Poll(now.AddSeconds(8));
+    Check(afterForget.Tasks.Single().Steps.All(step => step.title != "First step"),
+        "Explicit disconnect must forget stopped titles before a later reconnect.");
+}
+
+
+var cappedHistory = new SessionReader();
+string Retarget(string value, string id) => value.Replace("\"observed\"", "\"" + id + "\"", StringComparison.Ordinal);
+for (int index = 0; index < 256; index++)
+{
+    string id = "stopped-cap-" + index;
+    string plan = Retarget(complete, id);
+    cappedHistory.Read(plan, "", now, DateTime.MinValue.ToUniversalTime());
+    cappedHistory.Read(plan + Retarget(completeStop, id), "", now.AddSeconds(2), DateTime.MinValue.ToUniversalTime());
+}
+Check(!cappedHistory.RetentionOverflow && !cappedHistory.SourceUncertain,
+    "The bounded stopped-history capacity must accept its documented number of sessions.");
+string overflowPlan = Retarget(complete, "stopped-cap-overflow");
+cappedHistory.Read(overflowPlan + neighbor, "", now, DateTime.MinValue.ToUniversalTime());
+var capResult = cappedHistory.Read(overflowPlan + neighbor + Retarget(completeStop, "stopped-cap-overflow"),
+    "", now.AddSeconds(2), DateTime.MinValue.ToUniversalTime());
+Check(cappedHistory.RetentionOverflow && cappedHistory.SourceUncertain && capResult.Length == 1 &&
+    capResult[0].Id == "neighbor" && capResult[0].Unconfirmed && !capResult[0].PlanConfirmed,
+    "Overflow during a stop must immediately mark another visible session unconfirmed.");
+
 Console.WriteLine($"Claude file source: {checks} synthetic checks passed.");
 }
 catch (Exception error)

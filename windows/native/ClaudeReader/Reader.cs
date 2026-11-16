@@ -569,6 +569,8 @@ namespace AITaskMonitor.Claude {
   private const int MaximumRetainedStepId = 128;
   private readonly object gate = new object();
   private readonly Dictionary<string, Task> retained = new Dictionary<string, Task>(StringComparer.Ordinal);
+  // A cleanly stopped session keeps bounded names without creating a visible card.
+  private readonly Dictionary<string, Task> stoppedHistory = new Dictionary<string, Task>(StringComparer.Ordinal);
   private readonly HashSet<string> uncertainSessions = new HashSet<string>(StringComparer.Ordinal);
   private readonly HashSet<string> uncertainPlans = new HashSet<string>(StringComparer.Ordinal);
   private readonly HashSet<string> nameHistorySessions = new HashSet<string>(StringComparer.Ordinal);
@@ -654,13 +656,23 @@ namespace AITaskMonitor.Claude {
      if(nameHistorySessions.Count < MaximumRetained) nameHistorySessions.Add(id);
      else { overflow = true; sourceLoss = true; }
     }
+    // Do not re-create a card solely because its stopped session has stored
+    // evidence. On a prior source-wide loss, retain the previous fallback.
+    if(!sourceLoss) foreach(string id in cleanlyStopped) {
+     Task previous;
+     if(retained.TryGetValue(id, out previous) && previous.Steps != null && previous.Steps.Length > 0) {
+      if(stoppedHistory.ContainsKey(id)) stoppedHistory[id] = previous;
+      else if(stoppedHistory.Count < MaximumRetained) stoppedHistory.Add(id, previous);
+      else { overflow = true; sourceLoss = true; }
+     }
+     retained.Remove(id);
+    }
+    // An overflow while hiding a stopped session also makes every visible
+    // task uncertain before snapshots are produced.
     foreach(Task item in tasks) if(sourceLoss || uncertainSessions.Contains(item.Id)) {
      item.Unconfirmed=true; item.PlanConfirmed=false; item.KnownStepCount=0; item.KnownDoneCount=0; item.UnknownStepCount=item.Steps.Length;
     }
     else if(uncertainPlans.Contains(item.Id)) { item.PlanConfirmed=false; item.KnownStepCount=0; item.KnownDoneCount=0; item.UnknownStepCount=item.Steps.Length; }
-    // Do not re-create a card solely because its stopped session has stored
-    // evidence. On a prior source-wide loss, retain the previous fallback.
-    if(!sourceLoss) foreach(string id in cleanlyStopped) retained.Remove(id);
     // Do not revive stopped/absent sessions on the first source-loss marker.
     // For a still-visible session, keep its previous titles when the new
     // readable suffix carries only part of the plan.
@@ -670,7 +682,8 @@ namespace AITaskMonitor.Claude {
     for(int index = 0; index < tasks.Length; index++) {
      Task item = tasks[index];
      if(sourceLoss || uncertainSessions.Contains(item.Id) || uncertainPlans.Contains(item.Id) || item.Unconfirmed) {
-      Task previous; retained.TryGetValue(item.Id, out previous);
+      Task previous;
+      if(!retained.TryGetValue(item.Id, out previous)) stoppedHistory.TryGetValue(item.Id, out previous);
       Task safe = Freeze(item, previous, sourceLoss || nameHistorySessions.Contains(item.Id));
       safe.Unconfirmed = item.Unconfirmed;
       safe.Activity = item.Unconfirmed ? "" : item.Activity;
@@ -681,8 +694,8 @@ namespace AITaskMonitor.Claude {
     foreach(var entry in retained) if((prior || uncertainSessions.Contains(entry.Key)) && !visible.Contains(entry.Key)) result.Add(Freeze(entry.Value, null, sourceLoss || nameHistorySessions.Contains(entry.Key)));
     foreach(Task item in tasks) {
      Task frozen = Freeze(item, null, sourceLoss || nameHistorySessions.Contains(item.Id));
-     if(retained.ContainsKey(item.Id)) retained[item.Id] = frozen;
-     else if(retained.Count < MaximumRetained) retained.Add(item.Id, frozen);
+     if(retained.ContainsKey(item.Id)) { retained[item.Id] = frozen; stoppedHistory.Remove(item.Id); }
+     else if(retained.Count < MaximumRetained) { retained.Add(item.Id, frozen); stoppedHistory.Remove(item.Id); }
      else overflow = true;
     }
     return result.ToArray();
