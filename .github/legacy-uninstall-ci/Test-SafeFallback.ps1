@@ -111,8 +111,17 @@ try {
             $preserved=if($culture -eq 'ru-RU'){'подключения сохранены.'}else{'connections were preserved.'}
             Check (@($names|Where-Object {$_.Contains($expected) -and $_.Contains($preserved)}).Count -gt 0) 'The fallback did not explain that removal was not performed.'
             $buttonCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Button)
-            $button=$dialog.FindFirst([Windows.Automation.TreeScope]::Descendants,$buttonCondition)
-            Check ($null -ne $button) 'The fallback dialog has no confirmation button.'
+            $button=$null;$buttonClock=[Diagnostics.Stopwatch]::StartNew()
+            while($null -eq $button -and $buttonClock.Elapsed.TotalSeconds -lt 10){
+                $dialog=[Windows.Automation.AutomationElement]::RootElement.FindFirst([Windows.Automation.TreeScope]::Children,$condition)
+                if($null -ne $dialog){$button=$dialog.FindFirst([Windows.Automation.TreeScope]::Descendants,$buttonCondition)}
+                if($null -eq $button){Start-Sleep -Milliseconds 100}
+            }
+            if($null -eq $button){
+                $details=if($null -eq $dialog){@('dialog unavailable')}else{@($dialog.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)|ForEach-Object {$_.Current.ControlType.ProgrammaticName + ':' + $_.Current.Name})}
+                Write-Output ('Dialog UIA children: '+($details -join ' | '))
+                throw 'The fallback dialog has no confirmation button.'
+            }
             $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
             Check ($process.WaitForExit(10000) -and $process.ExitCode -eq 1) 'The fallback did not exit with the incomplete-removal status.'
         }finally{
