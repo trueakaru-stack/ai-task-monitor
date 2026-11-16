@@ -10,6 +10,7 @@ internal static class CodexProgressInstaller
     private static void Main()
     {
         bool installationAttempted = false;
+        bool claudeSetupAttempted = false;
         string installDirectory = null;
         try
         {
@@ -79,6 +80,7 @@ internal static class CodexProgressInstaller
 
                 if (connectClaude)
                 {
+                    claudeSetupAttempted = true;
                     Process setup = Process.Start(new ProcessStartInfo
                     {
                         FileName = "powershell.exe",
@@ -106,8 +108,9 @@ internal static class CodexProgressInstaller
         }
         catch (Exception error)
         {
+            string claudeAdvice = claudeSetupAttempted ? SafeInstallPaths.ClaudeSetupMayHaveChangedMessage() : "";
             string advice = installationAttempted ? SafeInstallPaths.PartialInstallMessage(installDirectory) : "";
-            MessageBox.Show(error.Message + advice, "AI task monitor", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(error.Message + claudeAdvice + advice, "AI task monitor", MessageBoxButtons.OK, MessageBoxIcon.Error);
             Environment.ExitCode = 1;
         }
     }

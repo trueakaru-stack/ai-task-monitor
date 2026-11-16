@@ -30,7 +30,7 @@ function Find-Window([Diagnostics.Process]$process,[int]$seconds){
     $otherWindows=[Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children,$idCondition)
     $details=@(foreach($item in $otherWindows){$item.Current.ClassName+':'+$item.Current.Name})
     $children=@(Get-CimInstance Win32_Process -Filter ('ParentProcessId = '+$process.Id) -Property Name|ForEach-Object {$_.Name})
-    Write-Output ('Window diagnostic: alive='+(-not $process.HasExited)+'; UIA windows='+($details -join ' | ')+'; child process names='+($children -join ','))
+    Write-Warning ('Window diagnostic: alive='+(-not $process.HasExited)+'; UIA windows='+($details -join ' | ')+'; child process names='+($children -join ','))
     throw 'The synthetic process window was not found in time.'
 }
 function Get-Names($window){
@@ -119,7 +119,27 @@ try{
     Check ($setup.WaitForExit(10000) -and $setup.ExitCode -eq 0) 'The synthetic setup did not finish successfully.'
     $setup.Dispose();$setup=$null
     Write-Output 'Synthetic setup completed; waiting for monitor window.'
-    $monitorWindow=Find-Window $monitor 40
+    try{
+        $monitorWindow=Find-Window $monitor 40
+    }catch{
+        if(-not $monitor.HasExited){$monitor.Kill();[void]$monitor.WaitForExit(10000)}
+        $monitor.Dispose();$monitor=$null
+        # Diagnostic only: repeat the installed launcher's exact PowerShell
+        # arguments with output redirected, in the same synthetic environment.
+        $direct=New-IsolatedStart $SystemPowerShell $values
+        $direct.RedirectStandardOutput=$true;$direct.RedirectStandardError=$true
+        foreach($arg in @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-Sta','-File',$appScript)){[void]$direct.ArgumentList.Add($arg)}
+        $probeMonitor=[Diagnostics.Process]::Start($direct)
+        try{
+            $probeOut=$probeMonitor.StandardOutput.ReadToEndAsync();$probeErr=$probeMonitor.StandardError.ReadToEndAsync()
+            $finished=$probeMonitor.WaitForExit(20000)
+            if(-not $finished){$probeMonitor.Kill();[void]$probeMonitor.WaitForExit(10000)}
+            $observedOut=if($probeOut.IsCompleted){$probeOut.Result}else{'<stream still open>'}
+            $observedErr=if($probeErr.IsCompleted){$probeErr.Result}else{'<stream still open>'}
+            Write-Warning ('Direct installed-script diagnostic: exited='+$finished+'; stdout='+$observedOut+'; stderr='+$observedErr)
+        }finally{$probeMonitor.Dispose()}
+        throw
+    }
     Write-Output 'Synthetic monitor window found.'
     Check ($monitorWindow.Current.Name -ceq 'AI task monitor') 'The synthetic monitor window did not open.'
     $monitor.Kill();Check ($monitor.WaitForExit(10000)) 'The synthetic monitor did not exit.'

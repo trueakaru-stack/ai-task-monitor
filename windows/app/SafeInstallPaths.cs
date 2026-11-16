@@ -71,6 +71,13 @@ internal sealed class SafeInstallPaths : IDisposable
         return "The installation folder already exists. Quit AI task monitor, Claude Code, other connected programs and their background processes. Move " + path + " to a safe location, then run the installer again. Data in CodexTaskProgress will not be changed.";
     }
 
+    internal static string ClaudeSetupMayHaveChangedMessage()
+    {
+        if (System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru")
+            return "\n\nНастройки подключения Claude Code могли измениться. Перед переносом или удалением папки проверьте и отключите подключение AI task monitor в Claude Code.";
+        return "\n\nClaude Code connection settings may have changed. Before moving or removing the folder, review and disconnect the AI task monitor integration in Claude Code.";
+    }
+
     internal static string PartialInstallMessage(string path)
     {
         if (System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru")
