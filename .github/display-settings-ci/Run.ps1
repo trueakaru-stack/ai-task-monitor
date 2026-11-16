@@ -75,7 +75,7 @@ try{
  Check ([IO.File]::Exists($hostAssembly)) 'The display-host test assembly is missing.'
  Invoke-Isolated @($hostAssembly,$root)
  Check (@(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File).Count -eq 4) 'The four synthetic frames are missing.'
- Check (@(Get-ChildItem -LiteralPath $root -Filter 'end-*.png' -File).Count -eq 8) 'The eight settings and feedback-error frames are missing.'
+ Check (@(Get-ChildItem -LiteralPath $root -Filter 'end-*.png' -File).Count -eq 12) 'The twelve settings and feedback-error frames are missing.'
  $viewProject=Join-Path $repository 'windows/native/Prototype/Tests/Prototype.Tests.csproj'
  Invoke-Isolated @('build',$viewProject,'-c','Release','--configfile',$config,'--artifacts-path',$artifacts,'-p:NuGetAudit=false','--nologo')
  $viewAssembly=Join-Path $artifacts 'bin/Prototype.Tests/release/AITaskMonitor.Prototype.Tests.dll'
@@ -97,6 +97,33 @@ try{
   Invoke-Isolated -arguments $arguments -executable $shell
   Check ([IO.File]::Exists($settings)) 'The published settings frame is missing.'
  }}
+ # Render the released layout's existing error element with synthetic error text.
+ # Only the disposable reference copy is instrumented; no email or clipboard action runs.
+ $referenceText=[IO.File]::ReadAllText($releasedScript)
+ $needle='  if($PreviewSettingsEnd){$settingsScroll.ScrollToEnd();$window.Dispatcher.Invoke([Action]{},[Windows.Threading.DispatcherPriority]::ApplicationIdle);$window.UpdateLayout()}'
+ Check (([regex]::Matches($referenceText,[regex]::Escape($needle))).Count -eq 1) 'Reference settings-end hook changed.'
+ $cases=@(
+  @{Kind='copy';Text='Не удалось скопировать адрес. Выделите его и скопируйте вручную.'},
+  @{Kind='mail';Text='Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com.'}
+ )
+ foreach($case in $cases){
+  $probeScript=Join-Path (Split-Path -Parent $releasedScript) ('AITM-Feedback-'+$case.Kind+'-Preview.ps1')
+  Check (-not [IO.File]::Exists($probeScript)) 'Reference probe path already exists.'
+  $injection='  if($PreviewSettingsEnd){$feedbackError.Tag='''+$case.Text+''';$feedbackError.Text=Tr ([string]$feedbackError.Tag);$feedbackError.Visibility="Visible";$window.UpdateLayout()}'
+  [IO.File]::WriteAllText($probeScript,$referenceText.Replace($needle,$injection+"`r`n"+$needle),[Text.UTF8Encoding]::new($true))
+  foreach($theme in @('dark','light')){foreach($language in @('ru','en')){
+   $stem=$theme+'-'+$language
+   $snapshot=Join-Path $root ('released-error-'+$case.Kind+'-'+$stem+'.png')
+   $key='ref-error-'+$case.Kind+'-'+$stem
+   $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',$probeScript,
+    '-PreviewActiveTasks','1','-PreviewOffscreen','-PreviewSettingsEnd','-ThemeOverride',$theme,'-LanguageOverride',$language,
+    '-PreferencesFile',(Join-Path $root ('temp/'+$key+'.json')),
+    '-DiagnosticDirectory',(Join-Path $root ('temp/'+$key)),
+    '-SnapshotFile',(Join-Path $root ('temp/'+$key+'-main.png')),'-SettingsSnapshotFile',$snapshot)
+   Invoke-Isolated -arguments $arguments -executable $shell
+   Check ([IO.File]::Exists($snapshot)) 'The released error frame is missing.'
+  }}
+ }
  foreach($path in @(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File)+@(Get-ChildItem -LiteralPath $root -Filter 'end-*.png' -File)+@(Get-ChildItem -LiteralPath $root -Filter 'released-*.png' -File)){
   $bytes=[IO.File]::ReadAllBytes($path.FullName)
   Check ($bytes.Length -ge 24) 'A rendered frame is too short.'

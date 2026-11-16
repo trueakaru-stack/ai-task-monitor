@@ -162,6 +162,20 @@ internal static class Program
         Check(File.ReadAllBytes(old).AsSpan().SequenceEqual(original) &&
             ((SolidColorBrush)window.Resources["Surface"]).Color == (Color)ColorConverter.ConvertFromString("#F6F6F6"),
             "Theme selection changed legacy settings or the window did not update.");
+        failCopy = true;
+        Click(window, "FeedbackCopyButton");
+        Check(Visible(feedbackError) && feedbackError.Text.StartsWith("Не удалось скопировать", StringComparison.Ordinal),
+            "A clipboard error is missing in the light Russian theme.");
+        CaptureSettingsEnd(window, root, "error-copy-light-ru");
+        failCopy = false;
+        Click(window, "FeedbackCopyButton");
+        failMail = true;
+        feedbackLink.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
+        Check(Visible(feedbackError) && feedbackError.Text.StartsWith("Не удалось открыть", StringComparison.Ordinal),
+            "A mail error is missing in the light Russian theme.");
+        CaptureSettingsEnd(window, root, "error-mail-light-ru");
+        failMail = false;
+        feedbackLink.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
         Capture(window, root, "settings-light-ru");
         CaptureSettingsEnd(window, root, "light-ru");
         var sourceTask = new AITaskMonitor.Claude.Task
@@ -217,6 +231,20 @@ internal static class Program
         Capture(window, root, "settings-light-en");
         CaptureSettingsEnd(window, root, "light-en");
         Click(window, "DarkThemeButton");
+        failCopy = true;
+        Click(window, "FeedbackCopyButton");
+        Check(Visible(feedbackError) && feedbackError.Text.StartsWith("Could not copy", StringComparison.Ordinal),
+            "A clipboard error is missing in the dark English theme.");
+        CaptureSettingsEnd(window, root, "error-copy-dark-en");
+        failCopy = false;
+        Click(window, "FeedbackCopyButton");
+        failMail = true;
+        feedbackLink.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
+        Check(Visible(feedbackError) && feedbackError.Text.StartsWith("Could not open", StringComparison.Ordinal),
+            "A mail error is missing in the dark English theme.");
+        CaptureSettingsEnd(window, root, "error-mail-dark-en");
+        failMail = false;
+        feedbackLink.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
         Capture(window, root, "settings-dark-en");
         CaptureSettingsEnd(window, root, "dark-en");
         Click(window, "SystemThemeButton");
