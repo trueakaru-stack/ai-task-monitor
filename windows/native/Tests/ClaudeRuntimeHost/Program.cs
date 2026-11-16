@@ -300,7 +300,7 @@ internal static class Program
         ((InvokePattern)element.GetCurrentPattern(InvokePattern.Pattern)).Invoke();
     }
 
-    private static void HoldWithoutCard(Process host, int milliseconds, Action? onObservation = null)
+    private static void HoldWithoutCard(Process host, int milliseconds)
     {
         DateTime until = DateTime.UtcNow.AddMilliseconds(milliseconds);
         var frame = new DispatcherFrame();
@@ -309,11 +309,38 @@ internal static class Program
         timer.Tick += (_, _) =>
         {
             observed |= HasName(host, "Задача Claude Code");
-            onObservation?.Invoke();
             if (observed || DateTime.UtcNow >= until) frame.Continue = false;
         };
         timer.Start(); Dispatcher.PushFrame(frame); timer.Stop();
         Check(!observed && !host.HasExited, "A pre-start event must not be presented as a current task.");
+    }
+
+    private static void ObserveEmptyState(Process host, int milliseconds)
+    {
+        var counts = new Dictionary<NameObservation, int>();
+        int immediateRecovery = 0, otherEmptyState = 0, progressVisible = 0;
+        DateTime until = DateTime.UtcNow.AddMilliseconds(milliseconds);
+        var frame = new DispatcherFrame();
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        timer.Tick += (_, _) =>
+        {
+            NameObservation sample = ObserveName(host, "Статус задач не подтверждён");
+            counts[sample] = counts.TryGetValue(sample, out int count) ? count + 1 : 1;
+            if (sample != NameObservation.Found)
+            {
+                if (HasName(host, "Статус задач не подтверждён")) immediateRecovery++;
+                if (HasName(host, "Источники не подключены") || HasName(host, "Нет данных от Claude Code")) otherEmptyState++;
+                if (HasName(host, "Ход выполнения")) progressVisible++;
+            }
+            if (DateTime.UtcNow >= until) frame.Continue = false;
+        };
+        timer.Start();
+        try { Dispatcher.PushFrame(frame); }
+        finally { timer.Stop(); }
+        Console.WriteLine("Synthetic UIA hold: counts=" +
+            String.Join(",", counts.OrderBy(x => x.Key).Select(x => x.Key + ":" + x.Value)) +
+            " immediateRecovery=" + immediateRecovery + " otherEmptyState=" + otherEmptyState +
+            " progressVisibleAfterMiss=" + progressVisible);
     }
 
     private static void CheckPreviewDoesNotReadProfile(string root, ClaudeRegisteredHookPaths paths)
@@ -418,33 +445,27 @@ internal static class Program
                 ReportEntryPointFailure(host, paths, legacy, original, Console.Error);
                 throw;
             }
-            // Exercise the same diagnostic path with known synthetic labels before relying on it in CI.
-            using (var diagnostic = new StringWriter())
+            // Verify the diagnostic itself reports one known present and one
+            // known absent label. Allow brief UIA gaps without accepting False.
+            bool diagnosticVerified = false;
+            string lastDiagnostic = "";
+            for (int attempt = 0; attempt < 5 && !diagnosticVerified; attempt++)
             {
+                using var diagnostic = new StringWriter();
                 ReportEntryPointFailure(host, paths, legacy, original, diagnostic);
-                string evidence = diagnostic.ToString();
-                Check(evidence.Contains("Synthetic child exited=False hasMainWindow=True", StringComparison.Ordinal) &&
-                    evidence.Contains("Synthetic global registration=Registered, legacyUnchanged=True", StringComparison.Ordinal) &&
-                    evidence.Contains("Synthetic UIA root=True", StringComparison.Ordinal) &&
-                    evidence.Contains("Synthetic UIA label [Статус задач не подтверждён]=", StringComparison.Ordinal) &&
-                    evidence.Contains("Synthetic UIA label [__aitm_synthetic_missing_label__]=False", StringComparison.Ordinal),
-                    "Synthetic entry-point diagnostics did not report known fixture state.");
+                lastDiagnostic = diagnostic.ToString();
+                diagnosticVerified = lastDiagnostic.Contains("Synthetic child exited=False hasMainWindow=True", StringComparison.Ordinal) &&
+                    lastDiagnostic.Contains("Synthetic global registration=Registered, legacyUnchanged=True", StringComparison.Ordinal) &&
+                    lastDiagnostic.Contains("Synthetic UIA root=True", StringComparison.Ordinal) &&
+                    lastDiagnostic.Contains("Synthetic UIA label [Статус задач не подтверждён]=True", StringComparison.Ordinal) &&
+                    lastDiagnostic.Contains("Synthetic UIA label [__aitm_synthetic_missing_label__]=False", StringComparison.Ordinal);
+                if (!diagnosticVerified && attempt < 4) Thread.Sleep(50);
             }
-            var holdCounts = new Dictionary<NameObservation, int>();
-            int immediateRecovery = 0, otherEmptyState = 0, progressVisible = 0;
-            HoldWithoutCard(host, 2500, () =>
-            {
-                NameObservation sample = ObserveName(host, "Статус задач не подтверждён");
-                holdCounts[sample] = holdCounts.TryGetValue(sample, out int count) ? count + 1 : 1;
-                if (sample == NameObservation.Found) return;
-                if (HasName(host, "Статус задач не подтверждён")) immediateRecovery++;
-                if (HasName(host, "Источники не подключены") || HasName(host, "Нет данных от Claude Code")) otherEmptyState++;
-                if (HasName(host, "Ход выполнения")) progressVisible++;
-            });
-            Console.WriteLine("Synthetic UIA hold: counts=" +
-                String.Join(",", holdCounts.OrderBy(x => x.Key).Select(x => x.Key + ":" + x.Value)) +
-                " immediateRecovery=" + immediateRecovery + " otherEmptyState=" + otherEmptyState +
-                " progressVisibleAfterMiss=" + progressVisible);
+            Check(diagnosticVerified, "Synthetic entry-point diagnostics did not report known fixture state. " + lastDiagnostic);
+            // Preserve the original negative interval; additional UIA tracing
+            // runs separately so it cannot reduce the card-absence probes.
+            HoldWithoutCard(host, 2500);
+            ObserveEmptyState(host, 2500);
             Check(!HasName(host, "Источники не подключены") && !HasName(host, "Активных задач сейчас нет"),
                 "A missing pre-start card was presented as a definitive absence.");
             // A later active event from the same session can make its prior context visible.
