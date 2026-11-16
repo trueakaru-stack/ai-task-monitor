@@ -8,7 +8,7 @@ permissions:
 jobs:
   real-codex-exec:
     if: ${{ github.repository == 'trueakaru-stack/ai-task-monitor' }}
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 8
     steps:
       - name: Create disposable, empty fixture directories
@@ -20,7 +20,7 @@ jobs:
           test "$RUNNER_OS" = macOS
           test "$RUNNER_TEMP" = /Users/runner/work/_temp
           test "$GITHUB_REPOSITORY" = trueakaru-stack/ai-task-monitor
-          test "$(uname -m)" = arm64
+          test "$(uname -m)" = x86_64
           test ! -e /Users/runner/.codex
           test ! -L /Users/runner/.codex
           task_root="$(mktemp -d "$RUNNER_TEMP/aitm-real-codex.XXXXXXXX")"
@@ -35,9 +35,9 @@ jobs:
           set -euo pipefail
           task_root="$AITM_REAL_CLI_ROOT"
           curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
-            https://registry.npmjs.org/@openai/codex/-/codex-0.169.0-darwin-arm64.tgz \
+            https://registry.npmjs.org/@openai/codex/-/codex-0.169.0-darwin-x64.tgz \
             --output "$task_root/codex.tgz"
-          expected='5WsWFBbVP78D+6FvNo1MMVxLPZdmcoQlqVJFrF4qx/TmvneLnMQKtLyXkUo54XOTDfoYKpNouTJ/F7gTVA8FnQ=='
+          expected='K1FKSsSLl9v3z5TeagBQXyQRDBIGB5Jncy5dxsRxwT3aaTqN3AI8VrCfoxBxKMOOU9O2QX1vg7WkBwNVth/s9A=='
           actual="$(/usr/bin/openssl dgst -sha512 -binary "$task_root/codex.tgz" | /usr/bin/openssl base64 -A)"
           test "$actual" = "$expected"
           tar -xzf "$task_root/codex.tgz" -C "$task_root/pkg"
@@ -199,7 +199,7 @@ jobs:
           const lockNames = fs.existsSync(lockDirectory) ? fs.readdirSync(lockDirectory) : [];
           const matchingWriterLocks = [...ids].filter(id => lockNames.includes(id + '.lock')).length;
           const responseStarted = fs.existsSync(process.argv[2] + '/out/response-started.txt');
-          const report = {cli:'0.169.0', source:'official codex exec', liveEndpoint:'synthetic localhost, no response headers sent yet', responseStarted, sessionFiles:files.length, sessionIds:ids.size, eventTypes:[...new Set(events)].sort(), indexPresent, matchingIndexEntries:indexed, writerLockDirectory:fs.existsSync(lockDirectory), matchingWriterLocks};
+          const report = {cli:'0.169.0', source:'official codex exec', liveEndpoint:'synthetic localhost, no response headers sent yet', responseStarted, rolloutBasename:files.length === 1 ? path.basename(files[0]) : '', sessionFiles:files.length, sessionIds:ids.size, eventTypes:[...new Set(events)].sort(), indexPresent, matchingIndexEntries:indexed, writerLockDirectory:fs.existsSync(lockDirectory), matchingWriterLocks};
           fs.writeFileSync(process.argv[2] + '/out/session-report.json', JSON.stringify(report, null, 2) + '\n');
           console.log(JSON.stringify(report));
           if (responseStarted || files.length !== 1 || ids.size !== 1 || !events.includes('task_started')) process.exit(1);
