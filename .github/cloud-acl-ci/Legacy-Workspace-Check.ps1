@@ -36,6 +36,12 @@ public static class SyntheticCloud {
             Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") != "github-hosted" ||
             Environment.GetEnvironmentVariable("RUNNER_OS") != "Windows" ||
             Environment.GetEnvironmentVariable("DOTNET_ADD_GLOBAL_TOOLS_TO_PATH") != "0") return 20;
+        string fixtureRoot=Path.GetFullPath(AppDomain.CurrentDomain.BaseDirectory).TrimEnd('\\');
+        string runnerTemp=Path.GetFullPath(Environment.GetEnvironmentVariable("RUNNER_TEMP")).TrimEnd('\\');
+        DirectoryInfo rootParent=Directory.GetParent(fixtureRoot);
+        if (rootParent == null || !String.Equals(rootParent.FullName,runnerTemp,StringComparison.OrdinalIgnoreCase) ||
+            !Path.GetFileName(fixtureRoot).StartsWith("aitm-cloud-command-",StringComparison.Ordinal)) return 24;
+        File.WriteAllText(Path.Combine(fixtureRoot,"legacy-launched.txt"),"synthetic-started");
         if (args.Length != 5 || args[0] != "cloud" || args[1] != "list" ||
             args[2] != "--json" || args[3] != "--limit" || args[4] != "20") return 21;
         string temp=Path.GetFullPath(Path.GetTempPath()).TrimEnd('\\');
@@ -66,4 +72,26 @@ $request.Dispose()
 if(-not $result.Ok -or $result.Json -cne '{"tasks":[],"cursor":null}') { throw 'Legacy protected process failed.' }
 if([IO.File]::ReadAllText($sentinel) -cne 'synthetic-original') { throw 'Original directory changed.' }
 if(@([IO.Directory]::GetDirectories($expectedTemp,'aitm-cloud-*')).Count -ne 0) { throw 'Completed workspace remained.' }
+$marker=Join-Path $root 'legacy-launched.txt'
+if(-not [IO.File]::Exists($marker)) { throw 'Synthetic child did not run.' }
+[IO.File]::Delete($marker)
+$oldTemp=[Environment]::GetEnvironmentVariable('TEMP')
+$oldTmp=[Environment]::GetEnvironmentVariable('TMP')
+$missing=Join-Path $root 'missing-temp-legacy'
+if([IO.Directory]::Exists($missing)) { throw 'Unexpected synthetic temp.' }
+try {
+    [Environment]::SetEnvironmentVariable('TEMP',$missing)
+    [Environment]::SetEnvironmentVariable('TMP',$missing)
+    $failed=New-Object AITaskMonitor.CodexCloud.Command($fixture,$null,15000)
+    $deadline=[DateTime]::UtcNow.AddSeconds(20)
+    while(-not $failed.Completed -and [DateTime]::UtcNow -lt $deadline){ Start-Sleep -Milliseconds 20 }
+    if(-not $failed.Completed){ $failed.Cancel(); throw 'Legacy failure test timed out.' }
+    $failedResult=$failed.GetResult()
+    $failed.Dispose()
+    if($failedResult.Ok -or [IO.File]::Exists($marker)) { throw 'Unsafe legacy launch was not blocked.' }
+} finally {
+    [Environment]::SetEnvironmentVariable('TEMP',$oldTemp)
+    [Environment]::SetEnvironmentVariable('TMP',$oldTmp)
+}
+if([IO.File]::ReadAllText($sentinel) -cne 'synthetic-original') { throw 'Failed setup changed original directory.' }
 Write-Output 'Legacy Cloud workspace: protected child, original sentinel and cleanup passed.'

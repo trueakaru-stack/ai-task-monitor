@@ -150,6 +150,14 @@ internal static class Program
             Check(signalled, "synthetic child signalled it started");
             using Mutex lifetime = Mutex.OpenExisting("Local\\AITM.Cloud.Lifetime." + id);
             Check(!MutexAvailable(lifetime, TimeSpan.Zero), "synthetic child is alive before stop");
+            string temp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
+            string[] held = Directory.GetDirectories(temp, "aitm-cloud-*");
+            Check(held.Length == 1, "live child has exactly one protected workspace");
+            bool moved = false;
+            try { Directory.Move(held[0], held[0] + "-moved"); moved = true; }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+            Check(!moved && Directory.Exists(held[0]), "live workspace cannot be renamed");
             if (cancel) cancellation.Cancel();
             using CommandResult result = await pending;
             Check(result.Outcome == (cancel ? CommandOutcome.Cancelled : CommandOutcome.TimedOut) &&
@@ -262,6 +270,25 @@ internal static class Program
                 Environment.SetEnvironmentVariable("TMP", priorTmp);
             }
             Check(File.ReadAllText(sentinel) == "original-synthetic-sentinel", "failed setup left original cwd intact");
+            string link = Path.Combine(root, "redirected-temp");
+            Check(!Directory.Exists(link), "redirect fixture is absent");
+            Directory.CreateSymbolicLink(link, temp);
+            try
+            {
+                Check((File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0, "redirect fixture is a reparse point");
+                Environment.SetEnvironmentVariable("TEMP", link);
+                Environment.SetEnvironmentVariable("TMP", link);
+                using CommandResult redirected = await CloudCommand.RunAsync(fixture, null, TimeSpan.FromSeconds(15));
+                Check(redirected.Outcome == CommandOutcome.StartFailed && !redirected.Started,
+                    "redirected temp prevents process launch");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("TEMP", priorTemp);
+                Environment.SetEnvironmentVariable("TMP", priorTmp);
+                Directory.Delete(link);
+            }
+            Check(File.ReadAllText(sentinel) == "original-synthetic-sentinel", "redirect rejection left original cwd intact");
             Console.WriteLine("Codex Cloud command synthetic checks passed: " + checks);
             return 0;
         }
