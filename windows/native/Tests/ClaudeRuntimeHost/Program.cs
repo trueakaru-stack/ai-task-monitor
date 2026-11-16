@@ -254,6 +254,50 @@ internal static class Program
         finally { if (!host.HasExited) { host.Kill(true); host.WaitForExit(5000); } }
     }
 
+    private static void ReportEntryPointFailure(Process host, ClaudeRegisteredHookPaths paths, string legacy, byte[] original, TextWriter output)
+    {
+        try
+        {
+            host.Refresh();
+            bool exited = host.HasExited;
+            output.WriteLine("Synthetic child exited=" + exited +
+                (exited ? " exitCode=" + host.ExitCode : " hasMainWindow=" + (host.MainWindowHandle != IntPtr.Zero)));
+        }
+        catch (Exception error) { output.WriteLine("Synthetic child state error=" + error.GetType().Name); }
+        try
+        {
+            output.WriteLine("Synthetic global registration=" + ClaudeRegisteredHookOwner.Inspect(paths) +
+                ", legacyUnchanged=" + (File.Exists(legacy) && File.ReadAllBytes(legacy).AsSpan().SequenceEqual(original)));
+        }
+        catch (Exception error) { output.WriteLine("Synthetic fixture inspection error=" + error.GetType().Name); }
+        try
+        {
+            host.Refresh();
+            if (host.HasExited || host.MainWindowHandle == IntPtr.Zero)
+            {
+                output.WriteLine("Synthetic UIA root unavailable (no running window)");
+                return;
+            }
+            AutomationElement? root = AutomationElement.FromHandle(host.MainWindowHandle);
+            output.WriteLine("Synthetic UIA root=" + (root is not null));
+            if (root is null) return;
+            foreach (string name in new[] { "Статус задач не подтверждён", "Task status unconfirmed",
+                "Нет данных от Claude Code", "No data from Claude Code", "Источники не подключены",
+                "No sources connected", "Задача Claude Code", "Claude Code task", "Ход выполнения", "Progress",
+                "__aitm_synthetic_missing_label__" })
+            {
+                try
+                {
+                    bool present = root.FindFirst(TreeScope.Descendants,
+                        new PropertyCondition(AutomationElement.NameProperty, name)) is not null;
+                    output.WriteLine("Synthetic UIA label [" + name + "]=" + present);
+                }
+                catch (Exception error) { output.WriteLine("Synthetic UIA label error=" + error.GetType().Name); }
+            }
+        }
+        catch (Exception error) { output.WriteLine("Synthetic UIA root error=" + error.GetType().Name); }
+    }
+
     private static void CheckActualEntryPoint(string root, ClaudeRegisteredHookPaths paths)
     {
         string exe = Path.Combine(root, "artifacts", "bin", "Prototype", "release", "AI Task Monitor.exe");
@@ -272,7 +316,27 @@ internal static class Program
         using Process host = Process.Start(start) ?? throw new InvalidOperationException("The synthetic host did not start.");
         try
         {
-            WaitUntil(() => HasName(host, "Статус задач не подтверждён"), "The normal entry point did not discover the synthetic registration.");
+            try
+            {
+                WaitUntil(() => HasName(host, "Статус задач не подтверждён"), "The normal entry point did not show the expected empty state.");
+            }
+            catch
+            {
+                ReportEntryPointFailure(host, paths, legacy, original, Console.Error);
+                throw;
+            }
+            // Exercise the same diagnostic path with known synthetic labels before relying on it in CI.
+            using (var diagnostic = new StringWriter())
+            {
+                ReportEntryPointFailure(host, paths, legacy, original, diagnostic);
+                string evidence = diagnostic.ToString();
+                Check(evidence.Contains("Synthetic child exited=False hasMainWindow=True", StringComparison.Ordinal) &&
+                    evidence.Contains("Synthetic global registration=Registered, legacyUnchanged=True", StringComparison.Ordinal) &&
+                    evidence.Contains("Synthetic UIA root=True", StringComparison.Ordinal) &&
+                    evidence.Contains("Synthetic UIA label [Статус задач не подтверждён]=True", StringComparison.Ordinal) &&
+                    evidence.Contains("Synthetic UIA label [__aitm_synthetic_missing_label__]=False", StringComparison.Ordinal),
+                    "Synthetic entry-point diagnostics did not report known fixture state.");
+            }
             HoldWithoutCard(host, 2500);
             Check(!HasName(host, "Источники не подключены") && !HasName(host, "Активных задач сейчас нет"),
                 "A missing pre-start card was presented as a definitive absence.");
