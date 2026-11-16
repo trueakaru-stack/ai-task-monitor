@@ -3,7 +3,7 @@ name: macOS build
 on:
   workflow_dispatch:
   push:
-    branches: [macos]
+    branches: [macos, codex/macos-kimi-main-candidate-20261116]
     paths:
       - "macos/**"
       - ".github/workflows/macos-build.yml"
@@ -69,6 +69,11 @@ jobs:
     runs-on: ${{ contains(github.event.head_commit.message, '[macos26]') && 'macos-26' || 'macos-15' }}
     timeout-minutes: 15
     steps:
+      - name: Stop tests-only until profile isolation is repaired
+        shell: bash
+        run: |
+          echo "::error::The legacy tests-only suite is blocked: some tests set HOME in child processes. No tests in this job ran. Fix isolation and rerun the complete suite."
+          exit 1
       - uses: actions/checkout@v4
       - name: Select Xcode
         if: ${{ !contains(github.event.head_commit.message, '[macos26]') }}
