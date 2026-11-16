@@ -210,12 +210,17 @@ final class ExternalProviderStateStore {
                 if event.provider == "opencode" || event.provider == "deepseek" {
                     return rejectAtCapacity(provider: event.provider, scope: scope)
                 }
+                // Every unknown card is visible evidence, including Kimi and
+                // Hermes cards. Reclaim only a terminal, non-visible record.
                 let removable = states.filter { _, value in
-                    value.status != "active" && value.status != "waiting" &&
-                    !(value.status == "unknown" && (value.provider == "opencode" || value.provider == "deepseek"))
+                    !["active", "waiting", "unknown"].contains(value.status)
                 }.min { $0.value.updatedAt < $1.value.updatedAt }
                 guard let oldest = removable?.key else { return rejectAtCapacity(provider: event.provider, scope: scope) }
-                if states[oldest]?.provider == "hermes" { markGap(provider: "hermes") }
+                if let discarded = states[oldest], discarded.provider == "hermes" {
+                    let discardedScope = Self.sessionScope(discarded.session)
+                    if Self.validDeepSeekScope(discardedScope) { markHermesScopeGap(discardedScope) }
+                    else { markGap(provider: "hermes") }
+                }
                 states.removeValue(forKey: oldest)
             }
             states[key] = ExternalProviderTask(provider: event.provider, session: event.session, status: "unknown",
@@ -446,7 +451,8 @@ final class ExternalProviderStateStore {
     }
 
     func retainProviders(_ allowed: Set<String>) {
-        capacityLimitedProviders.formIntersection(allowed)
+        // A rejected event may have belonged to a task that is still running.
+        // A connection change alone cannot establish that the loss is resolved.
         let nextOpenCodeAllowed = allowed.contains("opencode"), nextDeepSeekAllowed = allowed.contains("deepseek")
         if !providerRosterInitialized && !nextDeepSeekAllowed { deepSeekScopesInitialized = true }
         if providerRosterInitialized && nextOpenCodeAllowed != openCodeAllowed { openCodeUnconfirmed = true }
@@ -483,6 +489,7 @@ final class ExternalProviderStateStore {
         let barrier = Self.monotonicNanoseconds()
         for scope in changed {
             if hermesScopeBarriers.count >= maximumSessions && hermesScopeBarriers[scope] == nil {
+                capacityLimitedProviders.insert("hermes")
                 markGap(provider: "hermes")
                 hermesScopeBarriers.removeAll()
             }

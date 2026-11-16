@@ -73,9 +73,9 @@ final class ExternalProviderRuntime {
         store.markGap(provider: "deepseek")
     }
 
-    func parkState(markTransportGap: Bool) -> ExternalProviderStateStore {
+    func parkState(markTransportGap: Bool, preservingKimi: Bool = false) -> ExternalProviderStateStore {
         if markTransportGap { store.markGap() }
-        store.retainProviders([])
+        store.retainProviders(preservingKimi ? ["kimi"] : [])
         return store
     }
 
@@ -83,11 +83,14 @@ final class ExternalProviderRuntime {
                   uncertainScopes: [TaskProvider: Set<String>] = [:],
                   ambiguousScopes: [TaskProvider: Set<String>] = [:],
                   deepSeekHistoryLost: Bool = false, deepSeekDisabledScopes: Set<String> = [],
-                  now: Date = Date()) -> [MonitoredTask] {
+                  preservingKimi: Bool = false, now: Date = Date()) -> [MonitoredTask] {
         guard !channel.isStopped else { store.markGap(); transportUnavailable = true; return [] }
         let permitted = allowed.intersection([.kimi, .deepseek, .hermes, .opencode])
         channel.setAllowedProviders(Set(permitted.map(\.rawValue)))
-        store.retainProviders(Set(permitted.map(\.rawValue)))
+        var retainedProviders = Set(permitted.map(\.rawValue))
+        // A failed inspection pauses Kimi input; it does not close visible tasks.
+        if preservingKimi { retainedProviders.insert("kimi") }
+        store.retainProviders(retainedProviders)
         for provider in [TaskProvider.deepseek, .kimi, .hermes] where permitted.contains(provider) {
             let scopes = profileScopes[provider] ?? []
             // DeepSeek history is not an allowance and must not exhaust the live roster.

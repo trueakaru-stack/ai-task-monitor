@@ -36,6 +36,8 @@ final class ExternalProviderV2Runtime {
     private let generations: ExternalProviderV2GenerationFile
     private var slots: [ExternalProviderV2Scope: Slot] = [:]
     private(set) var capacityLimitedScopes: Set<ExternalProviderV2Scope> = []
+    // If distinct lost scopes exceed the bound, retain a provider-wide warning.
+    private(set) var capacityLimitedProviders: Set<String> = []
     private var lastSnapshotReady = false
     private var lastPendingScope: ExternalProviderV2Scope?
     private let maximumSessions = 256
@@ -75,7 +77,6 @@ final class ExternalProviderV2Runtime {
             }
         }
         slots = next
-        capacityLimitedScopes.formIntersection(desired)
     }
 
     func canAcknowledge(_ scope: ExternalProviderV2Scope) -> Bool {
@@ -91,22 +92,22 @@ final class ExternalProviderV2Runtime {
         // is still receiving a reply. The broker rotates the ticket under its
         // own short lock; queued frames are rechecked against that ticket.
         _ = consume(now: now)
-        guard let slot = slots[scope], canAcknowledge(scope),
-              let ticket = try? ExternalProviderV2GenerationFile.randomValue(),
+        guard let slot = slots[scope], canAcknowledge(scope) else { return false }
+        let visible = Slot.tasks(slot.verified, now: now) + Slot.tasks(slot.unknown, now: now)
+        let retainedIDs = Set(slot.parked.keys).union(visible.map(\.id))
+        // Do not acknowledge if doing so would discard visible evidence.
+        guard retainedIDs.count <= maximumSessions else {
+            recordCapacityLimit(scope)
+            return false
+        }
+        guard let ticket = try? ExternalProviderV2GenerationFile.randomValue(),
               broker.acknowledgeRestart(scope, generation: slot.generation, ticket: ticket) else { return false }
-        for task in Slot.tasks(slot.verified, now: now) + Slot.tasks(slot.unknown, now: now) {
-            slot.parked[task.id] = Self.unconfirmed(task)
-        }
-        if slot.parked.count > maximumSessions {
-            slot.parked = Dictionary(uniqueKeysWithValues: slot.parked.values.sorted { $0.updatedAt > $1.updatedAt }
-                .prefix(maximumSessions).map { ($0.id, $0) })
-        }
+        for task in visible { slot.parked[task.id] = Self.unconfirmed(task) }
         slot.verified = Slot.makeStore(scope, unconfirmed: false)
         slot.unknown = Slot.makeStore(scope, unconfirmed: true)
         slot.owners.removeAll()
         slot.terminalIDs.removeAll()
         slot.trustLost = false
-        capacityLimitedScopes.remove(scope)
         slot.ticket = ticket
         return true
     }
@@ -148,7 +149,7 @@ final class ExternalProviderV2Runtime {
                     slot.verified.markGap(provider: notice.scope.provider)
                     slot.trustLost = true
                     slot.terminalIDs.removeAll()
-                    if notice.instance == "overflow" { capacityLimitedScopes.insert(notice.scope) }
+                    if notice.instance == "overflow" { recordCapacityLimit(notice.scope) }
                 }
                 continue
             }
@@ -173,7 +174,7 @@ final class ExternalProviderV2Runtime {
             let existing = knownIDs(now: now)
             let id = event.provider + ":" + event.session
             if !existing.contains(id) && existing.count >= maximumSessions {
-                capacityLimitedScopes.insert(notice.scope)
+                recordCapacityLimit(notice.scope)
                 slot.verified.markGap(provider: notice.scope.provider)
                 slot.trustLost = true
                 slot.terminalIDs.removeAll()
@@ -190,7 +191,7 @@ final class ExternalProviderV2Runtime {
                 }
                 let ownerCount = slots.values.reduce(0) { $0 + $1.owners.count }
                 if slot.owners[event.session] == nil && ownerCount >= maximumSessions {
-                    capacityLimitedScopes.insert(notice.scope)
+                    recordCapacityLimit(notice.scope)
                     slot.verified.markGap(provider: notice.scope.provider)
                     slot.trustLost = true
                     slot.terminalIDs.removeAll()
@@ -205,6 +206,15 @@ final class ExternalProviderV2Runtime {
             } else { _ = slot.unknown.apply(event, now: now) }
         }
         return true
+    }
+
+    private func recordCapacityLimit(_ scope: ExternalProviderV2Scope) {
+        guard !capacityLimitedScopes.contains(scope) else { return }
+        if capacityLimitedScopes.count < maximumSessions {
+            capacityLimitedScopes.insert(scope)
+        } else {
+            capacityLimitedProviders.insert(scope.provider)
+        }
     }
 
     private func knownIDs(now: Date) -> Set<String> {
