@@ -156,8 +156,9 @@ synthetic fixture against the current PowerShell-embedded reader and the
 native reader. It checks session startup, legacy-only sessions and step names,
 quiet and resumed activity, prompt identity, activity privacy, malformed input,
 old-step status, an unambiguous stop and 10,000 synthetic events. It separately asserts the differences for
-simultaneous active/stop events, malformed legacy-only input and 129-unit
-session IDs. The [test README](../Tests/ClaudeReaderBehavior/README.md)
+simultaneous active/stop events, malformed legacy-only input, 129-unit session
+IDs and stopped-name retention after a later loss. The
+[test README](../Tests/ClaudeReaderBehavior/README.md)
 describes those cases and the deliberately failing old assertion. These
 selected checks do not establish full behavioral equivalence. Real Claude
 sessions, final application integration and installer behavior remain

@@ -19,11 +19,13 @@ asserts these intentional, observable differences:
   later observed session.
 - An embedded reader accepts a 129-unit session ID; the native reader
   rejects it rather than merging or truncating it.
+- After a previously visible task stops and its history is later lost, the
+  embedded reader retains the old step name as unconfirmed; the native reader
+  does not retain that stopped name in this scenario.
 
 These are selected behaviors, not an exhaustive diff or proof of equivalence.
-The readers also differ in retained stopped-history behavior and implementation
-details. Phase-aware events, real hook delivery, arbitrary clock races, file
-identity, UI and installer behavior require separate checks.
+Phase-aware events, real hook delivery, arbitrary clock races, file identity,
+UI and installer behavior require separate checks.
 
 The earlier native `Test-ClaudeReader.ps1` compared source text and invoked an
 old assertion suite that treats an inferred legacy step as confirmed. It now

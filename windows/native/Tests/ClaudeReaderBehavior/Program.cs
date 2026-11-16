@@ -114,6 +114,24 @@ internal static class Program
                 ? "Difference: native rejects a 129-unit session ID."
                 : "Difference: embedded reader accepts a 129-unit session ID.");
 
+            // The readers also differ after a known step is cleanly stopped
+            // and a later truncated history reports loss before the next turn.
+            var stoppedHistory = new SessionReader();
+            Task beforeStop = stoppedHistory.Read(prompt + "\n" + oldStep, "", now, boundary).Single();
+            Check(beforeStop.Steps.Any(step => step.title == "Synthetic step"), "The initial synthetic step name was not observed.");
+            Check(stoppedHistory.Read(prompt + "\n" + oldStep + "\n" + laterStop, "", now, boundary).Length == 0,
+                "The synthetic session did not stop before the history gap.");
+            string loss = "{\"session_id\":\"\",\"timestamp\":\"" + start.AddSeconds(4).ToString("o", CultureInfo.InvariantCulture) +
+                "\",\"event\":\"Unknown\",\"active\":null,\"stage_version\":1,\"stage_phase\":\"source_uncertain\"}";
+            string newTurn = Event("observed", "UserPromptSubmit", start.AddSeconds(5), true, "");
+            Task afterStopLoss = stoppedHistory.Read(loss + "\n" + newTurn, "", now, boundary).Single();
+            bool oldName = afterStopLoss.Steps.Any(step => step.title == "Synthetic step");
+            Check(afterStopLoss.Unconfirmed && (native ? !oldName : oldName),
+                "The documented stopped-history retention difference changed.");
+            Console.WriteLine(native
+                ? "Difference: native does not retain the stopped step name after a later history loss."
+                : "Difference: embedded reader retains the stopped step name after a later history loss.");
+
             string bulk = Event("bulk", "PreToolUse", start, true, ",\"tool_name\":\"Read\"");
             string events = String.Join("\n", Enumerable.Repeat(bulk, 5000));
             Check(Reader.Read(events, events, now, boundary).Length == 1,
