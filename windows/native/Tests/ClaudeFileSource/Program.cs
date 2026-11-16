@@ -1080,6 +1080,26 @@ Check(nearFutureFirstPoll.Read(nearStopJournal, "", now.AddSeconds(1),
     DateTime.MinValue.ToUniversalTime()).Length == 0 && !nearFutureFirstPoll.SourceUncertain,
     "A transient future stop seen first must not remain permanently uncertain.");
 
+
+var transientThenNewPrompt = new SessionReader();
+transientThenNewPrompt.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
+var priorTransient = transientThenNewPrompt.Read(nearStopJournal, "", now, DateTime.MinValue.ToUniversalTime()).Single();
+Check(priorTransient.Steps.Any(step => step.title == "First step") &&
+    priorTransient.Steps.Any(step => step.title == "Near-stop step"),
+    "The transient snapshot must first observe both titles.");
+string promptAfterNearStop = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "observed", ["timestamp"] = now.AddSeconds(1).ToString("O"),
+    ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
+transientThenNewPrompt.Read(nearStopJournal + promptAfterNearStop, "", now.AddSeconds(2),
+    DateTime.MinValue.ToUniversalTime());
+var namesAfterTransientLoss = transientThenNewPrompt.Read(sourceLossMarker + resumedAfterCoincidentLoss, "",
+    now.AddSeconds(5), DateTime.MinValue.ToUniversalTime()).Single();
+Check(namesAfterTransientLoss.Unconfirmed && !namesAfterTransientLoss.PlanConfirmed &&
+    namesAfterTransientLoss.Steps.Any(step => step.title == "First step") &&
+    namesAfterTransientLoss.Steps.Any(step => step.title == "Near-stop step") &&
+    namesAfterTransientLoss.Steps.All(step => step.status == "unknown"),
+    "A new prompt after a transient stop must not erase observed names before a later history loss.");
+
 string futureRename = JsonSerializer.Serialize(new Dictionary<string, object> {
     ["session_id"] = "observed", ["timestamp"] = now.AddMinutes(10).ToString("O"),
     ["event"] = "TaskCreated", ["active"] = true, ["task_id"] = "first",

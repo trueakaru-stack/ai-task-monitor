@@ -79,7 +79,8 @@ uncertain and retains conflicting observed names. This uncertainty persists for
 the reader's lifetime even if the clock later catches up. A terminal event only
 slightly later than the poll's timestamp is temporarily unconfirmed, keeps
 conflicting observed names for that snapshot and can be resolved by a subsequent
-poll. A session being quiet for at least 120 minutes is
+poll. If the same session continues, those names remain in bounded hidden
+history for a later detected loss. A session being quiet for at least 120 minutes is
 treated separately: later observed activity can restore its ordinary status when
 no other uncertainty was observed.
 

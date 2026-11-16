@@ -131,6 +131,51 @@ internal static class Program
         Check(condition(), description);
     }
 
+    // Preserve the existing two-check requirement while recording which of the
+    // timer observation and immediate follow-up succeeded.
+    private static void WaitUntilMeasured(Func<bool> condition, string description, TextWriter evidence, int seconds = 20)
+    {
+        var frame = new DispatcherFrame();
+        DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
+        var watch = Stopwatch.StartNew();
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(30) };
+        bool first = false, deadlineHit = false;
+        long firstMillis = -1;
+        int polls = 0;
+        timer.Tick += (_, _) =>
+        {
+            polls++;
+            bool found = condition();
+            bool expired = !found && DateTime.UtcNow >= deadline;
+            if (found || expired)
+            {
+                first = found;
+                deadlineHit = expired;
+                firstMillis = watch.ElapsedMilliseconds;
+                frame.Continue = false;
+            }
+        };
+        timer.Start();
+        Dispatcher.PushFrame(frame);
+        timer.Stop();
+        bool second = condition();
+        long secondMillis = watch.ElapsedMilliseconds;
+        evidence.WriteLine("Synthetic entry wait: tickFound=" + first + " finalFound=" + second +
+            " deadline=" + deadlineHit + " polls=" + polls + " tickMs=" + firstMillis + " finalMs=" + secondMillis);
+        Check(second, description);
+    }
+
+    private static void CheckMeasuredWait()
+    {
+        int count = 0;
+        bool rejected = false;
+        using var evidence = new StringWriter();
+        try { WaitUntilMeasured(() => Interlocked.Increment(ref count) == 1, "Synthetic transient state.", evidence, 1); }
+        catch (InvalidOperationException) { rejected = true; }
+        Check(rejected && evidence.ToString().Contains("tickFound=True finalFound=False", StringComparison.Ordinal),
+            "Measured wait must reject and report a transient first observation.");
+    }
+
     private static Window NewWindow(string language, string theme, bool compact, out PrototypeWindow controller,
         DisplayPreferenceService? preferences = null)
     {
@@ -318,7 +363,8 @@ internal static class Program
         {
             try
             {
-                WaitUntil(() => HasName(host, "Статус задач не подтверждён"), "The normal entry point did not show the expected empty state.");
+                WaitUntilMeasured(() => HasName(host, "Статус задач не подтверждён"),
+                    "The normal entry point did not show the expected empty state.", Console.Out);
             }
             catch
             {
@@ -390,6 +436,7 @@ internal static class Program
                 "A redirected settings file must not be treated as verified.");
 
             var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+            CheckMeasuredWait();
             string preferenceRoot = Path.Combine(root, "owner-preferences");
             Directory.CreateDirectory(preferenceRoot);
             string oldPreferences = Path.Combine(preferenceRoot, "old.json");

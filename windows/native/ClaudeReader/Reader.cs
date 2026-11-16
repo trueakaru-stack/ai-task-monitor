@@ -732,6 +732,10 @@ namespace AITaskMonitor.Claude {
       Task previous, hidden;
       retained.TryGetValue(item.Id, out previous);
       bool preserveNames = sourceLoss || uncertainSessions.Contains(item.Id) || nameHistorySessions.Contains(item.Id) || item.PreserveSnapshotNames;
+      // A transiently ambiguous snapshot can precede another active event.
+      // Keep its observed names hidden before an ordinary update can replace them.
+      if(previous != null && previous.PreserveSnapshotNames && !item.PreserveSnapshotNames && !preserveNames)
+       RememberStopped(previous);
       if(TryStopped(item.Id, out hidden)) {
        if(previous == null) previous = hidden;
        else if(preserveNames) previous = Freeze(previous, hidden, true);
