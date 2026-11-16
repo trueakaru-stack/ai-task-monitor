@@ -29,41 +29,42 @@ else:
     os.close(descriptor)
     raise SystemExit("Profile access was not denied.")
 
-path = root.parent / "source/macos/Sources/AITaskMonitor/AITaskMonitorApp.swift"
-if not stat.S_ISREG(path.lstat().st_mode):
+project = root.parent / "source/macos/Sources/AITaskMonitor"
+path = project / "AITaskMonitorApp.swift"
+main_path = project / "main.swift"
+if not stat.S_ISREG(path.lstat().st_mode) or not stat.S_ISREG(main_path.lstat().st_mode):
     raise SystemExit("Unsafe source file.")
 data = path.read_bytes()
 digest = hashlib.sha1(b"blob " + str(len(data)).encode("ascii") + b"\0" + data).hexdigest()
 if digest != "16d8dcedd9ddcd3cea8a73c8224ec45a2080abf9":
     raise SystemExit("Unexpected staged source.")
 text = data.decode("utf-8")
-old = """    var body: some Scene {
-        WindowGroup {
-            RootView().environmentObject(store)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .commands {
-"""
-new = """    @SceneBuilder
-    private var diagnosticWindow: some Scene {
-        if #available(macOS 15.0, *) {
-            WindowGroup {
-                RootView().environmentObject(store)
-            }
-            .windowStyle(.plain)
-        } else {
-            WindowGroup {
-                RootView().environmentObject(store)
-            }
-            .windowStyle(.hiddenTitleBar)
-        }
-    }
-
-    var body: some Scene {
-        diagnosticWindow
-        .commands {
-"""
-if text.count(old) != 1:
+if text.count("struct AITaskMonitorApp: App {") != 1 or text.count(".windowStyle(.hiddenTitleBar)") != 1:
     raise SystemExit("The original WindowGroup scene was not found exactly once.")
-path.write_text(text.replace(old, new, 1), encoding="utf-8")
-print("Staged only the documented plain window style on macOS 15 or later.")
+main_text = main_path.read_text(encoding="utf-8")
+expected_main = """import Foundation
+import SwiftUI
+
+if CommandLine.arguments.contains("--claude-hook") {
+    exit(ClaudeHook.run())
+} else if let index = CommandLine.arguments.firstIndex(of: "--render-previews"), CommandLine.arguments.indices.contains(index + 1) {
+    let output = URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true)
+    exit(MainActor.assumeIsolated { SnapshotRenderer.run(outputDirectory: output) })
+} else {
+    guard MainActor.assumeIsolated({ SyntheticWindowGroupAudit.prepare() }) else { exit(78) }
+    AITaskMonitorApp.main()
+}
+"""
+if main_text != expected_main:
+    raise SystemExit("Unexpected staged entry point.")
+text = text.replace("struct AITaskMonitorApp: App {", "@available(macOS 15.0, *)\nstruct AITaskMonitorApp: App {", 1)
+text = text.replace(".windowStyle(.hiddenTitleBar)", ".windowStyle(.plain)", 1)
+main_text = main_text.replace("    AITaskMonitorApp.main()\n", """    if #available(macOS 15.0, *) {
+        AITaskMonitorApp.main()
+    } else {
+        exit(78)
+    }
+""", 1)
+path.write_text(text, encoding="utf-8")
+main_path.write_text(main_text, encoding="utf-8")
+print("Staged only the plain style in an isolated macOS 15 or later diagnostic.")
