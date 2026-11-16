@@ -288,7 +288,97 @@ final class ExternalCapacityRegressionTests: XCTestCase {
                        "An explicit disconnect must not revive an old Kimi task.")
     }
 
+    @MainActor
+    func testKimiScopeChangeRetainsObservedCardUntilExplicitDisconnect() throws {
+        let path = try directory("ki-switch")
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: false)
+        let channelPath = path + "/ch"
+        let fixture = CapacityKimiFixture(.success(KimiConnection(state: "connected", scope: scopeA)))
+        var runtime: ExternalProviderRuntime?
+        defer { runtime?.stop() }
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: URL(fileURLWithPath: path + "/codex")),
+                              claudeReader: ClaudeTaskReader(eventFile: URL(fileURLWithPath: path + "/events")),
+                              journal: DiagnosticJournal(directory: URL(fileURLWithPath: path + "/journal")),
+                              enableExternalProviders: true, openCodeConnection: { .connected },
+                              additionalExternalConnections: [.deepseek: { .disconnected }, .hermes: { .disconnected }],
+                              makeExternalRuntime: {
+            let created = ExternalProviderRuntime(channel: try ExternalProviderChannel(directory: channelPath))
+            runtime = created
+            return created
+        }, discoverDeepSeekContext: { nil }, inspectKimiConnection: { try fixture.inspect() },
+                              kimiScanInterval: 0.1, discoverHermesContext: { nil },
+                              makeCodexCloudClient: { nil })
+        func wait(_ message: String, _ predicate: () -> Bool) {
+            let deadline = Date().addingTimeInterval(4)
+            while Date() < deadline && !predicate() {
+                store.refresh()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+            }
+            XCTAssertTrue(predicate(), message)
+        }
+        let first = scopeA + "_first"
+        let second = scopeB + "_second"
+        wait("Kimi was not connected") { store.kimiState == "connected" && runtime != nil }
+        try sendV1(channelPath, session: first, kind: "started")
+        wait("Original Kimi card was not observed") { store.tasks.contains { $0.id == "kimi:" + first } }
+        fixture.set(.success(KimiConnection(state: "connected", scope: scopeB)))
+        let deadline = Date().addingTimeInterval(4)
+        while Date() < deadline && !store.tasks.contains(where: { $0.id == "kimi:" + second }) {
+            try sendV1(channelPath, session: second, kind: "started")
+            store.refresh()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertTrue(store.tasks.contains { $0.id == "kimi:" + second && $0.isUnconfirmed },
+                      "New scope event was not observed.")
+        XCTAssertTrue(store.tasks.contains { $0.id == "kimi:" + first && $0.isUnconfirmed },
+                      "Scope change alone must not discard the observed Kimi card.")
+        XCTAssertTrue(store.unavailableSources.contains(.kimi), "Scope change must report incomplete data.")
+        fixture.set(.success(KimiConnection(state: "disabled", scope: nil)))
+        wait("Kimi was not disabled") { store.kimiState == "disabled" }
+        XCTAssertFalse(store.tasks.contains { $0.provider == .kimi })
+        fixture.set(.success(KimiConnection(state: "connected", scope: scopeB)))
+        wait("Kimi did not reconnect") { store.kimiState == "connected" }
+        XCTAssertFalse(store.tasks.contains { $0.id == "kimi:" + first || $0.id == "kimi:" + second })
+    }
+
     #if DEBUG
+    @MainActor
+    func testHermesScopeChangeKeepsHealthyNeighbourAndReportsUncertainty() throws {
+        let path = try directory("hermes-switch")
+        let seed = ExternalProviderStateStore()
+        seed.retainProviders(["hermes"])
+        seed.retainSessionScopes(provider: "hermes", scopes: [scopeA, scopeB])
+        let tick = Int64(clamping: DispatchTime.now().uptimeNanoseconds)
+        XCTAssertTrue(seed.apply(event("hermes", scopeA + "_old", "started", tick: tick, epoch: tick), now: now))
+        XCTAssertTrue(seed.apply(event("hermes", scopeB + "_healthy", "started", tick: tick + 1, epoch: tick + 1), now: now))
+        let runtime = ExternalProviderRuntime(channel: try ExternalProviderChannel(directory: path))
+        runtime.adoptState(seed)
+        defer { runtime.stop() }
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: URL(fileURLWithPath: path + "/codex")),
+                              claudeReader: ClaudeTaskReader(eventFile: URL(fileURLWithPath: path + "/events")),
+                              previewTasks: [], openCodeConnection: { .disconnected },
+                              additionalExternalConnections: [.kimi: { .disconnected }, .deepseek: { .disconnected }],
+                              makeExternalRuntime: { runtime })
+        let a = MonitoredTask(id: "hermes:" + scopeA + "_old", provider: .hermes, title: "Synthetic A",
+                              activity: "", isActive: true, progress: nil, progressKind: .none, steps: [], updatedAt: now)
+        let b = MonitoredTask(id: "hermes:" + scopeB + "_healthy", provider: .hermes, title: "Synthetic B",
+                              activity: "", isActive: true, progress: nil, progressKind: .none, steps: [], updatedAt: now)
+        let changedScope = String(repeating: "c", count: 32)
+        let initial = [HermesProfile(id: "root", name: "default", state: "prepared", scope: scopeA, error: nil, enabled: true),
+                       HermesProfile(id: "profile:work", name: "work", state: "prepared", scope: scopeB, error: nil, enabled: true)]
+        let changed = [HermesProfile(id: "root", name: "default", state: "prepared", scope: changedScope, error: nil, enabled: true),
+                       HermesProfile(id: "profile:work", name: "work", state: "prepared", scope: scopeB, error: nil, enabled: true)]
+        let result = store.testExternalFallback(previous: [a, b], deepSeekRosters: [], hermesRosters: [initial, changed])
+        XCTAssertTrue(result.1.contains(.hermes), "A changed Hermes scope must report incomplete data.")
+        XCTAssertTrue(result.0.contains { $0.id == b.id && $0.isActive && !$0.isUnconfirmed },
+                      "A scope change must not degrade the healthy neighbour.")
+        XCTAssertFalse(result.0.contains { $0.id == a.id },
+                       "Do not retain a potentially indefinite unconfirmed Hermes card.")
+        let later = store.testExternalFallback(previous: result.0, deepSeekRosters: [], hermesRosters: [changed])
+        XCTAssertTrue(later.1.contains(.hermes), "Hermes uncertainty must survive the next refresh.")
+        XCTAssertTrue(later.0.contains { $0.id == b.id && $0.isActive && !$0.isUnconfirmed })
+    }
+
     @MainActor
     func testPartialScopeKeepsPriorCardAndHealthyNeighbourAfterReconnect() throws {
         let path = try directory("scope")
@@ -513,7 +603,7 @@ final class ExternalCapacityRegressionTests: XCTestCase {
             AppLanguage.previewOverride = language
             for dark in [false, true] {
                 for compact in [false, true] {
-                    for kind in ["reference", "partial", "partial-empty", "full", "mixed"] {
+                    for kind in ["reference", "partial", "partial-empty", "full", "mixed", "mixed-long"] {
                         let provider: TaskProvider = kind == "reference" ? .codex : (kind == "full" ? .opencode : .deepseek)
                         let item = MonitoredTask(id: provider.rawValue + ":synthetic", provider: provider,
                             title: tr("Проверка задачи", "Synthetic task"),
@@ -530,6 +620,8 @@ final class ExternalCapacityRegressionTests: XCTestCase {
                             store.testSetExternalAvailability(previous: initial, unavailable: [.deepseek], partiallyUnavailable: [.deepseek])
                         case "full":
                             store.testSetExternalAvailability(previous: initial, unavailable: [.kimi])
+                        case "mixed-long":
+                            store.testSetExternalAvailability(previous: initial, unavailable: [.codex, .claude, .kimi, .deepseek, .hermes, .opencode], partiallyUnavailable: [.deepseek, .hermes, .opencode])
                         default:
                             store.testSetExternalAvailability(previous: initial, unavailable: [.kimi, .deepseek], partiallyUnavailable: [.deepseek])
                         }
@@ -573,7 +665,7 @@ final class ExternalCapacityRegressionTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path).count, 40)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path).count, 48)
     }
     #endif
 }

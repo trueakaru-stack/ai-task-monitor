@@ -1,0 +1,128 @@
+name: Synthetic macOS capacity regressions
+on:
+  push:
+    branches: ['codex/macos-card-scope-baseline-20261116']
+    paths: ['.github/workflows/macos-card-scope-baseline-20261116.yml', 'macos/**']
+permissions:
+  contents: read
+jobs:
+  isolated:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            developer: /Applications/Xcode_16.1.app/Contents/Developer
+          - runner: macos-26
+            developer: /Applications/Xcode.app/Contents/Developer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer }}
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Prepare and verify disposable sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          task_profile_dir="$(/usr/bin/python3 -I -S -B -c 'import os,pwd; print(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))')"
+          case "$task_profile_dir" in /Users/*) ;; *) echo 'Unexpected hosted runner profile.' >&2; exit 1;; esac
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-card-tests.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
+          case "$task_marker" in "$task_profile_dir"/*) ;; *) echo 'Runner temp is outside expected profile.' >&2; exit 1;; esac
+          printf 'synthetic-only\n' > "$task_marker"
+          task_node="$(command -v node)"
+          task_node_real="$(/usr/bin/python3 -I -S -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$task_node")"
+          task_node_root="$(dirname "$(dirname "$task_node_real")")"
+          task_node_bin="$(dirname "$task_node")"
+          task_python=''
+          for name in python3 python3.14 python3.13 python3.12 python3.11; do
+            candidate="$(command -v "$name" || true)"
+            if [[ "$candidate" == /* && -x "$candidate" ]] && "$candidate" -I -S -B -c 'import sys; assert (3, 11) <= sys.version_info[:2] < (3, 15)' 2>/dev/null; then task_python="$candidate"; break; fi
+          done
+          test -n "$task_python"
+          task_python_root="$("$task_python" -I -S -B -c 'import os,sys; print(os.path.realpath(sys.base_prefix))')"
+          case "$task_node_root" in /|/Users|"$task_profile_dir") echo 'Unsafe Node root.' >&2; exit 1;; esac
+          case "$task_python_root" in /|/Users|"$task_profile_dir") echo 'Unsafe Python root.' >&2; exit 1;; esac
+          task_path="$task_node_bin:$(dirname "$task_python"):$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin:$DEVELOPER_DIR/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" "$task_root/npm-cache" "$task_root/swift-cache" "$task_root/swift-config" "$task_root/swift-security" "$task_root/clang-cache"
+          : > "$task_root/npmrc"
+          git -c credential.helper= -c core.hooksPath="$task_root/hooks" -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
+          git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          cat > "$task_root/profile.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath (param "TASK_PROFILE")))
+          (allow file-read-metadata)
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny mach-lookup (global-name "com.apple.bsd.dirhelper"))
+          (allow file-read* (subpath (param "TASK_NODE_ROOT")))
+          (allow file-read* (subpath (param "TASK_PYTHON_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          PROFILE
+          cat > "$task_root/run-isolated" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 \
+            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 AITM_SYNTHETIC_REQUIRED=1 \
+            "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "AITM_MACOS_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "AITM_SYNTHETIC_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "NPM_CONFIG_CACHE=$AITM_TEST_TASK_ROOT/npm-cache" \
+            "NPM_CONFIG_USERCONFIG=$AITM_TEST_TASK_ROOT/npmrc" NPM_CONFIG_GLOBALCONFIG=/dev/null NPM_CONFIG_UPDATE_NOTIFIER=false \
+            /usr/bin/sandbox-exec -D "TASK_PROFILE=$AITM_TEST_PROFILE" -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" \
+              -D "TASK_NODE_ROOT=$AITM_TEST_NODE_ROOT" -D "TASK_PYTHON_ROOT=$AITM_TEST_PYTHON_ROOT" \
+              -f "$AITM_TEST_TASK_ROOT/profile.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-isolated"
+          { printf 'AITM_TEST_TASK_ROOT=%s\n' "$task_root"; printf 'AITM_TEST_DENIED_FILE=%s\n' "$task_marker"; printf 'AITM_TEST_PROFILE=%s\n' "$task_profile_dir"; printf 'AITM_TEST_NODE_ROOT=%s\n' "$task_node_root"; printf 'AITM_TEST_PYTHON_ROOT=%s\n' "$task_python_root"; printf 'AITM_TASK_PATH=%s\n' "$task_path"; printf 'AITM_TEST_NODE_BIN=%s\n' "$task_node"; printf 'AITM_TEST_PYTHON_BIN=%s\n' "$task_python"; } >> "$GITHUB_ENV"
+      - name: Verify sandbox blocks runner profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          "$task_run" /usr/bin/true
+          if "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write was not denied.' >&2; exit 1; fi
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import os; assert "HOME" not in os.environ and "CODEX_HOME" not in os.environ'
+          /bin/ln -s "$AITM_TEST_DENIED_FILE" "$AITM_TEST_TASK_ROOT/denied-link"
+          if "$task_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read via link was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write via link was not denied.' >&2; exit 1; fi
+      - name: Build synthetic regression tests
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          task_compiler=(/usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 swift)
+          "${task_compiler[@]}" build --build-tests --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security"
+          task_bin="$("${task_compiler[@]}" build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
+          test -d "$task_bin/AITaskMonitorPackageTests.xctest"
+          printf 'AITM_TEST_BIN=%s\n' "$task_bin" >> "$GITHUB_ENV"
+      - name: Check Kimi scope change
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: '"$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testKimiScopeChangeRetainsObservedCardUntilExplicitDisconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
+      - name: Check Hermes scope change
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: '"$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testHermesScopeChangeKeepsHealthyNeighbourAndReportsUncertainty "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
+      - name: Render synthetic availability states
+        id: render
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: '"$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testRenderExistingWarningForFullAndPartialSources "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
+      - name: Save synthetic availability renders
+        if: ${{ !cancelled() && steps.render.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-availability-scope-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-card-tests.*/temp/render-*/renders/*.png
+          if-no-files-found: error
+          retention-days: 30
