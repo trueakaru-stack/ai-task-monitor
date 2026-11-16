@@ -1,0 +1,156 @@
+name: Compare WindowGroup frame and safe-area behavior
+on:
+  push:
+    branches: ['codex/macos-windowgroup-frame-20261116']
+    paths:
+      - '.github/workflows/macos-windowgroup-frame-20261116.yml'
+      - 'macos/integration-tests/WindowGroupSyntheticAudit.swift'
+      - 'macos/integration-tests/StageWindowGroupSyntheticAudit.py'
+      - 'macos/integration-tests/WindowGroupMachProbe.c'
+      - 'macos/integration-tests/StageWindowGroupFrameVariant.py'
+permissions:
+  contents: read
+jobs:
+  windowgroup:
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - name: Prepare disposable source and strict sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-card-tests.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
+          printf 'synthetic-only\n' > "$task_marker"
+          task_path="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin:$DEVELOPER_DIR/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          task_python=/usr/bin/python3
+          test -x "$task_python"
+          mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" \
+            "$task_root/swift-cache" "$task_root/swift-config" "$task_root/swift-security" "$task_root/clang-cache" "$task_root/baseline"
+          task_git() {
+            /usr/bin/env -i "PATH=$task_path" "DEVELOPER_DIR=$DEVELOPER_DIR" GIT_CONFIG_GLOBAL=/dev/null \
+              GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 git "$@"
+          }
+          task_git -c credential.helper= -c core.hooksPath="$task_root/hooks" \
+            -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
+          task_git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" \
+            fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          task_git -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
+          test "$(task_git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(task_git -C "$task_root/source/macos" hash-object Package.swift)" = "144202dfc5f413e896867b219af2e0c3dc621897"
+          cat > "$task_root/profile.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (deny mach-lookup)
+          (allow mach-lookup (global-name "com.apple.windowserver.active") (global-name "com.apple.windowserver.session")
+                             (global-name "com.apple.CARenderServer") (global-name "com.apple.windowmanager.server"))
+          PROFILE
+          cat > "$task_root/run-isolated" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" \
+            "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 \
+            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 \
+            "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "AITM_SYNTHETIC_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" -f "$AITM_TEST_TASK_ROOT/profile.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-isolated"
+          {
+            printf 'AITM_TEST_TASK_ROOT=%s\n' "$task_root"
+            printf 'AITM_TEST_DENIED_FILE=%s\n' "$task_marker"
+            printf 'AITM_TEST_PYTHON_BIN=%s\n' "$task_python"
+            printf 'AITM_TASK_PATH=%s\n' "$task_path"
+          } >> "$GITHUB_ENV"
+      - name: Compile the read-only service probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" \
+            /usr/bin/clang -mmacosx-version-min=13.0 \
+            "$AITM_TEST_TASK_ROOT/source/macos/integration-tests/WindowGroupMachProbe.c" \
+            -o "$AITM_TEST_TASK_ROOT/mach-probe"
+      - name: Verify profile and service isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          "$task_run" /usr/bin/true
+          if "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write was not denied.' >&2; exit 1; fi
+          "$task_run" /bin/ln -s "$AITM_TEST_DENIED_FILE" "$AITM_TEST_TASK_ROOT/denied-link"
+          if "$task_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read through link was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write through link was not denied.' >&2; exit 1; fi
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import os; assert "HOME" not in os.environ and "CODEX_HOME" not in os.environ'
+          "$task_run" "$AITM_TEST_TASK_ROOT/mach-probe"
+      - name: Stage synthetic store and settings in exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          "$AITM_TEST_TASK_ROOT/run-isolated" "$AITM_TEST_PYTHON_BIN" -I -S -B \
+            "$AITM_TEST_TASK_ROOT/source/macos/integration-tests/StageWindowGroupSyntheticAudit.py"
+      - name: Build both WindowGroup variants under strict isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          "$task_run" swift build --disable-sandbox --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" \
+            --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security"
+          task_bin="$("$task_run" swift build --disable-sandbox --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" \
+            --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
+          test -x "$task_bin/AITaskMonitor"
+          "$task_run" /bin/cp "$task_bin/AITaskMonitor" "$AITM_TEST_TASK_ROOT/baseline/AITaskMonitor"
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B integration-tests/StageWindowGroupFrameVariant.py
+          "$task_run" swift build --disable-sandbox --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" \
+            --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security"
+          printf 'AITM_TEST_APP=%s\n' "$task_bin/AITaskMonitor" >> "$GITHUB_ENV"
+      - name: Capture only the synthetic application's own window
+        id: capture
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          for task_variant in baseline corrected; do
+            if test "$task_variant" = baseline; then task_app="$AITM_TEST_TASK_ROOT/baseline/AITaskMonitor"; else task_app="$AITM_TEST_APP"; fi
+            for task_mode in light dark; do
+              for task_scenario in compact-to-full full-to-compact; do
+                "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/env "AITM_WINDOWGROUP_VARIANT=$task_variant" \
+                  "AITM_WINDOWGROUP_SCENARIO=$task_scenario" "AITM_SYNTHETIC_APPEARANCE=$task_mode" "$task_app" &
+                task_pid=$!
+                ( sleep 25; kill -TERM "$task_pid" 2>/dev/null || true ) &
+                task_watchdog=$!
+                set +e
+                wait "$task_pid"
+                task_status=$?
+                set -e
+                kill "$task_watchdog" 2>/dev/null || true
+                wait "$task_watchdog" 2>/dev/null || true
+                if test "$task_status" -ne 0; then echo "Synthetic window capture failed or timed out." >&2; exit "$task_status"; fi
+              done
+            done
+          done
+      - name: Save synthetic WindowGroup captures
+        if: ${{ !cancelled() && steps.capture.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windowgroup-frame-comparison
+          path: ${{ runner.temp }}/aitm-card-tests.*/temp/corner-audit-*/*
+          if-no-files-found: warn
+          retention-days: 7
