@@ -159,7 +159,9 @@ old-step status, an unambiguous stop and 10,000 synthetic events. It separately 
 simultaneous active/stop events, malformed legacy-only input, 129-unit session
 IDs and stopped-name retention after a later loss. The
 [test README](../Tests/ClaudeReaderBehavior/README.md)
-describes those cases and the deliberately failing old assertion. These
+describes those cases and the deliberately failing old assertion. The native
+reader's loss of a previously observed stopped step name after later history
+loss is an open defect against the agreed preservation of known names. These
 selected checks do not establish full behavioral equivalence. Real Claude
 sessions, final application integration and installer behavior remain
 unverified.

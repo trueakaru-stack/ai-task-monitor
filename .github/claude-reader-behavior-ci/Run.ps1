@@ -32,7 +32,8 @@ try{
     Check ([IO.File]::Exists($compiler)) 'The hosted Framework compiler is unavailable.'
     $config=Join-Path $root 'NuGet.Config'
     [IO.File]::WriteAllText($config,'<configuration><packageSources><clear /></packageSources></configuration>',[Text.UTF8Encoding]::new($false))
-    function Invoke-Isolated([string]$executable,[string[]]$arguments,[string]$expectedError='',[switch]$withoutProbeMarker){
+    function Invoke-Isolated([string]$executable,[string[]]$arguments,[string]$expectedError='',[switch]$withoutProbeMarker,[int]$timeoutMilliseconds=180000){
+        Check ($timeoutMilliseconds -ge 1 -and $timeoutMilliseconds -le 180000) 'An isolated timeout is invalid.'
         $start=[Diagnostics.ProcessStartInfo]::new()
         $start.FileName=$executable;$start.WorkingDirectory=$root;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
         $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true;$start.Environment.Clear()
@@ -46,6 +47,7 @@ try{
             NUGET_PACKAGES=(Join-Path $root 'nuget');USERPROFILE=(Join-Path $root 'profile')
             APPDATA=(Join-Path $root 'appdata');LOCALAPPDATA=(Join-Path $root 'localappdata');TEMP=(Join-Path $root 'temp');TMP=(Join-Path $root 'temp')
             AITM_SYNTHETIC_SDK_MARKER=(Join-Path $root 'unexpected-sdk-launch.txt')
+            AITM_SYNTHETIC_TIMEOUT_DIRECTORY=(Join-Path $root 'timeout-fixture')
             CI=$env:CI;GITHUB_ACTIONS=$env:GITHUB_ACTIONS;RUNNER_ENVIRONMENT=$env:RUNNER_ENVIRONMENT;RUNNER_OS=$env:RUNNER_OS;RUNNER_TEMP=$env:RUNNER_TEMP
             PSModulePath=((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\Modules')+';'+(Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'))
         }
@@ -57,9 +59,18 @@ try{
         foreach($name in $values.Keys){$start.Environment[$name]=[string]$values[$name]}
         foreach($argument in $arguments){[void]$start.ArgumentList.Add($argument)}
         $process=[Diagnostics.Process]::Start($start)
+        Check ($null -ne $process) 'An isolated process could not be started.'
         try{
+            # The Process instance and its handle belong to this invocation;
+            # do not find or terminate a process by a separately looked-up PID.
+            $handle=$process.SafeHandle
+            Check (-not $handle.IsInvalid -and -not $handle.IsClosed) 'An isolated process handle is unavailable.'
             $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
-            if(-not $process.WaitForExit(180000)){throw 'An isolated test timed out.'}
+            if(-not $process.WaitForExit($timeoutMilliseconds)){
+                try{$process.Kill($true)}catch{throw 'The timed-out isolated process tree could not be terminated.'}
+                if(-not $process.WaitForExit(5000)){throw 'The timed-out isolated process did not exit within five seconds.'}
+                throw 'An isolated test timed out.'
+            }
             if($expectedError){
                 if($process.ExitCode -eq 0 -or -not $stderr.Result.Contains($expectedError)){throw 'The expected isolated failure did not occur.'}
                 return ''
@@ -75,9 +86,30 @@ try{
     $probeSource=Join-Path $root 'sdk-probe.cs'
     $probe=@'
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Threading;
 internal static class SdkProbe {
-    private static int Main() {
+    private static int Main(string[] args) {
+        if (args.Length == 1 && (args[0] == "tree-parent" || args[0] == "tree-child")) {
+            string directory = Environment.GetEnvironmentVariable("AITM_SYNTHETIC_TIMEOUT_DIRECTORY");
+            if (String.IsNullOrEmpty(directory) || !Directory.Exists(directory)) return 2;
+            if (args[0] == "tree-parent") {
+                var start = new ProcessStartInfo(typeof(SdkProbe).Assembly.Location, "tree-child");
+                start.UseShellExecute = false;
+                start.CreateNoWindow = true;
+                using (Process child = Process.Start(start)) {
+                    if (child == null) return 3;
+                    File.WriteAllText(Path.Combine(directory, "parent-ready"), "started");
+                    Thread.Sleep(Timeout.Infinite);
+                }
+            }
+            File.WriteAllText(Path.Combine(directory, "child-ready"), "started");
+            while (true) {
+                File.AppendAllText(Path.Combine(directory, "heartbeat"), ".");
+                Thread.Sleep(100);
+            }
+        }
         string marker = Environment.GetEnvironmentVariable("AITM_SYNTHETIC_SDK_MARKER");
         if (String.IsNullOrEmpty(marker)) marker = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "unexpected-sdk-launch.txt");
         File.WriteAllText(marker, "invoked");
@@ -106,6 +138,22 @@ internal static class SdkProbe {
     $null=Invoke-Isolated -executable $fakeDotnet -arguments @() -withoutProbeMarker
     Confirm-AndRemoveMarker $fallbackMarker $fakeSdk
     Write-Output 'Synthetic SDK positive controls created both markers; both were safely removed.'
+
+    # A direct synthetic parent starts one synthetic child. The heartbeat must
+    # stop after the timeout cleanup; it never accesses a real profile.
+    $timeoutDirectory=Join-Path $root 'timeout-fixture'
+    [void][IO.Directory]::CreateDirectory($timeoutDirectory)
+    $timedOut=$false
+    try{$null=Invoke-Isolated -executable $fakeDotnet -arguments @('tree-parent') -timeoutMilliseconds 4000}
+    catch{if($_.Exception.Message -ceq 'An isolated test timed out.'){$timedOut=$true}else{throw}}
+    $heartbeat=Join-Path $timeoutDirectory 'heartbeat'
+    Check ($timedOut -and [IO.File]::Exists((Join-Path $timeoutDirectory 'parent-ready')) -and
+        [IO.File]::Exists((Join-Path $timeoutDirectory 'child-ready')) -and [IO.File]::Exists($heartbeat)) 'Synthetic timeout process tree was not observed.'
+    $heartbeatBefore=([IO.FileInfo]::new($heartbeat)).Length
+    Start-Sleep -Milliseconds 600
+    $heartbeatAfter=([IO.FileInfo]::new($heartbeat)).Length
+    Check ($heartbeatBefore -gt 0 -and $heartbeatAfter -eq $heartbeatBefore) 'A synthetic descendant continued after timeout cleanup.'
+    Write-Output 'Synthetic timeout terminated the parent and stopped its child heartbeat.'
     $null=Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-Command','exit 0')
     $beforeLauncher=@(Get-ChildItem -LiteralPath $root -Recurse -Force | ForEach-Object {$_.FullName} | Sort-Object)
     $forbiddenWork=Join-Path $root 'launcher-must-not-create'

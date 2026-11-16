@@ -10,7 +10,7 @@ The common checks cover current and pre-start sessions, legacy-only sessions,
 legacy step-name preservation, quiet and later activity, prompt identity,
 generated activity privacy, a malformed current record, inferred and unnamed
 old steps, an unambiguous clear stop and 10,000 synthetic events. The test also
-asserts these intentional, observable differences:
+records these observed differences:
 
 - A simultaneous active and clear-stop event in one file hides the task in
   the embedded reader; the native reader keeps it unconfirmed.
@@ -21,7 +21,9 @@ asserts these intentional, observable differences:
   rejects it rather than merging or truncating it.
 - After a previously visible task stops and its history is later lost, the
   embedded reader retains the old step name as unconfirmed; the native reader
-  does not retain that stopped name in this scenario.
+  does not retain that stopped name in this scenario. This is an **open C#
+  behavior defect** against the agreed preservation of known step names. The
+  test reports whether the defect remains; it does not require it to persist.
 
 These are selected behaviors, not an exhaustive diff or proof of equivalence.
 Phase-aware events, real hook delivery, arbitrary clock races, file identity,
@@ -40,6 +42,10 @@ profile, clears child environments, sets `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0`,
 and compares user, machine and process PATH before and after. It runs the
 static PATH guard and verifies the retired launcher with a synthetic SDK probe
 whose marker is checked both with and without the marker environment variable.
+On a test timeout it requests termination of the directly started process tree
+and waits at most five seconds for the root process to exit. A synthetic parent
+and child heartbeat check exercises this path. The root-process wait does not
+prove that every possible detached or reparented descendant has exited.
 No `HOME` or `CODEX_HOME` override is introduced. These controls are for
 trusted hosted CI; they do not establish safety against a spoofed environment
 or concurrent path replacement.

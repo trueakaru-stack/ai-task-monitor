@@ -126,11 +126,16 @@ internal static class Program
             string newTurn = Event("observed", "UserPromptSubmit", start.AddSeconds(5), true, "");
             Task afterStopLoss = stoppedHistory.Read(loss + "\n" + newTurn, "", now, boundary).Single();
             bool oldName = afterStopLoss.Steps.Any(step => step.title == "Synthetic step");
-            Check(afterStopLoss.Unconfirmed && (native ? !oldName : oldName),
-                "The documented stopped-history retention difference changed.");
-            Console.WriteLine(native
-                ? "Difference: native does not retain the stopped step name after a later history loss."
-                : "Difference: embedded reader retains the stopped step name after a later history loss.");
+            Check(afterStopLoss.Unconfirmed, "A session after history loss was not marked unconfirmed.");
+            if (!native)
+            {
+                Check(oldName, "The embedded reader lost the stopped step name in the synthetic scenario.");
+                Console.WriteLine("Observed: embedded reader retains the stopped step name after a later history loss.");
+            }
+            else if (!oldName)
+                Console.WriteLine("OPEN DEFECT: native reader loses the stopped step name after a later history loss.");
+            else
+                Console.WriteLine("Observed: native reader retains the stopped step name; re-evaluate the documented open defect.");
 
             string bulk = Event("bulk", "PreToolUse", start, true, ",\"tool_name\":\"Read\"");
             string events = String.Join("\n", Enumerable.Repeat(bulk, 5000));
