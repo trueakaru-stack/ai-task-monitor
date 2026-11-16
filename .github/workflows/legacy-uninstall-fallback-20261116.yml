@@ -1,7 +1,7 @@
-name: Synthetic safe uninstall candidate
+name: Synthetic safe installation candidate
 on:
   push:
-    branches: ['codex/legacy-uninstall-fallback-20261116']
+    branches: ['codex/legacy-install-preserve-20261116']
 permissions:
   contents: read
 jobs:

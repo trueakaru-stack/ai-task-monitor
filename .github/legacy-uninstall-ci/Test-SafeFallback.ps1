@@ -42,6 +42,7 @@ try{
     foreach($entry in $items.GetEnumerator()){[IO.File]::WriteAllText([string]$entry.Key,[string]$entry.Value,[Text.UTF8Encoding]::new($false))}
     $ps=[IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'))
     $values=@{
+        CI=$env:CI;GITHUB_ACTIONS=$env:GITHUB_ACTIONS;RUNNER_ENVIRONMENT=$env:RUNNER_ENVIRONMENT;RUNNER_OS=$env:RUNNER_OS;RUNNER_TEMP=$env:RUNNER_TEMP
         SystemRoot=$env:SystemRoot;windir=$env:SystemRoot
         PATH=((Split-Path -Parent $ps)+';'+(Join-Path $env:SystemRoot 'System32')+';'+$env:SystemRoot)
         USERPROFILE=$profile;LOCALAPPDATA=$local;APPDATA=$roaming;TEMP=$tmp;TMP=$tmp
@@ -86,6 +87,11 @@ try {
     $extractProcess=[Diagnostics.Process]::Start($start)
     try{Check ($extractProcess.WaitForExit(20000) -and $extractProcess.ExitCode -eq 0) 'Cannot extract the candidate uninstaller.'}finally{$extractProcess.Dispose()}
     Check ((Get-FileHash -LiteralPath $extracted -Algorithm SHA256).Hash -ceq (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash) 'The compiled installer does not contain the candidate uninstaller.'
+    $engineTest=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Test-InstallEngine.ps1'))
+    $start=New-IsolatedPS
+    foreach($arg in @('-STA','-File',$engineTest,$exe,$root)){[void]$start.ArgumentList.Add($arg)}
+    $engineProcess=[Diagnostics.Process]::Start($start)
+    try{Check ($engineProcess.WaitForExit(30000) -and $engineProcess.ExitCode -eq 0) 'The installer assembly guard test failed.'}finally{$engineProcess.Dispose()}
     [IO.File]::Copy($extracted,$uninstaller,$true)
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -TypeDefinition @'

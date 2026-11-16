@@ -108,6 +108,7 @@ $arguments = @(
     "/resource:$(Join-Path $source 'ReleaseUpdates.ps1'),ReleaseUpdates.ps1",
     "/resource:$launcher,AI task monitor.exe",
     "/resource:$(Join-Path $source 'assets\app-icon.ico'),app-icon.ico",
+    (Join-Path $source "SafeInstallPaths.cs"),
     (Join-Path $source "CodexProgressInstaller.cs"),
     (Join-Path $source "VersionInfo.cs")
 )
