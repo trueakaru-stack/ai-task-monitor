@@ -53,6 +53,7 @@ async function run() {
   fs.writeFileSync(settingsPath, JSON.stringify(settings), { flag: 'wx' });
   let requests = 0;
   let toolRounds = 0;
+  let turnRequests = 0;
   const server = http.createServer((req, res) => {
     let body = '';
     req.setEncoding('utf8');
@@ -81,22 +82,14 @@ async function run() {
       if (requests <= 6) console.log('Synthetic model shape ' + requests + ': ' + messages.map(m =>
         m.role + '[' + (Array.isArray(m.content) ? m.content.map(c => c && c.type || '?').join(',') : typeof m.content) + ']'
       ).join(' '));
-      let lastPrompt = -1, lastPromptBlock = -1;
-      for (let i = 0; i < messages.length; i++) {
-        const m = messages[i];
-        if (m.role !== 'user') continue;
-        if (typeof m.content === 'string') { lastPrompt = i; lastPromptBlock = -1; continue; }
-        if (!Array.isArray(m.content)) continue;
-        let lastText = -1, lastResult = -1;
-        for (let j = 0; j < m.content.length; j++) {
-          if (m.content[j] && m.content[j].type === 'text') lastText = j;
-          if (m.content[j] && m.content[j].type === 'tool_result') lastResult = j;
-        }
-        if (lastText > lastResult) { lastPrompt = i; lastPromptBlock = lastText; }
+      // The stub is deterministic: the first model request in each synthetic
+      // invocation asks for two reads; the next supplies the final response.
+      // Claude versions can merge user text and prior results in one block.
+      const messageHasToolResult = turnRequests++ > 0;
+      if (messageHasToolResult && !messages.some(m =>
+          Array.isArray(m.content) && m.content.some(c => c && c.type === 'tool_result'))) {
+        res.writeHead(400); res.end(); return;
       }
-      const messageHasToolResult = messages.some((m, i) =>
-        Array.isArray(m.content) && m.content.some((c, j) => c && c.type === 'tool_result' &&
-          (i > lastPrompt || (i === lastPrompt && j > lastPromptBlock))));
       const model = typeof request.model === 'string' ? request.model : 'claude-sonnet-4-5-20250929';
       if (!request.stream) {
         if (!messageHasToolResult) toolRounds++;
@@ -182,6 +175,7 @@ async function run() {
     for (let turn = 0; turn < 2; turn++) {
       const args = [...common, ...(turn === 0 ? ['--session-id', session] : ['--resume', session]),
         'Read the synthetic fixture and respond with a short confirmation.'];
+      turnRequests = 0;
       const result = await invoke(args, 90000, 'turn-' + (turn + 1));
       if (result.code !== 0) {
         console.error('Synthetic CLI diagnostics: code=' + result.code + ' stdoutBytes=' + result.stdout.length +
