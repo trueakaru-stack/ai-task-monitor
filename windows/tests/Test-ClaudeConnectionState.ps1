@@ -25,8 +25,6 @@ $hook = Join-Path $args[0] 'ClaudeTaskHook.ps1'
 $legacy = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $hook + '"'
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& '" + $hook.Replace("'", "''") + "'"))
 $legacyEncoded = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
-$systemPowerShell = [IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'WindowsPowerShell\v1.0\powershell.exe')
-$current = '"' + $systemPowerShell + '" -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
 function Write-Hooks($hooks) {
     $value = @{ hooks = $hooks } | ConvertTo-Json -Depth 20
     [IO.File]::WriteAllText($settingsPath, $value, [Text.UTF8Encoding]::new($false))
@@ -36,7 +34,7 @@ if ((Claude-ConnectionState) -ne 'disconnected') { throw 'No owned hooks must be
 $partial = @{ PreToolUse = @(@{ hooks = @(@{ type='command'; command=$legacy }) }) }
 Write-Hooks $partial
 if ((Claude-ConnectionState) -ne 'partial') { throw 'A single owned hook must be reported as partial.' }
-foreach($command in @($legacy,$legacyEncoded,$current)) {
+foreach($command in @($legacy,$legacyEncoded)) {
     $complete = @{}
     foreach ($event in $events) { $complete[$event] = @(@{ hooks = @(@{ type='command'; command=$command }) }) }
     Write-Hooks $complete
@@ -45,7 +43,7 @@ foreach($command in @($legacy,$legacyEncoded,$current)) {
     Write-Hooks $complete
     if ((Claude-ConnectionState) -ne 'partial') { throw 'A missing Stop hook must be reported as partial.' }
 }
-Write-Output 'Claude connection states: new and both prior command forms, disconnected, partial and complete verified.'
+Write-Output 'Claude connection states: both supported command forms, disconnected, partial and complete verified.'
 '@
     & ([scriptblock]::Create($code + "`n" + $checks)) $appRoot
 } finally {

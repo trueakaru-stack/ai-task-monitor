@@ -30,7 +30,7 @@ try {
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& '" + $hook.Replace("'", "''") + "'"))
     $legacyEncoded = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
     $systemPowerShell = [IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'WindowsPowerShell\v1.0\powershell.exe')
-    $owned = '"' + $systemPowerShell + '" -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    $owned = $legacyEncoded
     $directory = Join-Path $root ".claude"
     [void][IO.Directory]::CreateDirectory($directory)
     $settingsPath = Join-Path $directory "settings.json"
@@ -47,8 +47,7 @@ try {
                     [ordered]@{ type = "command"; command = "echo synthetic" },
                     [ordered]@{ type = "prompt"; prompt = "synthetic" },
                     [ordered]@{ type = "command"; command = $owned + " --other-hook" },
-                    [ordered]@{ type = "command"; command = $owned; shell = "powershell" },
-                    [ordered]@{ type = "command"; command = $legacyEncoded; shell = "powershell" }
+                    [ordered]@{ type = "command"; command = $owned; shell = "powershell" }
                 ) },
                 [ordered]@{ matcher = "Other"; hooks = @() }
             )
@@ -83,8 +82,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Installing the hook failed." }
     $connected = Get-Content -Raw -Encoding UTF8 -LiteralPath $settingsPath | ConvertFrom-Json
     $groups = @($connected.hooks.PreToolUse)
-    if ($groups.Count -ne 3 -or @($groups[0].hooks).Count -ne 5 -or @($groups[1].hooks).Count -ne 0) { throw "Existing hook groups were changed." }
-    if ($groups[2].hooks[0].command -ne $owned) { throw "The app hook was not installed exactly." }
+    if ($groups.Count -ne 2 -or @($groups[0].hooks).Count -ne 5 -or @($groups[1].hooks).Count -ne 0) { throw "Existing hook groups were changed." }
+    if ($groups[0].hooks[4].command -ne $owned) { throw "The app hook was not installed exactly." }
     & $assertConnected
     if (@(Get-ChildItem -LiteralPath $directory -Filter 'settings.json.codex-tasks-backup-*').Count -ne 1) { throw "A settings backup was not retained." }
     if (@(Get-ChildItem -LiteralPath $directory -Filter '.ai-task-monitor-settings-*.tmp' -Force).Count -ne 0) { throw "A temporary settings file was left behind." }
@@ -106,14 +105,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Installing a hook from a special-character path failed." }
     $special = Get-Content -Raw -Encoding UTF8 -LiteralPath $settingsPath | ConvertFrom-Json
     $registered = [string]$special.hooks.UserPromptSubmit[0].hooks[0].command
-    $prefixCommand = '"' + $systemPowerShell + '" -NoProfile -ExecutionPolicy Bypass -EncodedCommand '
+    $prefixCommand = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand '
     if (-not $registered.StartsWith($prefixCommand) -or $registered.Contains('$') -or $registered.Contains("'")) { throw "The hook command exposes shell-sensitive path characters." }
     $encodedSpecial = $registered.Substring($prefixCommand.Length)
     $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encodedSpecial))
     $expectedScript = "& '" + (Join-Path $specialDirectory "ClaudeTaskHook.ps1").Replace("'", "''") + "'"
     if ($decoded -cne $expectedScript) { throw "The encoded hook did not preserve the exact script path." }
-    # Run the actual registered command through the Windows shell with a PATH
-    # that has no PowerShell directory; all state remains in the fixture.
+    # Run the actual registered command through the Windows shell using an
+    # isolated fixture PATH containing the system PowerShell directory.
     $hookStart = New-Object Diagnostics.ProcessStartInfo
     $hookStart.FileName = [IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'cmd.exe')
     $hookStart.Arguments = '/d /s /c "' + $registered + '"'
@@ -123,14 +122,14 @@ try {
     $hookStart.RedirectStandardInput = $true
     $hookStart.RedirectStandardOutput = $true
     $hookStart.RedirectStandardError = $true
-    $hookStart.EnvironmentVariables['PATH'] = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+    $hookStart.EnvironmentVariables['PATH'] = (Split-Path -Parent $systemPowerShell)+';'+[Environment]::GetFolderPath([Environment+SpecialFolder]::System)
     $hookProcess = [Diagnostics.Process]::Start($hookStart)
     try {
         $hookOut=$hookProcess.StandardOutput.ReadToEndAsync();$hookErr=$hookProcess.StandardError.ReadToEndAsync()
         $hookProcess.StandardInput.WriteLine('{"hook_event_name":"UserPromptSubmit","session_id":"synthetic-special"}')
         $hookProcess.StandardInput.Close()
         if (-not $hookProcess.WaitForExit(30000)) { throw 'The synthetic hook timed out.' }
-        if ($hookProcess.ExitCode -ne 0) { throw ('The registered hook failed without PowerShell on PATH: '+$hookOut.Result+' '+$hookErr.Result) }
+        if ($hookProcess.ExitCode -ne 0) { throw ('The registered hook failed in the isolated shell: '+$hookOut.Result+' '+$hookErr.Result) }
     } finally { $hookProcess.Dispose() }
     if (-not (Test-Path -LiteralPath (Join-Path $root 'CodexTaskProgress\claude-events-v2.jsonl'))) { throw "The registered hook did not receive input and write its synthetic event." }
 

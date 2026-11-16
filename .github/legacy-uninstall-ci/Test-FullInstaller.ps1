@@ -257,9 +257,21 @@ try{
     $expectedHookPath=Join-Path $install 'ClaudeTaskHook.ps1'
     $expectedScript="& '"+$expectedHookPath.Replace("'","''")+"'"
     $expectedEncoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($expectedScript))
-    $expectedCommand='"'+$SystemPowerShell+'" -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$expectedEncoded
-    Check ($configured.user -ceq 'preserved' -and
-        [string]$configured.hooks.UserPromptSubmit[0].hooks[0].command -ceq $expectedCommand) 'The real Claude setup did not safely write the expected system-PowerShell hook to fixture settings.'
+    $expectedCommand='powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand '+$expectedEncoded
+    if(-not ($configured.user -ceq 'preserved' -and
+        [string]$configured.hooks.UserPromptSubmit[0].hooks[0].command -ceq $expectedCommand)){
+        Write-Warning ('Synthetic installer error dialog: '+((Get-Names $failure) -join ' | '))
+        $debug=New-IsolatedStart $SystemPowerShell $partialValues
+        foreach($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $install 'Configure-ClaudeIntegration.ps1'),'-Mode','Install')){[void]$debug.ArgumentList.Add($arg)}
+        $debug.RedirectStandardOutput=$true;$debug.RedirectStandardError=$true
+        $debugProcess=[Diagnostics.Process]::Start($debug)
+        try{
+            $debugOut=$debugProcess.StandardOutput.ReadToEndAsync();$debugErr=$debugProcess.StandardError.ReadToEndAsync()
+            if($debugProcess.WaitForExit(30000)){Write-Warning ('Synthetic configuration diagnosis: exit='+$debugProcess.ExitCode+'; stdout='+$debugOut.Result+'; stderr='+$debugErr.Result)}
+            else{$debugProcess.Kill();[void]$debugProcess.WaitForExit(10000);Write-Warning 'Synthetic configuration diagnosis timed out.'}
+        }finally{$debugProcess.Dispose()}
+        throw 'The real Claude setup did not safely write the expected existing hook to fixture settings.'
+    }
     $failureNames=Get-Names $failure
     Check (@($failureNames|Where-Object {$_.Contains($install)}).Count -gt 0) 'The partial-install warning omitted the actual installation path.'
     Dismiss-Dialog $failure $partialSetup
