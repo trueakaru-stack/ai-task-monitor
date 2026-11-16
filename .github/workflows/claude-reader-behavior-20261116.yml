@@ -1,0 +1,35 @@
+name: Synthetic Claude reader behavior
+on:
+  push:
+    branches: [windows, codex/claude-reader-behavior-20261116]
+permissions:
+  contents: read
+jobs:
+  reader-behavior:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - name: Compare actual readers with isolated synthetic data
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:RUNNER_TEMP ('aitm-claude-behavior-source-'+[guid]::NewGuid().ToString('N'))
+          $source=Join-Path $root 'source'
+          $template=Join-Path $root 'template'
+          $hooks=Join-Path $root 'hooks'
+          New-Item -ItemType Directory -Path $source,$template,$hooks | Out-Null
+          $env:GIT_CONFIG_NOSYSTEM='1'
+          $env:GIT_CONFIG_GLOBAL=Join-Path $root 'empty.gitconfig'
+          [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL,'')
+          $env:GIT_TERMINAL_PROMPT='0'
+          git -c credential.helper= -c core.hooksPath="$hooks" init --quiet --template="$template" "$source"
+          if($LASTEXITCODE -ne 0){throw 'Cannot initialize synthetic source checkout.'}
+          git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$env:GITHUB_SHA"
+          if($LASTEXITCODE -ne 0){throw 'Cannot fetch test revision.'}
+          git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+          if($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:GITHUB_SHA){throw 'Cannot select exact test revision.'}
+          & (Join-Path $source '.github/claude-reader-behavior-ci/Run.ps1')

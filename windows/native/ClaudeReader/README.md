@@ -145,8 +145,20 @@ The candidate passed 164 file-source checks and 22 file-identity checks in
 using synthetic files on one hosted Windows filesystem.
 
 The WPF file and title-retention checks require Windows and a similarly isolated
-test environment; they were not run by that job. Do not invoke old local test
-runners without reviewing their environment handling. `Test-ClaudeReader.ps1`
-is an earlier source-identity check for the legacy embedded reader, not an
-acceptance test for this version. Real Claude sessions, final application
-integration and installer behavior remain unverified.
+test environment; they were not run by that job. The old
+`Test-ClaudeReader.ps1` launcher is disabled and fails before touching paths,
+changing the environment or starting an SDK. Its previous byte-for-byte
+comparison could not establish behavioral compatibility between the two
+different readers.
+
+The isolated `claude-reader-behavior-20261116.yml` workflow compiles the same
+synthetic fixture against the current PowerShell-embedded reader and the
+native reader. It checks session startup, legacy-only sessions, quiet activity,
+prompt identity, activity privacy, malformed input, inferred old-step status
+and 10,000 synthetic events. It separately asserts the differences for
+simultaneous active/stop events, malformed legacy-only input and 129-unit
+session IDs. The [test README](../Tests/ClaudeReaderBehavior/README.md)
+describes those cases and the deliberately failing old assertion. These
+selected checks do not establish full behavioral equivalence. Real Claude
+sessions, final application integration and installer behavior remain
+unverified.

@@ -32,6 +32,18 @@ RETIRED_INDEX_SOURCE = (
     "# isolation contract. Fail before touching any supplied paths or environment.\n"
     "throw 'The legacy Codex index test launcher is disabled. Use the disposable hosted workflow codex-index-bounded-synthetic-20261116.yml.'\n"
 )
+RETIRED_CLAUDE_LAUNCHER = "windows/native/ClaudeReader/Test-ClaudeReader.ps1"
+RETIRED_CLAUDE_SOURCE = (
+    "param(\n"
+    "    [string]$SdkRoot,\n"
+    "    [string]$WorkDirectory,\n"
+    "    [string]$PwshNet10,\n"
+    "    [string]$WindowsPowerShell\n"
+    ")\n\n"
+    "# This legacy launcher cannot verify the differing reader implementations.\n"
+    "# Fail before touching any supplied paths or environment.\n"
+    "throw 'The legacy Claude reader test launcher is disabled. Use the disposable hosted workflow claude-reader-behavior-20261116.yml.'\n"
+)
 REQUIRED_RUNNERS = {
     "windows/native/Claude/Test-Claude.ps1",
     "windows/native/ClaudeHook/Test-ClaudeHook.ps1",
@@ -57,6 +69,12 @@ REQUIRED_RUNNERS = {
 def retired_index_launcher_issues(source):
     if source.replace("\r\n", "\n") != RETIRED_INDEX_SOURCE:
         return ["the retired index launcher is not the exact side-effect-free fail-fast form"]
+    return []
+
+
+def retired_claude_launcher_issues(source):
+    if source.replace("\r\n", "\n") != RETIRED_CLAUDE_SOURCE:
+        return ["the retired Claude launcher is not the exact side-effect-free fail-fast form"]
     return []
 
 
@@ -389,6 +407,18 @@ def csharp_launcher_issues(source, variable):
 
 
 class DotnetPathSafety(unittest.TestCase):
+    def test_retired_claude_launcher_rejects_added_code(self):
+        self.assertFalse(retired_claude_launcher_issues(RETIRED_CLAUDE_SOURCE))
+        for unsafe in (
+            "& $dotnet --version\n" + RETIRED_CLAUDE_SOURCE,
+            RETIRED_CLAUDE_SOURCE + "Start-Process $SdkRoot\n",
+            RETIRED_CLAUDE_SOURCE + "Set-Content $WorkDirectory 'data'\n",
+            RETIRED_CLAUDE_SOURCE.replace("throw '", "Write-Output '", 1),
+            "$env:PATH='changed'\n" + RETIRED_CLAUDE_SOURCE,
+        ):
+            with self.subTest(unsafe=unsafe):
+                self.assertTrue(retired_claude_launcher_issues(unsafe))
+
     def test_retired_index_launcher_rejects_added_code(self):
         self.assertFalse(retired_index_launcher_issues(RETIRED_INDEX_SOURCE))
         for unsafe in (
@@ -497,6 +527,12 @@ class DotnetPathSafety(unittest.TestCase):
             if relative == RETIRED_INDEX_LAUNCHER:
                 inspected.add(relative)
                 for issue in retired_index_launcher_issues(source):
+                    with self.subTest(path=relative):
+                        self.fail(issue)
+                continue
+            if relative == RETIRED_CLAUDE_LAUNCHER:
+                inspected.add(relative)
+                for issue in retired_claude_launcher_issues(source):
                     with self.subTest(path=relative):
                         self.fail(issue)
                 continue
