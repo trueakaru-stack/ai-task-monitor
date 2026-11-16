@@ -8,7 +8,12 @@ jobs:
   recovery:
     runs-on: windows-2025
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [tests, screenshots]
     env:
+      AITM_CI_PART: ${{ matrix.part }}
       DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
@@ -102,20 +107,22 @@ jobs:
                 if ($stderr.Result) { Write-Output $stderr.Result.TrimEnd() }
               } finally { $process.Dispose() }
             }
-            $artifacts = Join-Path $root 'artifacts'
-            $project = Join-Path $source 'windows/native/Tests/ProviderV1Recovery/ProviderV1Recovery.Tests.csproj'
-            $dotnet = Join-Path $sdk 'dotnet.exe'
-            Invoke-Isolated $dotnet @('build', $project, '-c', 'Release', '--configfile', $config, '--artifacts-path', $artifacts, '-p:NuGetAudit=false', '--nologo')
-            $assembly = Join-Path $artifacts 'bin/ProviderV1Recovery.Tests/release/AITaskMonitor.ProviderV1Recovery.Tests.dll'
-            Invoke-Isolated $dotnet @($assembly)
             $powershell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
-            Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/tests/Test-ProviderV1Recovery.ps1'))
-            foreach ($test in @('Test-ExternalProviderState.ps1','Test-ExternalProviderView.ps1',
-              'Test-ExternalProviderRuntime.ps1','Test-ExternalProviderController.ps1',
-              'Test-ExternalProviderScopeIsolation.ps1','Test-ExternalProviderIsolation.ps1',
-              'Test-HermesObserverState.ps1','Test-ExternalSourceSnapshot.ps1')) {
-              Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source "windows/tests/$test"))
-            }
+            if ($env:AITM_CI_PART -eq 'tests') {
+              $artifacts = Join-Path $root 'artifacts'
+              $project = Join-Path $source 'windows/native/Tests/ProviderV1Recovery/ProviderV1Recovery.Tests.csproj'
+              $dotnet = Join-Path $sdk 'dotnet.exe'
+              Invoke-Isolated $dotnet @('build', $project, '-c', 'Release', '--configfile', $config, '--artifacts-path', $artifacts, '-p:NuGetAudit=false', '--nologo')
+              $assembly = Join-Path $artifacts 'bin/ProviderV1Recovery.Tests/release/AITaskMonitor.ProviderV1Recovery.Tests.dll'
+              Invoke-Isolated $dotnet @($assembly)
+              Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/tests/Test-ProviderV1Recovery.ps1'))
+              foreach ($test in @('Test-ExternalProviderState.ps1','Test-ExternalProviderView.ps1',
+                'Test-ExternalProviderRuntime.ps1','Test-ExternalProviderController.ps1',
+                'Test-ExternalProviderScopeIsolation.ps1','Test-ExternalProviderIsolation.ps1',
+                'Test-HermesObserverState.ps1','Test-ExternalSourceSnapshot.ps1')) {
+                Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source "windows/tests/$test"))
+              }
+            } else {
             $screenshots = Join-Path $root 'screenshots'
             $null = [IO.Directory]::CreateDirectory($screenshots)
             foreach ($warning in @('partial-data','partial-both')) {
@@ -136,6 +143,7 @@ jobs:
                 }
               }
             }
+            }
           } finally {
             foreach ($scope in @('User', 'Machine')) {
               $before = if ($scope -eq 'User') { $beforeUser } else { $beforeMachine }
@@ -146,7 +154,7 @@ jobs:
             }
           }
       - name: Preserve synthetic warning screenshots
-        if: always()
+        if: always() && matrix.part == 'screenshots'
         uses: actions/upload-artifact@v4
         with:
           name: synthetic-provider-warning
