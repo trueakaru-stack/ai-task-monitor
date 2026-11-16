@@ -47,6 +47,7 @@
  [ValidateRange(-1,6)][int]$PreviewActiveTasks = -1,
  [switch]$PreviewManyProviders,
  [ValidateSet('','partial-data','partial-connection','partial-both','unavailable')][string]$PreviewSourceWarning = '',
+ [ValidateSet('deepseek','codex')][string]$PreviewWarningProvider = 'deepseek',
  [switch]$PreviewTabsUiTest,
  [ValidateSet("default","planned","unplanned")][string]$PreviewScenario = "default",
  [switch]$PreviewActivityUiTest,
@@ -102,7 +103,7 @@ if($PreviewHermesSelection -and -not $PreviewHermesFocus){throw 'Hermes selectio
 if($PreviewHermesDisableSelection -and -not $PreviewHermesSelection){throw 'Hermes disable selection requires the isolated selection preview.'}
 if(($PreviewManyProviders -or $PreviewTabsUiTest) -and (-not $SnapshotFile -or -not $PreviewManyProviders -or $PreviewActiveTasks -ne 6)){throw 'Provider tab previews require six synthetic tasks and a snapshot.'}
 if($PreviewSourceWarning){
- if(-not $SnapshotFile -or $PreviewActiveTasks -lt 1 -or -not $DiagnosticDirectory){throw 'Source warning previews require synthetic tasks, a snapshot and an isolated diagnostic directory.'}
+ if(-not $SnapshotFile -or $PreviewActiveTasks -lt 0 -or ($PreviewActiveTasks -eq 0 -and $PreviewWarningProvider -ne 'codex') -or -not $DiagnosticDirectory){throw 'Source warning previews require synthetic tasks, a snapshot and an isolated diagnostic directory.'}
  $previewDataPath=[IO.Path]::GetFullPath($DiagnosticDirectory)
  $temporaryRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
  if(-not $previewDataPath.StartsWith($temporaryRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Source warning previews require a temporary diagnostic directory.'}
@@ -164,6 +165,7 @@ $script:monitorStartedUtc = [DateTime]::UtcNow
 $script:lastTasks = @()
 $script:lastAllTasks = @()
 $script:lastCodexTasks = @()
+$script:codexSourcePartial = $false
 $script:lastClaudeTasks = @()
 $script:sourceErrors = @()
 $script:sourcePartialConnections = @()
@@ -249,7 +251,7 @@ try{
  $script:codexCloudController=New-CodexCloudController
  $script:codexCloudModulesAvailable=$true
 }catch{}
-$script:currentVersion='0.2.7-alpha'
+$script:currentVersion='0.2.8-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateRequest=$null
@@ -379,6 +381,7 @@ $script:translations=@{
  'Нет данных'='No data'
  'Нет данных от '='No data from '
  'Часть данных недоступна'='Some data is unavailable'
+ 'Статус не подтверждён. Из журнала: '='Status unconfirmed. From log: '
  'Подключён'='Connected'
  'Подключён частично'='Partially connected'
  'Не подключён'='Not connected'
@@ -1595,7 +1598,7 @@ function Claude-InstallationState([string]$profile,[string]$appData,[string]$loc
 }
 
 function Update-SourceSettings {
- $codexSourceStatus.Text=Tr $(if($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
+ $codexSourceStatus.Text=Tr $(if($script:sourcePartialData -contains "Codex"){"Часть данных недоступна"}elseif($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
  Update-CodexCloudSourceSettings
  Update-OpenCodeSourceSettings
  Update-KimiSourceSettings
@@ -1870,27 +1873,28 @@ function Refresh-SystemTheme {
 }
 
 function Lock-State([string]$path) {
- if (-not (Test-Path -LiteralPath $path -ErrorAction Stop)) { return "missing" }
  try {
-  $sharing=[IO.FileShare]::Read -bor [IO.FileShare]::Delete
-  $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
-  $stream.Dispose()
-  return "free"
+  # Only inspect the directory entry. Opening this file without write sharing
+  # can prevent Codex from acquiring its writer lock.
+  $attributes=[IO.File]::GetAttributes($path)
+  if(($attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) -ne 0){return "unavailable"}
+  return "present"
  } catch {
   $exception=$_.Exception
   while($null -ne $exception.InnerException){$exception=$exception.InnerException}
-  if($exception -is [IO.IOException] -and (($exception.HResult -band 65535) -in @(32,33))){return "held"}
+  if($exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException]){return "missing"}
   return "unavailable"
  }
 }
 
 function Find-PriorLifecycle([string]$path) {
- $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+ $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
  try {
   $position=$stream.Length;$buffer=New-Object byte[] 262144;$carry='';$discardPartial=$false
+  $minimum=[Math]::Max([long]0,$position-[long]8388608)
   $terminals=New-Object 'Collections.Generic.List[object]'
-  while($position -gt 0){
-   $count=[int][Math]::Min([long]$buffer.Length,$position);$position-=$count
+  while($position -gt $minimum){
+   $count=[int][Math]::Min([long]$buffer.Length,$position-$minimum);$position-=$count
    [void]$stream.Seek($position,[IO.SeekOrigin]::Begin)
    $read=0
    while($read -lt $count){$n=$stream.Read($buffer,$read,$count-$read);if($n -le 0){throw 'Unable to read Codex session history.'};$read+=$n}
@@ -1925,7 +1929,8 @@ function Find-PriorLifecycle([string]$path) {
      }
      $lifecycle='task_started'
      foreach($terminal in $terminals){
-      if(-not $turn -or -not $terminal.TurnId -or $turn -eq $terminal.TurnId){$lifecycle=$terminal.Lifecycle;break}
+      if(-not $turn -or -not $terminal.TurnId){return $null}
+      if($turn -eq $terminal.TurnId){$lifecycle=$terminal.Lifecycle;break}
      }
      $key=if($turn){'turn:'+$turn}elseif($raw){'time:'+$raw}else{''}
      return [PSCustomObject]@{Lifecycle=$lifecycle;TurnId=$turn;LastEventUtc=$timestamp;StartKey=$key;StartedUtc=$timestamp}
@@ -1938,7 +1943,7 @@ function Find-PriorLifecycle([string]$path) {
     if($carry.Length -gt 1048576){$carry='';$discardPartial=$true}
    }
   }
-  if($terminals.Count){return [PSCustomObject]@{Lifecycle=$terminals[0].Lifecycle;TurnId='';LastEventUtc=[DateTime]::MinValue;StartKey='';StartedUtc=[DateTime]::MinValue}}
+  # A terminal without its matching start cannot establish the current turn.
   return $null
  } finally {$stream.Dispose()}
 }
@@ -1956,7 +1961,7 @@ function Thread-State([string]$id) {
   $startedUtc=if($null -ne $cached.PSObject.Properties["StartedUtc"]){[DateTime]$cached.StartedUtc}else{[DateTime]::MinValue}
  }else{
   $tailLimit=2097152
-  $tail=Read-TailText $path $tailLimit
+  $tail=Read-TailText $path $tailLimit $true
   $seed=$null
   if($null -ne $cached -and $cached.Lifecycle -in @('task_started','task_complete','turn_aborted') -and
      $null -ne $cached.PSObject.Properties['TurnId'] -and [long]$file.Length -ge [long]$cached.Length -and
@@ -1994,7 +1999,9 @@ function Thread-State([string]$id) {
    elseif($eventType -notin @("task_complete","turn_complete","turn_aborted") -and $lifecycle -ne "task_started"){continue}
    if($turnId -and $eventTurn -and $eventTurn -ne $turnId){continue}
    if($eventType -in @("task_complete","turn_complete","turn_aborted")){
-    $lifecycle=if($eventType -eq "turn_aborted"){"turn_aborted"}else{"task_complete"}
+    # A terminal without a matching turn ID cannot close an observed turn.
+    if(-not $turnId -or -not $eventTurn){$lifecycle="uncertain_terminal";continue}
+    if($lifecycle -eq "task_started"){$lifecycle=if($eventType -eq "turn_aborted"){"turn_aborted"}else{"task_complete"}}
     continue
    }
    if($eventType -in @("task_started","turn_started")){$startedUtc=$timestamp}
@@ -2003,10 +2010,10 @@ function Thread-State([string]$id) {
    return [PSCustomObject]@{Lifecycle=$lifecycle;TurnId=$turnId;LastEventUtc=$lastEventUtc;StartKey=$startKey;StartedUtc=$startedUtc;LatestTailEventUtc=$latestTailEventUtc;SawStart=$sawStart}
   }
   $parsed=& $parseTail $tail $seed
-  if($null -eq $seed -and -not $scannedPrior -and -not $parsed.SawStart -and [long]$file.Length -gt $tailLimit -and $parsed.LatestTailEventUtc -ge $script:monitorStartedUtc){
+  if($null -eq $seed -and -not $scannedPrior -and -not $parsed.SawStart -and [long]$file.Length -gt $tailLimit){
    $priorLock=Lock-State (Join-Path $lockDirectory "$id.lock")
    if($priorLock -eq 'unavailable'){throw 'Codex session lock cannot be checked.'}
-   if($priorLock -eq 'held'){
+   if($priorLock -eq 'present'){
     $prior=Find-PriorLifecycle $path
     $scannedPrior=$true
     if($null -ne $prior){$parsed=& $parseTail $tail $prior}
@@ -2019,16 +2026,15 @@ function Thread-State([string]$id) {
  $hasStart=$lifecycle -eq "task_started"
  $lock=if($hasStart){Lock-State (Join-Path $lockDirectory "$id.lock")}else{"missing"}
  if($lock -eq "unavailable"){throw "Codex session lock cannot be checked."}
- $state=if($lifecycle -eq "task_complete"){"completed"}elseif($lifecycle -eq "turn_aborted"){"interrupted"}elseif($hasStart -and $lock -eq "held"){
-  if($lastEventUtc -ge $script:monitorStartedUtc -or $script:observedCodex.ContainsKey($id)){"active"}else{"unobserved"}
- }else{"unknown"}
- return [PSCustomObject]@{State=$state;HasStartMarker=$hasStart;UpdatedUtc=$file.LastWriteTimeUtc;StartKey=$startKey;StartedUtc=$startedUtc}
+ $state=if($lifecycle -eq "task_complete"){"completed"}elseif($lifecycle -eq "turn_aborted"){"interrupted"}else{"unknown"}
+ return [PSCustomObject]@{State=$state;HasStartMarker=$hasStart;UpdatedUtc=$file.LastWriteTimeUtc;StartKey=$startKey;StartedUtc=$startedUtc;LockState=$lock}
 }
 
 function Codex-Uncertain([string]$id,$threadState) {
  if($threadState.State -eq "active"){$script:observedCodex[$id]=$true}
  elseif($threadState.State -in @("completed","interrupted")){[void]$script:observedCodex.Remove($id)}
- elseif($threadState.State -eq "unknown" -and $threadState.HasStartMarker -and $threadState.UpdatedUtc -ge $script:monitorStartedUtc){$script:observedCodex[$id]=$true}
+ elseif($threadState.State -eq "unknown" -and $threadState.HasStartMarker -and
+   (($null -ne $threadState.PSObject.Properties['LockState'] -and $threadState.LockState -eq 'present') -or $threadState.UpdatedUtc -ge $script:monitorStartedUtc)){$script:observedCodex[$id]=$true}
  return ($threadState.State -eq "unknown" -and $script:observedCodex.ContainsKey($id))
 }
 
@@ -2140,11 +2146,23 @@ function Session-Workspace([string]$id) {
  $path = Session-File $id
  if (-not $path) { return "" }
  try {
-  foreach ($line in Get-Content -LiteralPath $path -Encoding UTF8 -TotalCount 12) {
-   if ($line -notmatch '"type":"session_meta"') { continue }
-   $record = $line | ConvertFrom-Json
-   return [string](Prop $record.payload "cwd" "")
-  }
+  $sharing=[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+  $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
+  try{
+   $count=[int][Math]::Min([long]1048576,[long]$stream.Length);$bytes=[byte[]]::new($count);$offset=0
+   while($offset -lt $count){$read=$stream.Read($bytes,$offset,$count-$offset);if($read -le 0){throw 'The session changed while reading.'};$offset+=$read}
+  }finally{$stream.Dispose()}
+  $memory=[IO.MemoryStream]::new($bytes,$false)
+  try{
+   $reader=[IO.StreamReader]::new($memory,[Text.Encoding]::UTF8,$true,4096,$true)
+   try{
+    for($i=0;$i -lt 12 -and $null -ne ($line=$reader.ReadLine());$i++){
+     if($line -notmatch '"type":"session_meta"'){continue}
+     $record=$line|ConvertFrom-Json -ErrorAction Stop
+     return [string](Prop $record.payload 'cwd' '')
+    }
+   }finally{$reader.Dispose()}
+  }finally{$memory.Dispose()}
  } catch {}
  return ""
 }
@@ -2184,10 +2202,17 @@ function Read-TailText([string]$path,[long]$maxBytes,[bool]$allowDelete=$false) 
  if($allowDelete){$sharing=$sharing -bor [IO.FileShare]::Delete}
  $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
  try {
-  $bytes=[Math]::Min($maxBytes,$stream.Length); [void]$stream.Seek(-$bytes,[IO.SeekOrigin]::End)
-  $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true,4096,$true)
-  try{return $reader.ReadToEnd()}finally{$reader.Dispose()}
+  if($maxBytes -lt 0 -or $maxBytes -gt [int]::MaxValue){throw 'Invalid bounded tail size.'}
+  $length=[long]$stream.Length;$count=[int][Math]::Min($maxBytes,$length)
+  $bytes=[byte[]]::new($count);[void]$stream.Seek($length-$count,[IO.SeekOrigin]::Begin)
+  $offset=0
+  while($offset -lt $count){$read=$stream.Read($bytes,$offset,$count-$offset);if($read -le 0){throw 'The session changed while reading.'};$offset+=$read}
  }finally{$stream.Dispose()}
+ $memory=[IO.MemoryStream]::new($bytes,$false)
+ try{
+  $reader=[IO.StreamReader]::new($memory,[Text.Encoding]::UTF8,$true,4096,$true)
+  try{return $reader.ReadToEnd()}finally{$reader.Dispose()}
+ }finally{$memory.Dispose()}
 }
 
 function Codex-Plan([string]$id) {
@@ -2216,8 +2241,9 @@ function Codex-Plan([string]$id) {
    return [Convert]::ToBase64String($data)
   }
   $safeEnd=[long]0;$position=$length;$buffer=New-Object byte[] 65536
-  while($position -gt 0 -and $safeEnd -eq 0){
-   $count=[int][Math]::Min([long]$buffer.Length,$position);$position-=$count
+  $minimumEnd=[Math]::Max([long]0,$length-[long]8388608)
+  while($position -gt $minimumEnd -and $safeEnd -eq 0){
+   $count=[int][Math]::Min([long]$buffer.Length,$position-$minimumEnd);$position-=$count
    [void]$stream.Seek($position,[IO.SeekOrigin]::Begin)
    $read=0
    while($read -lt $count){$n=$stream.Read($buffer,$read,$count-$read);if($n -le 0){throw 'Unable to read Codex plan history.'};$read+=$n}
@@ -2228,11 +2254,16 @@ function Codex-Plan([string]$id) {
    if($anchor -ceq [string]$cached.Anchor){$offset=[long]$cached.Offset;$latest=@($cached.Steps);$confirmed=[bool]$cached.Confirmed;$currentTurn=[string]$cached.CurrentTurn}
   }
   if($safeEnd -gt $offset){
+   $partialPlan=($safeEnd-$offset) -gt 8388608
+   if($partialPlan){$offset=$safeEnd-8388608;$latest=@();$confirmed=$false;$currentTurn=''}
    [void]$stream.Seek($offset,[IO.SeekOrigin]::Begin)
-   $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,($offset -eq 0),4096,$true)
+   $count=[int]($safeEnd-$offset);$data=[byte[]]::new($count);$read=0
+   while($read -lt $count){$n=$stream.Read($data,$read,$count-$read);if($n -le 0){throw 'Unable to read Codex plan history.'};$read+=$n}
+   $memory=[IO.MemoryStream]::new($data,$false)
+   $reader=[IO.StreamReader]::new($memory,[Text.Encoding]::UTF8,($offset -eq 0),4096,$true)
    try{
+    if($partialPlan){[void]$reader.ReadLine()}
     while($null -ne ($line=$reader.ReadLine())){
-     if($reader.EndOfStream -and $safeEnd -lt $length){break}
      if($line -notmatch 'update_plan|task_started|turn_started'){continue}
      try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
      $payload=Prop $record "payload"
@@ -2274,7 +2305,8 @@ function Codex-Plan([string]$id) {
      }
      $latest=$candidate.ToArray();$confirmed=$true
     }
-   }finally{$reader.Dispose()}
+   }finally{$reader.Dispose();$memory.Dispose()}
+   if($partialPlan){$confirmed=$false}
   }
   $anchor=& $readAnchor $stream $safeEnd
  }finally{$stream.Dispose()}
@@ -2288,7 +2320,7 @@ function Codex-Activity([string]$id) {
  $path = Session-File $id
  if (-not $path) { return "" }
  try {
-  $tail=Read-TailText $path 2097152
+  $tail=Read-TailText $path 2097152 $true
   $lines=$tail -split "`r?`n"; $startIndex=-1; $turnId=""; $latestCommentary=""
   for($index=$lines.Count-1;$index -ge 0;$index--){
    $line=$lines[$index]
@@ -2338,6 +2370,81 @@ function Codex-Activity([string]$id) {
  return ""
 }
 
+function Read-ObservedCodexTail([string]$path,[string]$id) {
+ $sharing=[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+ $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
+ try{
+  $length=[long]$stream.Length
+  $headCount=[int][Math]::Min([long]65536,$length)
+  $offset=[Math]::Max([long]0,$length-[long]2097152)
+  $tailStart=if($offset -gt 0){$offset-1}else{[long]0}
+  $tailCount=[int]($length-$tailStart)
+  $readRange={param([long]$position,[int]$count)
+   $data=[byte[]]::new($count);[void]$stream.Seek($position,[IO.SeekOrigin]::Begin);$read=0
+   while($read -lt $count){$n=$stream.Read($data,$read,$count-$read);if($n -le 0){throw 'Codex journal changed while reading.'};$read+=$n}
+   return ,$data
+  }
+  $head=& $readRange 0 $headCount;$tail=& $readRange $tailStart $tailCount
+  $headAgain=& $readRange 0 $headCount;$tailAgain=& $readRange $tailStart $tailCount
+  if($stream.Length -lt $length){throw 'Codex journal was truncated.'}
+  $hash=[Security.Cryptography.SHA256]::Create()
+  try{
+   if([Convert]::ToBase64String($hash.ComputeHash($head)) -cne [Convert]::ToBase64String($hash.ComputeHash($headAgain)) -or
+      [Convert]::ToBase64String($hash.ComputeHash($tail)) -cne [Convert]::ToBase64String($hash.ComputeHash($tailAgain))){throw 'Codex journal changed while reading.'}
+  }finally{$hash.Dispose()}
+ }finally{$stream.Dispose()}
+ $lineEnd=0;while($lineEnd -lt $head.Length -and $head[$lineEnd] -ne 10){$lineEnd++}
+ if($lineEnd -ge $head.Length){return ''}
+ $encoding=[Text.UTF8Encoding]::new($false,$true)
+ $first=$encoding.GetString($head,0,$lineEnd).TrimStart([char]0xFEFF).TrimEnd([char]13)
+ try{$meta=$first|ConvertFrom-Json -ErrorAction Stop}catch{return ''}
+ if([string](Prop $meta 'type' '') -ne 'session_meta' -or [string](Prop (Prop $meta 'payload') 'id' '') -ne $id){return ''}
+ $start=0
+ if($offset -gt 0){
+  $start=1
+  if($tail[0] -ne 10){while($start -lt $tail.Length -and $tail[$start] -ne 10){$start++};if($start -lt $tail.Length){$start++}}
+ }
+ $end=$tail.Length
+ if($end -gt $start -and $tail[$end-1] -ne 10){while($end -gt $start -and $tail[$end-1] -ne 10){$end--}}
+ if($end -le $start){return ''}
+ return $encoding.GetString($tail,$start,$end-$start)
+}
+
+function Codex-ObservedActivity([string]$id,[string]$startKey) {
+ $path=Session-File $id
+ if(-not $path){return ''}
+ try{
+  $tail=Read-ObservedCodexTail $path $id
+  $lines=$tail -split "`r?`n"
+  $turn=if($startKey.StartsWith('turn:',[StringComparison]::Ordinal)){$startKey.Substring(5)}else{''}
+  for($index=$lines.Count-1;$index -ge 0;$index--){
+   $line=$lines[$index]
+   if($line.Length -gt 1048576 -or $line -notmatch '"(item_completed|agent_message|commentary)"'){continue}
+   try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
+   $payload=Prop $record 'payload';$recordType=[string](Prop $record 'type' '');$kind=[string](Prop $payload 'type' '')
+   $message=''
+   if($recordType -eq 'event_msg' -and $kind -eq 'item_completed' -and $turn -and
+      [string](Prop $payload 'thread_id' '') -eq $id -and [string](Prop $payload 'turn_id' '') -ceq $turn){
+    $item=Prop $payload 'item';$itemType=[string](Prop $item 'type' '')
+    if($itemType -eq 'Reasoning'){
+     foreach($part in @(Prop $item 'summary_text' @())){if($part -is [string] -and $part.Trim()){$message=[string]$part}}
+    }elseif($itemType -eq 'AgentMessage' -and [string](Prop $item 'phase' '') -eq 'commentary'){
+     foreach($part in @(Prop $item 'content' @())){if([string](Prop $part 'type' '') -eq 'Text'){$message=[string](Prop $part 'text' '')}}
+    }
+   }elseif($recordType -eq 'event_msg' -and $kind -eq 'agent_message' -and [string](Prop $payload 'phase' '') -eq 'commentary'){
+    $message=[string](Prop $payload 'message' '')
+   }elseif($recordType -eq 'response_item' -and $kind -eq 'message' -and [string](Prop $payload 'role' '') -eq 'assistant' -and [string](Prop $payload 'phase' '') -eq 'commentary'){
+    foreach($part in @(Prop $payload 'content' @())){if([string](Prop $part 'type' '') -eq 'output_text'){$message=[string](Prop $part 'text' '')}}
+   }
+   if($message){
+    $first=@($message -split "`r?`n"|Where-Object {$_.Trim()}|Select-Object -First 1)
+    if($first.Count){$value=$first[0].Trim();if($value -match '^\*\*(?<heading>.+?)\*\*'){$value=$Matches.heading};return [regex]::Replace($value,'\s+',' ')}
+   }
+  }
+ }catch{}
+ return ''
+}
+
 function Plan-Progress($steps, [int]$fallback) {
  $all = @($steps)
  if ($all.Count -eq 0) { return $fallback }
@@ -2347,55 +2454,51 @@ function Plan-Progress($steps, [int]$fallback) {
 
 function Codex-IndexCandidates {
  $sessionMap=@{}
- foreach($line in Get-Content -LiteralPath $sessionIndex -Encoding UTF8 -Tail 50){
-  if(-not $line){continue}
-  try{
-   $session=$line|ConvertFrom-Json -ErrorAction Stop
-   $id=[string](Prop $session "id" "")
-   if($id -match '^[A-Za-z0-9_-]{1,128}$'){$sessionMap[$id]=$session}
-  }catch{}
- }
  $needed=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
  foreach($id in @($script:observedCodex.Keys)){
-  if([string]$id -match '^[A-Za-z0-9_-]{1,128}$' -and -not $sessionMap.ContainsKey([string]$id)){[void]$needed.Add([string]$id)}
+  if([string]$id -match '^[A-Za-z0-9_-]{1,128}$'){[void]$needed.Add([string]$id)}
  }
  if(Test-Path -LiteralPath $lockDirectory -PathType Container -ErrorAction Stop){
   foreach($lock in Get-ChildItem -LiteralPath $lockDirectory -File -Filter '*.lock' -ErrorAction Stop){
    $id=[IO.Path]::GetFileNameWithoutExtension($lock.Name)
-   if($id -notmatch '^[A-Za-z0-9_-]{1,128}$' -or $sessionMap.ContainsKey($id)){continue}
-   if((Lock-State $lock.FullName) -in @('held','unavailable')){[void]$needed.Add($id)}
+   if($id -notmatch '^[A-Za-z0-9_-]{1,128}$'){continue}
+   $lockState=Lock-State $lock.FullName
+   if($lockState -eq 'unavailable'){throw 'Codex session lock metadata is unavailable.'}
+   if($lockState -eq 'present'){[void]$needed.Add($id)}
+   if($needed.Count -gt 256){throw 'Too many Codex session lock entries to inspect safely.'}
   }
  }
- if($needed.Count -gt 0){
-  $indexFile=Get-Item -LiteralPath $sessionIndex -ErrorAction Stop
-  $version="{0}|{1}|{2}" -f $indexFile.FullName,$indexFile.Length,$indexFile.LastWriteTimeUtc.Ticks
-  if($null -eq (Get-Variable -Scope Script -Name sessionIndexLookup -ErrorAction SilentlyContinue)){$script:sessionIndexLookup=@{}}
-  if(-not $script:sessionIndexLookup.ContainsKey('Version') -or $script:sessionIndexLookup.Version -cne $version){$script:sessionIndexLookup=@{Version=$version;Items=@{}}}
-  $missing=@($needed|Where-Object {-not $script:sessionIndexLookup.Items.ContainsKey($_)})
-  if($missing.Count -gt 0){
-   foreach($id in $missing){$script:sessionIndexLookup.Items[$id]=$null}
-   $filter='"(?:'+(($missing|ForEach-Object {[regex]::Escape($_)}) -join '|')+')"'
-   $sharing=[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
-   $stream=[IO.File]::Open($sessionIndex,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
-   try{
-    $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true,4096,$true)
-    try{
-     while($null -ne ($line=$reader.ReadLine())){
-      if($line.Length -gt 1048576){throw 'Codex session index contains an oversized line.'}
-      if($line -notmatch $filter){continue}
-      try{
-       $session=$line|ConvertFrom-Json -ErrorAction Stop
-       $id=[string](Prop $session "id" "")
-       if($id -and $script:sessionIndexLookup.Items.ContainsKey($id)){$script:sessionIndexLookup.Items[$id]=$session}
-      }catch{}
-     }
-    }finally{$reader.Dispose()}
-   }finally{$stream.Dispose()}
+ if($needed.Count -gt 256){throw 'Too many observed Codex sessions to inspect safely.'}
+ # Read one bounded snapshot. Do not read a growing index to EOF or expose a
+ # partial snapshot as a complete list when the file changes during the read.
+ $sharing=[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+ $stream=[IO.File]::Open($sessionIndex,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
+ try{
+  $length=[long]$stream.Length
+  if($length -gt 16777216){throw 'Codex session index exceeds the safe read budget.'}
+  $bytes=[byte[]]::new([int]$length)
+  $offset=0
+  while($offset -lt $bytes.Length){$read=$stream.Read($bytes,$offset,$bytes.Length-$offset);if($read -le 0){throw 'Codex session index changed during reading.'};$offset+=$read}
+  if($stream.Length -ne $length){throw 'Codex session index changed during reading.'}
+ }finally{$stream.Dispose()}
+ $memory=[IO.MemoryStream]::new($bytes,$false)
+ try{
+  $reader=[IO.StreamReader]::new($memory,[Text.UTF8Encoding]::new($false,$true),$true,4096,$true)
+  try{$text=$reader.ReadToEnd()}finally{$reader.Dispose()}
+ }finally{$memory.Dispose()}
+ if($text.Length -gt 0 -and -not $text.EndsWith("`n",[StringComparison]::Ordinal)){throw 'Codex session index has an incomplete final record.'}
+ $recent=New-Object 'Collections.Generic.Queue[string]'
+ $filter=if($needed.Count){'"(?:'+((@($needed)|ForEach-Object {[regex]::Escape($_)}) -join '|')+')"'}else{''}
+ foreach($line in ($text -split "`r?`n")){
+  if(-not $line){continue}
+  if($line.Length -gt 1048576){throw 'Codex session index contains an oversized line.'}
+  if($recent.Count -eq 50){[void]$recent.Dequeue()};$recent.Enqueue($line)
+  if($filter -and $line -match $filter){
+   try{$session=$line|ConvertFrom-Json -ErrorAction Stop;$id=[string](Prop $session 'id' '');if($needed.Contains($id)){$sessionMap[$id]=$session}}catch{}
   }
-  foreach($id in $needed){
-   $session=$script:sessionIndexLookup.Items[$id]
-   if($null -ne $session){$sessionMap[$id]=$session}
-  }
+ }
+ foreach($line in $recent){
+  try{$session=$line|ConvertFrom-Json -ErrorAction Stop;$id=[string](Prop $session 'id' '');if($id -match '^[A-Za-z0-9_-]{1,128}$'){$sessionMap[$id]=$session}}catch{}
  }
  foreach($session in $sessionMap.Values){
   try{
@@ -2410,10 +2513,15 @@ function Codex-IndexCandidates {
 }
 
 function Codex-Tasks {
+ $script:codexSourcePartial=$false
+ $script:codexTerminated=@{}
  if (-not (Test-Path -LiteralPath $sessionIndex -ErrorAction Stop)) {
   if ($script:lastCodexTasks.Count -gt 0 -or (Test-Path -LiteralPath $codexHome -PathType Container -ErrorAction Stop)) { throw "Codex session index is unavailable." }
   return @()
  }
+ # Local journals and lock-file presence do not establish a complete set of
+ # current tasks, even when all of the readable events are well formed.
+ $script:codexSourcePartial=$true
  $sessions = @(Codex-IndexCandidates)
  $discoveryVariable=Get-Variable -Scope Script -Name 'sessionDiscovery' -ErrorAction SilentlyContinue
  if ($null -ne $discoveryVariable -and $null -ne $discoveryVariable.Value) {
@@ -2446,6 +2554,7 @@ function Codex-Tasks {
   $id = [string]$session.id; $title = [string]$session.thread_name
   if($title -eq "Guardian review"){continue}
   $threadState = Thread-State $id
+  if($threadState.State -in @('completed','interrupted')){$script:codexTerminated[$id]=$true}
   $eventActive = $threadState.State -eq "active"
   $uncertain = Codex-Uncertain $id $threadState
   if($threadState.State -in @("interrupted","unobserved")){continue}
@@ -2484,12 +2593,16 @@ function Codex-Tasks {
    if ($doneCount -eq $steps.Count) { $progress = 100; $progressKind="exact"; $progressBasis="steps" }
    elseif ($null -ne $progress -and $progress -ge 100) { $progress = 99 }
   }
+  if($uncertain){$planConfirmed=$false;$progress=$null;$progressKind='none'}
   $updated = if($threadState.UpdatedUtc -ne [DateTime]::MinValue){$threadState.UpdatedUtc.ToLocalTime()}else{[DateTime]::MinValue}
-  $activityGenerated=$uncertain
-  $activity = if($uncertain){"Статус не подтверждён"}elseif($running){$currentActivity=Codex-Activity $id;if($currentActivity){$currentActivity}else{$activityGenerated=$true;"Выполняется"}}else{""}
   $startKey=[string](Prop $threadState "StartKey" "")
   $started=[DateTime](Prop $threadState "StartedUtc" ([DateTime]::MinValue))
-  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; Activity=$activity; ActivityGenerated=$activityGenerated; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; ProgressBasis=$progressBasis; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source; PlanConfirmed=$planConfirmed })
+  $activityGenerated=$uncertain;$activityObserved=$false
+  $activity = if($uncertain){
+   $observed=Codex-ObservedActivity $id $startKey
+   if($observed){$activityObserved=$true;$activityGenerated=$false;$observed}else{"Статус не подтверждён"}
+  }elseif($running){$currentActivity=Codex-Activity $id;if($currentActivity){$currentActivity}else{$activityGenerated=$true;"Выполняется"}}else{""}
+  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; Activity=$activity; ActivityGenerated=$activityGenerated; ActivityObserved=$activityObserved; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; ProgressBasis=$progressBasis; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source; PlanConfirmed=$planConfirmed })
  }
  $runningItems = @($items | Where-Object Active | Sort-Object Updated -Descending)
  $trackedItems = @($items | Where-Object { -not $_.Active -and ($_.Status -in @("Статус не подтверждён","Ожидает подтверждения") -or $_.Paused) } | Sort-Object Updated -Descending)
@@ -2596,7 +2709,23 @@ function Claude-Tasks {
 function Source-Snapshot {
  $codex=@(); $claude=@(); $external=@(); $cloud=@(); $unavailable=New-Object Collections.Generic.List[string]
  $partialConnection=New-Object Collections.Generic.List[string];$partialData=New-Object Collections.Generic.List[string]
- try{$codex=@(Codex-Tasks);$script:lastCodexTasks=$codex}catch{[void]$unavailable.Add("Codex");$codex=@(Unconfirmed-Tasks $script:lastCodexTasks)}
+ try{
+  $previousCodex=@($script:lastCodexTasks)
+  $codex=@(Codex-Tasks)
+  $codexPartial=Get-Variable -Scope Script -Name codexSourcePartial -ErrorAction SilentlyContinue
+  if($null -ne $codexPartial -and $codexPartial.Value){
+   [void]$unavailable.Add('Codex');[void]$partialData.Add('Codex')
+   $seenCodex=@{};foreach($task in $codex){$seenCodex[[string]$task.Id]=$true}
+   $terminated=Get-Variable -Scope Script -Name codexTerminated -ErrorAction SilentlyContinue
+   foreach($task in $previousCodex){
+    $id=[string]$task.Id
+    if($id -and -not $seenCodex.ContainsKey($id) -and ($null -eq $terminated -or $null -eq $terminated.Value -or -not $terminated.Value.ContainsKey($id))){
+     $codex+=@(Unconfirmed-Tasks @($task));$seenCodex[$id]=$true
+    }
+   }
+  }
+  $script:lastCodexTasks=$codex
+ }catch{[void]$unavailable.Add("Codex");$codex=@(Unconfirmed-Tasks $script:lastCodexTasks)}
  try{
   $connectionState=if($ClaudeEventFile){"connected"}else{Claude-ConnectionState}
   if($connectionState -eq "connected"){$claude=@(Claude-Tasks);$script:lastClaudeTasks=$claude}
@@ -2743,8 +2872,9 @@ function Unconfirmed-Tasks($tasks) {
  foreach($task in $tasks){
   if(-not $task.Active -and [string](Prop $task "Status" "") -ne "Статус не подтверждён"){continue}
   $copy=$task.PSObject.Copy()
-  $copy.Active=$false; $copy.Status="Статус не подтверждён"; $copy.Activity="Статус не подтверждён"
-  if([string](Prop $copy 'Provider' '') -eq 'claude'){
+  $copy.Active=$false; $copy.Status="Статус не подтверждён"
+  if(-not ([string](Prop $copy 'Provider' '') -eq 'codex' -and [bool](Prop $copy 'ActivityObserved' $false) -and [string](Prop $copy 'Activity' ''))){$copy.Activity="Статус не подтверждён"}
+  if([string](Prop $copy 'Provider' '') -in @('claude','codex')){
    if($null -ne $copy.PSObject.Properties['PlanConfirmed']){$copy.PlanConfirmed=$false}
    if($null -ne $copy.PSObject.Properties['Progress']){$copy.Progress=$null}
    if($null -ne $copy.PSObject.Properties['ProgressKind']){$copy.ProgressKind='none'}
@@ -2904,6 +3034,9 @@ function Localized-TaskTitle($task) {
 function Localized-TaskActivity($task) {
  $activity=[string](Prop $task 'Activity' '')
  if(-not $activity){return ''}
+ if([string](Prop $task 'Provider' '') -eq 'codex' -and [string](Prop $task 'Status' '') -eq 'Статус не подтверждён' -and [bool](Prop $task 'ActivityObserved' $false)){
+  return (Tr 'Статус не подтверждён. Из журнала: ')+$activity
+ }
  if([bool](Prop $task 'ActivityGenerated' $false) -or [string](Prop $task 'Status' '') -eq 'Статус не подтверждён'){return (Tr $activity)}
  if([string](Prop $task 'Provider' '') -eq 'claude'){
   foreach($prefix in @('Выполняет: ','Завершено: ','Ошибка: ','Добавлен этап: ','Завершён этап: ')){
@@ -3045,7 +3178,7 @@ function New-ActivityIndicator([bool]$active) {
 
 function Add-Card($task) {
  $stepCount=@($task.Steps).Count
- $hideClaudePlanState=([string]$task.Provider -eq "claude" -and (-not [bool](Prop $task "PlanConfirmed" $true) -or [string](Prop $task "Status" "") -eq "Статус не подтверждён"))
+ $hideClaudePlanState=([string]$task.Provider -in @("claude","codex") -and (-not [bool](Prop $task "PlanConfirmed" $true) -or [string](Prop $task "Status" "") -eq "Статус не подтверждён"))
  $hasLoopWarning=$null -ne (Get-LoopWarning $task)
  $card=New-Object Windows.Controls.Grid; if($stepCount -gt 0){$card.Height=$(if($script:showProviderLabels){278}else{258})+$(if($hasLoopWarning){64}else{0})}; $card.Margin=New-Object Windows.Thickness(0,0,0,12)
  $cardShape=New-Object Windows.Shapes.Path; $cardShape.Fill=Brush $script:palette.Raised; $cardShape.Stroke=Brush $(if($task.Active){$script:palette.CardBorder}else{$script:palette.Border}); $cardShape.StrokeThickness=1; $cardShape.IsHitTestVisible=$false
@@ -3115,7 +3248,7 @@ function Add-CompactTask($task) {
  $planNoteText=Plan-StatusNote $task
  if($planNoteText){$planNote=Text $planNoteText 11.5 $script:palette.Muted;$planNote.Margin=New-Object Windows.Thickness(12,4,0,0);$warningPanel.Children.Add($planNote)|Out-Null}
  Add-LoopWarning $warningPanel $task $true; [Windows.Controls.Grid]::SetRow($warningPanel,2); $container.Children.Add($warningPanel)|Out-Null
- $hideClaudePlanState=([string]$task.Provider -eq 'claude' -and (-not [bool](Prop $task 'PlanConfirmed' $true) -or [string](Prop $task 'Status' '') -eq 'Статус не подтверждён'))
+ $hideClaudePlanState=([string]$task.Provider -in @('claude','codex') -and (-not [bool](Prop $task 'PlanConfirmed' $true) -or [string](Prop $task 'Status' '') -eq 'Статус не подтверждён'))
  if(-not $hideClaudePlanState -and $task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Height=2; $bar.Margin=New-Object Windows.Thickness(12,7,0,0); [Windows.Controls.Grid]::SetRow($bar,3); $container.Children.Add($bar)|Out-Null}
  $compactTasksPanel.Children.Add($container)|Out-Null
 }
@@ -3775,7 +3908,7 @@ function Update-View {
  try {
   $previousAllTasks=@($script:lastAllTasks)
   $sourceSnapshot=if($PreviewActiveTasks -ge 0){
-   $previewWarning=if($PreviewSourceWarning){@('DeepSeek Harness')}else{@()}
+   $previewWarning=if($PreviewSourceWarning){@($(if($PreviewWarningProvider -eq 'codex'){'Codex'}else{'DeepSeek Harness'}))}else{@()}
    [PSCustomObject]@{Tasks=@();Unavailable=$previewWarning;PartialConnection=$(if($PreviewSourceWarning -in @('partial-connection','partial-both')){$previewWarning}else{@()});PartialData=$(if($PreviewSourceWarning -in @('partial-data','partial-both')){$previewWarning}else{@()})}
   }else{Source-Snapshot}
   $allTasks=@($sourceSnapshot.Tasks)
@@ -3787,8 +3920,13 @@ function Update-View {
    $previewActivities=@((Preview-Text 'Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний' 'Checking plan cards, source filters, scrolling, the light theme and long descriptions before release'),(Preview-Text 'Запускаю визуальную проверку' 'Running visual checks'),(Preview-Text 'Собираю данные для переноса' 'Preparing migration data'),(Preview-Text 'Проверяю план' 'Checking the plan'),(Preview-Text 'Проверяю данные' 'Checking data'),(Preview-Text 'Выполняю действие' 'Performing an action'))
    $previewProgress=@(50,33,$null,$null,$null,$null);$previewKinds=@("exact","exact","none","none","none","none");$previewProviders=@("codex","claude","claude","deepseek","hermes","opencode");$previewProviderNames=@("Codex","Claude Code","Claude Code","DeepSeek Harness","Hermes Agent","OpenCode")
    if($PreviewSourceWarning){
-    $previewProviders[0]='deepseek';$previewProviderNames[0]='DeepSeek Harness'
-    $previewTitles[0]=Preview-Text 'Задача DeepSeek Harness' 'DeepSeek Harness task'
+    if($PreviewWarningProvider -eq 'codex'){
+     $previewProviders[0]='codex';$previewProviderNames[0]='Codex'
+     $previewTitles[0]=Preview-Text 'Задача Codex' 'Codex task'
+    }else{
+     $previewProviders[0]='deepseek';$previewProviderNames[0]='DeepSeek Harness'
+     $previewTitles[0]=Preview-Text 'Задача DeepSeek Harness' 'DeepSeek Harness task'
+    }
    }
    if($PreviewManyProviders){
     $previewProviders[2]='kimi';$previewProviderNames[2]='Kimi Code'
@@ -3829,7 +3967,8 @@ function Update-View {
      if($PreviewScenario -eq "unplanned"){$previewSteps=@();$previewValue=$null;$previewKind="none"}
     }
     $previewTime=[DateTime]::Now.AddSeconds(-$i)
-    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;ActivityGenerated=($PreviewManyProviders -and $i -ge 2);Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр";PlanConfirmed=(-not ($PreviewPlanUnconfirmed -and $i -eq 0))}
+    $previewObserved=($previewIsUnconfirmed -and $PreviewSourceWarning -and $PreviewWarningProvider -eq 'codex')
+    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;ActivityGenerated=($PreviewManyProviders -and $i -ge 2);ActivityObserved=[bool]$previewObserved;Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр";PlanConfirmed=(-not ($PreviewPlanUnconfirmed -and $i -eq 0))}
    }
    if($PreviewCloudTask -and $script:codexCloudModulesAvailable){
     $fixture=[PSCustomObject]@{Id='codex-cloud:synthetic';Title=(Preview-Text 'Тестовая облачная задача' 'Synthetic cloud task');State='pending';Updated=[DateTimeOffset]::UtcNow}
@@ -3854,7 +3993,7 @@ function Update-View {
   Render-ProviderTabs $allTasks
   $tasks=@(Filtered-Tasks $allTasks)
   $script:lastTasks=$tasks
-  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
+  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$(Prop $_ 'ActivityObserved' $false):$stepState`:$loopState"})-join"|")
   if($next -ne $script:fingerprint){
    $script:fingerprint=$next; $tasksPanel.Children.Clear()
    if($script:sourceErrors.Count -gt 0){$warning=Text (Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
@@ -4080,7 +4219,12 @@ if ($SnapshotFile) {
  $window.Show(); $window.UpdateLayout()
  if($PreviewSourceWarning -eq 'partial-both'){
   $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
-  if($actual -cne ((Tr 'Часть данных недоступна')+': DeepSeek Harness')){throw 'A source warning was duplicated or translated incorrectly.'}
+  $previewWarningName=if($PreviewWarningProvider -eq 'codex'){'Codex'}else{'DeepSeek Harness'}
+  if($actual -cne ((Tr 'Часть данных недоступна')+': '+$previewWarningName)){throw 'A source warning was duplicated or translated incorrectly.'}
+ }
+ if($PreviewSourceWarning -and $PreviewWarningProvider -eq 'codex' -and $PreviewActiveTasks -eq 1 -and $PreviewUnconfirmed){
+  $previewTask=@($script:lastAllTasks|Where-Object Id -eq 'preview-0')
+  if($previewTask.Count -ne 1 -or (Localized-TaskActivity $previewTask[0]) -cne ((Tr 'Статус не подтверждён. Из журнала: ')+$previewTask[0].Activity)){throw 'The observed Codex message lacks its unconfirmed status.'}
  }
  if($PreviewSourceWarning -in @('partial-data','partial-both') -and $script:isCompact){
   Render-CompactTasks $script:lastAllTasks;$window.UpdateLayout()

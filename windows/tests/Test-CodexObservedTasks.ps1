@@ -36,6 +36,7 @@ function Session-File([string]$id) { return $script:sessionPaths[$id] }
 function Manual-Tasks($sessions) { return @{} }
 function Codex-Plan([string]$id) { return @() }
 function Codex-Activity([string]$id) { return "Synthetic activity" }
+function Codex-ObservedActivity([string]$id,[string]$key) { return "Synthetic activity" }
 
 $now = [DateTime]::UtcNow.ToString("o")
 $records = @(
@@ -43,7 +44,7 @@ $records = @(
     (@{ id="old-id"; thread_name="Old synthetic task"; updated_at=$now } | ConvertTo-Json -Compress)
 )
 [IO.File]::WriteAllText($sessionIndex, (($records -join "`n") + "`n"), [Text.UTF8Encoding]::new($false))
-$started = @{timestamp=$script:monitorStartedUtc.AddHours(-3).ToString("o");type="event_msg";payload=@{type="task_started"}}|ConvertTo-Json -Compress
+$started = @{timestamp=$script:monitorStartedUtc.AddHours(-3).ToString("o");type="event_msg";payload=@{type="task_started";turn_id="turn-1"}}|ConvertTo-Json -Compress
 foreach ($path in $script:sessionPaths.Values) {
     [IO.File]::WriteAllText($path, ($started + "`n"), [Text.UTF8Encoding]::new($false))
     [IO.File]::SetLastWriteTimeUtc($path, $script:monitorStartedUtc.AddHours(-3))
@@ -59,21 +60,21 @@ $oldOwner = [IO.File]::Open($oldLock,[IO.FileMode]::Open,[IO.FileAccess]::ReadWr
 try {
     function Manual-Tasks($sessions) { return @{"old-id"=[PSCustomObject]@{title="Synthetic stale progress";status="В работе";steps=@()}} }
     $tasks = @(Codex-Tasks)
-    if ($tasks.Count -ne 1 -or $tasks[0].Id -ne "active-id" -or -not $tasks[0].Active) {
-        throw "The newly observed task must appear; the old silent task must stay hidden despite a held lock and manual status."
+    if ($tasks.Count -ne 2 -or @($tasks | Where-Object { $_.Active -or $_.Status -ne 'Статус не подтверждён' }).Count -ne 0) {
+        throw "Start records with present locks must be visible only as unconfirmed, including an old silent turn."
     }
     function Manual-Tasks($sessions) { return @{} }
     [IO.File]::AppendAllText($script:sessionPaths["old-id"], ($newEvent + "`n"), [Text.UTF8Encoding]::new($false))
-    if (@(Codex-Tasks|Where-Object Active).Count -ne 2) { throw "A new event must reveal the formerly silent task." }
-    $oldAborted='{"type":"event_msg","payload":{"type":"turn_aborted"}}'
+    if (@(Codex-Tasks|Where-Object { -not $_.Active -and $_.Status -eq 'Статус не подтверждён' }).Count -ne 2) { throw "A new event must not turn either task into confirmed activity." }
+    $oldAborted='{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-1"}}'
     [IO.File]::AppendAllText($script:sessionPaths["old-id"], ($oldAborted + "`n"), [Text.UTF8Encoding]::new($false))
 } finally { $owner.Dispose();$oldOwner.Dispose() }
 
 $tasks = @(Codex-Tasks)
-if ($tasks.Count -ne 1 -or $tasks[0].Id -ne "active-id" -or $tasks[0].Active -or $tasks[0].Activity -eq "Synthetic activity") {
+if ($tasks.Count -ne 1 -or $tasks[0].Id -ne "active-id" -or $tasks[0].Active -or -not $tasks[0].ActivityObserved -or $tasks[0].Activity -ne "Synthetic activity") {
     throw "The previously observed task must become unconfirmed after its lock is released."
 }
-$complete = '{"type":"event_msg","payload":{"type":"task_complete"}}'
+$complete = '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}'
 [IO.File]::AppendAllText($script:sessionPaths["active-id"], ($complete + "`n"), [Text.UTF8Encoding]::new($false))
 $tasks = @(Codex-Tasks)
 if ($tasks.Count -ne 0) { throw "Completed and previously unseen old tasks must not be displayed." }
@@ -87,13 +88,13 @@ $startedAgain = @{timestamp=$script:monitorStartedUtc.AddSeconds(2).ToString("o"
 [IO.File]::AppendAllText($script:sessionPaths["active-id"], ($startedAgain + "`n"), [Text.UTF8Encoding]::new($false))
 $owner = [IO.File]::Open($lock,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
 try {
-    if (@(Codex-Tasks|Where-Object Active).Count -ne 1) { throw "The resumed task must be observed as active." }
+    if (@(Codex-Tasks|Where-Object { -not $_.Active -and $_.Status -eq 'Статус не подтверждён' }).Count -ne 1) { throw "The resumed task must be unconfirmed." }
     function Manual-Tasks($sessions) { return @{"active-id"=[PSCustomObject]@{title="Synthetic progress";status="В работе";steps=@()}} }
     $aborted = '{"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-2"}}'
     [IO.File]::AppendAllText($script:sessionPaths["active-id"], ($aborted + "`n"), [Text.UTF8Encoding]::new($false))
     if (@(Codex-Tasks).Count -ne 0) { throw "An interrupted task must remain hidden even if a writer lock and old manual progress still exist." }
 } finally { $owner.Dispose() }
-Write-Output "Codex observed tasks: old records hidden, live lock retained, uncertainty and completion verified."
+Write-Output "Codex observed tasks: passive lock presence, uncertainty and matched completion verified."
 '@
 
 try {

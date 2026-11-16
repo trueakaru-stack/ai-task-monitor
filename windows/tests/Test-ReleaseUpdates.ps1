@@ -43,4 +43,10 @@ $current=$match.Groups[1].Value
 $currentRelease=@(@{tag_name=('v'+$current);draft=$false;assets=@(@{name=('AITaskMonitorSetup-'+$current+'.exe');browser_download_url=('https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v'+$current+'/AITaskMonitorSetup-'+$current+'.exe')})}) | ConvertTo-Json -Depth 5 -Compress
 if(-not $currentRelease.StartsWith('[')){$currentRelease='['+$currentRelease+']'}
 Assert ($null -eq (Find-PlatformUpdate $currentRelease $current 'windows')) 'Application offered its own release as an update.'
+$release028='[{"tag_name":"v0.3.8-alpha","draft":false,"assets":[{"name":"AITaskMonitor-macOS-0.3.8-alpha.dmg","browser_download_url":"https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.8-alpha/AITaskMonitor-macOS-0.3.8-alpha.dmg"}]},{"tag_name":"v0.2.8-alpha","draft":false,"assets":[{"name":"AITaskMonitorSetup-0.2.8-alpha.exe","browser_download_url":"https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.8-alpha/AITaskMonitorSetup-0.2.8-alpha.exe"}]}]'
+$upgrade=Find-PlatformUpdate $release028 '0.2.7-alpha' 'windows'
+Assert ($null -ne $upgrade -and $upgrade.Version -ceq '0.2.8-alpha' -and $upgrade.Url.EndsWith('/v0.2.8-alpha/AITaskMonitorSetup-0.2.8-alpha.exe')) 'The previous Windows version did not select the 0.2.8 installer.'
+Assert ($null -eq (Find-PlatformUpdate $release028 '0.2.8-alpha' 'windows')) 'The current Windows version offered its own installer.'
+$versionSource=[IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\app\VersionInfo.cs'))
+Assert ($current -ceq '0.2.8-alpha' -and $versionSource.Contains('AssemblyVersion("0.2.8.0")') -and $versionSource.Contains('AssemblyFileVersion("0.2.8.0")') -and $versionSource.Contains('AssemblyInformationalVersion("0.2.8-alpha")')) 'The application and installer versions do not agree.'
 Write-Output 'Release selection: versions, prereleases, platform, drafts, bounds and trusted links verified.'

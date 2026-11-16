@@ -44,26 +44,26 @@ $owners=New-Object 'Collections.Generic.List[System.IO.FileStream]'
 try{
  $owners.Add((Write-Fixture 'long-active' @($start) $true $false))
  $state=Thread-State 'long-active'
- if($state.State -ne 'active' -or $state.StartKey -ne 'turn:turn-b'){throw 'A fresh long-running turn was not recovered from earlier history.'}
+ if($state.State -ne 'unknown' -or -not $state.HasStartMarker -or $state.StartKey -ne 'turn:turn-b'){throw 'A long-running turn was not recovered as unconfirmed from earlier history.'}
  [void](Codex-Uncertain 'long-active' $state)
  [IO.File]::AppendAllText($script:sessionPaths['long-active'],('{"timestamp":"'+$recent+'","type":"event_msg","payload":{"type":"token_count"}}'+"`n"),[Text.UTF8Encoding]::new($false))
- if((Thread-State 'long-active').State -ne 'active'){throw 'An ongoing long turn was lost after an incremental update.'}
+ if((Thread-State 'long-active').State -ne 'unknown' -or -not (Codex-Uncertain 'long-active' (Thread-State 'long-active'))){throw 'An unconfirmed long turn was lost after an incremental update.'}
 
  $owners.Add((Write-Fixture 'completed' @($start,$finished) $true $false))
  if((Thread-State 'completed').State -ne 'completed'){throw 'A long completed turn was incorrectly marked active.'}
 
  $owners.Add((Write-Fixture 'old-silent' @($start) $false $false))
  $silent=Thread-State 'old-silent'
- if($silent.State -eq 'active' -or (Codex-Uncertain 'old-silent' $silent)){throw 'A silent task from before monitor startup became visible.'}
+ if($silent.State -ne 'unknown' -or -not (Codex-Uncertain 'old-silent' $silent)){throw 'An old turn with a present lock must be unconfirmed.'}
 
  $owners.Add((Write-Fixture 'old-abort' @($start,$staleAbort) $true $false))
- if((Thread-State 'old-abort').State -ne 'active'){throw 'An interruption from another turn stopped the current long turn.'}
+ if((Thread-State 'old-abort').State -ne 'unknown' -or -not (Thread-State 'old-abort').HasStartMarker){throw 'An interruption from another turn stopped the current unconfirmed turn.'}
 
  $owners.Add((Write-Fixture 'oversized-line' @($start) $true $true))
- if((Thread-State 'oversized-line').State -ne 'active'){throw 'A long non-event line hid the previous turn boundary.'}
+ if((Thread-State 'oversized-line').State -ne 'unknown' -or -not (Thread-State 'oversized-line').HasStartMarker){throw 'A long non-event line hid the previous turn boundary.'}
 
  $owners.Add((Write-Fixture 'burst' @($start) $true $false))
- if((Thread-State 'burst').State -ne 'active'){throw 'The burst fixture did not start active.'}
+ if((Thread-State 'burst').State -ne 'unknown' -or -not (Thread-State 'burst').HasStartMarker){throw 'The burst fixture did not start as an unconfirmed turn.'}
  $writer=[IO.StreamWriter]::new($script:sessionPaths['burst'],$true,[Text.UTF8Encoding]::new($false))
  try{
   $writer.WriteLine($finished)
@@ -82,7 +82,7 @@ try{
   for($i=0;$i -lt 48;$i++){$writer.WriteLine('{"type":"response_item","payload":{"text":"'+('x'*65536)+'"}}')}
   $writer.WriteLine('{"timestamp":"'+$recent+'","type":"event_msg","payload":{"type":"item_completed"}}')
  }finally{$writer.Dispose()}
- if((Thread-State 'no-start').State -ne 'active'){throw 'A new boundary hidden by a large append was missed after a negative scan.'}
+ if((Thread-State 'no-start').State -ne 'unknown' -or -not (Thread-State 'no-start').HasStartMarker){throw 'A new boundary hidden by a large append was missed after a negative scan.'}
  Write-Output 'Codex long turns: old boundaries, incremental updates, completion, stale tasks, mismatched aborts, oversized lines, large appends and absent boundaries verified.'
 }finally{foreach($owner in $owners){$owner.Dispose()}}
 '@
