@@ -23,7 +23,8 @@ Never build or run this experiment on a user computer or publish its output.
 The test rejects an occupied or redirected install destination, installs the
 published files into a new temporary directory, verifies their hashes, and
 starts `AI Task Monitor.exe` with an offscreen window in the runner. It verifies
-that the launched executable owns that window and closes it cleanly. The test
+that the launched executable owns that window and closes it cleanly. It checks
+that the uninstaller refuses to act when its hosted-CI guard is disabled. The test
 then modifies one payload file, locks another and adds unrelated files and data.
 During synthetic uninstall, unchanged unlocked payload files are removed while
 the modified file, locked file and unrelated data are retained. When the hosted

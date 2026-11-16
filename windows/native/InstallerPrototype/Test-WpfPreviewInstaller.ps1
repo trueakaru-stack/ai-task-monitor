@@ -257,6 +257,15 @@ public static class AitmWpfInstallerWindowCheck {
 
     $uninstallers = @(Get-ChildItem -LiteralPath $install -Filter 'unins???.exe' -File)
     Assert-Condition ($uninstallers.Count -eq 1) 'Expected one synthetic WPF uninstaller.'
+    $env:AITM_WPF_INSTALLER = '0'
+    $null = Invoke-HiddenSetup $uninstallers[0].FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+    $env:AITM_WPF_INSTALLER = '1'
+    Assert-Condition ([IO.File]::Exists($uninstallers[0].FullName)) 'Uninstaller ignored its synthetic CI guard.'
+    foreach ($entry in $payloadHashes.GetEnumerator()) {
+        $installed = Join-Path $install $entry.Key
+        Assert-Condition ([IO.File]::Exists($installed) -and
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $installed).Hash -ceq $entry.Value) 'Guarded uninstall altered the preview payload.'
+    }
     $modified = Join-Path $install 'AI Task Monitor.deps.json'
     $modifiedBytes = [Text.Encoding]::UTF8.GetBytes('synthetic user-modified payload')
     [IO.File]::WriteAllBytes($modified, $modifiedBytes)
