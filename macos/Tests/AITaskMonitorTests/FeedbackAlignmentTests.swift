@@ -118,6 +118,13 @@ final class FeedbackAlignmentTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(1.2))
         host.layoutSubtreeIfNeeded()
 
+        // Draw the synthetic host before injecting clicks, as a displayed window does.
+        guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+            XCTFail("The synthetic host could not be drawn.")
+            return
+        }
+        host.cacheDisplay(in: host.bounds, to: bitmap)
+
         let symbol = NSHostingView(rootView: Image(systemName: "doc.on.doc")
             .font(.system(size: 13)).fixedSize())
         print("Synthetic intrinsic symbol size: \(symbol.fittingSize)")
