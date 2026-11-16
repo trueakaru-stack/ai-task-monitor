@@ -190,9 +190,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         for _ in 0..<300 {
             let id = UUID().uuidString.lowercased()
             let file = old.appendingPathComponent("rollout-2001-01-01T00-00-00-\(id).jsonl")
-            guard FileManager.default.createFile(atPath: file.path, contents: Data()) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
+            try writeFixture(Data(), to: file)
         }
         let original = try rollout(root, fileID: first)
         var calendar = Calendar(identifier: .gregorian)
@@ -262,9 +260,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
         for _ in 0..<300 {
             let file = old.appendingPathComponent("rollout-2001-01-01T00-00-00-\(UUID().uuidString.lowercased()).jsonl")
-            guard FileManager.default.createFile(atPath: file.path, contents: Data()) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
+            try writeFixture(Data(), to: file)
         }
         let original = try rollout(root, fileID: first)
         try append("task_complete", to: original)
@@ -309,9 +305,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         _ = try rollout(root, fileID: first)
         let locks = root.appendingPathComponent("thread-writer-locks", isDirectory: true)
         try FileManager.default.createDirectory(at: locks, withIntermediateDirectories: false)
-        guard FileManager.default.createFile(atPath: locks.appendingPathComponent(first + ".lock").path, contents: Data()) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
+        try writeFixture(Data(), to: locks.appendingPathComponent(first + ".lock"))
         let observedSince = Date().addingTimeInterval(60)
         let snapshot = try CodexTaskReader(codexHome: root)
             .readSnapshot(now: observedSince.addingTimeInterval(1), observedSince: observedSince)
@@ -336,9 +330,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         let locks = root.appendingPathComponent("thread-writer-locks", isDirectory: true)
         try FileManager.default.createDirectory(at: locks, withIntermediateDirectories: false)
         let target = root.appendingPathComponent("synthetic-target")
-        guard FileManager.default.createFile(atPath: target.path, contents: Data()) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
+        try writeFixture(Data(), to: target)
         try FileManager.default.createSymbolicLink(at: locks.appendingPathComponent(first + ".lock"), withDestinationURL: target)
         let observedSince = Date().addingTimeInterval(60)
         let snapshot = try CodexTaskReader(codexHome: root)
@@ -360,9 +352,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         for _ in 0..<600 {
             let id = UUID().uuidString.lowercased()
             let path = today.appendingPathComponent("rollout-2026-11-16T15-31-00-\(id).jsonl")
-            guard FileManager.default.createFile(atPath: path.path, contents: Data()) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
+            try writeFixture(Data(), to: path)
             try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: path.path)
             candidates[path.standardizedFileURL.path] = id
         }
@@ -419,7 +409,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
         for _ in 0..<300 {
             let path = old.appendingPathComponent("rollout-2001-01-01T00-00-00-\(UUID().uuidString.lowercased()).jsonl")
-            guard FileManager.default.createFile(atPath: path.path, contents: Data()) else { throw CocoaError(.fileWriteUnknown) }
+            try writeFixture(Data(), to: path)
             try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: path.path)
         }
         let original = try rollout(root, fileID: first)
@@ -455,7 +445,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
         for _ in 0..<300 {
             let path = old.appendingPathComponent("rollout-2001-01-01T00-00-00-\(UUID().uuidString.lowercased()).jsonl")
-            guard FileManager.default.createFile(atPath: path.path, contents: Data()) else { throw CocoaError(.fileWriteUnknown) }
+            try writeFixture(Data(), to: path)
             try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: path.path)
         }
         let original = try rollout(root, fileID: first)
@@ -499,7 +489,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
         for _ in 0..<300 {
             let path = old.appendingPathComponent("rollout-2001-01-01T00-00-00-\(UUID().uuidString.lowercased()).jsonl")
-            guard FileManager.default.createFile(atPath: path.path, contents: Data()) else { throw CocoaError(.fileWriteUnknown) }
+            try writeFixture(Data(), to: path)
             try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: path.path)
         }
         let original = try rollout(root, fileID: first)
@@ -514,7 +504,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         let locks = root.appendingPathComponent("thread-writer-locks", isDirectory: true)
         try FileManager.default.createDirectory(at: locks, withIntermediateDirectories: false)
         let marker = locks.appendingPathComponent(first + ".lock")
-        guard FileManager.default.createFile(atPath: marker.path, contents: Data()) else { throw CocoaError(.fileWriteUnknown) }
+        try writeFixture(Data(), to: marker)
         let reader = CodexTaskReader(codexHome: root)
         let since = Date().addingTimeInterval(-60)
         let before = try reader.readSnapshot(observedSince: since)
