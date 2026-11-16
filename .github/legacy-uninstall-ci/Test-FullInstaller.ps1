@@ -37,15 +37,16 @@ function Get-Names($window){
     $children=$window.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
     return @(foreach($item in $children){$item.Current.Name})
 }
-function Dismiss-Dialog($window,[Diagnostics.Process]$process){
+function Invoke-DialogButton($window,[Diagnostics.Process]$process,[string[]]$names){
     $all=$window.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)
-    $buttons=@($all|Where-Object {$_.Current.Name -ceq 'OK' -and $_.Current.ClassName -ceq 'Button'})
-    Check ($buttons.Count -eq 1) 'The synthetic setup dialog has no unique OK control.'
+    $buttons=@($all|Where-Object {$_.Current.Name -cin $names -and $_.Current.ClassName -ceq 'Button'})
+    Check ($buttons.Count -eq 1) 'The synthetic setup dialog has no unique expected button.'
     $handle=[IntPtr]$buttons[0].Current.NativeWindowHandle;$owner=[uint32]0
     [void][FallbackTestNative]::GetWindowThreadProcessId($handle,[ref]$owner)
     Check ($handle -ne [IntPtr]::Zero -and $owner -eq $process.Id) 'The synthetic setup control belongs to another process.'
-    Check ([FallbackTestNative]::PostMessage($handle,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)) 'Cannot dismiss the synthetic setup dialog.'
+    Check ([FallbackTestNative]::PostMessage($handle,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)) 'Cannot activate the synthetic setup control.'
 }
+function Dismiss-Dialog($window,[Diagnostics.Process]$process){Invoke-DialogButton $window $process @('OK')}
 Check ($env:CI -ceq 'true' -and $env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted' -and $env:RUNNER_OS -ceq 'Windows' -and $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH -ceq '0') 'Requires disposable hosted Windows.'
 $runnerProfile=[IO.Path]::GetFullPath($env:USERPROFILE)
 Check ([string]::Equals($runnerProfile,[IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)),[StringComparison]::OrdinalIgnoreCase)) 'The disposable runner profile identity is inconsistent.'
@@ -91,6 +92,97 @@ $oldShortcutHash=(Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash
 $oldData=Join-Path $local 'CodexTaskProgress'
 [void][IO.Directory]::CreateDirectory($oldData)
 $oldSentinel=Join-Path $oldData 'user-note.txt';[IO.File]::WriteAllText($oldSentinel,'synthetic user data')
+# Exercise the error after a synthetic Claude setup has changed test-only
+# settings. The shim replaces the new synthetic launcher, never a user file.
+$claudeDirectories=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+[void]$claudeDirectories.Add([IO.Path]::GetFullPath((Join-Path $knownProfile '.claude')))
+[void]$claudeDirectories.Add([IO.Path]::GetFullPath((Join-Path $profile '.claude')))
+foreach($dir in $claudeDirectories){
+    Check (-not [IO.Directory]::Exists($dir) -and -not [IO.File]::Exists($dir)) 'A synthetic Claude directory already exists.'
+    $parent=[IO.Directory]::GetParent($dir).FullName
+    Check ((Within $parent $runnerProfile) -or (Within $parent $FixtureRoot)) 'A synthetic Claude directory escaped the disposable profile.'
+    for($p=[IO.DirectoryInfo]::new($parent);$null -ne $p;$p=$p.Parent){
+        Check ($p.Exists -and (($p.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) 'A synthetic Claude path is redirected.'
+    }
+    [void][IO.Directory]::CreateDirectory($dir)
+}
+$fakeSettings=Join-Path $profile '.claude\settings.json'
+[IO.File]::WriteAllText($fakeSettings,'{"user":"preserved"}')
+$shimDir=Join-Path $FixtureRoot 'synthetic-claude-shim'
+[void][IO.Directory]::CreateDirectory($shimDir)
+$shimSource=Join-Path $PSScriptRoot 'SyntheticClaudeSetup.cs'
+$shim=Join-Path $shimDir 'powershell.exe'
+$compiler=Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+Check ([IO.File]::Exists($compiler) -and [IO.File]::Exists($shimSource)) 'The synthetic setup compiler or source is missing.'
+$compile=New-IsolatedStart $compiler $values
+$compile.RedirectStandardOutput=$true;$compile.RedirectStandardError=$true
+foreach($arg in @('/nologo','/target:exe',('/out:'+$shim),$shimSource)){[void]$compile.ArgumentList.Add($arg)}
+$compilerProcess=[Diagnostics.Process]::Start($compile)
+try{
+    $compilerOut=$compilerProcess.StandardOutput.ReadToEndAsync();$compilerErr=$compilerProcess.StandardError.ReadToEndAsync()
+    if(-not $compilerProcess.WaitForExit(30000)){throw 'Synthetic setup shim compilation timed out.'}
+    if($compilerProcess.ExitCode -ne 0){Write-Warning ($compilerOut.Result+' '+$compilerErr.Result);throw 'Synthetic setup shim did not compile.'}
+}finally{$compilerProcess.Dispose()}
+$partialValues=@{}
+foreach($key in $values.Keys){$partialValues[$key]=$values[$key]}
+$partialValues.PATH=$shimDir+';'+$values.PATH
+$partialValues.AITM_TEST_LOCAL=$knownLocal
+$partialValues.AITM_TEST_INSTALL=$install
+$partialValues.AITM_TEST_PROFILE=$profile
+$partialValues.AITM_TEST_FIXTURE=$FixtureRoot
+$partialMarker=Join-Path $FixtureRoot 'synthetic-claude-marker'
+$partialValues.AITM_TEST_MARKER=$partialMarker
+$partialSetup=$null
+try{
+    $start=New-IsolatedStart $Installer $partialValues
+    $partialSetup=[Diagnostics.Process]::Start($start)
+    $prompt=Find-Window $partialSetup 30
+    $promptNames=Get-Names $prompt
+    Check (@($promptNames|Where-Object {$_.Contains('Подключить Claude Code?')}).Count -gt 0) 'The synthetic Claude connection prompt was not shown.'
+    Invoke-DialogButton $prompt $partialSetup @('Yes','Да')
+    $clock=[Diagnostics.Stopwatch]::StartNew();$failure=$null
+    $idCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,$partialSetup.Id)
+    $nameCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,'AI task monitor')
+    $condition=[Windows.Automation.AndCondition]::new($idCondition,$nameCondition)
+    while($null -eq $failure -and $clock.Elapsed.TotalSeconds -lt 30){
+        if($partialSetup.HasExited){throw 'The synthetic partial setup exited without its warning.'}
+        $window=[Windows.Automation.AutomationElement]::RootElement.FindFirst([Windows.Automation.TreeScope]::Children,$condition)
+        if($null -ne $window){
+            $names=Get-Names $window
+            if(@($names|Where-Object {$_.Contains('Настройки подключения Claude Code могли измениться.') -or $_.Contains('Claude Code connection settings may have changed.')}).Count -gt 0){$failure=$window;break}
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    Check ($null -ne $failure) 'The synthetic partial setup did not warn about Claude settings.'
+    Check ([IO.File]::Exists($partialMarker) -and [IO.File]::ReadAllText($fakeSettings) -ceq '{"user":"preserved","fixture_hook":"synthetic"}') 'The synthetic Claude setup did not reach the intended side effect.'
+    $failureNames=Get-Names $failure
+    Check (@($failureNames|Where-Object {$_.Contains($install)}).Count -gt 0) 'The partial-install warning omitted the actual installation path.'
+    Dismiss-Dialog $failure $partialSetup
+    Check ($partialSetup.WaitForExit(10000) -and $partialSetup.ExitCode -eq 1) 'The synthetic partial setup did not fail as expected.'
+}finally{
+    if($null -ne $partialSetup){if(-not $partialSetup.HasExited){$partialSetup.Kill();[void]$partialSetup.WaitForExit(10000)};$partialSetup.Dispose()}
+}
+$backup=[IO.Path]::GetFullPath($install+'.synthetic-partial')
+Check ([string]::Equals([IO.Directory]::GetParent($install).FullName,$knownLocal,[StringComparison]::OrdinalIgnoreCase) -and
+    [string]::Equals([IO.Directory]::GetParent($backup).FullName,$knownLocal,[StringComparison]::OrdinalIgnoreCase) -and
+    [IO.Directory]::Exists($install) -and -not [IO.Directory]::Exists($backup) -and -not [IO.File]::Exists($backup)) 'The synthetic partial-install backup path is unsafe.'
+[IO.Directory]::Move($install,$backup)
+foreach($dir in $claudeDirectories){
+    $saved=[IO.Path]::GetFullPath($dir+'.synthetic-backup')
+    Check ([string]::Equals([IO.Directory]::GetParent($saved).FullName,[IO.Directory]::GetParent($dir).FullName,[StringComparison]::OrdinalIgnoreCase) -and
+        [IO.Directory]::Exists($dir) -and -not [IO.Directory]::Exists($saved) -and -not [IO.File]::Exists($saved) -and
+        (([IO.File]::GetAttributes($dir) -band [IO.FileAttributes]::ReparsePoint) -eq 0)) 'The synthetic Claude backup path is unsafe.'
+    [IO.Directory]::Move($dir,$saved)
+}
+if([IO.File]::Exists($shortcut)){
+    $savedShortcut=[IO.Path]::GetFullPath($shortcut+'.synthetic-backup')
+    Check ([string]::Equals([IO.Directory]::GetParent($savedShortcut).FullName,$knownPrograms,[StringComparison]::OrdinalIgnoreCase) -and -not [IO.File]::Exists($savedShortcut)) 'The synthetic shortcut backup path is unsafe.'
+    [IO.File]::Move($shortcut,$savedShortcut)
+}
+Check ((Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash -ceq $oldShortcutHash -and
+    [IO.File]::ReadAllText($oldSentinel) -ceq 'synthetic user data') 'Synthetic partial setup changed pre-existing data.'
+Write-Output 'Synthetic Claude setup warning verified after a simulated settings change and launcher failure; no real account or settings used.'
+
 $setup=$null;$monitor=$null
 try{
     $start=New-IsolatedStart $Installer $values
