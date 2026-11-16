@@ -31,6 +31,7 @@ Replace the released Windows PowerShell-hosted monitor with a standalone C# appl
 - [x] (2026-11-16) Tested deferred display-preference migration and explicit initialization from two user-selected values. The unconnected adapter preserves the old file, reports an unconfirmed legacy snapshot rather than substituting defaults, and does not overwrite an existing native target. Hosted Windows CI passed 74 synthetic checks; the UI and remaining settings are not migrated.
 - [x] (2026-11-16) Independently reviewed and tested the synthetic Codex Cloud-to-WPF slice. Hosted Windows CI passed 264 assertions, including process ownership, source isolation, uncertain cloud status, cancellation and compact-count grammar. The default preview uses its own executable and starts with no connected sources; real runners and settings remain disconnected.
 - [x] (2026-11-16) Investigated official Codex hooks as a non-blocking source of historical evidence and tested an isolated in-memory parser. Hosted Windows CI passed 194 synthetic checks. This does not register a hook, connect Codex or establish current activity or completion.
+- [x] (2026-11-16) Tested a bounded synthetic local Codex hook helper and channel with current-user pipe controls. It is not registered or connected to the application and cannot confirm a task's current state.
 - [ ] Establish a reliable Codex source path in C#, including bounded journal reading, lifecycle handling, lock observation, source errors, and uncertainty. The integrated slice is synthetic only; real locks and profiles are not approved for unsafe probing.
 - [ ] Resolve the provider-channel reconnection race and retain per-source and per-profile uncertainty without affecting healthy sources.
 - [ ] Integrate and verify the accepted Claude Code, OpenCode, DeepSeek, Hermes, Kimi, and available official cloud-monitoring behavior. Distinguish local and cloud support and do not invent unsupported statuses.
@@ -213,6 +214,8 @@ The implementation uses C#/.NET 10 and WPF for Windows. The native Codex source 
 - A follow-up preparation change for the synthetic macOS feedback host failed again on macOS 26 in [43836684705](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43836684705). Drawing the host alone is therefore not a confirmed cross-version fix; the candidate remains outside the primary branch. This does not establish a failure in the real application.
 - The Mac shadow audit terminated during synthetic own-window capture in [43834003583](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43834003583). Composited-window corner acceptance remains unverified; this is not evidence of a product crash.
 
+- The unconnected synthetic Codex hook helper and local named-pipe controller passed 22 checks in [43838639552](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43838639552), with unchanged user and machine PATH. The test checked actual current-user DACL and same-name collision on a hosted runner, but did not test a second user, remote clients, real Codex, endpoint discovery or registration. Same-user processes can forge events, and event delivery or current activity is not confirmed.
+
 ## Revision Note
 
 - 2026-11-13: Created the plan from the user's accepted C# migration, test-safety decisions, published source state, and verified synthetic evidence.
@@ -256,3 +259,4 @@ The implementation uses C#/.NET 10 and WPF for Windows. The native Codex source 
 - 2026-11-16: Recorded the synthetic cloud-to-window checks and their separate visual inspection, together with real-runner and shutdown limitations.
 - 2026-11-16: Recorded a synthetic Codex hook-evidence experiment and distinguished historical evidence from live task status.
 - 2026-11-16: Recorded the guarded WPF preview installer, feedback snapshots and the repeated synthetic macOS click-test failure. These are not release acceptance.
+- 2026-11-16: Recorded the synthetic Codex hook transport, the constrained scope of its security checks, and the remaining integration limitations.
