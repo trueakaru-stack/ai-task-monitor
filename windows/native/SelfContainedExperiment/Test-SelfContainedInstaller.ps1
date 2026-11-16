@@ -219,6 +219,7 @@ try {
         [string]::Equals([IO.Directory]::GetParent($retained).FullName, $root, [StringComparison]::OrdinalIgnoreCase) -and
         -not [IO.Directory]::Exists($retained) -and -not [IO.File]::Exists($retained)) 'Invalid retained fixture path.'
     Assert-Test (((Get-Item -LiteralPath $install -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Synthetic installation root was redirected.'
+    Assert-Test (((Get-Item -LiteralPath $install -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Synthetic installation root was redirected.'
     [IO.Directory]::Move($install, $retained)
     Assert-Test ((Invoke-HiddenSetup $setup $quiet) -eq 0) 'Second synthetic install failed.'
     $oneLevel = @($nested | Where-Object { [IO.Path]::GetDirectoryName($_.Relative) -and
@@ -245,6 +246,7 @@ try {
     $secondUninstallers = @(Get-ChildItem -LiteralPath $install -Filter 'unins???.exe' -File)
     Assert-Test ($secondUninstallers.Count -eq 1) 'Expected one second synthetic uninstaller.'
     $redirectExit = Invoke-HiddenSetup $secondUninstallers[0].FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+    Assert-Test ($redirectExit -ne 0 -and [IO.File]::Exists((Join-Path $install 'AI Task Monitor.exe'))) 'An existing redirect should prevent the synthetic uninstall.'
     Assert-Test ([IO.File]::Exists($sentinel) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($sentinel)) -ceq
         [Convert]::ToBase64String($sentinelBytes)) 'Uninstall followed a junction and changed external synthetic data.'
     Assert-Test ([Convert]::ToBase64String([IO.File]::ReadAllBytes($statePath)) -ceq [Convert]::ToBase64String($stateBytes)) 'Uninstall changed synthetic user settings during redirection.'
