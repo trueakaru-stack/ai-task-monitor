@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens = $null; $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$parseErrors)
@@ -30,8 +30,8 @@ function Manual-Tasks($sessions) { return @{} }
 function Codex-Plan([string]$id) { return @() }
 function Codex-Activity([string]$id) { return 'Synthetic action' }
 function Thread-State([string]$id) {
-    $active = (Lock-State (Join-Path $lockDirectory ($id + '.lock'))) -eq 'held'
-    return [PSCustomObject]@{ State=$(if ($active) { 'active' } else { 'unknown' }); HasStartMarker=$true; UpdatedUtc=[DateTime]::UtcNow; StartKey='turn:test'; StartedUtc=[DateTime]::UtcNow }
+    $lockState = Lock-State (Join-Path $lockDirectory ($id + '.lock'))
+    return [PSCustomObject]@{ State='unknown'; HasStartMarker=$true; UpdatedUtc=[DateTime]::UtcNow; StartKey='turn:test'; StartedUtc=[DateTime]::UtcNow; LockState=$lockState }
 }
 $now = [DateTime]::UtcNow.ToString('o')
 $records = New-Object 'Collections.Generic.List[string]'
@@ -40,10 +40,10 @@ for ($i=0; $i -lt 60; $i++) { $records.Add((@{id=('quiet-'+$i);thread_name='Synt
 [IO.File]::WriteAllLines($sessionIndex, $records, [Text.UTF8Encoding]::new($false))
 $lock = [IO.File]::Open((Join-Path $lockDirectory 'older-active.lock'), [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
 try {
-    $active = @(Codex-Tasks | Where-Object { $_.Id -eq 'older-active' -and $_.Active })
-    if ($active.Count -ne 1) { throw 'An observed, locked session outside the last 50 index rows must remain visible.' }
-    $again = @(Codex-Tasks | Where-Object { $_.Id -eq 'older-active' -and $_.Active })
-    if ($again.Count -ne 1) { throw 'A cached older active session must remain visible on the next refresh.' }
+    $active = @(Codex-Tasks | Where-Object { $_.Id -eq 'older-active' -and -not $_.Active -and $_.Status -eq 'Статус не подтверждён' })
+    if ($active.Count -ne 1) { throw 'A session with a present lock outside the last 50 index rows must remain unconfirmed.' }
+    $again = @(Codex-Tasks | Where-Object { $_.Id -eq 'older-active' -and -not $_.Active -and $_.Status -eq 'Статус не подтверждён' })
+    if ($again.Count -ne 1) { throw 'The older unconfirmed session must remain visible on the next refresh.' }
     $records[0] = (@{id='older-active';thread_name='Synthetic renamed older task';updated_at=$now}|ConvertTo-Json -Compress)
     [IO.File]::WriteAllLines($sessionIndex, $records, [Text.UTF8Encoding]::new($false))
     $renamed = @(Codex-Tasks | Where-Object { $_.Id -eq 'older-active' -and $_.Title -eq 'Synthetic renamed older task' })

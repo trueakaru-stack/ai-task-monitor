@@ -1,0 +1,162 @@
+﻿$ErrorActionPreference = 'Stop'
+if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or
+    $env:RUNNER_OS -cne 'Windows' -or $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH -cne '0') {
+    throw 'This synthetic test requires a disposable hosted Windows runner.'
+}
+$tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+$runnerRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
+if (-not $tempRoot.StartsWith($runnerRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'The test temp path is not isolated.' }
+$root = [IO.Path]::GetFullPath((Join-Path $tempRoot ('aitm-codex-passive-' + [guid]::NewGuid().ToString('N'))))
+if (-not $root.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe fixture path.' }
+[void][IO.Directory]::CreateDirectory($root)
+$source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'The monitor source failed to parse.'}
+$names=@('Prop','Lock-State','Find-PriorLifecycle','Thread-State','Codex-Uncertain','Session-File',
+ 'Session-Workspace','Progress-Files','Manual-Tasks','Read-TailText','Codex-Plan','Codex-Activity',
+ 'Plan-Progress','Codex-IndexCandidates','Codex-Tasks','Unconfirmed-Tasks','Source-Snapshot')
+$definitions=foreach($name in $names){
+ $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true)
+ if($null -eq $node){throw "Missing monitor function: $name"}
+ $node.Extent.Text
+}
+$lockNode=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq 'Lock-State'},$true)
+if($lockNode.Extent.Text -match '\[IO\.File\]::Open|FileStream|CreateFile|LockFile|ReadAll'){throw 'The lock metadata probe must not open or lock the writer file.'}
+$initializers=foreach($name in @('$script:sessionFiles','$script:sessionDates','$script:sessionDiscovery')){
+ $nodes=@($ast.FindAll({param($item) $item -is [Management.Automation.Language.AssignmentStatementAst] -and $item.Left.Extent.Text -ceq $name},$true))
+ if($nodes.Count -ne 1){throw "Unexpected initializer: $name"};$nodes[0].Extent.Text
+}
+$checks=@'
+$fixture=$args[0]
+$codexHome=Join-Path $fixture 'profile'
+$sessionIndex=Join-Path $codexHome 'session_index.jsonl'
+$sessionsDirectory=Join-Path $codexHome 'sessions'
+$lockDirectory=Join-Path $codexHome 'thread-writer-locks'
+[void][IO.Directory]::CreateDirectory($sessionsDirectory)
+[void][IO.Directory]::CreateDirectory($lockDirectory)
+$script:lifecycleState=@{};$script:observedCodex=@{};$script:planCache=@{};$script:planConfirmations=@{}
+$script:lastCodexTasks=@();$script:lastClaudeTasks=@();$script:codexSourcePartial=$false
+$script:codexCloudModulesAvailable=$false;$script:externalProviderModulesAvailable=$false
+$script:monitorStartedUtc=[DateTime]::UtcNow.AddSeconds(-10)
+$ProgressFile='';$ClaudeEventFile=''
+function Claude-ConnectionState {return 'disconnected'}
+function Require([bool]$condition,[string]$message){if(-not $condition){throw $message}}
+function Write-Event([string]$path,[string]$type,[string]$turn){
+ $event=@{timestamp=[DateTime]::UtcNow.ToString('o');type='event_msg';payload=@{type=$type;turn_id=$turn}}|ConvertTo-Json -Compress
+ [IO.File]::AppendAllText($path,($event+"`n"),[Text.UTF8Encoding]::new($false))
+}
+function Write-Index([object[]]$records){
+ $lines=@($records|ForEach-Object {$_|ConvertTo-Json -Compress})
+ [IO.File]::WriteAllText($sessionIndex,(($lines -join "`n")+"`n"),[Text.UTF8Encoding]::new($false))
+}
+function Record([string]$id){return @{id=$id;thread_name=('Synthetic '+$id);updated_at=[DateTime]::UtcNow.ToString('o')}}
+function New-Session([string]$id,[string]$turn){
+ $path=Join-Path $sessionsDirectory ('rollout-'+$id+'.jsonl')
+ Write-Event $path 'task_started' $turn
+ [IO.File]::WriteAllText((Join-Path $lockDirectory ($id+'.lock')),'',[Text.UTF8Encoding]::new($false))
+ return $path
+}
+
+# A lock entry alone is not a task, and an uncertain source cannot say empty.
+Write-Index @((Record 'no-event'))
+[IO.File]::WriteAllText((Join-Path $lockDirectory 'no-event.lock'),'')
+$empty=Source-Snapshot
+Require (@($empty.Tasks).Count -eq 0 -and @($empty.Unavailable) -contains 'Codex' -and @($empty.PartialData) -contains 'Codex') 'Lock presence alone created activity or an empty-state claim.'
+
+# Reproduce the conflicting Windows share mode with a synthetic writer file.
+$lock=Join-Path $lockDirectory 'writer.lock'
+[IO.File]::WriteAllText($lock,'')
+$unsafe=[IO.File]::Open($lock,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::Read -bor [IO.FileShare]::Delete))
+try{
+ $blocked=$false
+ try{$probe=[IO.File]::Open($lock,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$probe.Dispose()}catch [IO.IOException] {$blocked=$true}
+ Require $blocked 'The former conflicting sharing mode did not block the positive control.'
+}finally{$unsafe.Dispose()}
+Require ((Lock-State $lock) -eq 'present') 'The safe probe did not report metadata presence.'
+
+# A concurrent synthetic writer repeatedly opens the same lock file while the
+# actual monitor function checks metadata. No installed agent is started.
+$ready=Join-Path $fixture 'writer-ready';$done=Join-Path $fixture 'writer-done';$report=Join-Path $fixture 'writer-report.json'
+$worker=@(
+ '$path=$env:AITM_TEST_LOCK;$ready=$env:AITM_TEST_READY;$done=$env:AITM_TEST_DONE;$report=$env:AITM_TEST_REPORT'
+ '$attempts=0;$blocked=0;$watch=[Diagnostics.Stopwatch]::StartNew()'
+ '[IO.File]::WriteAllText($ready,''ready'')'
+ 'while(-not [IO.File]::Exists($done) -and $watch.ElapsedMilliseconds -lt 20000){'
+ ' try{$h=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$h.Dispose();$attempts++}'
+ ' catch [IO.IOException]{$blocked++}'
+ '}'
+ '@{attempts=$attempts;blocked=$blocked}|ConvertTo-Json -Compress|Set-Content -LiteralPath $report -Encoding UTF8'
+) -join "`n"
+$encoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($worker))
+$start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$start.Arguments='-NoProfile -NonInteractive -EncodedCommand '+$encoded;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+$start.EnvironmentVariables['AITM_TEST_LOCK']=$lock;$start.EnvironmentVariables['AITM_TEST_READY']=$ready
+$start.EnvironmentVariables['AITM_TEST_DONE']=$done;$start.EnvironmentVariables['AITM_TEST_REPORT']=$report
+$child=[Diagnostics.Process]::Start($start)
+try{
+ $watch=[Diagnostics.Stopwatch]::StartNew()
+ while(-not [IO.File]::Exists($ready) -and -not $child.HasExited -and $watch.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
+ Require ([IO.File]::Exists($ready)) 'The synthetic writer did not start.'
+ for($i=0;$i -lt 2500;$i++){Require ((Lock-State $lock) -eq 'present') 'A concurrent metadata probe failed.'}
+ [IO.File]::WriteAllText($done,'done')
+ if(-not $child.WaitForExit(25000)){$child.Kill();[void]$child.WaitForExit(5000);throw 'The synthetic writer timed out.'}
+ Require ($child.ExitCode -eq 0 -and [IO.File]::Exists($report)) 'The synthetic writer failed.'
+ $writerResult=Get-Content -LiteralPath $report -Raw -Encoding UTF8|ConvertFrom-Json
+ Require ($writerResult.attempts -gt 0 -and $writerResult.blocked -eq 0) 'The metadata observer blocked a synthetic writer.'
+}finally{if(-not $child.HasExited){$child.Kill();[void]$child.WaitForExit(5000)};$child.Dispose()}
+
+$path=New-Session 'task-a' 'turn-a'
+$plan=@{plan=@(@{step='Synthetic first';status='in_progress'})}|ConvertTo-Json -Compress -Depth 6
+$record=@{type='response_item';payload=@{type='function_call';name='update_plan';arguments=$plan}}|ConvertTo-Json -Compress -Depth 8
+[IO.File]::AppendAllText($path,($record+"`n"),[Text.UTF8Encoding]::new($false))
+Write-Index @((Record 'task-a'))
+$snapshot=Source-Snapshot;$card=@($snapshot.Tasks|Where-Object Id -eq 'task-a')
+Require ($card.Count -eq 1 -and -not $card[0].Active -and $card[0].Status -eq 'Статус не подтверждён' -and
+ $null -eq $card[0].Progress -and -not $card[0].PlanConfirmed -and @($card[0].Steps).Count -eq 1) 'A start and plan were not retained as unconfirmed.'
+[IO.File]::Delete((Join-Path $lockDirectory 'task-a.lock'))
+$withoutLock=Source-Snapshot
+Require (@($withoutLock.Tasks|Where-Object {$_.Id -eq 'task-a' -and -not $_.Active}).Count -eq 1) 'A missing lock was treated as completion.'
+Write-Event $path 'task_complete' ''
+$unmatched=Source-Snapshot
+Require (@($unmatched.Tasks|Where-Object Id -eq 'task-a').Count -eq 1) 'A terminal without a matching turn hid a previously seen task.'
+
+$pathB=New-Session 'task-b' 'turn-b'
+Write-Index @((Record 'task-b'))
+Require (@((Source-Snapshot).Tasks|Where-Object Id -eq 'task-b').Count -eq 1) 'A second unconfirmed task was not found.'
+Write-Event $pathB 'task_complete' 'turn-b'
+$completed=Source-Snapshot
+Require (@($completed.Tasks|Where-Object Id -eq 'task-b').Count -eq 0 -and @($completed.PartialData) -contains 'Codex') 'A matched terminal or the incomplete-source warning was mishandled.'
+
+# A start outside the last index rows is still found from lock metadata.
+$oldPath=New-Session 'historical-lock' 'turn-old'
+$records=@((Record 'historical-lock'))
+for($i=0;$i -lt 60;$i++){$records+=,(Record ('quiet-'+$i))}
+Write-Index $records
+$older=Source-Snapshot
+Require (@($older.Tasks|Where-Object {$_.Id -eq 'historical-lock' -and -not $_.Active}).Count -eq 1) 'A present lock outside the latest 50 rows was missed.'
+
+# A long turn with its boundary in the bounded earlier window remains unknown.
+$long=Join-Path $sessionsDirectory 'rollout-long-turn.jsonl'
+$writer=[IO.StreamWriter]::new($long,$false,[Text.UTF8Encoding]::new($false))
+try{
+ $writer.WriteLine('{"timestamp":"'+[DateTime]::UtcNow.AddHours(-1).ToString('o')+'","type":"event_msg","payload":{"type":"task_started","turn_id":"long-turn"}}')
+ for($i=0;$i -lt 52;$i++){$writer.WriteLine('{"type":"response_item","payload":{"text":"'+('x'*65536)+'"}}')}
+ $writer.WriteLine('{"timestamp":"'+[DateTime]::UtcNow.ToString('o')+'","type":"event_msg","payload":{"type":"item_completed","turn_id":"long-turn"}}')
+}finally{$writer.Dispose()}
+[IO.File]::WriteAllText((Join-Path $lockDirectory 'long-turn.lock'),'')
+Write-Index @((Record 'long-turn'))
+$longState=Thread-State 'long-turn'
+Require ($longState.State -eq 'unknown' -and $longState.HasStartMarker -and (Codex-Uncertain 'long-turn' $longState)) 'A bounded long turn was not retained as unconfirmed.'
+
+# Oversized and incomplete indices cannot be returned as complete empty lists.
+$script:lastCodexTasks=@($older.Tasks)
+[IO.File]::WriteAllText($sessionIndex,('x'*16777217),[Text.UTF8Encoding]::new($false))
+$tooLarge=Source-Snapshot
+Require (@($tooLarge.Unavailable) -contains 'Codex' -and @($tooLarge.Tasks|Where-Object Id -eq 'historical-lock').Count -eq 1) 'An oversized index lost the previously visible task or hid the source error.'
+[IO.File]::WriteAllText($sessionIndex,'{"id":"unfinished"}',[Text.UTF8Encoding]::new($false))
+$partial=Source-Snapshot
+Require (@($partial.Unavailable) -contains 'Codex') 'An incomplete index was treated as a complete snapshot.'
+Write-Output ('Codex passive: writer sharing positive control, '+$writerResult.attempts+' concurrent opens, evidence, completion, historical lookup and bounded failures verified.')
+'@
+& ([scriptblock]::Create(($initializers -join "`n")+"`n"+($definitions -join "`n")+"`n"+$checks)) $root

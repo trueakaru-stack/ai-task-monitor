@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens = $null
 $errors = $null
@@ -29,7 +29,6 @@ $checks = @'
 $fixture = $args[0]
 $sessionFunction = $args[1]
 $env:USERPROFILE = $fixture
-$env:CODEX_HOME = $fixture
 $env:LOCALAPPDATA = $fixture
 $ProgressFile = ''
 $ClaudeEventFile = ''
@@ -72,7 +71,7 @@ function Write-Event([string]$path,[string]$type,[string]$turn) {
     [IO.File]::AppendAllText($path, ($record + "`n"), [Text.UTF8Encoding]::new($false))
 }
 function Active-Ids {
-    return @((Codex-Tasks | Where-Object { $_.Active } | ForEach-Object { $_.Id }) | Sort-Object)
+    return @((Codex-Tasks | Where-Object { -not $_.Active -and $_.Status -eq 'Статус не подтверждён' } | ForEach-Object { $_.Id }) | Sort-Object)
 }
 function Wait-Session([string]$id,[int]$timeoutMilliseconds=8000) {
     $watch=[Diagnostics.Stopwatch]::StartNew()
@@ -117,7 +116,7 @@ try {
 
     # A temporary failure keeps the last task snapshot unconfirmed and then recovers.
     $snapshot=Source-Snapshot
-    Require (@($snapshot.Tasks | Where-Object Active).Count -eq 2) 'The initial source snapshot is incomplete.'
+    Require (@($snapshot.Tasks | Where-Object { -not $_.Active -and $_.Status -eq 'Статус не подтверждён' }).Count -eq 2 -and @($snapshot.PartialData) -contains 'Codex') 'The initial source snapshot did not retain both tasks and partial data warning.'
     $hidden=Join-Path $codexHome 'sessions-hidden'
     Move-Item -LiteralPath $sessionsDirectory -Destination $hidden
     try {
@@ -128,7 +127,7 @@ try {
         Move-Item -LiteralPath $hidden -Destination $sessionsDirectory
     }
     $recovered=Source-Snapshot
-    Require (@($recovered.Unavailable).Count -eq 0 -and @($recovered.Tasks | Where-Object Active).Count -eq 2) 'The source did not recover after the directory returned.'
+    Require (@($recovered.PartialData) -contains 'Codex' -and @($recovered.Tasks | Where-Object { -not $_.Active -and $_.Status -eq 'Статус не подтверждён' }).Count -eq 2) 'The source did not recover its unconfirmed tasks after the directory returned.'
 } finally {
     $readyLock.Dispose()
     $lateLock.Dispose()

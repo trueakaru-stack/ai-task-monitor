@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
@@ -52,14 +52,14 @@ try {
     $plan = @{plan=@(@{step='First';status='completed'},@{step='Second';status='in_progress'})} | ConvertTo-Json -Compress -Depth 8
     Write-Record $script:sessionPaths['old-id'] @{type='response_item';payload=@{type='function_call';name='update_plan';arguments=$plan}}
     $old = @(Codex-Tasks)
-    Require ($old.Count -eq 1 -and $old[0].Activity -eq 'Preparing plan' -and @($old[0].Steps).Count -eq 2 -and $old[0].Progress -eq 50) 'The planned task did not connect its live activity and real plan'
+    Require ($old.Count -eq 1 -and -not $old[0].Active -and $old[0].Activity -eq 'Статус не подтверждён' -and @($old[0].Steps).Count -eq 2 -and $null -eq $old[0].Progress -and -not $old[0].PlanConfirmed) 'The observed plan must remain visible without claiming current activity or progress'
     $first = Prioritize-Tasks $old @() ''
     Require ($first.SelectedId -eq 'old-id') 'The initial task was not selected'
 
     $owners.Add((New-Fixture 'new-id' 'new-turn' 4 'Checking screenshot stability'))
     $current = @(Codex-Tasks)
     $new = @($current | Where-Object Id -eq 'new-id')
-    Require ($new.Count -eq 1 -and $new[0].Activity -eq 'Checking screenshot stability' -and @($new[0].Steps).Count -eq 0 -and $null -eq $new[0].Progress) 'The unplanned task lost activity or gained fabricated progress'
+    Require ($new.Count -eq 1 -and -not $new[0].Active -and $new[0].Activity -eq 'Статус не подтверждён' -and @($new[0].Steps).Count -eq 0 -and $null -eq $new[0].Progress) 'The unplanned task must remain unconfirmed without fabricated progress'
     $second = Prioritize-Tasks $current $old 'old-id'
     Require ($second.SelectedId -eq 'new-id' -and $second.Tasks[0].Id -eq 'new-id') 'The new live task was not selected and first'
 
@@ -68,10 +68,10 @@ try {
     Write-Record $script:sessionPaths['old-id'] @{timestamp=$when;type='event_msg';payload=@{type='item_completed';turn_id='resumed-turn';item=@{type='Reasoning';summary_text=@('**Resume work**')}}}
     $resumed = @(Codex-Tasks)
     $third = Prioritize-Tasks $resumed $current 'new-id'
-    Require ($third.SelectedId -eq 'old-id' -and $third.Tasks[0].Id -eq 'old-id' -and $third.Tasks[0].Activity -eq 'Resume work') 'The continued task did not take focus with its current action'
+    Require ($third.SelectedId -eq 'old-id' -and $third.Tasks[0].Id -eq 'old-id' -and $third.Tasks[0].Activity -eq 'Статус не подтверждён') 'The continued unconfirmed task did not take focus safely'
     Require (-not $third.Tasks[0].PlanConfirmed -and @($third.Tasks[0].Steps).Count -eq 2) 'A prior plan must remain visible but unconfirmed after the new turn starts'
     Require (-not (($resumed | ConvertTo-Json -Compress -Depth 8) -match 'PRIVATE_REASONING')) 'Raw reasoning leaked into task display data'
-    Write-Output 'Codex activity pipeline: live sessions, plans, no-plan activity, new and resumed selection, and privacy verified.'
+    Write-Output 'Codex activity pipeline: unconfirmed sessions, retained plans, new and resumed selection, and privacy verified.'
 } finally { foreach ($owner in $owners) { $owner.Dispose() } }
 '@
 try { & ([scriptblock]::Create(($definitions -join "`n") + "`n" + $checks)) $root }
