@@ -99,7 +99,8 @@ enum SyntheticWindowGroupAudit {
 
     @MainActor static func prepare() -> Bool {
         let mode = ProcessInfo.processInfo.environment["AITM_SYNTHETIC_APPEARANCE"]
-        guard mode == "light" || mode == "dark" else { return false }
+        let variant = ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_VARIANT"]
+        guard (mode == "light" || mode == "dark"), (variant == "baseline" || variant == "ignore-top") else { return false }
         do {
             output = try makeOutput()
             AppLanguage.previewOverride = .ru
@@ -149,9 +150,17 @@ enum SyntheticWindowGroupAudit {
                 let full = NSBitmapImageRep(cgImage: image)
                 try save(full, name: "windowgroup-\(mode)-system-shadow.png", in: output)
                 try save(onCyan(full), name: "windowgroup-\(mode)-system-shadow-cyan.png", in: output)
-                var row: [String: Any] = ["mode": mode, "windowHasShadow": window.hasShadow,
-                    "windowIsOpaque": window.isOpaque, "backingScale": Double(window.backingScaleFactor),
+                let content = window.contentView
+                let insets = content?.safeAreaInsets ?? NSEdgeInsetsZero
+                let layout = window.contentLayoutRect
+                var row: [String: Any] = ["mode": mode,
+                    "variant": ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_VARIANT"] ?? "",
+                    "windowHasShadow": window.hasShadow, "windowIsOpaque": window.isOpaque,
+                    "backingScale": Double(window.backingScaleFactor),
                     "windowPoints": [Double(window.frame.width), Double(window.frame.height)],
+                    "contentPoints": [Double(content?.bounds.width ?? 0), Double(content?.bounds.height ?? 0)],
+                    "contentSafeInsets": [Double(insets.top), Double(insets.left), Double(insets.bottom), Double(insets.right)],
+                    "contentLayoutRect": [Double(layout.minX), Double(layout.minY), Double(layout.width), Double(layout.height)],
                     "imagePixels": [full.pixelsWide, full.pixelsHigh]]
                 if let image = CGWindowListCreateImage(.null, .optionIncludingWindow, ownID,
                                                        [.bestResolution, .boundsIgnoreFraming]) {
