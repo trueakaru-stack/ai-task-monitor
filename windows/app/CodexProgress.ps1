@@ -46,6 +46,7 @@
  [ValidateRange(0,5000)][int]$PreviewStartupDelayMilliseconds = 0,
  [ValidateRange(-1,6)][int]$PreviewActiveTasks = -1,
  [switch]$PreviewManyProviders,
+ [ValidateSet('','partial-data','partial-connection','partial-both','unavailable')][string]$PreviewSourceWarning = '',
  [switch]$PreviewTabsUiTest,
  [ValidateSet("default","planned","unplanned")][string]$PreviewScenario = "default",
  [switch]$PreviewActivityUiTest,
@@ -100,6 +101,12 @@ if($PreviewHermesFocus -and (-not $PreviewSources -or $PreviewHermesState -notin
 if($PreviewHermesSelection -and -not $PreviewHermesFocus){throw 'Hermes selection previews require the isolated focus preview.'}
 if($PreviewHermesDisableSelection -and -not $PreviewHermesSelection){throw 'Hermes disable selection requires the isolated selection preview.'}
 if(($PreviewManyProviders -or $PreviewTabsUiTest) -and (-not $SnapshotFile -or -not $PreviewManyProviders -or $PreviewActiveTasks -ne 6)){throw 'Provider tab previews require six synthetic tasks and a snapshot.'}
+if($PreviewSourceWarning){
+ if(-not $SnapshotFile -or $PreviewActiveTasks -lt 1 -or -not $DiagnosticDirectory){throw 'Source warning previews require synthetic tasks, a snapshot and an isolated diagnostic directory.'}
+ $previewDataPath=[IO.Path]::GetFullPath($DiagnosticDirectory)
+ $temporaryRoot=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
+ if(-not $previewDataPath.StartsWith($temporaryRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Source warning previews require a temporary diagnostic directory.'}
+}
 if($PreviewActivityUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or $PreviewScenario -eq "default")){throw "Activity UI tests require one synthetic task, a scenario and a snapshot."}
 if($PreviewFocusUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or -not $CompactMode)){throw "Focus UI tests require a compact synthetic snapshot."}
 if(($PreviewMotion -ne "default" -or $PreviewMotionDelayMilliseconds -gt 0) -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw "Motion previews require synthetic tasks and a snapshot."}
@@ -159,6 +166,8 @@ $script:lastAllTasks = @()
 $script:lastCodexTasks = @()
 $script:lastClaudeTasks = @()
 $script:sourceErrors = @()
+$script:sourcePartialConnections = @()
+$script:sourcePartialData = @()
 $script:compactTaskId = ""
 $script:taskPriority = @{}
 $script:taskPriorityCounter = 0
@@ -369,6 +378,7 @@ $script:translations=@{
  'Скачать новую версию'='Download the new version'
  'Нет данных'='No data'
  'Нет данных от '='No data from '
+ 'Часть данных недоступна'='Some data is unavailable'
  'Подключён'='Connected'
  'Подключён частично'='Partially connected'
  'Не подключён'='Not connected'
@@ -1675,7 +1685,7 @@ function Get-DeepSeekErrorMessage([string]$code,[bool]$profileScan=$false) {
  $message=switch($code){
   'unsupported-desktop'{'Профиль DeepSeek Desktop пока не поддерживается.';break}
   {$_ -in @('unverified-dsh','unverified-pnpm')}{'Версия DeepSeek Harness или pnpm не подтверждена.';break}
-  {$_ -in @('linked-path','modified-bundle','partial-connection') -or $_ -like 'bundle-conflict*'}{'Подключение DeepSeek Harness неполное или его файлы изменены.';break}
+  {$_ -in @('linked-path','modified-bundle','partial-connection','scope-changed') -or $_ -like 'bundle-conflict*'}{'Подключение DeepSeek Harness неполное или его файлы изменены.';break}
   default{if($profileScan){'Не удалось проверить профиль DeepSeek Harness.'}else{'Не удалось изменить подключение DeepSeek Harness.'}}
  }
  return (Tr $message)
@@ -2585,6 +2595,7 @@ function Claude-Tasks {
 
 function Source-Snapshot {
  $codex=@(); $claude=@(); $external=@(); $cloud=@(); $unavailable=New-Object Collections.Generic.List[string]
+ $partialConnection=New-Object Collections.Generic.List[string];$partialData=New-Object Collections.Generic.List[string]
  try{$codex=@(Codex-Tasks);$script:lastCodexTasks=$codex}catch{[void]$unavailable.Add("Codex");$codex=@(Unconfirmed-Tasks $script:lastCodexTasks)}
  try{
   $connectionState=if($ClaudeEventFile){"connected"}else{Claude-ConnectionState}
@@ -2605,7 +2616,7 @@ function Source-Snapshot {
  if($script:externalProviderModulesAvailable){
   $connection=try{Get-OpenCodeConnectionState -AppRoot $PSScriptRoot}catch{'error'}
   $connections=@{opencode=$connection}
-  $profileScopes=@{};$uncertainProfileScopes=@{}
+  $profileScopes=@{};$uncertainProfileScopes=@{};$confirmedDisconnectedProfileScopes=@{}
   $kimiAvailable=Get-Variable -Scope Script -Name 'kimiModulesAvailable' -ErrorAction SilentlyContinue
   if($null -ne $kimiAvailable -and $kimiAvailable.Value -and -not ($SnapshotFile -and $PreviewActiveTasks -ge 0)){
    $connections.kimi=try{
@@ -2623,6 +2634,7 @@ function Source-Snapshot {
     if($script:showingSettings){Update-DeepSeekSourceSettings}
     $profileScopes.deepseek=@(Get-DeepSeekAllowedScopes $script:deepSeekController)
     $uncertainProfileScopes.deepseek=@(Get-DeepSeekUncertainScopes $script:deepSeekController)
+    $confirmedDisconnectedProfileScopes.deepseek=@(Get-DeepSeekConfirmedDisconnectedScopes $script:deepSeekController)
     Get-DeepSeekMonitorConnectionState $script:deepSeekController
    }catch{'error'}
   }
@@ -2637,16 +2649,18 @@ function Source-Snapshot {
    }catch{'error'}
   }
   try{
-   $group=Read-ExternalProviderGroupSnapshot -Controller $script:externalProviderController -Connections $connections -Seen $script:seenExternalConnections -PreviousTasks $script:lastExternalTasks -ProfileScopes $profileScopes -UncertainProfileScopes $uncertainProfileScopes -Language $script:resolvedLanguage
+   $group=Read-ExternalProviderGroupSnapshot -Controller $script:externalProviderController -Connections $connections -Seen $script:seenExternalConnections -PreviousTasks $script:lastExternalTasks -ProfileScopes $profileScopes -UncertainProfileScopes $uncertainProfileScopes -ConfirmedDisconnectedProfileScopes $confirmedDisconnectedProfileScopes -Language $script:resolvedLanguage
    $external=@($group.Tasks);$script:lastExternalTasks=$external
    foreach($name in $group.Unavailable){[void]$unavailable.Add($name)}
+   if($group.PSObject.Properties['PartialConnection']){foreach($name in $group.PartialConnection){[void]$partialConnection.Add($name)}}
+   if($group.PSObject.Properties['PartialData']){foreach($name in $group.PartialData){[void]$partialData.Add($name)}}
   }catch{
    foreach($pair in @(@('opencode','OpenCode'),@('kimi','Kimi Code'),@('deepseek','DeepSeek Harness'),@('hermes','Hermes Agent'))){if($script:seenExternalConnections.ContainsKey($pair[0])){[void]$unavailable.Add($pair[1])}}
    $external=@(Unconfirmed-ExternalTasks $script:lastExternalTasks);$script:lastExternalTasks=$external
    try{Stop-ExternalProviderController $script:externalProviderController}catch{}
   }
  }
- return [PSCustomObject]@{Tasks=@($codex+$claude+$external+$cloud);Unavailable=$unavailable.ToArray()}
+ return [PSCustomObject]@{Tasks=@($codex+$claude+$external+$cloud);Unavailable=$unavailable.ToArray();PartialConnection=$partialConnection.ToArray();PartialData=$partialData.ToArray()}
 }
 
 function Sync-ClaudeLoopChannel {
@@ -3160,16 +3174,27 @@ function Compact-VisibleTasks($tasks) {
  return @($tasks|Where-Object {$_.Active -or [string](Prop $_ "Status" "") -in @("Статус не подтверждён","Ожидает подтверждения")})
 }
 
+function Source-WarningText([string[]]$Unavailable,[string[]]$PartialConnection,[string[]]$PartialData) {
+ $data=@($Unavailable | Where-Object {$PartialData -ccontains $_})
+ $connection=@($Unavailable | Where-Object {$PartialConnection -ccontains $_ -and $data -cnotcontains $_})
+ $full=@($Unavailable | Where-Object {$data -cnotcontains $_ -and $connection -cnotcontains $_})
+ $parts=New-Object 'Collections.Generic.List[string]'
+ if($full.Count){$parts.Add((Tr 'Нет данных от ')+($full -join ', '))}
+ if($connection.Count){$parts.Add((Tr 'Подключён частично')+': '+($connection -join ', '))}
+ if($data.Count){$parts.Add((Tr 'Часть данных недоступна')+': '+($data -join ', '))}
+ return ($parts -join '; ')
+}
+
 function Render-CompactTasks($tasks) {
  $compactTasksPanel.Children.Clear(); $compactDotsPanel.Children.Clear()
  $compactTasks=@(Compact-VisibleTasks $tasks)
  $visibleTasks=@($compactTasks|Select-Object -First 3)
- $unavailable=@($script:sourceErrors)
- $warningText=if($unavailable.Count -gt 0){(Tr "Нет данных от ")+($unavailable -join ", ")}else{""}
+ $warningText=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
  if($visibleTasks.Count -eq 0){
   $script:compactTaskId=""
   $compactEmpty=Text $(if($warningText){$warningText}else{Tr "Активных задач сейчас нет"}) 12.5 $script:palette.Activity
   $compactEmpty.Margin=New-Object Windows.Thickness(0,5,0,5)
+  if($warningText){$compactEmpty.Tag='source-warning'}
   $compactTasksPanel.Children.Add($compactEmpty)|Out-Null
   $compactDotsPanel.Visibility="Collapsed"
  } else {
@@ -3179,6 +3204,7 @@ function Render-CompactTasks($tasks) {
   if($warningText){
    $warning=Text $warningText 11.5 $script:palette.Muted
    $warning.Margin=New-Object Windows.Thickness(12,0,0,6)
+   $warning.Tag='source-warning'
    $compactTasksPanel.Children.Add($warning)|Out-Null
   }
   if($visibleTasks.Count -gt 1){
@@ -3191,7 +3217,7 @@ function Render-CompactTasks($tasks) {
  $compactMoreText.Text=$(if($hiddenCount -gt 0){if($script:resolvedLanguage -eq 'en'){"$hiddenCount more tasks"}else{"Ещё $hiddenCount задач"}}else{""})
  $hasLoopWarning=$visibleTasks.Count -gt 0 -and $null -ne (Get-LoopWarning $selected[0])
  $hasUnconfirmedPlan=$visibleTasks.Count -gt 0 -and [bool](Plan-StatusNote $selected[0])
- if($script:isCompact){$window.Height=Compact-Height $compactTasks.Count ($unavailable.Count -gt 0) $hasLoopWarning $hasUnconfirmedPlan; Move-CompactWindow}
+ if($script:isCompact){$window.Height=Compact-Height $compactTasks.Count ([bool]$warningText) $hasLoopWarning $hasUnconfirmedPlan;Move-CompactWindow}
 }
 
 function Compact-Height([int]$activeCount,[bool]$hasSourceErrors=$false,[bool]$hasLoopWarning=$false,[bool]$hasUnconfirmedPlan=$false) {
@@ -3748,13 +3774,22 @@ function Preview-Text([string]$russian,[string]$english) {
 function Update-View {
  try {
   $previousAllTasks=@($script:lastAllTasks)
-  $sourceSnapshot=if($PreviewActiveTasks -ge 0){[PSCustomObject]@{Tasks=@();Unavailable=@()}}else{Source-Snapshot}
+  $sourceSnapshot=if($PreviewActiveTasks -ge 0){
+   $previewWarning=if($PreviewSourceWarning){@('DeepSeek Harness')}else{@()}
+   [PSCustomObject]@{Tasks=@();Unavailable=$previewWarning;PartialConnection=$(if($PreviewSourceWarning -in @('partial-connection','partial-both')){$previewWarning}else{@()});PartialData=$(if($PreviewSourceWarning -in @('partial-data','partial-both')){$previewWarning}else{@()})}
+  }else{Source-Snapshot}
   $allTasks=@($sourceSnapshot.Tasks)
   $script:sourceErrors=@($sourceSnapshot.Unavailable)
+  $script:sourcePartialConnections=@($sourceSnapshot.PartialConnection)
+  $script:sourcePartialData=@($sourceSnapshot.PartialData)
   if($PreviewActiveTasks -ge 0){
    $previewTitles=@((Preview-Text 'Создать индикатор прогресса задач' 'Create a task progress indicator'),(Preview-Text 'Задача Claude Code' 'Claude Code task'),(Preview-Text 'Задача Claude Code' 'Claude Code task'),(Preview-Text 'Задача DeepSeek Harness' 'DeepSeek Harness task'),(Preview-Text 'Задача Hermes Agent' 'Hermes Agent task'),(Preview-Text 'Задача OpenCode' 'OpenCode task'))
    $previewActivities=@((Preview-Text 'Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний' 'Checking plan cards, source filters, scrolling, the light theme and long descriptions before release'),(Preview-Text 'Запускаю визуальную проверку' 'Running visual checks'),(Preview-Text 'Собираю данные для переноса' 'Preparing migration data'),(Preview-Text 'Проверяю план' 'Checking the plan'),(Preview-Text 'Проверяю данные' 'Checking data'),(Preview-Text 'Выполняю действие' 'Performing an action'))
    $previewProgress=@(50,33,$null,$null,$null,$null);$previewKinds=@("exact","exact","none","none","none","none");$previewProviders=@("codex","claude","claude","deepseek","hermes","opencode");$previewProviderNames=@("Codex","Claude Code","Claude Code","DeepSeek Harness","Hermes Agent","OpenCode")
+   if($PreviewSourceWarning){
+    $previewProviders[0]='deepseek';$previewProviderNames[0]='DeepSeek Harness'
+    $previewTitles[0]=Preview-Text 'Задача DeepSeek Harness' 'DeepSeek Harness task'
+   }
    if($PreviewManyProviders){
     $previewProviders[2]='kimi';$previewProviderNames[2]='Kimi Code'
     foreach($previewIndex in 2..5){
@@ -3819,10 +3854,10 @@ function Update-View {
   Render-ProviderTabs $allTasks
   $tasks=@(Filtered-Tasks $allTasks)
   $script:lastTasks=$tasks
-  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
+  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
   if($next -ne $script:fingerprint){
    $script:fingerprint=$next; $tasksPanel.Children.Clear()
-   if($script:sourceErrors.Count -gt 0){$warning=Text ((Tr "Нет данных от ")+($script:sourceErrors -join ", ")) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
+   if($script:sourceErrors.Count -gt 0){$warning=Text (Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
    foreach($task in $tasks){Add-Card $task}
    if($tasks.Count -eq 0 -and $script:sourceErrors.Count -eq 0){$empty=Text (Tr "Активных задач сейчас нет") 14 $script:palette.Secondary; $empty.Margin=New-Object Windows.Thickness(4,24,0,0); $tasksPanel.Children.Add($empty)|Out-Null}
    Render-CompactTasks $allTasks
@@ -4043,6 +4078,19 @@ if($PreviewUpdate){$script:availableUpdate=[PSCustomObject]@{Version='0.3.0-alph
 if ($SnapshotFile) {
  if($PreviewOffscreen){$window.WindowStartupLocation="Manual";$window.Left=-10000;$window.Top=-10000;$window.ShowActivated=$false;$window.ShowInTaskbar=$false}
  $window.Show(); $window.UpdateLayout()
+ if($PreviewSourceWarning -eq 'partial-both'){
+  $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
+  if($actual -cne ((Tr 'Часть данных недоступна')+': DeepSeek Harness')){throw 'A source warning was duplicated or translated incorrectly.'}
+ }
+ if($PreviewSourceWarning -in @('partial-data','partial-both') -and $script:isCompact){
+  Render-CompactTasks $script:lastAllTasks;$window.UpdateLayout()
+  $warning=@($compactTasksPanel.Children | Where-Object {$_ -is [Windows.Controls.TextBlock] -and $_.Tag -ceq 'source-warning'})
+  if($warning.Count -ne 1){throw 'The compact source warning is missing.'}
+  $warning[0].Measure([Windows.Size]::new($compactTasksPanel.ActualWidth,[double]::PositiveInfinity))
+  $needed=$warning[0].DesiredSize.Height-$warning[0].Margin.Top-$warning[0].Margin.Bottom
+  $bounds=$warning[0].TransformToAncestor($compactView).TransformBounds([Windows.Rect]::new(0,0,$warning[0].ActualWidth,$warning[0].ActualHeight))
+  if($warning[0].ActualHeight+0.5 -lt $needed -or $bounds.Bottom -gt $compactView.ActualHeight+0.5){throw 'The compact source warning is clipped.'}
+ }
  if($PreviewTabsUiTest){
   if($providerTabsPanel.Children.Count -ne 7 -or $providerTabsScroll.ScrollableWidth -le 0){throw 'The six-provider tab row must overflow in one scrollable row.'}
   $providerTabsScroll.ScrollToHorizontalOffset($providerTabsScroll.ScrollableWidth);$window.UpdateLayout()

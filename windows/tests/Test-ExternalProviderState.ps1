@@ -90,7 +90,7 @@ Apply $heartbeat '{"version":1,"provider":"opencode","session":"long","kind":"he
 Assert ((@($heartbeat.Snapshot($now.AddMinutes(35)))[0]).Status -eq 'unknown') 'Heartbeat must not revive a task after a transport gap.'
 Apply $heartbeat '{"version":1,"provider":"opencode","session":"long","kind":"completed"}' $now.AddMinutes(36)
 Apply $heartbeat '{"version":1,"provider":"opencode","session":"long","kind":"heartbeat"}' $now.AddMinutes(36)
-Assert (@($heartbeat.Snapshot($now.AddMinutes(36))).Count -eq 0) 'Heartbeat must not revive completed tasks.'
+Assert (@($heartbeat.Snapshot($now.AddMinutes(36)) | Where-Object Status -eq 'unknown').Count -eq 1) 'A delayed terminal event after a gap must not hide an unconfirmed task.'
 
 $waitingStore = [AITaskMonitor.ExternalProviders.StateStore]::new()
 Apply $waitingStore '{"version":1,"provider":"deepseek","session":"wait","kind":"waiting"}' $now

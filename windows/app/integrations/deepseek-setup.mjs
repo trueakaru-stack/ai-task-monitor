@@ -11,10 +11,12 @@ try {
     chunks.push(chunk);
   }
   const request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  const allowed = new Set(['action', 'home', 'profile', 'assets', 'installAnchor', 'pnpmScript']);
+  const allowed = new Set(['action', 'home', 'profile', 'assets', 'installAnchor', 'pnpmScript', 'expectedScope']);
   if (!request || typeof request !== 'object' || Array.isArray(request) ||
       Object.keys(request).some(key => !allowed.has(key)) ||
       Object.values(request).some(value => typeof value !== 'string' || value.length > 8192)) throw new Error('invalid-request');
+  if (Object.hasOwn(request, 'expectedScope') &&
+      (request.action !== 'disconnect' || !/^[a-f0-9]{32}$/.test(request.expectedScope))) throw new Error('invalid-request');
   let result;
   if (request.action === 'list') {
     if (request.installAnchor || request.pnpmScript) await validateDeepSeekRuntime(request.installAnchor, request.pnpmScript);

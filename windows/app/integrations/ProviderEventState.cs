@@ -148,6 +148,8 @@ namespace AITaskMonitor.ExternalProviders
     }
 
     // State is bounded and exists only while the monitor process is running.
+    // V1 has no sender generation. Existing first-start behavior is retained;
+    // after a known loss or disconnect, later events cannot restore confidence.
     public sealed class StateStore
     {
         private readonly Dictionary<string, TaskState> states = new Dictionary<string, TaskState>(StringComparer.Ordinal);
@@ -157,9 +159,53 @@ namespace AITaskMonitor.ExternalProviders
         private readonly Dictionary<string, long> hermesScopeBarriers = new Dictionary<string, long>(StringComparer.Ordinal);
         private HashSet<string> hermesScopes = new HashSet<string>(StringComparer.Ordinal);
         private HashSet<string> hermesUncertainScopes = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> retainedProviders = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> capacityLimitedProviders = new HashSet<string>(StringComparer.Ordinal);
+        private readonly Dictionary<string, HashSet<string>> capacityLimitedScopes = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        private readonly HashSet<string> lossAffectedProviders = new HashSet<string>(StringComparer.Ordinal);
+        private readonly Dictionary<string, HashSet<string>> lossAffectedScopes = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        private readonly HashSet<string> retiredV1Providers = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> retiredDeepSeekScopes = new HashSet<string>(StringComparer.Ordinal);
         private const int MaximumSessions = 256;
         private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(30);
         private static readonly TimeSpan HeartbeatLifetime = TimeSpan.FromMinutes(3);
+
+        public string[] CapacityLimitedProviders
+        {
+            get { return capacityLimitedProviders.Union(capacityLimitedScopes.Where(pair => pair.Value.Count != 0)
+                .Select(pair => pair.Key)).OrderBy(name => name, StringComparer.Ordinal).ToArray(); }
+        }
+
+        public string[] CapacityLimitedScopes(string provider)
+        {
+            HashSet<string> scopes;
+            return capacityLimitedScopes.TryGetValue(provider, out scopes)
+                ? scopes.OrderBy(scope => scope, StringComparer.Ordinal).ToArray() : new string[0];
+        }
+
+        public string[] LossAffectedProviders
+        {
+            get { return lossAffectedProviders.Union(lossAffectedScopes.Where(pair => pair.Value.Count != 0)
+                .Select(pair => pair.Key)).OrderBy(name => name, StringComparer.Ordinal).ToArray(); }
+        }
+
+        private void RecordScopeLoss(string provider, string scope)
+        {
+            if (!IsScope(scope)) { lossAffectedProviders.Add(provider); return; }
+            HashSet<string> scopes;
+            if (!lossAffectedScopes.TryGetValue(provider, out scopes))
+            { scopes = new HashSet<string>(StringComparer.Ordinal); lossAffectedScopes.Add(provider, scopes); }
+            if (scopes.Count < MaximumSessions || scopes.Contains(scope)) scopes.Add(scope);
+            else lossAffectedProviders.Add(provider);
+        }
+
+        private bool IsV1Unconfirmed(string provider, string scope)
+        {
+            HashSet<string> scopes;
+            return retiredV1Providers.Contains(provider) || lossAffectedProviders.Contains(provider) ||
+                (lossAffectedScopes.TryGetValue(provider, out scopes) && scopes.Contains(scope)) ||
+                (provider == "deepseek" && retiredDeepSeekScopes.Contains(scope));
+        }
 
         public bool Apply(Event input, DateTimeOffset now)
         {
@@ -174,13 +220,22 @@ namespace AITaskMonitor.ExternalProviders
             { MarkProviderGap("hermes"); return false; }
             if (input.Kind == "gap")
             {
-                if (input.Provider == "hermes" && scope.Length == 32 && scope.All(c => (c >= 'a' && c <= 'f') || (c >= '0' && c <= '9')))
+                if (input.Provider == "hermes" && IsScope(scope))
                 { MarkHermesScopeGap(scope); return true; }
+                if (input.Provider == "deepseek" && IsScope(scope))
+                { MarkSessionScopesGap(input.Provider, new[] { scope }); return true; }
                 MarkProviderGap(input.Provider); return true;
             }
             string key = input.Provider + ":" + input.Session;
             TaskState state;
             bool created = false;
+            bool legacyUnconfirmed = (input.Provider == "opencode" || input.Provider == "deepseek") &&
+                IsV1Unconfirmed(input.Provider, scope);
+            if (legacyUnconfirmed &&
+                (input.Kind == "heartbeat" || input.Kind == "idle" || input.Kind == "completed" ||
+                 input.Kind == "failed" || input.Kind == "interrupted" || input.Kind == "plan" || input.Kind == "tool_finished") &&
+                (!states.TryGetValue(key, out state) || IsTerminal(state.Status)))
+                return true;
             // A heartbeat is only evidence about a previously observed session.
             // It cannot create a task after the monitor starts or revive one after a gap.
             if (input.Kind == "heartbeat")
@@ -196,9 +251,12 @@ namespace AITaskMonitor.ExternalProviders
             {
                 if (states.Count >= MaximumSessions)
                 {
-                    var oldest = states.Where(pair => pair.Value.Status != "active" && pair.Value.Status != "waiting")
+                    // Preserve visible V1 records while leaving the original
+                    // eviction policy for the other providers in place.
+                    var oldest = states.Where(pair => pair.Value.Status != "active" && pair.Value.Status != "waiting" &&
+                        (IsTerminal(pair.Value.Status) || (pair.Value.Provider != "deepseek" && pair.Value.Provider != "opencode")))
                         .OrderBy(pair => pair.Value.Updated).FirstOrDefault();
-                    if (oldest.Key == null) { MarkGap(); return false; }
+                    if (oldest.Key == null) { RejectAtCapacity(input.Provider, scope); return false; }
                     if (oldest.Value.Provider == "hermes") MarkProviderGap("hermes");
                     states.Remove(oldest.Key);
                 }
@@ -210,6 +268,15 @@ namespace AITaskMonitor.ExternalProviders
             }
             Expire(state, now);
             if (input.Provider == "hermes") return ApplyHermes(state, input, now, created);
+            if (legacyUnconfirmed)
+            {
+                if (input.Kind == "plan") state.Steps = CopySteps(input.Steps);
+                if (String.IsNullOrEmpty(state.StartKey) && (input.Kind == "started" || input.Kind == "active" ||
+                    input.Kind == "waiting" || input.Kind == "tool_started")) Start(state, now, input.Turn);
+                MakeUnconfirmed(state);
+                state.Updated = now;
+                return true;
+            }
             if (input.Provider == "kimi")
             {
                 // Kimi's passive hooks can arrive late or be lost, and do not
@@ -268,6 +335,44 @@ namespace AITaskMonitor.ExternalProviders
             return true;
         }
 
+        private static bool IsTerminal(string status)
+        {
+            return status == "idle" || status == "completed" || status == "failed" || status == "interrupted";
+        }
+
+        private static bool IsScope(string scope)
+        {
+            return scope.Length == 32 && scope.All(c => (c >= 'a' && c <= 'f') || (c >= '0' && c <= '9'));
+        }
+
+        private static void MakeUnconfirmed(TaskState state)
+        {
+            state.Status = "unknown";
+            state.PlanConfirmed = false;
+            state.Calls.Clear();
+            state.LastHeartbeat = null;
+        }
+
+        private void RejectAtCapacity(string provider, string scope)
+        {
+            if (IsScope(scope) && provider == "deepseek")
+            {
+                HashSet<string> scopes;
+                if (!capacityLimitedScopes.TryGetValue(provider, out scopes))
+                { scopes = new HashSet<string>(StringComparer.Ordinal); capacityLimitedScopes.Add(provider, scopes); }
+                if (scopes.Count < MaximumSessions || scopes.Contains(scope)) scopes.Add(scope);
+                else capacityLimitedProviders.Add(provider); // Unknown affected scope; retain source warning.
+                MarkSessionScopesGap(provider, new[] { scope });
+            }
+            else
+            {
+                // The rejected frame identifies its source. Do not invalidate
+                // healthy neighbors that share this bounded store.
+                capacityLimitedProviders.Add(provider);
+                MarkProviderGap(provider);
+            }
+        }
+
         // An overflow or broken transport invalidates activity claims, never invents completion.
         public void MarkGap()
         {
@@ -276,12 +381,18 @@ namespace AITaskMonitor.ExternalProviders
 
         public void MarkProviderGap(string provider)
         {
+            if (provider == null)
+            {
+                foreach (string name in retainedProviders.Union(states.Values.Select(state => state.Provider)))
+                    if (name == "deepseek" || name == "opencode") lossAffectedProviders.Add(name);
+            }
+            else if (provider == "deepseek" || provider == "opencode") lossAffectedProviders.Add(provider);
             if (provider == null || provider == "hermes") hermesBarrier = Math.Max(hermesBarrier, MonotonicNanoseconds());
             foreach (TaskState state in states.Values)
             {
                 if (provider != null && state.Provider != provider) continue;
                 if (state.Provider == "hermes") { state.HermesUncertain = true; state.HermesRequests.Clear(); }
-                if (state.Steps.Length > 0) state.PlanConfirmed = false;
+                if (state.Steps.Length > 0 || state.Provider == "deepseek" || state.Provider == "opencode") state.PlanConfirmed = false;
                 if (state.Status == "active" || state.Status == "waiting") { state.Status = "unknown"; state.Calls.Clear(); }
                 state.LastHeartbeat = null;
             }
@@ -292,6 +403,16 @@ namespace AITaskMonitor.ExternalProviders
         public void RetainProviders(string[] providers)
         {
             var allowed = new HashSet<string>(providers ?? new string[0], StringComparer.Ordinal);
+            foreach (string provider in retainedProviders.Except(allowed))
+                if (provider == "opencode" || provider == "deepseek") retiredV1Providers.Add(provider);
+            retainedProviders.Clear();
+            retainedProviders.UnionWith(allowed);
+            capacityLimitedProviders.IntersectWith(allowed);
+            foreach (string provider in capacityLimitedScopes.Keys.Where(provider => !allowed.Contains(provider)).ToArray())
+                capacityLimitedScopes.Remove(provider);
+            lossAffectedProviders.IntersectWith(allowed);
+            foreach (string provider in lossAffectedScopes.Keys.Where(provider => !allowed.Contains(provider)).ToArray())
+                lossAffectedScopes.Remove(provider);
             bool nowAllowed = allowed.Contains("hermes");
             if (nowAllowed != hermesAllowed)
             {
@@ -308,6 +429,12 @@ namespace AITaskMonitor.ExternalProviders
                 states.Remove(key);
         }
 
+        // The original receiver discarded other providers' state when it stopped.
+        public void RetainOnlyV1Providers()
+        {
+            RetainProviders(retainedProviders.Where(provider => provider == "opencode" || provider == "deepseek").ToArray());
+        }
+
         public void RetainSessionScopes(string provider, string[] scopes)
         {
             var allowed = new HashSet<string>(scopes ?? new string[0], StringComparer.Ordinal);
@@ -316,13 +443,33 @@ namespace AITaskMonitor.ExternalProviders
                 UpdateHermesScopeBarriers(hermesScopes.Except(allowed).Concat(allowed.Except(hermesScopes)));
                 hermesScopes = allowed;
             }
-            foreach (string key in states.Where(pair => pair.Value.Provider == provider && !allowed.Contains(SessionScope(pair.Value.Session)))
+            // DeepSeek roster absence alone does not prove a profile was disabled.
+            if (provider != "deepseek")
+                foreach (string key in states.Where(pair => pair.Value.Provider == provider && !allowed.Contains(SessionScope(pair.Value.Session)))
+                    .Select(pair => pair.Key).ToArray()) states.Remove(key);
+        }
+
+        public void ConfirmDeepSeekDisconnectedScopes(string[] scopes)
+        {
+            var confirmed = new HashSet<string>((scopes ?? new string[0]).Where(IsScope), StringComparer.Ordinal);
+            foreach (string scope in confirmed)
+            {
+                if (retiredDeepSeekScopes.Count < MaximumSessions || retiredDeepSeekScopes.Contains(scope))
+                    retiredDeepSeekScopes.Add(scope);
+                else { retiredV1Providers.Add("deepseek"); lossAffectedProviders.Add("deepseek"); }
+            }
+            HashSet<string> capacityScopes;
+            if (capacityLimitedScopes.TryGetValue("deepseek", out capacityScopes)) capacityScopes.ExceptWith(confirmed);
+            HashSet<string> lostScopes;
+            if (lossAffectedScopes.TryGetValue("deepseek", out lostScopes)) lostScopes.ExceptWith(confirmed);
+            foreach (string key in states.Where(pair => pair.Value.Provider == "deepseek" && confirmed.Contains(SessionScope(pair.Value.Session)))
                 .Select(pair => pair.Key).ToArray()) states.Remove(key);
         }
 
         public void MarkSessionScopesGap(string provider, string[] scopes)
         {
             var uncertain = new HashSet<string>(scopes ?? new string[0], StringComparer.Ordinal);
+            if (provider == "deepseek") foreach (string scope in uncertain) RecordScopeLoss(provider, scope);
             if (provider == "hermes")
             {
                 UpdateHermesScopeBarriers(hermesUncertainScopes.Except(uncertain).Concat(uncertain.Except(hermesUncertainScopes)));
@@ -332,7 +479,7 @@ namespace AITaskMonitor.ExternalProviders
             {
                 if (state.Provider != provider || !uncertain.Contains(SessionScope(state.Session))) continue;
                 if (provider == "hermes") { state.HermesUncertain = true; state.HermesRequests.Clear(); }
-                if (state.Steps.Length > 0) state.PlanConfirmed = false;
+                if (state.Steps.Length > 0 || provider == "deepseek") state.PlanConfirmed = false;
                 if (state.Status == "active" || state.Status == "waiting") { state.Status = "unknown"; state.Calls.Clear(); }
                 state.LastHeartbeat = null;
             }
