@@ -107,6 +107,11 @@ replace_once("RootView.swift",
              "        SyntheticWindowGroupAudit.observeWindow(window)\n"
              "        coordinator.observe(window)")
 
+replace_once("RootView.swift",
+             "        let size = isCompact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)",
+             "        let size = isCompact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)\n"
+             "        SyntheticWindowGroupAudit.noteDesiredSize(size, compact: isCompact)")
+
 helper = project / "integration-tests/WindowGroupSyntheticAudit.swift"
 target = source / "SyntheticWindowGroupAudit.swift"
 if not stat.S_ISREG(helper.lstat().st_mode) or target.exists() or target.is_symlink():
