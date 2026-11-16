@@ -86,7 +86,10 @@ to be a sandbox against spoofed environment variables or concurrent path
 replacement. The historical `Test-CodexIndex.ps1` is disabled and fails
 before inspecting paths, launching an SDK or changing the environment. The
 hosted check verifies its fail-fast behavior with an instrumented synthetic SDK
-and compares the temporary directory before and after invocation.
+and compares the temporary directory before and after invocation. Positive
+controls first verify that the SDK probe leaves a marker both with the marker
+environment variable and with that variable absent, then remove those two
+synthetic markers before testing the retired launcher.
 
 The hosted runner requires reference SHA-256
 `DD9A401DFABDFC68623A8503746EF7808F154C0E606588CE9143F07A31FEDDB8`,

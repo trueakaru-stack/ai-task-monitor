@@ -38,7 +38,7 @@ try {
     $sdk=Split-Path -Parent $dotnet
     $config=Join-Path $root 'NuGet.Config'
     [IO.File]::WriteAllText($config,'<configuration><packageSources><clear /></packageSources></configuration>',[Text.UTF8Encoding]::new($false))
-    function Invoke-Isolated([string]$executable, [string[]]$arguments, [string]$expectedError='') {
+    function Invoke-Isolated([string]$executable, [string[]]$arguments, [string]$expectedError='', [switch]$withoutProbeMarker) {
         $start=[Diagnostics.ProcessStartInfo]::new()
         $start.FileName=$executable; $start.WorkingDirectory=$root; $start.UseShellExecute=$false; $start.CreateNoWindow=$true
         $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true; $start.Environment.Clear()
@@ -59,6 +59,7 @@ try {
             $value=[Environment]::GetEnvironmentVariable($name)
             if(-not [string]::IsNullOrEmpty($value)) { $values[$name]=$value }
         }
+        if($withoutProbeMarker) { $values.Remove('AITM_SYNTHETIC_SDK_MARKER') }
         foreach($name in $values.Keys) { $start.Environment[$name]=[string]$values[$name] }
         foreach($argument in $arguments) { [void]$start.ArgumentList.Add($argument) }
         $process=[Diagnostics.Process]::Start($start)
@@ -85,7 +86,9 @@ using System;
 using System.IO;
 internal static class SdkProbe {
     private static int Main() {
-        File.WriteAllText(Environment.GetEnvironmentVariable("AITM_SYNTHETIC_SDK_MARKER"), "invoked");
+        string marker = Environment.GetEnvironmentVariable("AITM_SYNTHETIC_SDK_MARKER");
+        if (String.IsNullOrEmpty(marker)) marker = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "unexpected-sdk-launch.txt");
+        File.WriteAllText(marker, "invoked");
         return 0;
     }
 }
@@ -96,6 +99,25 @@ internal static class SdkProbe {
     Check ([IO.File]::Exists($compiler)) 'The synthetic SDK probe compiler is missing.'
     $null=Invoke-Isolated $compiler @('/nologo','/target:exe',('/out:'+$fakeDotnet),$probeSource)
     Check ([IO.File]::Exists($fakeDotnet)) 'The synthetic SDK probe was not built.'
+    $probeMarker=[IO.Path]::GetFullPath((Join-Path $root 'unexpected-sdk-launch.txt'))
+    $fallbackMarker=[IO.Path]::GetFullPath((Join-Path $fakeSdk 'unexpected-sdk-launch.txt'))
+    function Confirm-AndRemoveMarker([string]$path, [string]$expectedDirectory) {
+        $absolute=[IO.Path]::GetFullPath($path)
+        Check ([string]::Equals([IO.Directory]::GetParent($absolute).FullName,$expectedDirectory,[StringComparison]::OrdinalIgnoreCase) -and
+            [IO.File]::Exists($absolute) -and
+            (([IO.File]::GetAttributes($absolute) -band ([IO.FileAttributes]::ReparsePoint -bor [IO.FileAttributes]::Directory)) -eq 0) -and
+            [IO.File]::ReadAllText($absolute) -ceq 'invoked') 'The synthetic SDK marker is absent or unsafe.'
+        [IO.File]::Delete($absolute)
+        Check (-not [IO.File]::Exists($absolute)) 'The synthetic SDK marker could not be removed.'
+    }
+    Check (-not [IO.File]::Exists($probeMarker) -and -not [IO.File]::Exists($fallbackMarker)) 'An SDK probe marker already exists.'
+    $null=Invoke-Isolated -executable $fakeDotnet -arguments @()
+    Confirm-AndRemoveMarker $probeMarker $root
+    # The historical launcher rebuilt its child environment. Verify that a
+    # probe launched without our marker variable is observable as well.
+    $null=Invoke-Isolated -executable $fakeDotnet -arguments @() -withoutProbeMarker
+    Confirm-AndRemoveMarker $fallbackMarker $fakeSdk
+    Write-Output 'Synthetic SDK positive controls created both markers; both were safely removed.'
     # Windows PowerShell may initialize its own caches on first launch.
     # Establish that baseline before measuring the retired script.
     $null=Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-Command','exit 0')
@@ -111,7 +133,7 @@ internal static class SdkProbe {
         Write-Output ('Synthetic launcher inventory changes: added '+($added -join ',')+'; removed '+($removed -join ','))
     }
     Check (($beforeLauncher -join "`n") -ceq ($afterLauncher -join "`n") -and
-        -not [IO.File]::Exists((Join-Path $root 'unexpected-sdk-launch.txt')) -and
+        -not [IO.File]::Exists($probeMarker) -and -not [IO.File]::Exists($fallbackMarker) -and
         -not [IO.Directory]::Exists($forbiddenWork)) 'The retired launcher created data or started the synthetic SDK.'
     Write-Output 'Retired launcher refused before creating files or starting the synthetic SDK.'
     $project=Join-Path $repository 'windows\native\CodexIndex\Tests\CodexIndex.Tests.csproj'
