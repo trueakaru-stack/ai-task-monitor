@@ -80,12 +80,23 @@ try {
         } finally { $process.Dispose() }
     }
 
-    $pwsh = (Get-Command pwsh.exe -CommandType Application | Select-Object -First 1).Source
-    Check ([IO.File]::Exists($pwsh)) 'Hosted PowerShell is unavailable.'
-    $fixture = Join-Path $repositoryRoot '.github\claude-anchor-ci\Fixture.ps1'
-    $output = Invoke-Isolated -arguments @('-NoProfile', '-NonInteractive', '-File', $fixture, '-Root', $root) -executable $pwsh
-    Write-Output $output.TrimEnd()
-    Write-Output 'Claude anchor feasibility used synthetic files only.'
+    $projects = @(
+        @{ Project='windows\native\Tests\ClaudeFileSource\ClaudeFileSource.Tests.csproj'; Assembly='bin\ClaudeFileSource.Tests\release\ClaudeFileSource.Tests.dll' },
+        @{ Project='windows\native\Tests\ClaudeFileIdentity\ClaudeFileIdentity.Tests.csproj'; Assembly='bin\ClaudeFileIdentity.Tests\release\ClaudeFileIdentity.Tests.dll' },
+        @{ Project='windows\native\Tests\ClaudePump\ClaudePump.Tests.csproj'; Assembly='bin\ClaudePump.Tests\release\AITaskMonitor.ClaudePump.Tests.dll' },
+        @{ Project='windows\native\Tests\ClaudeFileUi\ClaudeFileUi.Tests.csproj'; Assembly='bin\ClaudeFileUi.Tests\release\AITaskMonitor.Prototype.Tests.dll' }
+    )
+    foreach ($item in $projects) {
+        $project = Join-Path $repositoryRoot $item.Project
+        $build = Invoke-Isolated @('build', $project, '-c', 'Release', '--configfile', $config,
+            '--artifacts-path', $artifacts, '-p:NuGetAudit=false', '--nologo')
+        Write-Output $build.TrimEnd()
+        $assembly = Join-Path $artifacts $item.Assembly
+        Check ([IO.File]::Exists($assembly)) 'A synthetic test assembly is missing.'
+        $output = Invoke-Isolated @($assembly)
+        Write-Output $output.TrimEnd()
+    }
+    Write-Output 'Claude journal checks used synthetic files only.'
 } finally {
     foreach ($scope in @('User','Machine')) {
         $before = if ($scope -eq 'User') { $beforeUser } else { $beforeMachine }

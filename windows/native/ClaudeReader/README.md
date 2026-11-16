@@ -88,24 +88,29 @@ An incomplete retained plan is flagged and retention overflow marks the source
 unavailable and unconfirmed rather than silently confirming a partial view.
 These bounds also apply to fallback cards after a failure during a pending read.
 
-During a poll, Windows `FILE_ID_INFO` is compared across the two simultaneously
-open handles; unsupported or invalid identities are treated as loss. When a
-journal exists, the file source also reports loss on non-Windows systems where
-this identity check is unavailable. Missing optional files do not request an
-identity; the separate event parser is not restricted by this check. This does
-not make a concurrent read atomic. A same-prefix replacement between polls, or
-after the second handle opens, can still go undetected. IDs can be reused, and
-coordinated ABA changes, changes between checking the two files, or a writer
-that never records an event can also remain undetected. An append after
-the captured length may only be seen on the next poll. The source cannot tell a
-live partial write from a permanently interrupted one, cannot guarantee a future
-completion or notice every writer failure, and its memory of loss does not
-survive a process restart. It does not discover a real profile, register hooks,
-or start itself in the application. Synthetic tests of bounded input and known
-failures do not establish behavior for a real Claude installation.
+During a poll, Windows `FILE_ID_INFO` is compared across simultaneously open
+read handles. A successful read keeps one read-only handle, shared for writes
+and deletion, as an identity anchor until the next poll. Comparing the still-open
+previous and current file identities also detects an identical-content
+replacement between polls. Unsupported or invalid identities are treated as
+loss. This protects observed continuity; it does not make a concurrent read
+atomic. A replacement before first observation, an ABA swap between observations,
+a replacement after the verification opens, changes between files, and a writer
+that omits an event can remain undetected. An append after the captured length
+may wait for the next poll. A retained file can occupy storage until its handle
+is closed, even after rotation. Dispose the source after use. Disposal can wait
+for a blocked read and must run off the UI thread; the prototype pump schedules it
+on a worker without waiting on the dispatcher.
 
-Do not connect this reader to real profiles until the remaining file identity
-gap and the other documented integration limitations are handled.
+The source cannot tell a live partial write from a permanently interrupted one,
+cannot guarantee a future completion or notice every writer failure, and its
+memory of loss does not survive a process restart. It does not discover a real
+profile, register hooks, or start itself in the application. Synthetic tests
+of bounded input and known failures do not establish behavior for a real Claude
+installation.
+
+Do not connect this reader to real profiles until the remaining read race,
+connection and lifecycle limitations are handled.
 
 The phase-aware format must not be passed to the old reader: an older monitor
 can misinterpret a phase event as a confirmed step. A separate journal and an
