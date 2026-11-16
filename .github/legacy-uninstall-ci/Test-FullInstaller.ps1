@@ -478,7 +478,9 @@ try{
     $cmdPath=Join-Path $env:SystemRoot 'System32\cmd.exe'
     $cmdStart=New-IsolatedStart $cmdPath $cmdValues
     $cmdStart.Arguments='/d /s /c ""'+$commandPath+'""'
+    $cmdStart.RedirectStandardOutput=$true;$cmdStart.RedirectStandardError=$true
     $setup=[Diagnostics.Process]::Start($cmdStart)
+    $cmdOut=$setup.StandardOutput.ReadToEndAsync();$cmdErr=$setup.StandardError.ReadToEndAsync()
     $childClock=[Diagnostics.Stopwatch]::StartNew();$removalChild=$null
     while($null -eq $removalChild -and $childClock.Elapsed.TotalSeconds -lt 30){
         if($setup.HasExited){throw 'The installed removal CMD exited before starting PowerShell.'}
@@ -497,8 +499,15 @@ try{
         Invoke-DialogButton $question $removalChild @('Yes','Да')
         $result=Find-DialogText $removalChild @('Claude Code disconnection was checked.') 40
         Save-DialogScreenshot $result $removalChild 'removal-result-en'
+        Write-Output ('Synthetic removal result: '+((Get-Names $result) -join ' | '))
         Dismiss-Dialog $result $removalChild
-        Check ($removalChild.WaitForExit(10000) -and $removalChild.ExitCode -eq 0) 'The installed uninstaller did not complete its verified removal.'
+        $removalExited=$removalChild.WaitForExit(10000)
+        $removalExit=if($removalExited){[string]$removalChild.ExitCode}else{'still running'}
+        $setup.Refresh()
+        $observedCmdOut=if($cmdOut.IsCompleted){$cmdOut.Result}else{'pending'}
+        $observedCmdErr=if($cmdErr.IsCompleted){$cmdErr.Result}else{'pending'}
+        Write-Output ('Synthetic removal exit diagnostic: powershell='+$removalExit+'; cmd exited='+$setup.HasExited+'; launcher exists='+[IO.File]::Exists($launcher)+'; app script exists='+[IO.File]::Exists($appScript)+'; stdout='+$observedCmdOut+'; stderr='+$observedCmdErr)
+        Check ($removalExited -and $removalChild.ExitCode -eq 0) 'The installed uninstaller did not complete its verified removal.'
     }finally{
         if(-not $removalChild.HasExited){$removalChild.Kill();[void]$removalChild.WaitForExit(10000)}
         $removalChild.Dispose()
