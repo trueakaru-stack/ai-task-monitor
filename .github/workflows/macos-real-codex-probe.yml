@@ -63,7 +63,7 @@ jobs:
           (allow file-write* (subpath (param "TASK_ROOT")) (subpath "/Users/runner/.codex"))
           (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
           (deny network*)
-          (allow network-outbound (remote ip "127.0.0.1:45231"))
+          (allow network-outbound (remote ip "localhost:45231"))
           (allow mach-lookup)
           (deny mach-lookup (global-name "com.apple.cfprefsd.agent") (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.bsd.dirhelper"))
           PROFILE
