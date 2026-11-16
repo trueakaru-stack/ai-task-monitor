@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks, screenshots]
+        part: [checks, screenshots-active, screenshots-empty]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
@@ -29,7 +29,7 @@ jobs:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
     steps:
       - name: Verify passive observation in isolated Windows
-        if: ${{ matrix.part != 'screenshots' || !contains(github.event.head_commit.message, '[remaining-checks]') }}
+        if: ${{ matrix.part == 'checks' || !contains(github.event.head_commit.message, '[remaining-checks]') }}
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -110,7 +110,8 @@ jobs:
                 Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
               }
             }else{
-              foreach($count in @(1)){foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){
+              $counts=if($env:AITM_TEST_PART -eq 'screenshots-active'){@(1)}else{@(0)}
+              foreach($count in $counts){foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){
                 $stem="codex-$count-$theme-$language-$mode"
                 $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks',[string]$count,'-PreviewSourceWarning','partial-data','-PreviewWarningProvider','codex','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
                 if($count -eq 1){$arguments+=@('-PreviewUnconfirmed','-PreviewPlanUnconfirmed','-PreviewScenario','planned')}
@@ -124,10 +125,10 @@ jobs:
             if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}
           }
       - name: Preserve synthetic screenshots
-        if: always() && matrix.part == 'screenshots' && !contains(github.event.head_commit.message, '[remaining-checks]')
+        if: always() && matrix.part != 'checks' && !contains(github.event.head_commit.message, '[remaining-checks]')
         uses: actions/upload-artifact@v4
         with:
-          name: windows-codex-passive-screenshots
+          name: windows-codex-passive-${{ matrix.part }}
           path: ${{ runner.temp }}/aitm-codex-passive-ci-*/screenshots/*.png
           if-no-files-found: warn
           retention-days: 7

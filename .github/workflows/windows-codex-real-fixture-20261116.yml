@@ -3,6 +3,7 @@ on:
   push:
     branches: [codex/windows-codex-no-index-20261116]
     paths:
+      - 'windows/app/CodexProgress.ps1'
       - '.github/codex-real-fixture-ci/**'
       - '.github/workflows/windows-codex-real-fixture-20261116.yml'
 permissions:

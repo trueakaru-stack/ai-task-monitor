@@ -13,7 +13,7 @@ $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'The monitor source failed to parse.'}
-$names=@('Prop','Tr','Localized-TaskTitle','Localized-TaskActivity','Lock-State','Find-PriorLifecycle','Thread-State','Codex-Uncertain','Session-File',
+$names=@('Prop','Tr','Localized-TaskTitle','Localized-TaskActivity','Source-WarningText','Lock-State','Find-PriorLifecycle','Thread-State','Codex-Uncertain','Session-File',
  'Session-Workspace','Progress-Files','Manual-Tasks','Read-TailText','Codex-Plan','Codex-Activity','Read-ObservedCodexTail','Codex-ObservedActivity',
  'Plan-Progress','Codex-IndexCandidates','Codex-UnindexedCandidates','Codex-Tasks','Unconfirmed-Tasks','Source-Snapshot')
 $definitions=foreach($name in $names){
@@ -67,7 +67,7 @@ function New-Session([string]$id,[string]$turn){
 Write-Index @((Record 'no-event'))
 [IO.File]::WriteAllText((Join-Path $lockDirectory 'no-event.lock'),'')
 $empty=Source-Snapshot
-Require (@($empty.Tasks).Count -eq 0 -and @($empty.Unavailable) -contains 'Codex' -and @($empty.PartialData) -contains 'Codex') 'Lock presence alone created activity or an empty-state claim.'
+Require (@($empty.Tasks).Count -eq 0 -and @($empty.Unavailable) -contains 'Codex' -and $empty.CodexIncomplete) 'Lock presence alone created activity or an empty-state claim.'
 
 # Reproduce the conflicting Windows share mode with a synthetic writer file.
 $lock=Join-Path $lockDirectory 'writer.lock'
@@ -141,7 +141,7 @@ Require ($second.Count -eq 1 -and -not $second[0].ActivityObserved -and $second[
 Require (@($changedIndex.Tasks|Where-Object {$_.Id -eq 'task-a' -and -not $_.Active}).Count -eq 1) 'An observed task vanished when its index entry disappeared.'
 Write-Event $pathB 'task_complete' 'turn-b'
 $completed=Source-Snapshot
-Require (@($completed.Tasks|Where-Object Id -eq 'task-b').Count -eq 0 -and @($completed.PartialData) -contains 'Codex') 'A matched terminal or the incomplete-source warning was mishandled.'
+Require (@($completed.Tasks|Where-Object Id -eq 'task-b').Count -eq 0 -and $completed.CodexIncomplete) 'A matched terminal or the incomplete-source warning was mishandled.'
 
 # Paginated ItemCompleted carries thread and turn identity. Legacy commentary
 # is displayed only as a record from a verified session file, not as a turn.
@@ -228,19 +228,34 @@ try{
   $script:unindexedScan.CheckedFiles -le 256 -and $script:unindexedScan.BytesRead -le 4194304) 'Invalid, incomplete, ambiguous or oversized discovery was accepted.'
  $noIndex=Source-Snapshot
  Require (@($noIndex.Tasks|Where-Object Id -eq $noIndexId).Count -eq 0 -and
-  @($noIndex.PartialData) -contains 'Codex') 'An old unobserved, unlocked rollout was treated as an active task.'
+  $noIndex.CodexIncomplete) 'An old unobserved, unlocked rollout was treated as an active task.'
  [IO.File]::AppendAllText($noIndexPath,($legacyItem+"`n"),[Text.UTF8Encoding]::new($false))
  $noIndex=Source-Snapshot
  $card=@($noIndex.Tasks|Where-Object Id -eq $noIndexId)
  Require ($card.Count -eq 1 -and -not $card[0].Active -and $card[0].Status -eq 'Статус не подтверждён' -and
   $card[0].TitleGenerated -and $card[0].Title -ceq 'Задача Codex' -and $card[0].ActivityObserved -and
-  @($noIndex.PartialData) -contains 'Codex') 'An unindexed CLI session was lost, confirmed, or not marked partial.'
+  $noIndex.CodexIncomplete) 'An unindexed CLI session was lost, confirmed, or not marked partial.'
  $script:resolvedLanguage='en'
  Require ((Localized-TaskTitle $card[0]) -ceq 'Codex task') 'The generated Codex title was not translated.'
  $userTitle=[PSCustomObject]@{Provider='codex';Title='Задача Codex';TitleGenerated=$false}
  Require ((Localized-TaskTitle $userTitle) -ceq 'Задача Codex') 'A user-provided Codex title was translated.'
  $script:resolvedLanguage='ru'
  Require ((Localized-TaskTitle $card[0]) -ceq 'Задача Codex') 'The generated Russian Codex title was changed.'
+ Require ((Source-WarningText @('Codex') @() @() $true) -ceq 'Список задач Codex может быть неполным' -and
+  (Source-WarningText @('Codex') @() @('Codex') $false) -ceq 'Часть данных недоступна: Codex') 'Codex coverage and read failures were conflated in Russian.'
+ $script:resolvedLanguage='en'
+ Require ((Source-WarningText @('Codex') @() @() $true) -ceq 'The Codex task list may be incomplete' -and
+  (Source-WarningText @('Codex') @() @('Codex') $false) -ceq 'Some data is unavailable: Codex') 'Codex coverage and read failures were conflated in English.'
+ $script:resolvedLanguage='ru'
+ $originalHome=$codexHome;$originalIndex=$sessionIndex
+ try{
+  $codexHome=Join-Path $fixture 'missing-codex-home'
+  $sessionIndex=Join-Path $codexHome 'session_index.jsonl'
+  $gone=Source-Snapshot
+  Require (@($gone.Unavailable) -contains 'Codex' -and @($gone.Tasks|Where-Object {$_.Id -eq $noIndexId -and -not $_.Active}).Count -eq 1) 'A vanished Codex home hid previously visible tasks.'
+ }finally{$codexHome=$originalHome;$sessionIndex=$originalIndex}
+ $script:unindexedScan=$null
+ [void](Source-Snapshot)
  $hiddenPath=$noIndexPath+'.fixture-hidden'
  $scanTick=$script:sessionDiscovery.LastScanTicks
  [IO.File]::Move($noIndexPath,$hiddenPath)
@@ -279,13 +294,32 @@ try{
  $budgetRoot=Join-Path $fixture 'bounded-file-count'
  $budgetDay=Join-Path (Join-Path (Join-Path $budgetRoot ([DateTime]::UtcNow.ToString('yyyy'))) ([DateTime]::UtcNow.ToString('MM'))) ([DateTime]::UtcNow.ToString('dd'))
  [void][IO.Directory]::CreateDirectory($budgetDay)
+ $ids=@{}
  for($i=0;$i -lt 300;$i++){
-  $path=Join-Path $budgetDay ('rollout-synthetic-'+$i+'.jsonl')
-  [IO.File]::WriteAllText($path,'{}',[Text.UTF8Encoding]::new($false))
+  $id=[Guid]::NewGuid().ToString()
+  $path=Join-Path $budgetDay ('rollout-'+$filenameTime+'-'+$id+'.jsonl')
+  $ids[$path]=$id
+  [IO.File]::WriteAllText($path,("{}`n"),[Text.UTF8Encoding]::new($false))
  }
+ $order=@([IO.Directory]::EnumerateFiles($budgetDay,'rollout-*.jsonl',[IO.SearchOption]::TopDirectoryOnly))
+ $laterPath=[string]$order[270];$laterId=[string]$ids[$laterPath]
+ $laterMeta=@{type='session_meta';payload=@{id=$laterId}}|ConvertTo-Json -Compress
+ [IO.File]::WriteAllText($laterPath,($laterMeta+"`n"),[Text.UTF8Encoding]::new($false))
+ Write-Event $laterPath 'task_started' 'later-turn'
+ [IO.File]::WriteAllText((Join-Path $lockDirectory ($laterId+'.lock')),'',[Text.UTF8Encoding]::new($false))
  $sessionsDirectory=$budgetRoot;$script:unindexedScan=$null
  $none=@(Codex-UnindexedCandidates)
- Require ($none.Count -eq 0 -and $script:unindexedScan.CheckedFiles -eq 256 -and $script:unindexedScan.BytesRead -eq 0) 'The file-count budget was not enforced.'
+ Require ($none.Count -eq 0 -and $script:unindexedScan.CheckedFiles -eq 256 -and $script:unindexedScan.BytesRead -le 4194304) 'The file-count budget was not enforced.'
+ $writer=[IO.File]::Open($laterPath,[IO.FileMode]::Open,[IO.FileAccess]::Write,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+ try{[void]$writer.Seek(0,[IO.SeekOrigin]::End);$writer.WriteByte(10)}finally{$writer.Dispose()}
+ $script:unindexedScan.Tick=0
+ $later=@(Codex-UnindexedCandidates)
+ Require (@($later|Where-Object id -eq $laterId).Count -eq 1 -and $script:unindexedScan.CheckedFiles -le 256) 'The next page did not reach a later session.'
+ $laterSnapshot=Source-Snapshot
+ Require (@($laterSnapshot.Tasks|Where-Object {$_.Id -eq $laterId -and -not $_.Active -and $_.Status -eq 'Статус не подтверждён'}).Count -eq 1) 'A later-page session did not reach the task list unconfirmed.'
+ $script:unindexedScan.Tick=0
+ $nextSnapshot=Source-Snapshot
+ Require (@($nextSnapshot.Tasks|Where-Object {$_.Id -eq $laterId -and -not $_.Active -and $_.Status -eq 'Статус не подтверждён'}).Count -eq 1) 'A prior page lost its visible unconfirmed card.'
  $budgetRoot=Join-Path $fixture 'bounded-byte-count'
  $budgetDay=Join-Path (Join-Path (Join-Path $budgetRoot ([DateTime]::UtcNow.ToString('yyyy'))) ([DateTime]::UtcNow.ToString('MM'))) ([DateTime]::UtcNow.ToString('dd'))
  [void][IO.Directory]::CreateDirectory($budgetDay)
@@ -298,6 +332,18 @@ try{
  $sessionsDirectory=$budgetRoot;$script:unindexedScan=$null
  [void]@(Codex-UnindexedCandidates)
  Require ($script:unindexedScan.CheckedFiles -le 256 -and $script:unindexedScan.BytesRead -eq 4194304) 'The byte budget was not enforced.'
+ $script:unindexedScan.Tick=0
+ Require (@(Codex-UnindexedCandidates).Count -gt 0) 'The byte-limited scan did not resume.'
+ $badRoot=Join-Path $fixture 'redirected-sessions'
+ $badYear=Join-Path $badRoot ([DateTime]::UtcNow.ToString('yyyy'))
+ $badMonth=Join-Path $badYear ([DateTime]::UtcNow.ToString('MM'))
+ $badDay=Join-Path $badMonth ([DateTime]::UtcNow.ToString('dd'))
+ $outside=Join-Path $fixture 'redirected-target'
+ foreach($dir in @($badMonth,$outside)){[void][IO.Directory]::CreateDirectory($dir)}
+ $null=New-Item -ItemType Junction -Path $badDay -Target $outside
+ $sessionsDirectory=$badRoot;$script:unindexedScan=$null
+ [void]@(Codex-UnindexedCandidates)
+ Require $script:codexDiscoveryFailed 'A redirected dated directory was not reported as a read failure.'
 }finally{$sessionsDirectory=$originalSessionsDirectory;$script:unindexedScan=$null}
 
 # Oversized and incomplete indices cannot be returned as complete empty lists.

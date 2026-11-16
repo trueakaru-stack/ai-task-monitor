@@ -116,7 +116,7 @@ try {
 
     # A temporary failure keeps the last task snapshot unconfirmed and then recovers.
     $snapshot=Source-Snapshot
-    Require (@($snapshot.Tasks | Where-Object { -not $_.Active -and $_.Status -eq 'Статус не подтверждён' }).Count -eq 2 -and @($snapshot.PartialData) -contains 'Codex') 'The initial source snapshot did not retain both tasks and partial data warning.'
+    Require (@($snapshot.Tasks | Where-Object { -not $_.Active -and $_.Status -eq 'Статус не подтверждён' }).Count -eq 2 -and $snapshot.CodexIncomplete) 'The initial source snapshot did not retain both tasks and incomplete-list warning.'
     $hidden=Join-Path $codexHome 'sessions-hidden'
     Move-Item -LiteralPath $sessionsDirectory -Destination $hidden
     try {
@@ -127,7 +127,7 @@ try {
         Move-Item -LiteralPath $hidden -Destination $sessionsDirectory
     }
     $recovered=Source-Snapshot
-    Require (@($recovered.PartialData) -contains 'Codex' -and @($recovered.Tasks | Where-Object { -not $_.Active -and $_.Status -eq 'Статус не подтверждён' }).Count -eq 2) 'The source did not recover its unconfirmed tasks after the directory returned.'
+    Require ($recovered.CodexIncomplete -and @($recovered.Tasks | Where-Object { -not $_.Active -and $_.Status -eq 'Статус не подтверждён' }).Count -eq 2) 'The source did not recover its unconfirmed tasks after the directory returned.'
 } finally {
     $readyLock.Dispose()
     $lateLock.Dispose()
