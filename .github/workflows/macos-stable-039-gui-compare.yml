@@ -1,0 +1,664 @@
+name: macOS stable DMG GUI comparison
+on:
+  push:
+    branches: [codex/macos-stable-039-gui-compare-20261116]
+    paths: [".github/workflows/macos-stable-039-gui-compare.yml"]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  stable-apple-silicon:
+    if: ${{ github.repository == 'trueakaru-stack/ai-task-monitor' }}
+    runs-on: macos-26
+    timeout-minutes: 8
+    steps:
+      - name: Prepare disposable synthetic environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$GITHUB_REPOSITORY" = trueakaru-stack/ai-task-monitor
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-gui-039.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-denied-039.XXXXXXXX")"
+          printf 'synthetic profile marker\n' > "$task_marker"
+          mkdir -p "$task_root"/{input,mount,temp,synthetic-home,out,previews,plan-previews,Applications}
+          printf 'AITM_TEST_TASK_ROOT=%s\nAITM_TEST_DENIED_FILE=%s\n' "$task_root" "$task_marker" >> "$GITHUB_ENV"
+      - name: Download the exact completed candidate artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "14248403132"
+          run-id: "43911548511"
+          github-token: ${{ github.token }}
+          path: ${{ env.AITM_TEST_TASK_ROOT }}/input
+      - name: Validate profile isolation and run the actual application window
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_TEST_TASK_ROOT"
+          case "$task_root" in /Users/runner/work/_temp/aitm-gui-039.*) ;; *) echo 'Unexpected temporary root'; exit 1;; esac
+          cd "$task_root"
+          image_count="$(find input -type f -name 'AITaskMonitor-macOS-0.3.9.dmg' -print | wc -l | tr -d ' ')"
+          test "$image_count" = 1
+          image_path="$(find input -type f -name 'AITaskMonitor-macOS-0.3.9.dmg' -print)"
+          expected=5ff53fc7c6b4961ad0b647444c88703c6730fd665803483d953b23a2a41c48ee
+          test "$(shasum -a 256 "$image_path" | cut -d' ' -f1)" = "$expected"
+          echo "Verified exact final DMG: $expected"
+          cat > "$task_root/graphics.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (allow mach-lookup)
+          (deny mach-lookup (global-name "com.apple.cfprefsd.agent") (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.bsd.dirhelper"))
+          PROFILE
+          cat > "$task_root/run-graphics" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "CFFIXED_USER_HOME=$AITM_TEST_TASK_ROOT/synthetic-home" \
+            "LANG=en_US.UTF-8" \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" -f "$AITM_TEST_TASK_ROOT/graphics.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-graphics"
+          task_run="$task_root/run-graphics"
+          "$task_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          ln -s "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"
+          for marker in "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"; do
+            if "$task_run" /bin/cat "$marker" > /dev/null 2>&1; then echo 'Profile read unexpectedly allowed'; exit 1; fi
+            if "$task_run" /usr/bin/touch "$marker" > /dev/null 2>&1; then echo 'Profile write unexpectedly allowed'; exit 1; fi
+          done
+          cat > "$task_root/safety.c" <<'C'
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
+          #include <errno.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          int main(void) {
+            const char *blocked[] = {"com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon", "com.apple.bsd.dirhelper"};
+            for (unsigned i = 0; i < sizeof(blocked)/sizeof(blocked[0]); i++) {
+              mach_port_t port = MACH_PORT_NULL;
+              kern_return_t r = bootstrap_look_up(bootstrap_port, blocked[i], &port);
+              if (r == KERN_SUCCESS) mach_port_deallocate(mach_task_self(), port);
+              if (r != BOOTSTRAP_NOT_PRIVILEGED) { fprintf(stderr, "Profile service block not verified: %d\n", r); return 1; }
+            }
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) {
+              if (errno != EPERM && errno != EACCES) return 2;
+            } else {
+              struct sockaddr_in addr = {0};
+              addr.sin_len = sizeof(addr);
+              addr.sin_family = AF_INET;
+              addr.sin_port = htons(9);
+              addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+              errno = 0;
+              if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || (errno != EPERM && errno != EACCES)) {
+                close(fd); fprintf(stderr, "Loopback network was not provably denied.\n"); return 3;
+              }
+              close(fd);
+            }
+            puts("Profile services and loopback network are denied");
+            return 0;
+          }
+          C
+          cat > "$task_root/window.c" <<'C'
+          #include <CoreGraphics/CoreGraphics.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+            if (argc != 2) return 2;
+            int target = atoi(argv[1]), found = 0;
+            CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+            if (!windows) { fputs("Window list unavailable\n", stderr); return 3; }
+            for (CFIndex i = 0; i < CFArrayGetCount(windows); i++) {
+              CFDictionaryRef row = CFArrayGetValueAtIndex(windows, i);
+              CFNumberRef owner = CFDictionaryGetValue(row, kCGWindowOwnerPID), level = CFDictionaryGetValue(row, kCGWindowLayer);
+              CFDictionaryRef bounds = CFDictionaryGetValue(row, kCGWindowBounds);
+              int ownerID = -1, layer = -1;
+              CGRect rect = CGRectZero;
+              if (!owner || !level || !bounds) continue;
+              if (!CFNumberGetValue(owner, kCFNumberIntType, &ownerID) || !CFNumberGetValue(level, kCFNumberIntType, &layer)) continue;
+              if (!CGRectMakeWithDictionaryRepresentation(bounds, &rect)) continue;
+              if (ownerID == target && layer == 0 && rect.size.width >= 200 && rect.size.height >= 100) {
+                printf("Visible application window: %.0f x %.0f points\n", rect.size.width, rect.size.height);
+                found++;
+              }
+            }
+            CFRelease(windows);
+            return found ? 0 : 1;
+          }
+          C
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/safety.c" -o "$task_root/safety"
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/window.c" -framework CoreGraphics -framework CoreFoundation -o "$task_root/window"
+          "$task_run" "$task_root/safety"
+          task_pid=""
+          cleanup() {
+            if test -n "$task_pid" && kill -0 "$task_pid" 2>/dev/null; then
+              kill -TERM "$task_pid" 2>/dev/null || true
+              wait "$task_pid" 2>/dev/null || true
+            fi
+            if /sbin/mount | /usr/bin/grep -F " on $task_root/mount (" > /dev/null; then
+              /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+                "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil detach "$task_root/mount" >/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+            "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil attach "$image_path" \
+            -readonly -nobrowse -noautoopen -mountpoint "$task_root/mount" -plist > "$task_root/out/mount.plist"
+          task_mounted_app="$task_root/mount/AI Task Monitor.app"
+          test -d "$task_mounted_app"
+          test ! -L "$task_mounted_app"
+          task_app="$task_root/Applications/AI Task Monitor.app"
+          test ! -e "$task_app"
+          test ! -L "$task_app"
+          /usr/bin/ditto "$task_mounted_app" "$task_app"
+          /usr/bin/diff -qr "$task_mounted_app" "$task_app"
+          /usr/bin/codesign --verify --deep --strict "$task_app"
+          task_binary="$task_app/Contents/MacOS/AITaskMonitor"
+          test -x "$task_binary"
+          /usr/bin/xcrun lipo "$task_binary" -verify_arch arm64 x86_64
+          test "$(/usr/bin/plutil -extract AITaskMonitorReleaseVersion raw -o - "$task_app/Contents/Info.plist")" = 0.3.9
+          test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = 0.3.9
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$task_app/Contents/Info.plist")" = 13
+          echo "Starting verified installed copy from the exact DMG without preview flags"
+          "$task_run" "$task_binary" > "$task_root/out/app.log" 2>&1 &
+          task_pid=$!
+          found=0
+          for attempt in {1..40}; do
+            if ! kill -0 "$task_pid" 2>/dev/null; then
+              set +e
+              wait "$task_pid"
+              result=$?
+              set -e
+              task_pid=""
+              echo "Application exited before a window was verified (status $result)."
+              cat "$task_root/out/app.log"
+              exit 1
+            fi
+            if "$task_run" "$task_root/window" "$task_pid" > "$task_root/out/window.log" 2>&1; then found=1; break; fi
+            sleep 0.5
+          done
+          if test "$found" != 1; then
+            echo "No visible application window detected."
+            cat "$task_root/out/window.log" "$task_root/out/app.log"
+            exit 1
+          fi
+          cat "$task_root/out/window.log"
+          sleep 3
+          kill -0 "$task_pid"
+          echo 'Installed copy from the exact DMG remained running with its own visible window.'
+          kill -TERM "$task_pid"
+          wait "$task_pid" || true
+          task_pid=""
+          echo 'Checking synthetic preview render; this is separate from the real-window test.'
+          "$task_run" "$task_binary" --render-previews "$task_root/previews" > "$task_root/out/preview.log" 2>&1 &
+          task_pid=$!
+          for attempt in {1..60}; do
+            if test -s "$task_root/previews/expanded-dark.png" && test -s "$task_root/previews/expanded-light.png"; then break; fi
+            if ! kill -0 "$task_pid" 2>/dev/null; then break; fi
+            sleep 0.5
+          done
+          if test -s "$task_root/previews/expanded-dark.png" && test -s "$task_root/previews/expanded-light.png"; then
+            cp "$task_root/previews/expanded-dark.png" "$task_root/out/synthetic-expanded-dark.png"
+            cp "$task_root/previews/expanded-light.png" "$task_root/out/synthetic-expanded-light.png"
+            echo 'Synthetic previews from exact app binary saved.'
+          else
+            echo 'Synthetic preview render not obtained; real-window result above is independent.'
+            cat "$task_root/out/preview.log"
+          fi
+          if test -n "$task_pid" && kill -0 "$task_pid" 2>/dev/null; then
+            kill -TERM "$task_pid" 2>/dev/null || true
+            wait "$task_pid" 2>/dev/null || true
+          fi
+          task_pid=""
+          echo 'Rendering additional unconfirmed-state previews with synthetic data.'
+          "$task_run" /usr/bin/env AITM_CLAUDE_PLAN_PREVIEW_ONLY=1 "$task_binary" --render-previews "$task_root/plan-previews" > "$task_root/out/plan-preview.log" 2>&1 &
+          task_pid=$!
+          for attempt in {1..120}; do
+            if test -s "$task_root/plan-previews/codex-plan-ru-dark-expanded-stale.png" && test -s "$task_root/plan-previews/codex-plan-ru-light-expanded-stale.png" && test -s "$task_root/plan-previews/codex-plan-en-dark-expanded-stale.png" && test -s "$task_root/plan-previews/codex-plan-en-light-expanded-stale.png"; then break; fi
+            if ! kill -0 "$task_pid" 2>/dev/null; then break; fi
+            sleep 0.5
+          done
+          for language in ru en; do
+            for appearance in dark light; do
+              candidate="$task_root/plan-previews/codex-plan-$language-$appearance-expanded-stale.png"
+              if test -s "$candidate"; then /bin/cp "$candidate" "$task_root/out/"; fi
+            done
+          done
+          echo 'Preview figures are synthetic and do not establish a live service session.'
+      - name: Save diagnostic evidence
+        if: ${{ always() && env.AITM_TEST_TASK_ROOT != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: stable-039-gui-apple-silicon
+          path: ${{ env.AITM_TEST_TASK_ROOT }}/out/
+          if-no-files-found: warn
+          retention-days: 7
+  compare-intel:
+    if: ${{ github.repository == 'trueakaru-stack/ai-task-monitor' }}
+    runs-on: macos-15-intel
+    timeout-minutes: 12
+    steps:
+      - name: Prepare alpha environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$GITHUB_REPOSITORY" = trueakaru-stack/ai-task-monitor
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-gui-039.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-denied-039.XXXXXXXX")"
+          printf 'synthetic profile marker\n' > "$task_marker"
+          mkdir -p "$task_root"/{input,mount,temp,synthetic-home,out,previews,plan-previews,Applications}
+          printf 'AITM_TEST_TASK_ROOT=%s\nAITM_TEST_DENIED_FILE=%s\n' "$task_root" "$task_marker" >> "$GITHUB_ENV"
+      - name: Download verified alpha DMG
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "14236812788"
+          run-id: "43890590251"
+          github-token: ${{ github.token }}
+          path: ${{ env.AITM_TEST_TASK_ROOT }}/input
+      - name: Compare alpha window on Intel
+        id: alpha_window
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_TEST_TASK_ROOT"
+          case "$task_root" in /Users/runner/work/_temp/aitm-gui-039.*) ;; *) echo 'Unexpected temporary root'; exit 1;; esac
+          cd "$task_root"
+          image_count="$(find input -type f -name 'AITaskMonitor-macOS-0.3.9-alpha.dmg' -print | wc -l | tr -d ' ')"
+          test "$image_count" = 1
+          image_path="$(find input -type f -name 'AITaskMonitor-macOS-0.3.9-alpha.dmg' -print)"
+          expected=297ade4c5fc1347ab9b1c93fb9686d553667066b425808a8161308896bf34e2e
+          test "$(shasum -a 256 "$image_path" | cut -d' ' -f1)" = "$expected"
+          echo "Verified exact final DMG: $expected"
+          cat > "$task_root/graphics.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (allow mach-lookup)
+          (deny mach-lookup (global-name "com.apple.cfprefsd.agent") (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.bsd.dirhelper"))
+          PROFILE
+          cat > "$task_root/run-graphics" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "CFFIXED_USER_HOME=$AITM_TEST_TASK_ROOT/synthetic-home" \
+            "LANG=en_US.UTF-8" \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" -f "$AITM_TEST_TASK_ROOT/graphics.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-graphics"
+          task_run="$task_root/run-graphics"
+          "$task_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          ln -s "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"
+          for marker in "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"; do
+            if "$task_run" /bin/cat "$marker" > /dev/null 2>&1; then echo 'Profile read unexpectedly allowed'; exit 1; fi
+            if "$task_run" /usr/bin/touch "$marker" > /dev/null 2>&1; then echo 'Profile write unexpectedly allowed'; exit 1; fi
+          done
+          cat > "$task_root/safety.c" <<'C'
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
+          #include <errno.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          int main(void) {
+            const char *blocked[] = {"com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon", "com.apple.bsd.dirhelper"};
+            for (unsigned i = 0; i < sizeof(blocked)/sizeof(blocked[0]); i++) {
+              mach_port_t port = MACH_PORT_NULL;
+              kern_return_t r = bootstrap_look_up(bootstrap_port, blocked[i], &port);
+              if (r == KERN_SUCCESS) mach_port_deallocate(mach_task_self(), port);
+              if (r != BOOTSTRAP_NOT_PRIVILEGED) { fprintf(stderr, "Profile service block not verified: %d\n", r); return 1; }
+            }
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) {
+              if (errno != EPERM && errno != EACCES) return 2;
+            } else {
+              struct sockaddr_in addr = {0};
+              addr.sin_len = sizeof(addr);
+              addr.sin_family = AF_INET;
+              addr.sin_port = htons(9);
+              addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+              errno = 0;
+              if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || (errno != EPERM && errno != EACCES)) {
+                close(fd); fprintf(stderr, "Loopback network was not provably denied.\n"); return 3;
+              }
+              close(fd);
+            }
+            puts("Profile services and loopback network are denied");
+            return 0;
+          }
+          C
+          cat > "$task_root/window.c" <<'C'
+          #include <CoreGraphics/CoreGraphics.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+            if (argc != 2) return 2;
+            int target = atoi(argv[1]), found = 0;
+            CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+            if (!windows) { fputs("Window list unavailable\n", stderr); return 3; }
+            for (CFIndex i = 0; i < CFArrayGetCount(windows); i++) {
+              CFDictionaryRef row = CFArrayGetValueAtIndex(windows, i);
+              CFNumberRef owner = CFDictionaryGetValue(row, kCGWindowOwnerPID), level = CFDictionaryGetValue(row, kCGWindowLayer);
+              CFDictionaryRef bounds = CFDictionaryGetValue(row, kCGWindowBounds);
+              int ownerID = -1, layer = -1;
+              CGRect rect = CGRectZero;
+              if (!owner || !level || !bounds) continue;
+              if (!CFNumberGetValue(owner, kCFNumberIntType, &ownerID) || !CFNumberGetValue(level, kCFNumberIntType, &layer)) continue;
+              if (!CGRectMakeWithDictionaryRepresentation(bounds, &rect)) continue;
+              if (ownerID == target && layer == 0 && rect.size.width >= 200 && rect.size.height >= 100) {
+                printf("Visible application window: %.0f x %.0f points\n", rect.size.width, rect.size.height);
+                found++;
+              }
+            }
+            CFRelease(windows);
+            return found ? 0 : 1;
+          }
+          C
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/safety.c" -o "$task_root/safety"
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/window.c" -framework CoreGraphics -framework CoreFoundation -o "$task_root/window"
+          "$task_run" "$task_root/safety"
+          task_pid=""
+          cleanup() {
+            if test -n "$task_pid" && kill -0 "$task_pid" 2>/dev/null; then
+              kill -TERM "$task_pid" 2>/dev/null || true
+              wait "$task_pid" 2>/dev/null || true
+            fi
+            if /sbin/mount | /usr/bin/grep -F " on $task_root/mount (" > /dev/null; then
+              /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+                "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil detach "$task_root/mount" >/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+            "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil attach "$image_path" \
+            -readonly -nobrowse -noautoopen -mountpoint "$task_root/mount" -plist > "$task_root/out/mount.plist"
+          task_mounted_app="$task_root/mount/AI Task Monitor.app"
+          test -d "$task_mounted_app"
+          test ! -L "$task_mounted_app"
+          task_app="$task_root/Applications/AI Task Monitor.app"
+          test ! -e "$task_app"
+          test ! -L "$task_app"
+          /usr/bin/ditto "$task_mounted_app" "$task_app"
+          /usr/bin/diff -qr "$task_mounted_app" "$task_app"
+          /usr/bin/codesign --verify --deep --strict "$task_app"
+          task_binary="$task_app/Contents/MacOS/AITaskMonitor"
+          test -x "$task_binary"
+          /usr/bin/xcrun lipo "$task_binary" -verify_arch arm64 x86_64
+          test "$(/usr/bin/plutil -extract AITaskMonitorReleaseVersion raw -o - "$task_app/Contents/Info.plist")" = 0.3.9-alpha
+          test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = 0.3.9
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$task_app/Contents/Info.plist")" = 12
+          echo "Starting verified installed copy from the exact DMG without preview flags"
+          "$task_run" "$task_binary" > "$task_root/out/app.log" 2>&1 &
+          task_pid=$!
+          found=0
+          for attempt in {1..40}; do
+            if ! kill -0 "$task_pid" 2>/dev/null; then
+              set +e
+              wait "$task_pid"
+              result=$?
+              set -e
+              task_pid=""
+              echo "Application exited before a window was verified (status $result)."
+              cat "$task_root/out/app.log"
+              exit 1
+            fi
+            if "$task_run" "$task_root/window" "$task_pid" > "$task_root/out/window.log" 2>&1; then found=1; break; fi
+            sleep 0.5
+          done
+          if test "$found" != 1; then
+            echo "No visible application window detected."
+            cat "$task_root/out/window.log" "$task_root/out/app.log"
+            exit 1
+          fi
+          cat "$task_root/out/window.log"
+          sleep 3
+          kill -0 "$task_pid"
+          echo 'Installed copy from the exact DMG remained running with its own visible window.'
+          kill -TERM "$task_pid"
+          wait "$task_pid" || true
+          task_pid=""
+      - name: Save alpha window evidence
+        if: ${{ always() && env.AITM_TEST_TASK_ROOT != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gui-039-alpha-intel
+          path: ${{ env.AITM_TEST_TASK_ROOT }}/out/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Prepare stable environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$GITHUB_REPOSITORY" = trueakaru-stack/ai-task-monitor
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-gui-039.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-denied-039.XXXXXXXX")"
+          printf 'synthetic profile marker\n' > "$task_marker"
+          mkdir -p "$task_root"/{input,mount,temp,synthetic-home,out,previews,plan-previews,Applications}
+          printf 'AITM_TEST_TASK_ROOT=%s\nAITM_TEST_DENIED_FILE=%s\n' "$task_root" "$task_marker" >> "$GITHUB_ENV"
+      - name: Download verified stable DMG
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "14248403132"
+          run-id: "43911548511"
+          github-token: ${{ github.token }}
+          path: ${{ env.AITM_TEST_TASK_ROOT }}/input
+      - name: Compare stable window on Intel
+        id: stable_window
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_TEST_TASK_ROOT"
+          case "$task_root" in /Users/runner/work/_temp/aitm-gui-039.*) ;; *) echo 'Unexpected temporary root'; exit 1;; esac
+          cd "$task_root"
+          image_count="$(find input -type f -name 'AITaskMonitor-macOS-0.3.9.dmg' -print | wc -l | tr -d ' ')"
+          test "$image_count" = 1
+          image_path="$(find input -type f -name 'AITaskMonitor-macOS-0.3.9.dmg' -print)"
+          expected=5ff53fc7c6b4961ad0b647444c88703c6730fd665803483d953b23a2a41c48ee
+          test "$(shasum -a 256 "$image_path" | cut -d' ' -f1)" = "$expected"
+          echo "Verified exact final DMG: $expected"
+          cat > "$task_root/graphics.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (allow mach-lookup)
+          (deny mach-lookup (global-name "com.apple.cfprefsd.agent") (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.bsd.dirhelper"))
+          PROFILE
+          cat > "$task_root/run-graphics" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "CFFIXED_USER_HOME=$AITM_TEST_TASK_ROOT/synthetic-home" \
+            "LANG=en_US.UTF-8" \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" -f "$AITM_TEST_TASK_ROOT/graphics.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-graphics"
+          task_run="$task_root/run-graphics"
+          "$task_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          ln -s "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"
+          for marker in "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"; do
+            if "$task_run" /bin/cat "$marker" > /dev/null 2>&1; then echo 'Profile read unexpectedly allowed'; exit 1; fi
+            if "$task_run" /usr/bin/touch "$marker" > /dev/null 2>&1; then echo 'Profile write unexpectedly allowed'; exit 1; fi
+          done
+          cat > "$task_root/safety.c" <<'C'
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
+          #include <errno.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          int main(void) {
+            const char *blocked[] = {"com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon", "com.apple.bsd.dirhelper"};
+            for (unsigned i = 0; i < sizeof(blocked)/sizeof(blocked[0]); i++) {
+              mach_port_t port = MACH_PORT_NULL;
+              kern_return_t r = bootstrap_look_up(bootstrap_port, blocked[i], &port);
+              if (r == KERN_SUCCESS) mach_port_deallocate(mach_task_self(), port);
+              if (r != BOOTSTRAP_NOT_PRIVILEGED) { fprintf(stderr, "Profile service block not verified: %d\n", r); return 1; }
+            }
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) {
+              if (errno != EPERM && errno != EACCES) return 2;
+            } else {
+              struct sockaddr_in addr = {0};
+              addr.sin_len = sizeof(addr);
+              addr.sin_family = AF_INET;
+              addr.sin_port = htons(9);
+              addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+              errno = 0;
+              if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || (errno != EPERM && errno != EACCES)) {
+                close(fd); fprintf(stderr, "Loopback network was not provably denied.\n"); return 3;
+              }
+              close(fd);
+            }
+            puts("Profile services and loopback network are denied");
+            return 0;
+          }
+          C
+          cat > "$task_root/window.c" <<'C'
+          #include <CoreGraphics/CoreGraphics.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+            if (argc != 2) return 2;
+            int target = atoi(argv[1]), found = 0;
+            CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+            if (!windows) { fputs("Window list unavailable\n", stderr); return 3; }
+            for (CFIndex i = 0; i < CFArrayGetCount(windows); i++) {
+              CFDictionaryRef row = CFArrayGetValueAtIndex(windows, i);
+              CFNumberRef owner = CFDictionaryGetValue(row, kCGWindowOwnerPID), level = CFDictionaryGetValue(row, kCGWindowLayer);
+              CFDictionaryRef bounds = CFDictionaryGetValue(row, kCGWindowBounds);
+              int ownerID = -1, layer = -1;
+              CGRect rect = CGRectZero;
+              if (!owner || !level || !bounds) continue;
+              if (!CFNumberGetValue(owner, kCFNumberIntType, &ownerID) || !CFNumberGetValue(level, kCFNumberIntType, &layer)) continue;
+              if (!CGRectMakeWithDictionaryRepresentation(bounds, &rect)) continue;
+              if (ownerID == target && layer == 0 && rect.size.width >= 200 && rect.size.height >= 100) {
+                printf("Visible application window: %.0f x %.0f points\n", rect.size.width, rect.size.height);
+                found++;
+              }
+            }
+            CFRelease(windows);
+            return found ? 0 : 1;
+          }
+          C
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/safety.c" -o "$task_root/safety"
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/window.c" -framework CoreGraphics -framework CoreFoundation -o "$task_root/window"
+          "$task_run" "$task_root/safety"
+          task_pid=""
+          cleanup() {
+            if test -n "$task_pid" && kill -0 "$task_pid" 2>/dev/null; then
+              kill -TERM "$task_pid" 2>/dev/null || true
+              wait "$task_pid" 2>/dev/null || true
+            fi
+            if /sbin/mount | /usr/bin/grep -F " on $task_root/mount (" > /dev/null; then
+              /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+                "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil detach "$task_root/mount" >/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+            "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil attach "$image_path" \
+            -readonly -nobrowse -noautoopen -mountpoint "$task_root/mount" -plist > "$task_root/out/mount.plist"
+          task_mounted_app="$task_root/mount/AI Task Monitor.app"
+          test -d "$task_mounted_app"
+          test ! -L "$task_mounted_app"
+          task_app="$task_root/Applications/AI Task Monitor.app"
+          test ! -e "$task_app"
+          test ! -L "$task_app"
+          /usr/bin/ditto "$task_mounted_app" "$task_app"
+          /usr/bin/diff -qr "$task_mounted_app" "$task_app"
+          /usr/bin/codesign --verify --deep --strict "$task_app"
+          task_binary="$task_app/Contents/MacOS/AITaskMonitor"
+          test -x "$task_binary"
+          /usr/bin/xcrun lipo "$task_binary" -verify_arch arm64 x86_64
+          test "$(/usr/bin/plutil -extract AITaskMonitorReleaseVersion raw -o - "$task_app/Contents/Info.plist")" = 0.3.9
+          test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = 0.3.9
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$task_app/Contents/Info.plist")" = 13
+          echo "Starting verified installed copy from the exact DMG without preview flags"
+          "$task_run" "$task_binary" > "$task_root/out/app.log" 2>&1 &
+          task_pid=$!
+          found=0
+          for attempt in {1..40}; do
+            if ! kill -0 "$task_pid" 2>/dev/null; then
+              set +e
+              wait "$task_pid"
+              result=$?
+              set -e
+              task_pid=""
+              echo "Application exited before a window was verified (status $result)."
+              cat "$task_root/out/app.log"
+              exit 1
+            fi
+            if "$task_run" "$task_root/window" "$task_pid" > "$task_root/out/window.log" 2>&1; then found=1; break; fi
+            sleep 0.5
+          done
+          if test "$found" != 1; then
+            echo "No visible application window detected."
+            cat "$task_root/out/window.log" "$task_root/out/app.log"
+            exit 1
+          fi
+          cat "$task_root/out/window.log"
+          sleep 3
+          kill -0 "$task_pid"
+          echo 'Installed copy from the exact DMG remained running with its own visible window.'
+          kill -TERM "$task_pid"
+          wait "$task_pid" || true
+          task_pid=""
+      - name: Save stable window evidence
+        if: ${{ always() && env.AITM_TEST_TASK_ROOT != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gui-039-stable-intel
+          path: ${{ env.AITM_TEST_TASK_ROOT }}/out/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Report both Intel window outcomes
+        if: ${{ always() }}
+        shell: bash
+        env:
+          ALPHA_OUTCOME: ${{ steps.alpha_window.outcome }}
+          STABLE_OUTCOME: ${{ steps.stable_window.outcome }}
+        run: |
+          echo "Alpha window outcome: $ALPHA_OUTCOME"
+          echo "Stable window outcome: $STABLE_OUTCOME"
+          test "$ALPHA_OUTCOME" = success
+          test "$STABLE_OUTCOME" = success
