@@ -37,7 +37,7 @@ $launcherArguments = @(
     "/target:winexe",
     "/optimize+",
     "/out:$launcher",
-    "/win32icon:$(Join-Path $source 'assets\app-icon.ico')",
+    "/win32icon:$(Join-Path $source 'assets/app-icon.ico')",
     (Join-Path $source "CodexTasksLauncher.cs"),
     (Join-Path $source "VersionInfo.cs")
 )
@@ -61,6 +61,7 @@ $arguments = @(
     "/resource:$(Join-Path $source 'ClaudeLoopChannel.cs'),ClaudeLoopChannel.cs",
     "/resource:$(Join-Path $source 'ClaudeReaderCore.ps1'),ClaudeReaderCore.ps1",
     "/resource:$(Join-Path $source 'ClaudeRetention.cs'),ClaudeRetention.cs",
+    "/resource:$(Join-Path $source 'SafeUninstall.cs'),SafeUninstall.cs",
     "/resource:$(Join-Path $source 'AppShellIdentity.cs'),AppShellIdentity.cs",
     "/resource:$(Join-Path $source 'Configure-ClaudeIntegration.ps1'),Configure-ClaudeIntegration.ps1",
     "/resource:$(Join-Path $source 'Configure-OpenCodeIntegration.ps1'),Configure-OpenCodeIntegration.ps1",
@@ -108,9 +109,44 @@ $arguments = @(
     "/resource:$(Join-Path $source 'ReleaseUpdates.ps1'),ReleaseUpdates.ps1",
     "/resource:$launcher,AI task monitor.exe",
     "/resource:$(Join-Path $source 'assets\app-icon.ico'),app-icon.ico",
+    (Join-Path $source "SafeInstallPaths.cs"),
     (Join-Path $source "CodexProgressInstaller.cs"),
     (Join-Path $source "VersionInfo.cs")
 )
+
+# Build the uninstaller inventory from the exact resources embedded in this
+# installer. The helper enforces the complete approved path list.
+$payloadMap = @{}
+$uninstallResourceIndex = -1
+for ($index = 0; $index -lt $arguments.Count; $index++) {
+    $argument = [string]$arguments[$index]
+    if (-not $argument.StartsWith('/resource:', [StringComparison]::OrdinalIgnoreCase)) { continue }
+    $separator = $argument.LastIndexOf(',')
+    if ($separator -le '/resource:'.Length) { throw 'Invalid installer resource declaration.' }
+    $resourceSource = $argument.Substring('/resource:'.Length, $separator - '/resource:'.Length)
+    $resourceName = $argument.Substring($separator + 1)
+    if ($resourceName -ceq 'Uninstall-CodexProgress.ps1') {
+        if ($uninstallResourceIndex -ge 0) { throw 'Duplicate uninstaller resource.' }
+        $uninstallResourceIndex = $index
+        continue
+    }
+    $kimiPrefix = 'integrations.kimi-plugin.'
+    $integrationPrefix = 'integrations.'
+    $relative = if ($resourceName.StartsWith($kimiPrefix, [StringComparison]::Ordinal)) {
+        'integrations/kimi-plugin/' + $resourceName.Substring($kimiPrefix.Length)
+    } elseif ($resourceName.StartsWith($integrationPrefix, [StringComparison]::Ordinal)) {
+        'integrations/' + $resourceName.Substring($integrationPrefix.Length)
+    } elseif ($resourceName -ceq 'app-icon.ico') {
+        'assets/app-icon.ico'
+    } else { $resourceName }
+    if ($payloadMap.ContainsKey($relative)) { throw 'Duplicate installation target in resources.' }
+    $payloadMap[$relative] = [IO.Path]::GetFullPath($resourceSource)
+}
+if ($uninstallResourceIndex -lt 0) { throw 'The uninstaller resource is missing.' }
+$generatedUninstaller = Join-Path $buildTemp ('Uninstall-generated-' + [Guid]::NewGuid().ToString('N') + '.ps1')
+& (Join-Path $source 'Build-UninstallManifest.ps1') -Files $payloadMap -TemplatePath (Join-Path $source 'Uninstall-CodexProgress.ps1') -OutputPath $generatedUninstaller
+if (-not [IO.File]::Exists($generatedUninstaller)) { throw 'The uninstaller manifest was not generated.' }
+$arguments[$uninstallResourceIndex] = "/resource:$generatedUninstaller,Uninstall-CodexProgress.ps1"
 
 & $compiler $arguments
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $output)) { throw "Installer compilation failed" }

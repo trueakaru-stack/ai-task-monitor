@@ -10,6 +10,7 @@ jobs:
     timeout-minutes: 10
     env:
       DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
     steps:
       - name: Run legacy uninstaller only against isolated fixtures
         shell: pwsh
@@ -33,3 +34,21 @@ jobs:
           python -B (Join-Path $source 'windows/tests/Test-DotnetPathSafety.py')
           if ($LASTEXITCODE -ne 0) { throw '.NET PATH safety guard failed.' }
           & (Join-Path $source '.github/legacy-uninstall-ci/Run.ps1')
+          & (Join-Path $source 'windows/tests/Test-UninstallPreservesData.ps1')
+
+      - name: Save the exact verified setup
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-windows-setup-${{ github.sha }}
+          path: ${{ runner.temp }}/aitm-verified-setup-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Save synthetic dialog screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-dialogs-${{ github.sha }}
+          path: ${{ runner.temp }}/aitm-dialogs-${{ github.sha }}
+          if-no-files-found: warn
+          retention-days: 3

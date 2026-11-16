@@ -1,0 +1,50 @@
+name: Synthetic Windows safe uninstall
+on:
+  push:
+    branches: ['codex/windows-safe-uninstall-20261116']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+    steps:
+      - name: Check only disposable fixtures
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          function Read-PathState([string]$scope){
+            $key=if($scope -eq 'User'){[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment',$false)}else{[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment',$false)}
+            try{$value=$key.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);$kind=if($null -eq $value){'Missing'}else{[string]$key.GetValueKind('Path')};return [pscustomobject]@{Value=[string]$value;Kind=$kind}}finally{$key.Dispose()}
+          }
+          $beforeUser=Read-PathState 'User';$beforeMachine=Read-PathState 'Machine'
+          $beforeProcess=[Environment]::GetEnvironmentVariable('Path','Process')
+          try{
+            $root=Join-Path $env:RUNNER_TEMP ('aitm-removal-source-'+[Guid]::NewGuid().ToString('N'))
+            $source=Join-Path $root 'source';$hooks=Join-Path $root 'hooks';$template=Join-Path $root 'template'
+            foreach($dir in @($source,$hooks,$template)){[void][IO.Directory]::CreateDirectory($dir)}
+            $env:GIT_CONFIG_NOSYSTEM='1';$env:GIT_TERMINAL_PROMPT='0';$env:GIT_CONFIG_GLOBAL=Join-Path $root 'empty.gitconfig'
+            [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL,'')
+            git -c credential.helper= -c core.hooksPath="$hooks" init --quiet --template="$template" "$source"
+            if($LASTEXITCODE -ne 0){throw 'Cannot initialize the synthetic checkout.'}
+            git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$env:GITHUB_SHA"
+            if($LASTEXITCODE -ne 0){throw 'Cannot fetch the exact candidate.'}
+            git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+            if($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:GITHUB_SHA){throw 'Cannot select the exact candidate.'}
+            $pythonRoot=if($env:RUNNER_TOOL_CACHE){Join-Path $env:RUNNER_TOOL_CACHE 'Python'}else{''}
+            $candidate=if($pythonRoot -and [IO.Directory]::Exists($pythonRoot)){Get-ChildItem -LiteralPath $pythonRoot -Filter python.exe -File -Recurse | Where-Object {$_.FullName -match '\\x64\\python\.exe$'} | Sort-Object FullName -Descending | Select-Object -First 1}else{$null}
+            if($null -ne $candidate){
+              $trusted=[IO.Path]::GetFullPath($pythonRoot).TrimEnd('\')+'\';$path=[IO.Path]::GetFullPath($candidate.FullName)
+              $safe=$path.StartsWith($trusted,[StringComparison]::OrdinalIgnoreCase) -and $path -notmatch '(?i)WindowsApps' -and ($candidate.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and ($candidate.VersionInfo.ProductName -match '(?i)Python' -or $candidate.VersionInfo.FileDescription -match '(?i)Python')
+              for($parent=$candidate.Directory;$safe -and $null -ne $parent -and $parent.FullName.Length -ge $pythonRoot.Length;$parent=$parent.Parent){if(($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){$safe=$false}}
+              if($safe){& $path -I -B (Join-Path $source 'windows/tests/Test-DotnetPathSafety.py');if($LASTEXITCODE -ne 0){throw 'The PATH safety guard failed.'};Write-Output 'PATH safety guard passed.'}
+              else{Write-Warning 'PATH safety guard skipped: no verified interpreter.'}
+            }else{Write-Warning 'PATH safety guard skipped: no verified interpreter.'}
+            & (Join-Path $source '.github/safe-uninstall-ci/Test.ps1')
+          }finally{
+            foreach($scope in @('User','Machine')){$before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine};$after=Read-PathState $scope;if($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind){throw "$scope PATH changed."}}
+            if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}
+          }
