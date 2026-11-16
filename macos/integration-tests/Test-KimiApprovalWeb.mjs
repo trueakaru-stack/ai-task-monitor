@@ -180,7 +180,8 @@ async function run(withPlugin) {
     }
   } catch (error) {
     const kind = typeof error?.name === 'string' && /^[A-Za-z]+Error$/.test(error.name) ? error.name : 'Error';
-    throw new Error(`Kimi synthetic ${phase}: ${kind}`);
+    const denied = /(?:EPERM|EACCES|permission denied|operation not permitted)/i.test(output);
+    throw new Error(`Kimi synthetic ${phase}: ${kind}; processExited=${child.exitCode !== null}; permissionError=${denied}; modelRequests=${modelRequests}`);
   } finally {
     ws?.close();
     child.kill();

@@ -103,9 +103,10 @@ jobs:
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
           cd "$AITM_TEST_TASK_ROOT/source/macos"
           task_flags=(--cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security" --disable-sandbox)
-          "$task_run" swift build --verbose "${task_flags[@]}"
-          task_bin="$("$task_run" swift build --show-bin-path "${task_flags[@]}")"
-          "$task_run" /usr/bin/env "AITM_DSH_ANCHOR=$AITM_TEST_TASK_ROOT/dsh/node_modules/@deepseek-ai/dsh/package.json" "AITM_PNPM_SCRIPT=$AITM_TEST_TASK_ROOT/dsh/node_modules/pnpm/bin/pnpm.mjs" "AITM_NODE=$AITM_TEST_NODE_BIN" "AITM_CLAUDE_TEST_EXECUTABLE=$task_bin/AITaskMonitor" /bin/bash scripts/run-swift-tests.sh "${task_flags[@]}" --filter DeepSeekIntegrationTests/testIsolatedUpstreamConnectionBridge | tee "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
+          task_compiler=(/usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 swift)
+          "${task_compiler[@]}" build --build-tests --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security"
+          task_bin="$("${task_compiler[@]}" build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
+          "$task_run" /usr/bin/env "AITM_DSH_ANCHOR=$AITM_TEST_TASK_ROOT/dsh/node_modules/@deepseek-ai/dsh/package.json" "AITM_PNPM_SCRIPT=$AITM_TEST_TASK_ROOT/dsh/node_modules/pnpm/bin/pnpm.mjs" "AITM_NODE=$AITM_TEST_NODE_BIN" "AITM_CLAUDE_TEST_EXECUTABLE=$task_bin/AITaskMonitor" /bin/bash scripts/run-swift-tests.sh "${task_flags[@]}" --skip-build --filter DeepSeekIntegrationTests/testIsolatedUpstreamConnectionBridge | tee "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
           grep -q 'testIsolatedUpstreamConnectionBridge.*passed' "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
       - name: Exercise DeepSeek synthetic integration
         if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
