@@ -1,0 +1,55 @@
+name: Synthetic macOS feedback visual audit
+on:
+  push:
+    branches: ['codex/macos-feedback-audit-20261116']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  feedback:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            xcode: /Applications/Xcode_16.1.app/Contents/Developer
+          - os: macos-26
+            xcode: /Applications/Xcode.app/Contents/Developer
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: ${{ matrix.xcode }}
+    steps:
+      - name: Checkout exact revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true && test "$RUNNER_ENVIRONMENT" = github-hosted && test "$RUNNER_OS" = macOS
+          test -d "$DEVELOPER_DIR"
+          test -z "$(ls -A "$GITHUB_WORKSPACE")"
+          mkdir -p "$RUNNER_TEMP/aitm-empty-template" "$RUNNER_TEMP/aitm-empty-hooks"
+          git -C "$GITHUB_WORKSPACE" -c init.templateDir="$RUNNER_TEMP/aitm-empty-template" -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" init
+          git -C "$GITHUB_WORKSPACE" -c credential.helper= -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" fetch --no-tags --depth=1 "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          test "$(git -C "$GITHUB_WORKSPACE" rev-parse FETCH_HEAD)" = "$GITHUB_SHA"
+          git -C "$GITHUB_WORKSPACE" -c core.hooksPath="$RUNNER_TEMP/aitm-empty-hooks" checkout --detach FETCH_HEAD
+      - name: Check copy button on isolated runner
+        shell: bash
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          export AITM_FEEDBACK_SYNTHETIC_ROOT="$(mktemp -d "$RUNNER_TEMP/aitm-feedback-XXXXXXXX")"
+          export AITM_FEEDBACK_SYNTHETIC_CI=1
+          swift test --filter FeedbackAlignmentTests
+      - name: Render settings previews
+        if: ${{ !cancelled() }}
+        shell: bash
+        working-directory: macos
+        run: swift run AITaskMonitor --render-previews "$RUNNER_TEMP/aitm-feedback-previews"
+      - name: Upload settings previews
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-feedback-${{ matrix.os }}
+          path: ${{ runner.temp }}/aitm-feedback-previews/settings-end-*.png
+          if-no-files-found: error
+          retention-days: 7
