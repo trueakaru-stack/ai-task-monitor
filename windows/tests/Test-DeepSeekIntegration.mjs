@@ -117,6 +117,16 @@ try {
   await assert.rejects(setDeepSeekConnected(options, false), { code: 'modified-bundle' });
   assert.equal((await readFile(observer, 'utf8')), 'FOREIGN CHANGE');
   await writeFile(observer, original);
+  const neighbor = 'neighbor-profile';
+  await execute(process.execPath, [bin, 'plugin', '--profile', neighbor, 'add', '--offline', '--ignore-scripts', foreign],
+    { env, windowsHide: true, timeout: 30000, maxBuffer: 1048576 });
+  const neighborOptions = { ...options, profile: neighbor };
+  assert.equal(await setDeepSeekConnected(neighborOptions, true), 'connected');
+  const neighborDir = join(fixtureHome, 'profiles', neighbor);
+  const neighborManifestPath = join(neighborDir, 'package.json');
+  const neighborMarkerPath = join(neighborDir, 'ai-task-monitor-observer', 'aitm-manifest.json');
+  const neighborManifest = await readFile(neighborManifestPath);
+  const neighborMarker = await readFile(neighborMarkerPath);
   const require = createRequire(anchor);
   const { withFileLock } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-atomic-write')).href);
   const oldScope = listedConnected.response.result[0].scope;
@@ -153,12 +163,16 @@ try {
   assert.deepEqual(await readFile(scopePath), afterScopeChange, 'A mismatched scope was overwritten.');
   assert.deepEqual(await readFile(bundleMarker), afterMarkerChange, 'A mismatched bundle was overwritten.');
   assert.deepEqual(await readFile(manifestPath), afterManifestChange, 'A mismatched profile manifest was changed.');
+  assert.deepEqual(await readFile(neighborManifestPath), neighborManifest, 'The neighboring profile manifest changed.');
+  assert.deepEqual(await readFile(neighborMarkerPath), neighborMarker, 'The neighboring profile bundle changed.');
+  assert.equal(await deepSeekProfileState(fixtureHome, neighbor), 'connected');
   assert.equal(await deepSeekProfileState(fixtureHome, profile), 'connected');
   assert.deepEqual(await bridge({ action: 'disconnect', ...options, expectedScope: newScope }),
     { status: 0, response: { ok: true, result: { state: 'disconnected', scope: newScope } } });
   await assert.rejects(setDeepSeekConnected({ ...options, expectedScope: newScope }, false), { code: 'scope-changed' });
   assert.equal(await setDeepSeekConnected(options, true), 'connected');
   assert.equal(await setDeepSeekConnected(options, false), 'disconnected');
+  assert.equal(await setDeepSeekConnected(neighborOptions, false), 'disconnected');
   await assert.rejects(readFile(marker), { code: 'ENOENT' });
   manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   assert.ok(manifest.dependencies['aitm-foreign-fixture']);
