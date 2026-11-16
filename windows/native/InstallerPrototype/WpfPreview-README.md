@@ -54,6 +54,38 @@ or cloud child process, explicit ownership rules, signing and complete product
 and visual acceptance. The existing legacy uninstaller must not be called as a
 substitute. These remain release blockers regardless of this synthetic test.
 
+## Candidate self-contained follow-up, not yet built
+
+The .NET 10 release current on 2026-11-16 is runtime 10.0.15 and SDK 10.0.404.
+In a new disposable hosted Windows runner, download the official
+`dotnet-sdk-10.0.404-win-x64.zip` from the URL in Microsoft's
+[release metadata](https://github.com/dotnet/core/blob/main/release-notes/10.0/10.0.15/release.json),
+verify the published SHA-512
+`330ddd2665b43cd2e428216a0d8ea1ac7bb19b5434fdc530e62010dc3b52823a620bf95489d628e1ed6f5122401793ee4887cca4a019122361a1231497f632ee`,
+then extract it only into a new runner-temp directory. Set the .NET PATH opt-out
+before every SDK process, isolate profile/temp/cache directories, and select
+SDK 10.0.404 with a `global.json` containing `rollForward: disable` in the
+disposable checkout. Confirm the SDK and target versions there.
+
+The candidate publish arguments are `-r win-x64 --self-contained true` and
+`-p:RuntimeFrameworkVersion=10.0.15`; Microsoft documents that the latter pins
+the exact runtime for [self-contained deployments](https://learn.microsoft.com/en-us/dotnet/core/versions/selection).
+Restore may require the official NuGet packages
+[`Microsoft.NETCore.App.Runtime.win-x64` 10.0.15](https://www.nuget.org/packages/Microsoft.NETCore.App.Runtime.win-x64/10.0.15)
+and [`Microsoft.WindowsDesktop.App.Runtime.win-x64` 10.0.15](https://www.nuget.org/packages/Microsoft.WindowsDesktop.App.Runtime.win-x64/10.0.15),
+and possibly additional SDK-selected packages. Use only the official feed and a
+new isolated package cache; verify the resolved package identities and signatures.
+Do not claim the exact pack set until a real restore is inspected.
+
+Verify the installed executable on a clean hosted machine with an empty isolated
+`DOTNET_ROOT`, and inspect its loaded runtime module paths to confirm they come
+from the packaged application. The current experiment accepts only flat payloads;
+support for any nested runtime or localization files needs separate guarded
+ownership and removal tests. Self-contained removes the separate .NET runtime
+installation requirement, not Windows system requirements. Security updates to
+the bundled runtime require an application rebuild and redeployment. Nothing in
+this plan is an already tested self-contained package or authorizes a release.
+
 ## Hosted CI only
 
 On a fresh disposable GitHub-hosted Windows runner, with
