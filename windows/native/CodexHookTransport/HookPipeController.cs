@@ -79,7 +79,7 @@ public sealed class HookPipeController : IAsyncDisposable
                 }
                 catch (OperationCanceledException) when (stopping.IsCancellationRequested) { break; }
                 catch (ObjectDisposedException) when (stopping.IsCancellationRequested) { break; }
-                catch (Exception error) when (error is IOException or OperationCanceledException or
+                catch (Exception error) when (error is IOException or InvalidDataException or OperationCanceledException or
                     InvalidOperationException or ArgumentException)
                 {
                     collector.NotifyLoss(connection);

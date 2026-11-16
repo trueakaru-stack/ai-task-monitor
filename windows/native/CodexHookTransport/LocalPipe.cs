@@ -54,6 +54,7 @@ internal static class LocalPipe
     // rather than the user SID for elevated tokens.
     internal static bool HasCurrentUserOwner(SafePipeHandle handle)
     {
+        if (!OperatingSystem.IsWindows()) return false;
         const uint SeKernelObject = 6, OwnerInformation = 1;
         uint result = GetSecurityInfo(handle, SeKernelObject, OwnerInformation,
             out IntPtr owner, out _, out _, out _, out IntPtr descriptor);
