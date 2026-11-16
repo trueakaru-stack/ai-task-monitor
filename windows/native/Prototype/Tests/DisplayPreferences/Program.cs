@@ -53,19 +53,14 @@ PreferenceLoad loaded = service.Load();
 Check(loaded.Status == PreferenceStatus.Success && loaded.FromLegacy && loaded.Modes == new DisplayModes("dark", "ru"),
     "Legacy preferences were not read compatibly.");
 Check(target.Content is null && Equal(legacy.Content, legacyBytes), "Reading legacy preferences wrote to a store.");
-Check(service.SaveLanguage("en") == PreferenceStatus.Success, "Synthetic migration failed.");
-Check(Equal(legacy.Content, legacyBytes) && target.Content is not null, "Synthetic migration changed the legacy source.");
-Check(target.Content![0] == 0xEF && target.Content[1] == 0xBB && target.Content[2] == 0xBF, "The source UTF-8 BOM was lost.");
+Check(service.SaveLanguage("en") == PreferenceStatus.Success, "Saving one selection failed.");
+Check(Equal(legacy.Content, legacyBytes) && target.Content is not null, "Saving changed the legacy source.");
 using (JsonDocument saved = Parse(target.Content!))
 {
-    Check(saved.RootElement.GetProperty("Theme").GetString() == "DARK" && saved.RootElement.GetProperty("language").GetString() == "en",
-        "Saving a language changed the theme.");
-    Check(saved.RootElement.GetProperty("nested").GetRawText() == "{\"x\":[1,2,3]}" &&
-        saved.RootElement.GetProperty("wide").GetRawText() == "123456789012345678901234567890" &&
-        saved.RootElement.GetProperty("codexCloudEnabled").GetBoolean() &&
-        saved.RootElement.GetProperty("claudeRetentionDays").GetString() == "07" &&
-        saved.RootElement.GetProperty("claudeMaximumMB").GetString() == "010", "An unrelated setting changed.");
+    Check(saved.RootElement.EnumerateObject().Count() == 1 && saved.RootElement.GetProperty("language").GetString() == "en",
+        "The target did not contain exactly the selected field.");
 }
+Check(service.Load().Modes == new DisplayModes("dark", "en"), "The missing theme was not read from the old file.");
 Check(service.SaveTheme("light") == PreferenceStatus.Success, "Saving a theme failed.");
 PreferenceLoad again = service.Load();
 Check(again.Status == PreferenceStatus.Success && !again.FromLegacy && again.Modes == new DisplayModes("light", "en"),
@@ -82,19 +77,19 @@ var deferred = new DisplayPreferenceService(deferredTarget, deferredLegacy);
 PreferenceLoad deferredLoad = deferred.Load();
 Check(deferredLoad.Status == PreferenceStatus.MigrationDeferred && deferredLoad.Modes is null && !deferredLoad.FromLegacy,
     "An unconfirmed legacy snapshot was exposed as preferences.");
-Check(deferred.SaveTheme("dark") == PreferenceStatus.MigrationDeferred &&
-    deferred.SaveLanguage("en") == PreferenceStatus.MigrationDeferred && deferredTarget.Content is null,
-    "An unconfirmed legacy snapshot was saved or replaced with defaults.");
+Check(deferred.SaveTheme("dark") == PreferenceStatus.Success && deferred.Load().Status == PreferenceStatus.MigrationDeferred &&
+    deferred.SaveLanguage("en") == PreferenceStatus.Success && deferred.Load().Modes == new DisplayModes("dark", "en"),
+    "Explicit choices were not kept separate from deferred legacy data.");
 var unavailableLegacy = new MemoryLegacy(legacyBytes) { Status = LegacyPreferenceStatus.Unavailable };
 var unavailableTarget = new MemoryTarget();
 var unavailable = new DisplayPreferenceService(unavailableTarget, unavailableLegacy);
 Check(unavailable.Load().Status == PreferenceStatus.Unavailable &&
-    unavailable.SaveTheme("light") == PreferenceStatus.Unavailable && unavailableTarget.Content is null,
-    "An unavailable legacy source was treated as empty.");
+    unavailable.SaveTheme("light") == PreferenceStatus.Success && unavailable.Load().Status == PreferenceStatus.Unavailable,
+    "An unavailable legacy value was silently replaced with a default.");
 var defaultStatus = new DisplayPreferenceService(new MemoryTarget(),
     new MemoryLegacy(legacyBytes) { Status = default });
 Check(defaultStatus.Load().Status == PreferenceStatus.Unavailable &&
-    defaultStatus.SaveTheme("light") == PreferenceStatus.Unavailable,
+    defaultStatus.SaveTheme("light") == PreferenceStatus.Success && defaultStatus.Load().Status == PreferenceStatus.Unavailable,
     "An unspecified legacy status was treated as a confirmed snapshot.");
 var initializeTarget = new MemoryTarget();
 bool legacyOpenedDuringInitialization = false;
@@ -162,10 +157,11 @@ using (JsonDocument stringBoolean = Parse(stringBooleanTarget.Content!))
 var noBomTarget = new MemoryTarget();
 var noBomService = new DisplayPreferenceService(noBomTarget, new MemoryLegacy(Utf8("{\"language\":\"EN\",\"number\":1.00}")));
 Check(noBomService.SaveTheme("light") == PreferenceStatus.Success && noBomTarget.Content![0] == (byte)'{',
-    "A legacy document without a BOM was not preserved correctly.");
+    "The selected theme was not saved separately.");
 using (JsonDocument noBom = Parse(noBomTarget.Content!))
-    Check(noBom.RootElement.GetProperty("language").GetString() == "EN" &&
-        noBom.RootElement.GetProperty("number").GetRawText() == "1.00", "An unrelated legacy value changed.");
+    Check(noBom.RootElement.EnumerateObject().Count() == 1 && noBom.RootElement.GetProperty("theme").GetString() == "light",
+        "The target copied an unselected legacy value.");
+Check(noBomService.Load().Modes == new DisplayModes("light", "en"), "The old language was not used as a fallback.");
 
 var competingTarget = new MemoryTarget(Utf8("{\"theme\":\"dark\",\"other\":1}"));
 var competingService = new DisplayPreferenceService(competingTarget, new MemoryLegacy(null));
@@ -178,6 +174,13 @@ var appearsTarget = new MemoryTarget();
 var appearingLegacy = new MemoryLegacy(legacyBytes) { BeforeRead = () => appearsTarget.ExternalWrite(Utf8("{\"theme\":\"light\"}")) };
 Check(new DisplayPreferenceService(appearsTarget, appearingLegacy).Load().Status == PreferenceStatus.Conflict,
     "Loading ignored a target that appeared during migration.");
+var changesTarget = new MemoryTarget(Utf8("{\"theme\":\"dark\"}"));
+var changingLegacy = new MemoryLegacy(legacyBytes)
+{
+    BeforeRead = () => changesTarget.ExternalWrite(Utf8("{\"theme\":\"light\",\"extra\":7}"))
+};
+Check(new DisplayPreferenceService(changesTarget, changingLegacy).Load().Status == PreferenceStatus.Conflict,
+    "A target changed while its missing field was read from legacy.");
 
 string oldFile = Path.Combine(work, "old-settings.json"), newFile = Path.Combine(work, "new-settings.json");
 File.WriteAllBytes(oldFile, legacyBytes);
@@ -185,22 +188,30 @@ var filesA = new PreferenceFiles(oldFile, newFile);
 using (var legacyLock = new FileStream(oldFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
 {
     PreferenceLoad fileRead = filesA.Service.Load();
-    Check(fileRead.Status == PreferenceStatus.MigrationDeferred && fileRead.Modes is null && !fileRead.FromLegacy,
-        "An unconfirmed legacy file did not defer migration.");
-    Check(filesA.Service.SaveTheme("light") == PreferenceStatus.MigrationDeferred &&
-        filesA.Service.SaveLanguage("en") == PreferenceStatus.MigrationDeferred && !File.Exists(newFile),
-        "An unconfirmed legacy file created a native settings file.");
+    Check(fileRead.Status == PreferenceStatus.Unavailable && fileRead.Modes is null,
+        "An exclusively held legacy file was treated as absent.");
+    Check(filesA.Service.SaveTheme("light") == PreferenceStatus.Success &&
+        filesA.Service.SaveLanguage("en") == PreferenceStatus.Success && File.Exists(newFile),
+        "Explicit choices could not be saved without reading the old file.");
 }
-Check(Equal(File.ReadAllBytes(oldFile), legacyBytes), "Deferred migration modified the synthetic legacy file.");
+Check(Equal(File.ReadAllBytes(oldFile), legacyBytes), "Saving a choice modified the synthetic legacy file.");
 Check(File.Exists(newFile + ".lock"), "The separate target lock was not accounted for.");
 string missingOldFile = Path.Combine(work, "missing-old-settings.json");
 string missingNewFile = Path.Combine(work, "missing-native-settings.json");
 var missingFiles = new PreferenceFiles(missingOldFile, missingNewFile);
 PreferenceLoad missingLoad = missingFiles.Service.Load();
-Check(missingLoad.Status == PreferenceStatus.MigrationDeferred && missingLoad.Modes is null &&
-    missingFiles.Service.SaveTheme("dark") == PreferenceStatus.MigrationDeferred &&
-    !File.Exists(missingOldFile) && !File.Exists(missingNewFile),
-    "An unverified absent source was treated as a new installation.");
+Check(missingLoad.Status == PreferenceStatus.Success && missingLoad.Modes == new DisplayModes("system", "system") &&
+    missingFiles.Service.SaveTheme("dark") == PreferenceStatus.Success &&
+    !File.Exists(missingOldFile) && File.Exists(missingNewFile),
+    "A missing old file was changed or system fallback failed.");
+string absentDirectory = Path.Combine(work, "first-run", "settings");
+string absentOld = Path.Combine(absentDirectory, "old.json"), absentNew = Path.Combine(absentDirectory, "native.json");
+var firstRun = new PreferenceFiles(absentOld, absentNew);
+Check(firstRun.Service.Load().Modes == new DisplayModes("system", "system") && !Directory.Exists(absentDirectory),
+    "Reading preferences created a missing directory.");
+Check(firstRun.Service.SaveLanguage("en") == PreferenceStatus.Success && File.Exists(absentNew) && !File.Exists(absentOld) &&
+    firstRun.Service.Load().Modes == new DisplayModes("system", "en"),
+    "First-run selection did not create only the native target.");
 string initializationOldFile = Path.Combine(work, "initialization-old-settings.json");
 string initializationNewFile = Path.Combine(work, "initialization-native-settings.json");
 File.WriteAllBytes(initializationOldFile, legacyBytes);
@@ -273,18 +284,21 @@ Check(new PreferenceFiles(aliasLegacy, aliasTarget, () => fixedToken).Service.Sa
 
 string ordinaryRoot = Path.Combine(work, "ordinary"), storeRoot = Path.Combine(work, "store");
 Directory.CreateDirectory(ordinaryRoot); Directory.CreateDirectory(storeRoot);
+var ordinaryPaths = PreferenceFiles.PathsForEdition(storeRoot, ordinaryRoot, false);
+var storePaths = PreferenceFiles.PathsForEdition(storeRoot, ordinaryRoot, true);
+Check(ordinaryPaths.LegacyPath == Path.Combine(ordinaryRoot, "CodexTaskProgress", "settings.json") &&
+    ordinaryPaths.TargetPath == Path.Combine(ordinaryRoot, "CodexTaskProgress", "display-preferences.json") &&
+    storePaths.LegacyPath == Path.Combine(storeRoot, ".ai-task-monitor", "settings.json") &&
+    storePaths.TargetPath == Path.Combine(storeRoot, ".ai-task-monitor", "display-preferences.json"),
+    "The edition roots do not match the published application paths.");
 string ordinaryOld = Path.Combine(ordinaryRoot, "settings.json"), storeOld = Path.Combine(storeRoot, "settings.json");
 File.WriteAllText(ordinaryOld, "{\"theme\":\"dark\",\"other\":1}", new UTF8Encoding(false));
 File.WriteAllText(storeOld, "{\"theme\":\"light\",\"other\":2}", new UTF8Encoding(false));
 var ordinary = new PreferenceFiles(ordinaryOld, Path.Combine(ordinaryRoot, "native.json"));
 var storeEdition = new PreferenceFiles(storeOld, Path.Combine(storeRoot, "native.json"));
-Check(ordinary.Service.Load().Status == PreferenceStatus.MigrationDeferred &&
-    storeEdition.Service.Load().Status == PreferenceStatus.MigrationDeferred &&
-    ordinary.Service.SaveLanguage("ru") == PreferenceStatus.MigrationDeferred &&
-    storeEdition.Service.SaveLanguage("en") == PreferenceStatus.MigrationDeferred,
-    "A synthetic edition root was not deferred independently.");
-File.WriteAllText(Path.Combine(ordinaryRoot, "native.json"), "{\"theme\":\"dark\",\"other\":1}", new UTF8Encoding(false));
-File.WriteAllText(Path.Combine(storeRoot, "native.json"), "{\"theme\":\"light\",\"other\":2}", new UTF8Encoding(false));
+Check(ordinary.Service.Load().Modes == new DisplayModes("dark", "system") &&
+    storeEdition.Service.Load().Modes == new DisplayModes("light", "system"),
+    "A synthetic edition root did not read its own old settings.");
 Check(ordinary.Service.SaveLanguage("ru") == PreferenceStatus.Success &&
     storeEdition.Service.SaveLanguage("en") == PreferenceStatus.Success, "Separate synthetic targets could not be updated.");
 Check(ordinary.Service.Load().Modes == new DisplayModes("dark", "ru") &&
@@ -297,16 +311,18 @@ Directory.CreateDirectory(invalidRoot);
 string invalidLegacy = Path.Combine(invalidRoot, "old.json"), invalidNew = Path.Combine(invalidRoot, "new.json");
 byte[] duplicateLegacy = Utf8("{\"other\":{\"key\":1,\"KEY\":2}}\n");
 File.WriteAllBytes(invalidLegacy, duplicateLegacy);
-Check(new PreferenceFiles(invalidLegacy, invalidNew).Service.SaveTheme("dark") == PreferenceStatus.MigrationDeferred &&
-    !File.Exists(invalidNew) && Equal(File.ReadAllBytes(invalidLegacy), duplicateLegacy), "A malformed legacy file was overwritten or migrated.");
+var malformed = new PreferenceFiles(invalidLegacy, invalidNew);
+Check(malformed.Service.Load().Status == PreferenceStatus.InvalidDocument &&
+    malformed.Service.SaveTheme("dark") == PreferenceStatus.Success && Equal(File.ReadAllBytes(invalidLegacy), duplicateLegacy),
+    "A malformed legacy file was silently accepted or overwritten.");
 byte[] invalidLegacyUtf8 = [(byte)'{', (byte)'\"', 0xFF, (byte)'\"', (byte)':', (byte)'1', (byte)'}'];
 File.WriteAllBytes(invalidLegacy, invalidLegacyUtf8);
-Check(new PreferenceFiles(invalidLegacy, invalidNew).Service.SaveLanguage("en") == PreferenceStatus.MigrationDeferred &&
-    !File.Exists(invalidNew) && Equal(File.ReadAllBytes(invalidLegacy), invalidLegacyUtf8), "Invalid UTF-8 changed the legacy file.");
+Check(malformed.Service.Load().Status == PreferenceStatus.InvalidDocument &&
+    Equal(File.ReadAllBytes(invalidLegacy), invalidLegacyUtf8), "Invalid legacy UTF-8 was accepted or changed.");
 byte[] tooLarge = Utf8("{\"extra\":\"" + new string('x', 1_048_577) + "\"}");
 File.WriteAllBytes(invalidLegacy, tooLarge);
-Check(new PreferenceFiles(invalidLegacy, invalidNew).Service.SaveLanguage("en") == PreferenceStatus.MigrationDeferred &&
-    !File.Exists(invalidNew) && Equal(File.ReadAllBytes(invalidLegacy), tooLarge), "An oversized legacy file was changed.");
+Check(malformed.Service.Load().Status == PreferenceStatus.Unavailable &&
+    Equal(File.ReadAllBytes(invalidLegacy), tooLarge), "An oversized legacy file was accepted or changed.");
 var oversizedTarget = new MemoryTarget(tooLarge);
 Check(new DisplayPreferenceService(oversizedTarget, new MemoryLegacy(null)).SaveTheme("dark") == PreferenceStatus.InvalidDocument &&
     Equal(oversizedTarget.Content, tooLarge), "An oversized target document was overwritten.");
@@ -317,6 +333,22 @@ Check(new DisplayPreferenceService(deepTarget, new MemoryLegacy(null)).SaveTheme
 
 if (OperatingSystem.IsWindows())
 {
+    string sharedOld = Path.Combine(work, "legacy-concurrent.json");
+    string sharedNew = Path.Combine(work, "native-concurrent.json");
+    File.WriteAllText(sharedOld, "{\"theme\":\"dark\",\"language\":\"ru\"}", new UTF8Encoding(false));
+    var sharedFiles = new PreferenceFiles(sharedOld, sharedNew);
+    using (var liveWriter = new FileStream(sharedOld, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+    {
+        Check(sharedFiles.Service.Load().Modes == new DisplayModes("dark", "ru"),
+            "A cooperating writer was excluded by the legacy reader.");
+        byte[] replacement = Utf8("{\"theme\":\"light\",\"language\":\"en\"}");
+        liveWriter.Position = 0;
+        liveWriter.Write(replacement);
+        liveWriter.SetLength(replacement.Length);
+        liveWriter.Flush(true);
+    }
+    Check(sharedFiles.Service.Load().Modes == new DisplayModes("light", "en"),
+        "A later completed legacy write was not observed.");
     // A strict legacy reader could exclude in-place writes, but also prevents
     // the released writer's replace until it closes. This is a counterexample,
     // not an adopted change to the migration reader.

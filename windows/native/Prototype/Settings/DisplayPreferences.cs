@@ -22,9 +22,9 @@ internal interface IPreferenceTarget
     PreferenceCommit TryCommit(object expectedRevision, byte[] content);
 }
 
-// Confirmed permits a synthetic or otherwise verified snapshot; a null
-// document under that status means absence has been confirmed. Deferred and
-// Unavailable must never be interpreted as an empty settings document.
+// Confirmed means a bounded read completed or the file was absent at the time
+// of opening. A writer that does not coordinate can change it immediately
+// afterwards; Deferred and Unavailable are never treated as absence.
 internal interface ILegacyPreferenceSource
 {
     LegacyPreferenceStatus Read(out byte[]? content);
@@ -37,28 +37,30 @@ internal sealed class DisplayPreferenceService(IPreferenceTarget target, ILegacy
         try
         {
             if (!target.TryRead(out PreferenceSnapshot initial)) return new(PreferenceStatus.Unavailable, null, false);
-            byte[]? content = initial.Content;
-            bool fromLegacy = false;
-            if (content is null)
-            {
-                LegacyPreferenceStatus legacyStatus = legacy.Read(out content);
-                if (legacyStatus == LegacyPreferenceStatus.Deferred)
-                    return new(PreferenceStatus.MigrationDeferred, null, false);
-                if (legacyStatus != LegacyPreferenceStatus.Confirmed)
-                    return new(PreferenceStatus.Unavailable, null, false);
-                fromLegacy = content is not null;
-                // Do not return old preferences if a new target appeared while
-                // the legacy source was being read.
-                if (!target.TryRead(out PreferenceSnapshot current)) return new(PreferenceStatus.Unavailable, null, false);
-                if (current.Content is not null)
-                    return new(PreferenceStatus.Conflict, null, false);
-            }
-            return DisplayPreferenceDocument.TryRead(content, out DisplayModes? modes)
-                ? new(PreferenceStatus.Success, modes, fromLegacy)
-                : new(PreferenceStatus.InvalidDocument, null, fromLegacy);
+            if (!DisplayPreferenceDocument.TryReadPartial(initial.Content, out DisplayModes? own,
+                out bool ownTheme, out bool ownLanguage))
+                return new(PreferenceStatus.InvalidDocument, null, false);
+            if (ownTheme && ownLanguage) return new(PreferenceStatus.Success, own, false);
+            LegacyPreferenceStatus legacyStatus = legacy.Read(out byte[]? content);
+            if (legacyStatus == LegacyPreferenceStatus.Deferred)
+                return new(PreferenceStatus.MigrationDeferred, null, false);
+            if (legacyStatus != LegacyPreferenceStatus.Confirmed)
+                return new(PreferenceStatus.Unavailable, null, false);
+            if (!DisplayPreferenceDocument.TryReadPartial(content, out DisplayModes? old, out _, out _))
+                return new(PreferenceStatus.InvalidDocument, null, content is not null);
+            // Do not apply a mixed result if the new target changed while the
+            // old settings were being read. This does not lock the old writer.
+            if (!target.TryRead(out PreferenceSnapshot current)) return new(PreferenceStatus.Unavailable, null, false);
+            if (!SameContent(initial.Content, current.Content)) return new(PreferenceStatus.Conflict, null, false);
+            return new(PreferenceStatus.Success,
+                new DisplayModes(ownTheme ? own!.Theme : old!.Theme, ownLanguage ? own!.Language : old!.Language),
+                content is not null);
         }
         catch (Exception) { return new(PreferenceStatus.Unavailable, null, false); }
     }
+
+    private static bool SameContent(byte[]? first, byte[]? second) =>
+        first is null ? second is null : second is not null && first.AsSpan().SequenceEqual(second);
 
     internal PreferenceStatus SaveTheme(string mode) => Save("theme", mode);
     internal PreferenceStatus SaveLanguage(string mode) => Save("language", mode);
@@ -93,14 +95,9 @@ internal sealed class DisplayPreferenceService(IPreferenceTarget target, ILegacy
         try
         {
             if (!target.TryRead(out PreferenceSnapshot snapshot)) return PreferenceStatus.Unavailable;
-            byte[]? content = snapshot.Content;
-            if (content is null)
-            {
-                LegacyPreferenceStatus legacyStatus = legacy.Read(out content);
-                if (legacyStatus == LegacyPreferenceStatus.Deferred) return PreferenceStatus.MigrationDeferred;
-                if (legacyStatus != LegacyPreferenceStatus.Confirmed) return PreferenceStatus.Unavailable;
-            }
-            if (!DisplayPreferenceDocument.TryUpdate(content, name, mode, out byte[]? updated))
+            // Save only the explicit selection. Missing values continue to be
+            // read from the old file (or system defaults if absent).
+            if (!DisplayPreferenceDocument.TryUpdate(snapshot.Content, name, mode, out byte[]? updated))
                 return PreferenceStatus.InvalidDocument;
             return target.TryCommit(snapshot.Revision, updated!) switch
             {
@@ -135,8 +132,13 @@ internal static class DisplayPreferenceDocument
     }
 
     internal static bool TryRead(byte[]? content, out DisplayModes? modes)
+        => TryReadPartial(content, out modes, out _, out _);
+
+    internal static bool TryReadPartial(byte[]? content, out DisplayModes? modes, out bool hasTheme, out bool hasLanguage)
     {
         modes = null;
+        hasTheme = false;
+        hasLanguage = false;
         try
         {
             if (!TryParse(content, out JsonDocument? document, out _)) return false;
@@ -145,8 +147,8 @@ internal static class DisplayPreferenceDocument
                 string theme = "system", language = "system";
                 foreach (JsonProperty property in document!.RootElement.EnumerateObject())
                 {
-                    if (property.Name.Equals("theme", StringComparison.OrdinalIgnoreCase)) theme = Mode(property.Value, "theme");
-                    else if (property.Name.Equals("language", StringComparison.OrdinalIgnoreCase)) language = Mode(property.Value, "language");
+                    if (property.Name.Equals("theme", StringComparison.OrdinalIgnoreCase)) { hasTheme = true; theme = Mode(property.Value, "theme"); }
+                    else if (property.Name.Equals("language", StringComparison.OrdinalIgnoreCase)) { hasLanguage = true; language = Mode(property.Value, "language"); }
                 }
                 modes = new DisplayModes(theme, language);
                 return true;
