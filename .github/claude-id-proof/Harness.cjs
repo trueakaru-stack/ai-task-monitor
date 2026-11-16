@@ -130,22 +130,30 @@ async function run() {
       ANTHROPIC_API_KEY: 'synthetic-not-an-api-key',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', DISABLE_AUTOUPDATER: '1',
-      CLAUDE_CODE_SKIP_INSTALLATION_CHECKS: '1',
+      CLAUDE_CODE_SKIP_INSTALLATION_CHECKS: '1', API_TIMEOUT_MS: '7000',
       AITM_EVENT_DIR: eventsDir,
       AITM_HOOK_SCRIPT: __filename.replace(/\\/g, '/')
     };
-    const invoke = (args, timeoutMs) => new Promise((resolve, reject) => {
+    const invoke = (args, timeoutMs, phase) => new Promise((resolve, reject) => {
       const child = spawn(exe, [...prefixArgs, ...args], { cwd: root, env: clean, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
       let stdout = '', stderr = '';
       child.stdout.on('data', x => { if (stdout.length < 65536) stdout += x; });
       child.stderr.on('data', x => { if (stderr.length < 65536) stderr += x; });
-      const timeout = setTimeout(() => { child.kill(); reject(Error('Synthetic CLI timed out.')); }, timeoutMs);
+      const timeout = setTimeout(() => {
+        child.kill();
+        console.error('Synthetic CLI timeout: phase=' + phase + ' requests=' + requests +
+          ' toolRounds=' + toolRounds + ' stdoutBytes=' + stdout.length + ' stderrBytes=' + stderr.length +
+          ' authHint=' + /auth|credential|login/i.test(stdout + stderr) +
+          ' settingsHint=' + /settings|hook/i.test(stdout + stderr) +
+          ' hookFiles=' + fs.readdirSync(eventsDir).length);
+        reject(Error('Synthetic CLI timed out.'));
+      }, timeoutMs);
       child.on('error', e => { clearTimeout(timeout); reject(Error('Synthetic CLI could not start: ' + e.code)); });
       child.on('close', code => { clearTimeout(timeout); resolve({ code, stdout, stderr }); });
     });
-    const version = await invoke(['--version'], 20000);
+    const version = await invoke(['--version'], 20000, 'version');
     if (version.code !== 0 || !version.stdout.includes(versionExpected)) throw Error('Pinned binary version was not confirmed.');
-    const help = await invoke(['--help'], 30000);
+    const help = await invoke(['--help'], 30000, 'help');
     if (help.code !== 0) throw Error('Pinned CLI help was not available.');
     for (const option of ['--setting-sources', '--settings', '--allowedTools', '--session-id', '--resume']) {
       if (!help.stdout.includes(option)) throw Error('Required isolated CLI option is unavailable: ' + option);
@@ -158,7 +166,7 @@ async function run() {
     for (let turn = 0; turn < 2; turn++) {
       const args = [...common, ...(turn === 0 ? ['--session-id', session] : ['--resume', session]),
         'Read the synthetic fixture and respond with a short confirmation.'];
-      const result = await invoke(args, 90000);
+      const result = await invoke(args, 90000, 'turn-' + (turn + 1));
       if (result.code !== 0) {
         console.error('Synthetic CLI diagnostics: code=' + result.code + ' stdoutBytes=' + result.stdout.length +
           ' stderrBytes=' + result.stderr.length + ' requests=' + requests +
