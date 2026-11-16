@@ -95,8 +95,14 @@ try {
     $engineTest=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'Test-InstallEngine.ps1'))
     $start=New-IsolatedPS
     foreach($arg in @('-STA','-File',$engineTest,$exe,$root)){[void]$start.ArgumentList.Add($arg)}
+    $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
     $engineProcess=[Diagnostics.Process]::Start($start)
-    try{Check ($engineProcess.WaitForExit(30000) -and $engineProcess.ExitCode -eq 0) 'The installer assembly guard test failed.'}finally{$engineProcess.Dispose()}
+    try{
+        $engineOut=$engineProcess.StandardOutput.ReadToEndAsync();$engineErr=$engineProcess.StandardError.ReadToEndAsync()
+        if(-not $engineProcess.WaitForExit(30000)){throw 'The installer assembly guard test timed out.'}
+        if($engineProcess.ExitCode -ne 0){Write-Output $engineOut.Result;Write-Output $engineErr.Result;throw 'The installer assembly guard test failed.'}
+        Write-Output $engineOut.Result
+    }finally{$engineProcess.Dispose()}
     [IO.File]::Copy($extracted,$uninstaller,$true)
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -TypeDefinition @'
