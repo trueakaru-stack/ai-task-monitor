@@ -1685,7 +1685,7 @@ function Get-DeepSeekErrorMessage([string]$code,[bool]$profileScan=$false) {
  $message=switch($code){
   'unsupported-desktop'{'Профиль DeepSeek Desktop пока не поддерживается.';break}
   {$_ -in @('unverified-dsh','unverified-pnpm')}{'Версия DeepSeek Harness или pnpm не подтверждена.';break}
-  {$_ -in @('linked-path','modified-bundle','partial-connection') -or $_ -like 'bundle-conflict*'}{'Подключение DeepSeek Harness неполное или его файлы изменены.';break}
+  {$_ -in @('linked-path','modified-bundle','partial-connection','scope-changed') -or $_ -like 'bundle-conflict*'}{'Подключение DeepSeek Harness неполное или его файлы изменены.';break}
   default{if($profileScan){'Не удалось проверить профиль DeepSeek Harness.'}else{'Не удалось изменить подключение DeepSeek Harness.'}}
  }
  return (Tr $message)
@@ -3176,7 +3176,7 @@ function Compact-VisibleTasks($tasks) {
 
 function Source-WarningText([string[]]$Unavailable,[string[]]$PartialConnection,[string[]]$PartialData) {
  $data=@($Unavailable | Where-Object {$PartialData -ccontains $_})
- $connection=@($Unavailable | Where-Object {$PartialConnection -ccontains $_})
+ $connection=@($Unavailable | Where-Object {$PartialConnection -ccontains $_ -and $data -cnotcontains $_})
  $full=@($Unavailable | Where-Object {$data -cnotcontains $_ -and $connection -cnotcontains $_})
  $parts=New-Object 'Collections.Generic.List[string]'
  if($full.Count){$parts.Add((Tr 'Нет данных от ')+($full -join ', '))}
@@ -3194,6 +3194,7 @@ function Render-CompactTasks($tasks) {
   $script:compactTaskId=""
   $compactEmpty=Text $(if($warningText){$warningText}else{Tr "Активных задач сейчас нет"}) 12.5 $script:palette.Activity
   $compactEmpty.Margin=New-Object Windows.Thickness(0,5,0,5)
+  if($warningText){$compactEmpty.Tag='source-warning'}
   $compactTasksPanel.Children.Add($compactEmpty)|Out-Null
   $compactDotsPanel.Visibility="Collapsed"
  } else {
@@ -3203,6 +3204,7 @@ function Render-CompactTasks($tasks) {
   if($warningText){
    $warning=Text $warningText 11.5 $script:palette.Muted
    $warning.Margin=New-Object Windows.Thickness(12,0,0,6)
+   $warning.Tag='source-warning'
    $compactTasksPanel.Children.Add($warning)|Out-Null
   }
   if($visibleTasks.Count -gt 1){
@@ -3215,7 +3217,7 @@ function Render-CompactTasks($tasks) {
  $compactMoreText.Text=$(if($hiddenCount -gt 0){if($script:resolvedLanguage -eq 'en'){"$hiddenCount more tasks"}else{"Ещё $hiddenCount задач"}}else{""})
  $hasLoopWarning=$visibleTasks.Count -gt 0 -and $null -ne (Get-LoopWarning $selected[0])
  $hasUnconfirmedPlan=$visibleTasks.Count -gt 0 -and [bool](Plan-StatusNote $selected[0])
- if($script:isCompact){$window.Height=Compact-Height $compactTasks.Count ($unavailable.Count -gt 0) $hasLoopWarning $hasUnconfirmedPlan; Move-CompactWindow}
+ if($script:isCompact){$window.Height=Compact-Height $compactTasks.Count ([bool]$warningText) $hasLoopWarning $hasUnconfirmedPlan;Move-CompactWindow}
 }
 
 function Compact-Height([int]$activeCount,[bool]$hasSourceErrors=$false,[bool]$hasLoopWarning=$false,[bool]$hasUnconfirmedPlan=$false) {
@@ -4076,6 +4078,19 @@ if($PreviewUpdate){$script:availableUpdate=[PSCustomObject]@{Version='0.3.0-alph
 if ($SnapshotFile) {
  if($PreviewOffscreen){$window.WindowStartupLocation="Manual";$window.Left=-10000;$window.Top=-10000;$window.ShowActivated=$false;$window.ShowInTaskbar=$false}
  $window.Show(); $window.UpdateLayout()
+ if($PreviewSourceWarning -eq 'partial-both'){
+  $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
+  if($actual -cne ((Tr 'Часть данных недоступна')+': DeepSeek Harness')){throw 'A source warning was duplicated or translated incorrectly.'}
+ }
+ if($PreviewSourceWarning -in @('partial-data','partial-both') -and $script:isCompact){
+  Render-CompactTasks $script:lastAllTasks;$window.UpdateLayout()
+  $warning=@($compactTasksPanel.Children | Where-Object {$_ -is [Windows.Controls.TextBlock] -and $_.Tag -ceq 'source-warning'})
+  if($warning.Count -ne 1){throw 'The compact source warning is missing.'}
+  $warning[0].Measure([Windows.Size]::new($compactTasksPanel.ActualWidth,[double]::PositiveInfinity))
+  $needed=$warning[0].DesiredSize.Height-$warning[0].Margin.Top-$warning[0].Margin.Bottom
+  $bounds=$warning[0].TransformToAncestor($compactView).TransformBounds([Windows.Rect]::new(0,0,$warning[0].ActualWidth,$warning[0].ActualHeight))
+  if($warning[0].ActualHeight+0.5 -lt $needed -or $bounds.Bottom -gt $compactView.ActualHeight+0.5){throw 'The compact source warning is clipped.'}
+ }
  if($PreviewTabsUiTest){
   if($providerTabsPanel.Children.Count -ne 7 -or $providerTabsScroll.ScrollableWidth -le 0){throw 'The six-provider tab row must overflow in one scrollable row.'}
   $providerTabsScroll.ScrollToHorizontalOffset($providerTabsScroll.ScrollableWidth);$window.UpdateLayout()

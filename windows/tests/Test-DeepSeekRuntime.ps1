@@ -4,13 +4,18 @@
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version 2.0
+if($env:CI -ne 'true' -or $env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
+   $env:RUNNER_OS -ne 'Windows' -or $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH -ne '0' -or
+   $null -ne [Environment]::GetEnvironmentVariable('HOME','Process') -or $null -ne [Environment]::GetEnvironmentVariable('CODEX_HOME','Process')){
+ throw 'An isolated hosted Windows runner without HOME or CODEX_HOME is required.'
+}
 . (Join-Path $PSScriptRoot '..\app\integrations\DeepSeekRuntime.ps1')
 $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
 $root=[IO.Path]::GetFullPath((Join-Path $temp ('aitm-runtime-'+[Guid]::NewGuid().ToString('N'))))
 if(-not $root.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe fixture path.'}
 [void][IO.Directory]::CreateDirectory($root)
 $old=@{}
-foreach($name in @('USERPROFILE','APPDATA','LOCALAPPDATA','DSH_HOME','HOME','XDG_CONFIG_HOME','XDG_CACHE_HOME','PNPM_CONFIG_STORE_DIR','PNPM_CONFIG_IGNORE_SCRIPTS','PNPM_CONFIG_IGNORE_PNPMFILE','PNPM_CONFIG_OFFLINE','NPM_CONFIG_USERCONFIG')){
+foreach($name in @('USERPROFILE','APPDATA','LOCALAPPDATA','DSH_HOME','XDG_CONFIG_HOME','XDG_CACHE_HOME','PNPM_CONFIG_STORE_DIR','PNPM_CONFIG_IGNORE_SCRIPTS','PNPM_CONFIG_IGNORE_PNPMFILE','PNPM_CONFIG_OFFLINE','NPM_CONFIG_USERCONFIG')){
  $old[$name]=[Environment]::GetEnvironmentVariable($name,'Process')
 }
 function Await-FixtureRequest($request){
@@ -32,7 +37,7 @@ function Await-FixtureController($controller,[scriptblock]$condition){
  throw 'The isolated DeepSeek controller did not reach the expected state.'
 }
 try{
- foreach($name in @('USERPROFILE','APPDATA','LOCALAPPDATA','HOME')){[Environment]::SetEnvironmentVariable($name,$root,'Process')}
+ foreach($name in @('USERPROFILE','APPDATA','LOCALAPPDATA')){[Environment]::SetEnvironmentVariable($name,$root,'Process')}
  $dshHome=Join-Path $root 'dsh-home'
  [Environment]::SetEnvironmentVariable('DSH_HOME',$dshHome,'Process')
  [Environment]::SetEnvironmentVariable('XDG_CONFIG_HOME',(Join-Path $root 'config'),'Process')
@@ -94,6 +99,7 @@ try{
  try{$hash=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($root)),0,12).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
  $pipe='AITaskMonitor.ProviderEvents.'+$hash
  $ClaudeEventFile='';$script:lastCodexTasks=@();$script:lastClaudeTasks=@();$script:lastExternalTasks=@()
+ $SnapshotFile='';$PreviewActiveTasks=-1;$script:codexCloudModulesAvailable=$false;$script:kimiModulesAvailable=$false;$script:hermesModulesAvailable=$false
  $script:externalProviderModulesAvailable=$true;$script:externalProviderController=New-ExternalProviderController -PipeName $pipe
  $script:seenExternalConnections=@{};$script:resolvedLanguage='en';$script:showingSettings=$false
  $script:deepSeekModulesAvailable=$true;$script:deepSeekController=$controller
@@ -111,11 +117,13 @@ try{
   $external=@($snapshot.Tasks|Where-Object {$_.Provider -eq 'deepseek'})
   if($external.Count -ne 2 -or @($external|Where-Object {$_.Paused}).Count -ne 1 -or @($external|Where-Object {$_.Steps.Count -eq 1}).Count -ne 1){throw 'The app mixed or lost DeepSeek profile events.'}
   $firstScope=[string](@($controller.Profiles|Where-Object {$_.Name -ceq $profile})[0].Scope)
+  $otherBefore=@($external | Where-Object {-not $_.Id.StartsWith('deepseek:'+$firstScope+'_')})[0]
   Request-DeepSeekProfileConnection $controller $profile $false
   Await-FixtureController $controller { $null -eq $controller.Request -and @($controller.Profiles|Where-Object {$_.Name -ceq $profile -and $_.State -eq 'disconnected'}).Count -eq 1 }
   $after=Source-Snapshot
   $remaining=@($after.Tasks|Where-Object {$_.Provider -eq 'deepseek'})
   if($remaining.Count -ne 1 -or $remaining[0].Id.StartsWith('deepseek:'+$firstScope+'_')){throw 'Disconnect did not remove only the selected profile task.'}
+  if($remaining[0].Id -cne $otherBefore.Id -or $remaining[0].Active -ne $otherBefore.Active -or $remaining[0].Paused -ne $otherBefore.Paused){throw 'Disconnect changed the neighboring profile task.'}
   if(@($after.Tasks|Where-Object {$_.Provider -eq 'codex' -or $_.Provider -eq 'claude'}).Count -ne 2){throw 'The other sources changed unexpectedly.'}
  }finally{Stop-ExternalProviderController $script:externalProviderController}
  Request-DeepSeekProfileConnection $controller $profileTwo $false

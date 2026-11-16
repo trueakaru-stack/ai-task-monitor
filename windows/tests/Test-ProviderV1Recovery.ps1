@@ -15,7 +15,7 @@ if($null -eq $mapper){throw 'Application task mapper not found.'}
 . ([scriptblock]::Create($mapper.Extent.Text))
 function Assert($value,[string]$message){if(-not $value){throw $message}}
 function Receive-DeepSeekRuntimeRequest {param($Request) return $Request.Reply}
-function Start-DeepSeekRuntimeRequest {param($Context,$Action,$Profile) return [PSCustomObject]@{Action=$Action;Profile=$Profile;Reply=$null}}
+function Start-DeepSeekRuntimeRequest {param($Context,$Action,$Profile,$ExpectedScope) return [PSCustomObject]@{Action=$Action;Profile=$Profile;ExpectedScope=$ExpectedScope;Reply=$null}}
 function Feed-DeepSeek($controller,[object[]]$items,[bool]$ok=$true){
  $reply=[PSCustomObject]@{Ok=$ok;Error=$(if($ok){''}else{'synthetic-error'});Action='list';Profile='';Result=$items}
  $controller.Request=[PSCustomObject]@{Action='list';Profile='';Reply=$reply}
@@ -44,27 +44,45 @@ $a='a'*32;$b='b'*32;$c='c'*32
 $deep=New-DeepSeekMonitorController -AppRoot $appRoot
 Feed-DeepSeek $deep @((Profile 'A' 'connected' $a),(Profile 'B' 'connected' $b))
 Assert (@(Get-DeepSeekAllowedScopes $deep).Count -eq 2) 'Valid profiles were not connected.'
+$unlocked=New-DeepSeekMonitorController -AppRoot $appRoot
+Feed-DeepSeek $unlocked @((Profile 'A' 'connected' $a),(Profile 'B' 'connected' $b))
+Feed-DeepSeek $unlocked @((Profile 'A' 'disconnected'),(Profile 'B' 'connected' $b))
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $unlocked).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $unlocked) -ccontains $a) 'An unlocked listing was treated as proof.'
 $deep.Context=[PSCustomObject]@{}
+$deep.FixtureContext=$deep.Context
 Request-DeepSeekProfileConnection -Controller $deep -Profile 'A' -Connect $false
 Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a -and
         @(Get-DeepSeekAllowedScopes $deep) -ccontains $b) 'A disconnect request claimed a confirmed scope or degraded B.'
+$deep.Request.Reply=[PSCustomObject]@{Ok=$true;Error='';Action='disconnect';Profile='A';Result=[PSCustomObject]@{state='disconnected';scope=$a}}
+Update-DeepSeekMonitorController $deep
 $deep.Request=$null
-Feed-DeepSeek $deep @((Profile 'A' 'partial'),(Profile 'B' 'connected' $b))
-Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a) 'Partial profile was treated as disconnected.'
-Feed-DeepSeek $deep @((Profile 'B' 'connected' $b))
-Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a) 'A missing profile was treated as disconnected.'
-Feed-DeepSeek $deep @() $false
-Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0) 'An error was treated as a disconnect.'
-Feed-DeepSeek $deep @((Profile 'A' 'disconnected'),(Profile 'B' 'connected' $b))
-Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a -and
-        @(Get-DeepSeekAllowedScopes $deep) -ccontains $b) 'An unlocked disconnected listing was treated as proof.'
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep) -ccontains $a -and @(Get-DeepSeekAllowedScopes $deep) -ccontains $b) 'A matching locked proof did not isolate A.'
 Feed-DeepSeek $deep @((Profile 'A' 'partial'),(Profile 'B' 'connected' $b))
 Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a -and
         (Get-DeepSeekMonitorConnectionState $deep) -eq 'connected-degraded') 'A stale disconnect was reused after the profile became partial.'
 Feed-DeepSeek $deep @((Profile 'B' 'connected' $b))
 Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a) 'A stale disconnect was reused after the profile disappeared.'
 Feed-DeepSeek $deep @((Profile 'A' 'disconnected'),(Profile 'B' 'connected' $b))
-Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep).Count -eq 0 -and @(Get-DeepSeekUncertainScopes $deep) -ccontains $a) 'A repeated unlocked listing was treated as proof.'
+Assert (@(Get-DeepSeekConfirmedDisconnectedScopes $deep) -ccontains $a) 'A current listing did not retain the earlier locked proof.'
+$race=New-DeepSeekMonitorController -AppRoot $appRoot
+Feed-DeepSeek $race @((Profile 'A' 'connected' $a),(Profile 'B' 'connected' $b))
+$race.Context=[PSCustomObject]@{};$race.FixtureContext=$race.Context
+Request-DeepSeekProfileConnection -Controller $race -Profile 'A' -Connect $false
+$race.Request.Reply=[PSCustomObject]@{Ok=$true;Error='';Action='disconnect';Profile='A';Result=[PSCustomObject]@{state='disconnected';scope=$c}}
+Update-DeepSeekMonitorController $race
+$race.Request=$null
+Assert ($race.ActionError -eq 'scope-changed' -and @(Get-DeepSeekConfirmedDisconnectedScopes $race).Count -eq 0 -and
+        @(Get-DeepSeekUncertainScopes $race) -ccontains $a -and @(Get-DeepSeekAllowedScopes $race) -ccontains $b) 'A mismatched reply confirmed or affected another profile.'
+$reconnectedDeep=New-DeepSeekMonitorController -AppRoot $appRoot
+Feed-DeepSeek $reconnectedDeep @((Profile 'A' 'connected' $a),(Profile 'B' 'connected' $b))
+$reconnectedDeep.Context=[PSCustomObject]@{};$reconnectedDeep.FixtureContext=$reconnectedDeep.Context
+Request-DeepSeekProfileConnection -Controller $reconnectedDeep -Profile 'A' -Connect $false
+$reconnectedDeep.Request.Reply=[PSCustomObject]@{Ok=$true;Error='';Action='disconnect';Profile='A';Result=[PSCustomObject]@{state='disconnected';scope=$a}}
+Update-DeepSeekMonitorController $reconnectedDeep
+$reconnectedDeep.Request=$null
+Feed-DeepSeek $reconnectedDeep @((Profile 'A' 'connected' $c),(Profile 'B' 'connected' $b))
+Assert (@(Get-DeepSeekAllowedScopes $reconnectedDeep) -ccontains $c -and @(Get-DeepSeekAllowedScopes $reconnectedDeep) -ccontains $b -and
+        @(Get-DeepSeekUncertainScopes $reconnectedDeep) -ccontains $c -and @(Get-DeepSeekUncertainScopes $reconnectedDeep) -cnotcontains $b) 'A new namespace after disconnect was falsely confirmed or affected B.'
 $lostRoster=New-DeepSeekMonitorController -AppRoot $appRoot
 Feed-DeepSeek $lostRoster @((Profile 'A' 'connected' $a))
 Feed-DeepSeek $lostRoster @((Profile 'A' 'disconnected'))
@@ -109,16 +127,15 @@ try{
  $connections.deepseek='connected';$scopes.deepseek=@($a,$b);$uncertain.deepseek=@()
  Poll-Group
  Assert ($state.Unavailable -contains 'DeepSeek Harness' -and $state.Tasks.Count -eq 256) 'Recovery forgot the scoped loss.'
- $connections.deepseek=Get-DeepSeekMonitorConnectionState $deep
- $scopes.deepseek=@(Get-DeepSeekAllowedScopes $deep)
- $uncertain.deepseek=@(Get-DeepSeekUncertainScopes $deep)
- $confirmed.deepseek=@(Get-DeepSeekConfirmedDisconnectedScopes $deep)
+ $connections.deepseek=Get-DeepSeekMonitorConnectionState $unlocked
+ $scopes.deepseek=@(Get-DeepSeekAllowedScopes $unlocked)
+ $uncertain.deepseek=@(Get-DeepSeekUncertainScopes $unlocked)
+ $confirmed.deepseek=@(Get-DeepSeekConfirmedDisconnectedScopes $unlocked)
  Poll-Group
  Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_one') -and -not $_.Active}).Count -eq 1 -and
          @($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*') -and $_.Active}).Count -eq 254 -and
          $state.Unavailable -contains 'DeepSeek Harness') 'An unlocked profile listing removed A or affected healthy B in the real group flow.'
- # Synthetic proof exercises the reducer contract; the current bridge emits no such proof.
- $connections.deepseek='connected';$scopes.deepseek=@($b);$uncertain.deepseek=@();$confirmed.deepseek=@($a)
+ $connections.deepseek='connected';$scopes.deepseek=@($b);$uncertain.deepseek=@();$confirmed.deepseek=@(Get-DeepSeekConfirmedDisconnectedScopes $deep)
  Poll-Group
  Assert (@($state.Tasks | Where-Object {$_.Id -eq ('deepseek:'+$a+'_one')}).Count -eq 0 -and
          @($state.Tasks | Where-Object {$_.Id -like ('deepseek:'+$b+'_*') -and $_.Active}).Count -eq 254 -and

@@ -7,11 +7,11 @@ permissions:
 jobs:
   recovery:
     runs-on: windows-2025
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        part: [tests]
+        part: [tests, deepseek, screenshots]
     env:
       AITM_CI_PART: ${{ matrix.part }}
       DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
@@ -62,11 +62,17 @@ jobs:
             $command = Get-Command dotnet.exe -CommandType Application | Select-Object -First 1
             if ($null -eq $command) { throw 'The Windows .NET SDK is unavailable.' }
             $sdk = Split-Path -Parent $command.Source
-            foreach ($name in @('profile','appdata','localappdata','temp','nuget','dotnet')) {
+            $nodeCommand = Get-Command node.exe -CommandType Application | Select-Object -First 1
+            if ($null -eq $nodeCommand) { throw 'The Windows Node runtime is unavailable.' }
+            $node = [string]$nodeCommand.Source
+            $nodeDir = Split-Path -Parent $node
+            foreach ($name in @('profile','appdata','localappdata','temp','nuget','dotnet','npm-cache')) {
               $null = [IO.Directory]::CreateDirectory((Join-Path $root $name))
             }
             $config = Join-Path $root 'NuGet.Config'
             [IO.File]::WriteAllText($config, '<configuration><packageSources><clear /></packageSources></configuration>', [Text.UTF8Encoding]::new($false))
+            $npmConfig = Join-Path $root 'empty-npmrc'
+            [IO.File]::WriteAllText($npmConfig, '', [Text.UTF8Encoding]::new($false))
             function Invoke-Isolated([string]$executable,[string[]]$arguments) {
               foreach ($argument in $arguments) {
                 if ($argument.Contains('"') -or $argument.EndsWith('\')) { throw 'Unsupported synthetic argument.' }
@@ -82,11 +88,12 @@ jobs:
               $info.EnvironmentVariables.Clear()
               $values = @{
                 SystemRoot=$env:SystemRoot; windir=$env:SystemRoot
-                PATH=($sdk + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot)
+                PATH=($sdk + ';' + $nodeDir + ';' + (Join-Path $root 'upstream/node_modules/.bin') + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot)
                 DOTNET_ROOT=$sdk; DOTNET_MULTILEVEL_LOOKUP='0'; DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='0'
                 DOTNET_CLI_HOME=(Join-Path $root 'dotnet'); DOTNET_CLI_TELEMETRY_OPTOUT='1'
                 DOTNET_GENERATE_ASPNET_CERTIFICATE='0'; DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE='1'
                 NUGET_PACKAGES=(Join-Path $root 'nuget'); USERPROFILE=(Join-Path $root 'profile')
+                NPM_CONFIG_CACHE=(Join-Path $root 'npm-cache'); NPM_CONFIG_USERCONFIG=$npmConfig
                 APPDATA=(Join-Path $root 'appdata'); LOCALAPPDATA=(Join-Path $root 'localappdata')
                 TEMP=(Join-Path $root 'temp'); TMP=(Join-Path $root 'temp')
                 CI=$env:CI; GITHUB_ACTIONS=$env:GITHUB_ACTIONS; RUNNER_ENVIRONMENT=$env:RUNNER_ENVIRONMENT
@@ -101,7 +108,7 @@ jobs:
               try {
                 $stdout = $process.StandardOutput.ReadToEndAsync()
                 $stderr = $process.StandardError.ReadToEndAsync()
-                if (-not $process.WaitForExit(180000)) { $process.Kill($true); throw 'The synthetic provider check timed out.' }
+                if (-not $process.WaitForExit(300000)) { $process.Kill($true); throw 'The synthetic provider check timed out.' }
                 if ($process.ExitCode -ne 0) { throw ("The synthetic provider check failed: " + $stdout.Result + $stderr.Result) }
                 if ($stdout.Result) { Write-Output $stdout.Result.TrimEnd() }
                 if ($stderr.Result) { Write-Output $stderr.Result.TrimEnd() }
@@ -122,6 +129,17 @@ jobs:
                 'Test-HermesObserverState.ps1','Test-ExternalSourceSnapshot.ps1')) {
                 Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source "windows/tests/$test"))
               }
+            } elseif ($env:AITM_CI_PART -eq 'deepseek') {
+              $npmCli = Join-Path $nodeDir 'node_modules/npm/bin/npm-cli.js'
+              if (-not [IO.File]::Exists($npmCli)) { throw 'The isolated npm launcher is unavailable.' }
+              $upstream = Join-Path $root 'upstream'
+              $null = [IO.Directory]::CreateDirectory($upstream)
+              Invoke-Isolated $node @($npmCli,'install','--prefix',$upstream,'--ignore-scripts','--no-audit','--no-fund','--package-lock=false','@deepseek-ai/dsh@0.2.1-rc.5','pnpm@11.25.0')
+              $anchor = Join-Path $upstream 'node_modules/@deepseek-ai/dsh/package.json'
+              $pnpm = Join-Path $upstream 'node_modules/pnpm/bin/pnpm.mjs'
+              if (-not [IO.File]::Exists($anchor) -or -not [IO.File]::Exists($pnpm)) { throw 'Pinned synthetic manager dependencies are missing.' }
+              Invoke-Isolated $node @((Join-Path $source 'windows/tests/Test-DeepSeekIntegration.mjs'),$anchor,$pnpm)
+              Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/tests/Test-DeepSeekRuntime.ps1'),'-DshAnchor',$anchor,'-PnpmScript',$pnpm)
             } else {
             $screenshots = Join-Path $root 'screenshots'
             $null = [IO.Directory]::CreateDirectory($screenshots)

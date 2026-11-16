@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, realpath, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, relative, sep } from 'node:path';
@@ -9,24 +10,29 @@ import { promisify } from 'node:util';
 import { deepSeekProfileState, listDeepSeekProfiles, setDeepSeekConnected } from '../app/integrations/deepseek-integration.mjs';
 
 const [anchorArgument, pnpmArgument] = process.argv.slice(2);
+if (process.platform !== 'win32' || process.env.CI !== 'true' || process.env.GITHUB_ACTIONS !== 'true' ||
+    process.env.RUNNER_ENVIRONMENT !== 'github-hosted' || process.env.DOTNET_ADD_GLOBAL_TOOLS_TO_PATH !== '0' ||
+    Object.hasOwn(process.env, 'HOME') || Object.hasOwn(process.env, 'CODEX_HOME')) {
+  throw Error('An isolated hosted Windows runner without HOME or CODEX_HOME is required.');
+}
 assert.ok(anchorArgument && pnpmArgument, 'Pass isolated DeepSeek package.json and pnpm script paths.');
 const anchor = await realpath(anchorArgument);
 const pnpmScript = await realpath(pnpmArgument);
 const execute = promisify(execFile);
 const temp = await realpath(tmpdir());
 const fixture = await mkdtemp(join(temp, 'aitm-dsh-controller-'));
-const home = join(fixture, 'dsh-home');
+const fixtureHome = join(fixture, 'dsh-home');
 const foreign = join(fixture, 'foreign');
 const profile = 'synthetic-profile';
-const profileDir = join(home, 'profiles', profile);
+const profileDir = join(fixtureHome, 'profiles', profile);
 const manifestPath = join(profileDir, 'package.json');
 const assets = await realpath(join(dirname(dirname(fileURLToPath(import.meta.url))), 'app', 'integrations'));
 const marker = join(fixture, 'foreign-script-ran');
 const setup = join(assets, 'deepseek-setup.mjs');
 const inherited = Object.fromEntries(['PATH', 'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'OS', 'LANG', 'LC_ALL']
   .filter(name => typeof process.env[name] === 'string').map(name => [name, process.env[name]]));
-const env = { ...inherited, USERPROFILE: fixture, HOME: fixture, APPDATA: fixture, LOCALAPPDATA: fixture,
-  DSH_HOME: home, XDG_CONFIG_HOME: join(fixture, 'xdg-config'), XDG_CACHE_HOME: join(fixture, 'xdg-cache'),
+const env = { ...inherited, USERPROFILE: fixture, APPDATA: fixture, LOCALAPPDATA: fixture, DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0',
+  DSH_HOME: fixtureHome, XDG_CONFIG_HOME: join(fixture, 'xdg-config'), XDG_CACHE_HOME: join(fixture, 'xdg-cache'),
   NPM_CONFIG_CACHE: join(fixture, 'cache'), NPM_CONFIG_USERCONFIG: join(fixture, 'empty-npmrc'),
   PNPM_CONFIG_STORE_DIR: join(fixture, 'store'), PNPM_CONFIG_OFFLINE: 'true', PNPM_CONFIG_IGNORE_SCRIPTS: 'true',
   PNPM_CONFIG_IGNORE_PNPMFILE: 'true', AITM_SCRIPT_MARKER: marker };
@@ -61,11 +67,11 @@ try {
   const bin = join(dirname(anchor), 'lib', 'bin.js');
   await execute(process.execPath, [bin, 'plugin', '--profile', profile, 'add', '--offline', '--ignore-scripts', foreign],
     { env, windowsHide: true, timeout: 30000, maxBuffer: 1048576 });
-  assert.deepEqual(await listDeepSeekProfiles(home), [profile]);
-  assert.equal(await deepSeekProfileState(home, profile), 'disconnected');
-  assert.deepEqual(await bridge({ action: 'list', home }),
+  assert.deepEqual(await listDeepSeekProfiles(fixtureHome), [profile]);
+  assert.equal(await deepSeekProfileState(fixtureHome, profile), 'disconnected');
+  assert.deepEqual(await bridge({ action: 'list', home: fixtureHome }),
     { status: 0, response: { ok: true, result: [{ name: profile, state: 'disconnected' }] } });
-  await assert.rejects(deepSeekProfileState(home, 'missing'));
+  await assert.rejects(deepSeekProfileState(fixtureHome, 'missing'));
   let manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   await writeFile(join(profileDir, 'foreign-script.cjs'),
     `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran');`);
@@ -73,11 +79,11 @@ try {
   await writeFile(manifestPath, JSON.stringify(manifest));
   await writeFile(join(profileDir, '.pnpmfile.mjs'),
     `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'ran'); export function readPackage(pkg) { return pkg; }`);
-  const options = { home, profile, assets, installAnchor: anchor, pnpmScript };
+  const options = { home: fixtureHome, profile, assets, installAnchor: anchor, pnpmScript };
   const unsupportedAnchor = join(fixture, 'unsupported-dsh.json');
   await writeFile(unsupportedAnchor, JSON.stringify({ name: '@deepseek-ai/dsh', version: '99.0.0' }));
   await assert.rejects(setDeepSeekConnected({ ...options, installAnchor: unsupportedAnchor }, true), { code: 'unverified-dsh' });
-  assert.equal(await deepSeekProfileState(home, profile), 'disconnected');
+  assert.equal(await deepSeekProfileState(fixtureHome, profile), 'disconnected');
   const destination = join(profileDir, 'ai-task-monitor-observer');
   let linked = false;
   try {
@@ -94,13 +100,13 @@ try {
   }
   assert.deepEqual(await bridge({ action: 'connect', ...options }),
     { status: 0, response: { ok: true, result: 'connected' } });
-  const listedConnected = await bridge({ action: 'list', home });
+  const listedConnected = await bridge({ action: 'list', home: fixtureHome });
   assert.equal(listedConnected.response.result[0].state, 'connected', 'A new bridge process must read the connected profile.');
   assert.match(listedConnected.response.result[0].scope, /^[a-f0-9]{32}$/);
   await execute(process.execPath, [join(dirname(fileURLToPath(import.meta.url)), 'Test-DeepSeekUpstreamBoot.mjs'), anchor, profile],
     { env, cwd: fixture, windowsHide: true, timeout: 30000, maxBuffer: 1048576 });
   await assert.rejects(readFile(marker), { code: 'ENOENT' });
-  assert.equal(await deepSeekProfileState(home, profile), 'connected');
+  assert.equal(await deepSeekProfileState(fixtureHome, profile), 'connected');
   assert.equal(await setDeepSeekConnected(options, true), 'connected');
   manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   assert.ok(manifest.dependencies['aitm-foreign-fixture']);
@@ -111,17 +117,56 @@ try {
   await assert.rejects(setDeepSeekConnected(options, false), { code: 'modified-bundle' });
   assert.equal((await readFile(observer, 'utf8')), 'FOREIGN CHANGE');
   await writeFile(observer, original);
+  const require = createRequire(anchor);
+  const { withFileLock } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-atomic-write')).href);
+  const oldScope = listedConnected.response.result[0].scope;
+  const newScope = oldScope === 'a'.repeat(32) ? 'b'.repeat(32) : 'a'.repeat(32);
+  const scopePath = join(destination, 'monitor-profile.json');
+  const bundleMarker = join(destination, 'aitm-manifest.json');
+  let scopeAcquired, releaseScope, afterScopeChange, afterMarkerChange, afterManifestChange;
+  const scopeLocked = new Promise(resolve => { scopeAcquired = resolve; });
+  const scopeWait = new Promise(resolve => { releaseScope = resolve; });
+  const scopeWriter = withFileLock(manifestPath, async () => {
+    scopeAcquired();
+    await scopeWait;
+    const scopeBytes = Buffer.from(JSON.stringify({ namespace: newScope }));
+    const bundle = JSON.parse(await readFile(bundleMarker, 'utf8'));
+    bundle.files['monitor-profile.json'] = createHash('sha256').update(scopeBytes).digest('hex');
+    await writeFile(scopePath, scopeBytes);
+    await writeFile(bundleMarker, JSON.stringify(bundle));
+    afterScopeChange = await readFile(scopePath);
+    afterMarkerChange = await readFile(bundleMarker);
+    afterManifestChange = await readFile(manifestPath);
+  });
+  await scopeLocked;
+  const pendingDisconnect = setDeepSeekConnected({ ...options, expectedScope: oldScope }, false);
+  let pendingFinished = false;
+  pendingDisconnect.then(() => { pendingFinished = true; }, () => { pendingFinished = true; });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(pendingFinished, false, 'Disconnect did not wait for the profile lock.');
+  } finally {
+    releaseScope();
+    await scopeWriter;
+  }
+  await assert.rejects(pendingDisconnect, { code: 'scope-changed' });
+  assert.deepEqual(await readFile(scopePath), afterScopeChange, 'A mismatched scope was overwritten.');
+  assert.deepEqual(await readFile(bundleMarker), afterMarkerChange, 'A mismatched bundle was overwritten.');
+  assert.deepEqual(await readFile(manifestPath), afterManifestChange, 'A mismatched profile manifest was changed.');
+  assert.equal(await deepSeekProfileState(fixtureHome, profile), 'connected');
+  assert.deepEqual(await bridge({ action: 'disconnect', ...options, expectedScope: newScope }),
+    { status: 0, response: { ok: true, result: { state: 'disconnected', scope: newScope } } });
+  await assert.rejects(setDeepSeekConnected({ ...options, expectedScope: newScope }, false), { code: 'scope-changed' });
+  assert.equal(await setDeepSeekConnected(options, true), 'connected');
   assert.equal(await setDeepSeekConnected(options, false), 'disconnected');
   await assert.rejects(readFile(marker), { code: 'ENOENT' });
   manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
   assert.ok(manifest.dependencies['aitm-foreign-fixture']);
   assert.equal(manifest.dependencies['ai-task-monitor-dsh-observer'], undefined);
   assert.ok(manifest.dsh.profile.bundles.includes('aitm-foreign-fixture'));
-  assert.equal(await deepSeekProfileState(home, profile), 'disconnected');
+  assert.equal(await deepSeekProfileState(fixtureHome, profile), 'disconnected');
 
   // A concurrent agent writer holds this same lock. Re-read after it commits.
-  const require = createRequire(anchor);
-  const { withFileLock } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-atomic-write')).href);
   let acquired, release;
   const locked = new Promise(resolve => { acquired = resolve; });
   const wait = new Promise(resolve => { release = resolve; });
@@ -142,17 +187,17 @@ try {
   assert.equal(manifest.dependencies['ai-task-monitor-dsh-observer'], 'file:foreign-user-package');
   // Desktop owns this profile and npm dsh cannot safely manage it. Check
   // discovery and both actions, including Windows-style case variants.
-  const desktop = join(home, 'profiles', 'desktop');
+  const desktop = join(fixtureHome, 'profiles', 'desktop');
   await mkdir(desktop);
   const desktopManifest = join(desktop, 'package.json');
   const desktopContents = '{"desktop-owned":"preserve"}';
   await writeFile(desktopManifest, desktopContents);
   for (const name of ['desktop', 'Desktop', 'DESKTOP']) {
-    await assert.rejects(deepSeekProfileState(home, name), { code: 'unsupported-desktop' });
+    await assert.rejects(deepSeekProfileState(fixtureHome, name), { code: 'unsupported-desktop' });
     await assert.rejects(setDeepSeekConnected({ ...options, profile: name }, true), { code: 'unsupported-desktop' });
     await assert.rejects(setDeepSeekConnected({ ...options, profile: name }, false), { code: 'unsupported-desktop' });
   }
-  const desktopList = await bridge({ action: 'list', home });
+  const desktopList = await bridge({ action: 'list', home: fixtureHome });
   assert.deepEqual(desktopList.response.result.find(item => item.name === 'desktop'),
     { name: 'desktop', state: 'error', error: 'unsupported-desktop' });
   assert.equal(await readFile(desktopManifest, 'utf8'), desktopContents);

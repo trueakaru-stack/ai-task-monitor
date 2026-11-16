@@ -41,13 +41,15 @@ function Get-DeepSeekRuntimeContext {
 }
 
 function Start-DeepSeekRuntimeRequest {
- param([Parameter(Mandatory=$true)]$Context,[ValidateSet('list','connect','disconnect')][string]$Action,[string]$Profile='')
+ param([Parameter(Mandatory=$true)]$Context,[ValidateSet('list','connect','disconnect')][string]$Action,[string]$Profile='',[string]$ExpectedScope='')
  if($Action -ne 'list' -and -not $Profile){throw 'A DeepSeek profile is required.'}
+ if($ExpectedScope -and ($Action -ne 'disconnect' -or $ExpectedScope -cnotmatch '^[a-f0-9]{32}$')){throw 'Invalid DeepSeek scope.'}
  $request = @{action=$Action;home=[string]$Context.Home}
  $request.installAnchor=[string]$Context.Anchor;$request.pnpmScript=[string]$Context.Pnpm
  if($Action -ne 'list'){
   $request.profile=$Profile;$request.assets=[string]$Context.Assets
  }
+ if($ExpectedScope){$request.expectedScope=$ExpectedScope}
  $body = $request | ConvertTo-Json -Compress
  $start = [Diagnostics.ProcessStartInfo]::new()
  $start.FileName=[string]$Context.Node
@@ -63,7 +65,7 @@ function Start-DeepSeekRuntimeRequest {
   $bytes=[Text.Encoding]::UTF8.GetBytes($body)
   $process.StandardInput.BaseStream.Write($bytes,0,$bytes.Length)
   $process.StandardInput.Close()
-  return [PSCustomObject]@{Process=$process;Output=$output;Errors=$errors;Action=$Action;Profile=$Profile;Started=[DateTimeOffset]::UtcNow}
+  return [PSCustomObject]@{Process=$process;Output=$output;Errors=$errors;Action=$Action;Profile=$Profile;ExpectedScope=$ExpectedScope;Started=[DateTimeOffset]::UtcNow}
  }catch{
   $process.Dispose()
   throw
@@ -87,7 +89,7 @@ function Receive-DeepSeekRuntimeRequest {
 
 function New-DeepSeekMonitorController {
  param([Parameter(Mandatory=$true)][string]$AppRoot,$FixtureContext=$null)
- return [PSCustomObject]@{AppRoot=$AppRoot;FixtureContext=$FixtureContext;Context=$null;Request=$null;Profiles=@();Seen=[Collections.Hashtable]::new([StringComparer]::Ordinal);UncertainAfterDisconnect=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);AmbiguousScopes=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);ScopeHistoryLost=$false;Scanned=$false;LastError='';ActionError='';NextScan=[DateTimeOffset]::MinValue}
+ return [PSCustomObject]@{AppRoot=$AppRoot;FixtureContext=$FixtureContext;Context=$null;Request=$null;Profiles=@();Seen=[Collections.Hashtable]::new([StringComparer]::Ordinal);UncertainAfterDisconnect=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);ConfirmedDisconnectedScopes=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);ConfirmedDisconnectedNames=[Collections.Hashtable]::new([StringComparer]::Ordinal);RetiredProfileNames=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);AmbiguousScopes=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);ScopeHistoryLost=$false;Scanned=$false;LastError='';ActionError='';NextScan=[DateTimeOffset]::MinValue}
 }
 
 function Add-DeepSeekAmbiguousScope {
@@ -109,12 +111,29 @@ function Test-DeepSeekScopeConflict {
  return $false
 }
 
+function Confirm-DeepSeekDisconnectedProfile {
+ param($Controller,[string]$Name,[string]$Scope)
+ if($Scope -cnotmatch '^[a-f0-9]{32}$' -or -not $Controller.Seen.ContainsKey($Name) -or [string]$Controller.Seen[$Name] -cne $Scope){return $false}
+ if((Test-DeepSeekScopeConflict $Controller $Name $Scope) -or @($Controller.Profiles | Where-Object {$_.Name -ceq $Name}).Count -ne 1){
+  Add-DeepSeekAmbiguousScope $Controller $Scope;return $false
+ }
+ if(($Controller.ConfirmedDisconnectedScopes.Count -ge 256 -and -not $Controller.ConfirmedDisconnectedScopes.Contains($Scope)) -or
+    ($Controller.RetiredProfileNames.Count -ge 256 -and -not $Controller.RetiredProfileNames.Contains($Name))){$Controller.ScopeHistoryLost=$true;return $false}
+ [void]$Controller.ConfirmedDisconnectedScopes.Add($Scope)
+ $Controller.ConfirmedDisconnectedNames[$Scope]=$Name
+ [void]$Controller.RetiredProfileNames.Add($Name)
+ [void]$Controller.UncertainAfterDisconnect.Remove($Name)
+ [void]$Controller.Seen.Remove($Name)
+ return $true
+}
+
 function Update-DeepSeekMonitorController {
  param([Parameter(Mandatory=$true)]$Controller,[DateTimeOffset]$Now=[DateTimeOffset]::UtcNow)
  if($null -ne $Controller.Request){
   try{$reply=Receive-DeepSeekRuntimeRequest $Controller.Request}
   catch{$reply=[PSCustomObject]@{Ok=$false;Error='operation-failed';Action=$Controller.Request.Action;Profile=$Controller.Request.Profile;Result=$null}}
   if($null -ne $reply){
+   $completedRequest=$Controller.Request
    $Controller.Request=$null
    if($reply.Action -eq 'list'){
      if($reply.Ok -and @($reply.Result).Count -le 256){
@@ -133,12 +152,15 @@ function Update-DeepSeekMonitorController {
          $prior=if($Controller.Seen.ContainsKey($item.Name)){[string]$Controller.Seen[$item.Name]}else{''}
          if(@($Controller.Profiles | Where-Object {$_.Name -ceq $item.Name}).Count -ne 1 -or
             ($prior -and $prior -cne $item.Scope) -or
+            ($Controller.ConfirmedDisconnectedNames.ContainsKey($item.Scope) -and $Controller.ConfirmedDisconnectedNames[$item.Scope] -cne $item.Name) -or
             (Test-DeepSeekScopeConflict $Controller $item.Name $item.Scope)){
           Add-DeepSeekAmbiguousScope $Controller $prior;Add-DeepSeekAmbiguousScope $Controller $item.Scope
          }elseif(-not $Controller.Seen.ContainsKey($item.Name) -and $Controller.Seen.Count -ge 256){
           $Controller.ScopeHistoryLost=$true;Add-DeepSeekAmbiguousScope $Controller $item.Scope
          }else{
           $Controller.Seen[$item.Name]=$item.Scope
+          [void]$Controller.ConfirmedDisconnectedScopes.Remove([string]$item.Scope)
+          [void]$Controller.ConfirmedDisconnectedNames.Remove([string]$item.Scope)
          }
         }
       }
@@ -147,10 +169,18 @@ function Update-DeepSeekMonitorController {
     $Controller.NextScan=$Now.AddSeconds(15)
    }else{
     if($reply.Ok){
-      if($reply.Action -eq 'disconnect' -and [string]$reply.Result -cne 'disconnected'){$Controller.ActionError='invalid-response'}
-      else{
-       $Controller.ActionError=''
-      }
+      $expected=if($null -ne $completedRequest.PSObject.Properties['ExpectedScope']){[string]$completedRequest.ExpectedScope}else{''}
+      if($reply.Action -eq 'disconnect' -and $expected){
+       $result=$reply.Result
+       if($null -eq $result -or $null -eq $result.PSObject.Properties['state'] -or $null -eq $result.PSObject.Properties['scope'] -or
+          [string]$result.state -cne 'disconnected' -or [string]$result.scope -cne $expected -or
+          -not (Confirm-DeepSeekDisconnectedProfile $Controller ([string]$reply.Profile) $expected)){$Controller.ActionError='scope-changed'}
+       else{
+        $Controller.ActionError=''
+        foreach($item in @($Controller.Profiles | Where-Object {$_.Name -ceq [string]$reply.Profile})){$item.State='disconnected';$item.Scope=''}
+       }
+      }elseif($reply.Action -eq 'disconnect' -and [string]$reply.Result -cne 'disconnected'){$Controller.ActionError='invalid-response'}
+      else{$Controller.ActionError=''}
     }else{$Controller.ActionError=[string]$reply.Error}
     $Controller.NextScan=[DateTimeOffset]::MinValue
    }
@@ -176,13 +206,15 @@ function Request-DeepSeekProfileConnection {
   if($Controller.UncertainAfterDisconnect.Count -ge 256 -and -not $Controller.UncertainAfterDisconnect.Contains($Profile)){$Controller.ScopeHistoryLost=$true}
   else{[void]$Controller.UncertainAfterDisconnect.Add($Profile)}
  }
- $Controller.Request=Start-DeepSeekRuntimeRequest -Context $Controller.Context -Action $action -Profile $Profile
+ $expected=if($action -eq 'disconnect' -and $Controller.Seen.ContainsKey($Profile)){[string]$Controller.Seen[$Profile]}else{''}
+ if($expected -cnotmatch '^[a-f0-9]{32}$'){$expected=''}
+ $Controller.Request=Start-DeepSeekRuntimeRequest -Context $Controller.Context -Action $action -Profile $Profile -ExpectedScope $expected
 }
 
 function Get-DeepSeekMonitorConnectionState {
  param([Parameter(Mandatory=$true)]$Controller)
  if($Controller.LastError){
-  $previouslyKnown=$Controller.Seen.Count -gt 0 -or $Controller.UncertainAfterDisconnect.Count -gt 0 -or
+  $previouslyKnown=$Controller.Seen.Count -gt 0 -or $Controller.UncertainAfterDisconnect.Count -gt 0 -or $Controller.ConfirmedDisconnectedScopes.Count -gt 0 -or
    @($Controller.Profiles | Where-Object {$_.State -in @('connected','partial','error')}).Count -gt 0
   return $(if($previouslyKnown){'error'}else{'disconnected'})
  }
@@ -212,18 +244,29 @@ function Get-DeepSeekUncertainScopes {
   $scope=[string]$Controller.Seen[$name]
   if($scope -cnotmatch '^[a-f0-9]{32}$'){continue}
   $match=@($Controller.Profiles | Where-Object {$_.Name -ceq $name})
-  if($Controller.LastError -or $Controller.ScopeHistoryLost -or $Controller.UncertainAfterDisconnect.Contains([string]$name) -or $Controller.AmbiguousScopes.Contains($scope) -or $match.Count -ne 1 -or
+  if($Controller.LastError -or $Controller.ScopeHistoryLost -or $Controller.UncertainAfterDisconnect.Contains([string]$name) -or $Controller.RetiredProfileNames.Contains([string]$name) -or $Controller.AmbiguousScopes.Contains($scope) -or $match.Count -ne 1 -or
      $match[0].State -in @('partial','error','disconnected') -or ($match[0].State -eq 'connected' -and $match[0].Scope -cne $scope)){$result.Add($scope)}
  }
  foreach($scope in $Controller.AmbiguousScopes){if(-not $result.Contains($scope)){$result.Add($scope)}}
+ foreach($scope in @($Controller.ConfirmedDisconnectedNames.Keys)){
+  $name=[string]$Controller.ConfirmedDisconnectedNames[$scope]
+  $match=@($Controller.Profiles | Where-Object {$_.Name -ceq $name})
+  if(($match.Count -ne 1 -or $match[0].State -in @('partial','error') -or
+      ($match[0].State -eq 'connected' -and $match[0].Scope -cne $scope)) -and -not $result.Contains([string]$scope)){$result.Add([string]$scope)}
+ }
  if($Controller.ScopeHistoryLost){foreach($item in $Controller.Profiles){if($item.State -eq 'connected' -and $item.Scope -cmatch '^[a-f0-9]{32}$' -and -not $result.Contains([string]$item.Scope)){$result.Add([string]$item.Scope)}}}
  return $result.ToArray()
 }
 
 function Get-DeepSeekConfirmedDisconnectedScopes {
  param([Parameter(Mandatory=$true)]$Controller)
- # The current bridge returns only a profile name, not its prior namespace
- # checked under the manager lock. Neither its list nor its action can prove
- # that a previously observed scope was disconnected.
- return @()
+ if($Controller.LastError -or $Controller.ScopeHistoryLost){return @()}
+ $connected=@($Controller.Profiles | Where-Object {$_.State -eq 'connected'} | ForEach-Object {$_.Scope})
+ return @($Controller.ConfirmedDisconnectedScopes | Where-Object {
+  $scope=[string]$_
+  if($Controller.AmbiguousScopes.Contains($scope) -or $connected -ccontains $scope -or -not $Controller.ConfirmedDisconnectedNames.ContainsKey($scope)){return $false}
+  $name=[string]$Controller.ConfirmedDisconnectedNames[$scope]
+  $match=@($Controller.Profiles | Where-Object {$_.Name -ceq $name})
+  return ($match.Count -eq 1 -and $match[0].State -eq 'disconnected')
+ })
 }

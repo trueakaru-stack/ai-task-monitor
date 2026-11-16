@@ -239,8 +239,9 @@ async function createBundle(paths, assets) {
   }
 }
 
-async function removeOwnedBundle(paths) {
+async function removeOwnedBundle(paths, expectedScope) {
   const owned = await ownedBundle(paths);
+  if (expectedScope !== undefined && (!owned || owned.namespace !== expectedScope)) fail('scope-changed');
   if (!owned) return;
   const current = await lstat(paths.folder);
   if (current.dev !== owned.folder.dev || current.ino !== owned.folder.ino) fail('changed-bundle');
@@ -250,7 +251,11 @@ async function removeOwnedBundle(paths) {
 
 // pnpm 11 may leave its direct link after removing the dependency. Remove it
 // only when it is a link that still resolves to this exact owned bundle.
-async function removeOwnedEntry(paths) {
+async function removeOwnedEntry(paths, expectedScope) {
+  if (expectedScope !== undefined) {
+    const owned = await ownedBundle(paths);
+    if (!owned || owned.namespace !== expectedScope) fail('scope-changed');
+  }
   const entry = await statOrNull(paths.nodeEntry);
   if (!entry) return;
   await plainPath(dirname(paths.nodeEntry));
@@ -265,22 +270,26 @@ async function removeOwnedEntry(paths) {
 }
 
 // Called only after the user chooses a profile and presses the connection action.
-export async function setDeepSeekConnected({ home, profile, assets, installAnchor, pnpmScript }, connect) {
+export async function setDeepSeekConnected({ home, profile, assets, installAnchor, pnpmScript, expectedScope }, connect) {
   if (typeof connect !== 'boolean') fail('invalid-action');
+  if (expectedScope !== undefined && (connect || typeof expectedScope !== 'string' || !/^[a-f0-9]{32}$/.test(expectedScope))) fail('invalid-request');
   const paths = profilePaths(home, profile);
   await existingProfile(paths); // Never initialize an absent profile.
   const host = await runtime(installAnchor, pnpmScript);
   return host.withFileLock(paths.manifest, async () => {
     let manifest = await existingProfile(paths); // Recheck under the agent's own lock.
-    let state = await stateFor(paths, manifest);
+    const bundle = await ownedBundle(paths);
+    if (expectedScope !== undefined && (!bundle || bundle.namespace !== expectedScope)) fail('scope-changed');
+    let state = await stateFor(paths, manifest, bundle);
+    const disconnected = () => expectedScope === undefined ? 'disconnected' : { state: 'disconnected', scope: expectedScope };
     if (connect && state === 'connected') return state;
-    if (!connect && state === 'disconnected') return state;
+    if (!connect && state === 'disconnected') return disconnected();
     if (connect && state !== 'disconnected') fail('partial-connection');
     if (connect) await createBundle(paths, assets);
     else if (dependency(manifest) === null && selections(manifest).length === 0) {
-      await removeOwnedEntry(paths);
-      await removeOwnedBundle(paths);
-      return 'disconnected';
+      await removeOwnedEntry(paths, expectedScope);
+      await removeOwnedBundle(paths, expectedScope);
+      return disconnected();
     } else if (state !== 'connected') fail('partial-connection');
     const options = {
       command: process.execPath, args: [host.script], execution: 'service', outputBytes: 4096,
@@ -302,8 +311,8 @@ export async function setDeepSeekConnected({ home, profile, assets, installAncho
     const remainingDependency = dependency(manifest) !== null;
     const remainingSelection = selections(manifest).length > 0;
     if (remainingDependency || remainingSelection) fail('partial-connection');
-    await removeOwnedEntry(paths);
-    await removeOwnedBundle(paths);
-    return 'disconnected';
+    await removeOwnedEntry(paths, expectedScope);
+    await removeOwnedBundle(paths, expectedScope);
+    return disconnected();
   }, { waitMs: 5000 });
 }
