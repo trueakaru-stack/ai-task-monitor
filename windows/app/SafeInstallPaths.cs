@@ -5,7 +5,57 @@ using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
+using System.Text;
+using System.Web.Script.Serialization;
 using Microsoft.Win32.SafeHandles;
+
+internal static class InstallerLanguage
+{
+    private static bool isRussian = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru";
+
+    internal static void Initialize()
+    {
+        isRussian = Resolve(Environment.GetEnvironmentVariable("LOCALAPPDATA"));
+    }
+
+    internal static bool IsRussian { get { return isRussian; } }
+    internal static string Text(string russian, string english) { return isRussian ? russian : english; }
+
+    internal static bool Resolve(string localDirectory)
+    {
+        bool fallback = System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru";
+        try
+        {
+            if (String.IsNullOrEmpty(localDirectory) || !Path.IsPathRooted(localDirectory)) return fallback;
+            string local = Path.GetFullPath(localDirectory);
+            string folder = Path.Combine(local, "CodexTaskProgress");
+            string path = Path.Combine(folder, "settings.json");
+            foreach (string part in new[] { local, folder, path })
+            {
+                FileAttributes attributes = File.GetAttributes(part);
+                if ((attributes & FileAttributes.ReparsePoint) != 0) return fallback;
+                if (part == path ? (attributes & FileAttributes.Directory) != 0 : (attributes & FileAttributes.Directory) == 0) return fallback;
+            }
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                byte[] bytes = new byte[65537];
+                int total = 0, count;
+                while (total < bytes.Length && (count = stream.Read(bytes, total, bytes.Length - total)) > 0) total += count;
+                if (total > 65536) return fallback;
+                string json = new UTF8Encoding(false, true).GetString(bytes, 0, total).TrimStart('\uFEFF');
+                JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = 65536, RecursionLimit = 64 };
+                Dictionary<string, object> settings = serializer.DeserializeObject(json) as Dictionary<string, object>;
+                object language;
+                if (settings == null || !settings.TryGetValue("language", out language)) return fallback;
+                string selected = language as string;
+                if (String.Equals(selected, "ru", StringComparison.Ordinal)) return true;
+                if (String.Equals(selected, "en", StringComparison.Ordinal)) return false;
+            }
+        }
+        catch { }
+        return fallback;
+    }
+}
 
 internal sealed class SafeInstallPaths : IDisposable
 {
@@ -47,7 +97,7 @@ internal sealed class SafeInstallPaths : IDisposable
         string full = Normalize(path);
         string root = Path.GetPathRoot(full);
         if (root == null || root.Length != 3 || root[1] != ':' || root[2] != '\\')
-            throw new IOException("The installation path must be on a local drive.");
+            throw new IOException(InstallerLanguage.Text("Путь установки должен находиться на локальном диске.", "The installation path must be on a local drive."));
         SafeInstallPaths guard = new SafeInstallPaths();
         try
         {
@@ -66,21 +116,21 @@ internal sealed class SafeInstallPaths : IDisposable
 
     internal static string ExistingInstallMessage(string path)
     {
-        if (System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru")
+        if (InstallerLanguage.IsRussian)
             return "Папка установки уже существует. Полностью закройте AI task monitor, Claude Code и другие подключённые программы и их фоновые процессы. Перенесите папку " + path + " в безопасное место, затем повторите установку. Данные в папке CodexTaskProgress не изменяются.";
         return "The installation folder already exists. Quit AI task monitor, Claude Code, other connected programs and their background processes. Move " + path + " to a safe location, then run the installer again. Data in CodexTaskProgress will not be changed.";
     }
 
     internal static string ClaudeSetupMayHaveChangedMessage()
     {
-        if (System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru")
+        if (InstallerLanguage.IsRussian)
             return "\n\nНастройки подключения Claude Code могли измениться. Перед переносом или удалением папки проверьте и отключите подключение AI task monitor в Claude Code.";
         return "\n\nClaude Code connection settings may have changed. Before moving or removing the folder, review and disconnect the AI task monitor integration in Claude Code.";
     }
 
     internal static string PartialInstallMessage(string path)
     {
-        if (System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru")
+        if (InstallerLanguage.IsRussian)
             return "\n\nУстановка могла остаться незавершённой. Проверьте папку " + path + " и при необходимости перенесите её в безопасное место перед повтором.";
         return "\n\nInstallation may be incomplete. Review " + path + " and, if needed, move it to a safe location before retrying.";
     }
@@ -94,7 +144,7 @@ internal sealed class SafeInstallPaths : IDisposable
             int error = Marshal.GetLastWin32Error();
             if (error == 80 || error == 183)
                 throw new IOException(ExistingInstallMessage(full));
-            throw new Win32Exception(error, "Не удалось создать новую папку установки.");
+            throw new Win32Exception(error, InstallerLanguage.Text("Не удалось создать новую папку установки.", "Unable to create a new installation folder."));
         }
         Hold(full);
     }
@@ -110,7 +160,7 @@ internal sealed class SafeInstallPaths : IDisposable
     {
         string parent = Path.GetDirectoryName(full);
         if (String.IsNullOrEmpty(parent) || !directories.Contains(Normalize(parent)))
-            throw new IOException("The parent directory is not held for the installation.");
+            throw new IOException(InstallerLanguage.Text("Родительская папка не защищена для установки.", "The parent directory is not held for the installation."));
     }
 
     private void Hold(string path)
@@ -122,19 +172,19 @@ internal sealed class SafeInstallPaths : IDisposable
         {
             int error = Marshal.GetLastWin32Error();
             handle.Dispose();
-            throw new Win32Exception(error, "Не удалось безопасно открыть папку установки.");
+            throw new Win32Exception(error, InstallerLanguage.Text("Не удалось безопасно открыть папку установки.", "Unable to open the installation folder safely."));
         }
         FileInfo info;
         if (!GetFileInformationByHandle(handle, out info))
         {
             int error = Marshal.GetLastWin32Error();
             handle.Dispose();
-            throw new Win32Exception(error, "Не удалось проверить папку установки.");
+            throw new Win32Exception(error, InstallerLanguage.Text("Не удалось проверить папку установки.", "Unable to verify the installation folder."));
         }
         if ((info.Attributes & DirectoryAttribute) == 0 || (info.Attributes & ReparseAttribute) != 0)
         {
             handle.Dispose();
-            throw new IOException("Путь установки содержит перенаправленную папку. Установка остановлена без перезаписи файлов.");
+            throw new IOException(InstallerLanguage.Text("Путь установки содержит перенаправленную папку. Установка остановлена без перезаписи файлов.", "The installation path contains a redirected folder. Setup stopped without overwriting files."));
         }
         handles.Add(handle);
         directories.Add(full);
@@ -142,13 +192,13 @@ internal sealed class SafeInstallPaths : IDisposable
 
     private static string Normalize(string path)
     {
-        if (String.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path)) throw new IOException("The path is not absolute.");
+        if (String.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path)) throw new IOException(InstallerLanguage.Text("Путь установки должен быть абсолютным.", "The path is not absolute."));
         string sourceRoot = Path.GetPathRoot(path);
         if (sourceRoot == null || sourceRoot.Length != 3 || sourceRoot[1] != ':' || (sourceRoot[2] != '\\' && sourceRoot[2] != '/'))
-            throw new IOException("The path must be on a local drive.");
+            throw new IOException(InstallerLanguage.Text("Путь должен находиться на локальном диске.", "The path must be on a local drive."));
         string full = Path.GetFullPath(path);
         string root = Path.GetPathRoot(full);
-        if (String.IsNullOrEmpty(root)) throw new IOException("The installation path is not absolute.");
+        if (String.IsNullOrEmpty(root)) throw new IOException(InstallerLanguage.Text("Путь установки должен быть абсолютным.", "The installation path is not absolute."));
         return full.Length == root.Length ? root : full.TrimEnd('\\');
     }
 

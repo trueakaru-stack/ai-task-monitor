@@ -238,9 +238,9 @@ try{
     $start=New-IsolatedStart $Installer $partialValues
     $partialSetup=[Diagnostics.Process]::Start($start)
     $prompt=Find-Window $partialSetup 30
-    Save-DialogScreenshot $prompt $partialSetup 'claude-confirmation-ru'
+    Save-DialogScreenshot $prompt $partialSetup 'claude-confirmation-en'
     $promptNames=Get-Names $prompt
-    Check (@($promptNames|Where-Object {$_.Contains('Подключить Claude Code?')}).Count -gt 0) 'The synthetic Claude connection prompt was not shown.'
+    Check (@($promptNames|Where-Object {$_.Contains('Connect Claude Code?') -and $_.Contains('2.1.101')}).Count -gt 0) 'The English synthetic Claude connection prompt was not shown.'
     Invoke-DialogButton $prompt $partialSetup @('Yes','Да')
     $clock=[Diagnostics.Stopwatch]::StartNew();$failure=$null
     $idCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,$partialSetup.Id)
@@ -293,9 +293,9 @@ try{
     $setupTime=$setup.StartTime.ToUniversalTime()
     $dialog=Find-Window $setup 30
     Write-Output 'Synthetic setup dialog found.'
-    Save-DialogScreenshot $dialog $setup 'installation-success-ru'
+    Save-DialogScreenshot $dialog $setup 'installation-success-en'
     $names=Get-Names $dialog
-    Check (@($names|Where-Object {$_.Contains('AI task monitor установлен.') -and $_.Contains('AI task monitor (new)')}).Count -gt 0) 'The installer did not report a completed installation with the alternative shortcut.'
+    Check (@($names|Where-Object {$_.Contains('AI task monitor is installed.') -and $_.Contains('AI task monitor (new)')}).Count -gt 0) 'The installer did not report a completed installation with the alternative shortcut in English.'
     $launcher=Join-Path $install 'AI task monitor.exe';$appScript=Join-Path $install 'CodexProgress.ps1'
     Check ([IO.File]::Exists($launcher) -and [IO.File]::Exists($appScript) -and [IO.File]::Exists($shortcut) -and (Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash -ceq $oldShortcutHash) 'The full installer did not create the application and alternative shortcut while preserving the old one.'
     $clock=[Diagnostics.Stopwatch]::StartNew();$candidate=$null
@@ -402,20 +402,28 @@ try{
     $foreign=Join-Path $install 'foreign.txt';[IO.File]::WriteAllText($foreign,'synthetic unrelated file')
     $launcherHash=(Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash
     $shortcutHash=(Get-FileHash -LiteralPath $shortcut -Algorithm SHA256).Hash
-    $start=New-IsolatedStart $Installer $values
-    $setup=[Diagnostics.Process]::Start($start)
-    $dialog=Find-Window $setup 30
-    Save-DialogScreenshot $dialog $setup 'existing-installation-warning-en'
-    $names=Get-Names $dialog
-    Check (@($names|Where-Object {$_.Contains('Папка установки уже существует.') -or $_.Contains('The installation folder already exists.')}).Count -gt 0) 'The installer did not explain why the existing folder is preserved.'
-    Dismiss-Dialog $dialog $setup
-    Check ($setup.WaitForExit(10000) -and $setup.ExitCode -eq 1) 'The repeated synthetic installation did not stop.'
-    Check ([IO.File]::ReadAllText($foreign) -ceq 'synthetic unrelated file' -and
-        (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash -ceq $launcherHash -and
-        (Get-FileHash -LiteralPath $shortcut -Algorithm SHA256).Hash -ceq $shortcutHash -and (Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash -ceq $oldShortcutHash -and
-        [IO.File]::ReadAllText($oldSentinel) -ceq 'synthetic user data') 'The repeated synthetic installation changed existing files or data.'
-    Write-Output 'Full compiled setup: isolated known folders, clean install, shortcut and WPF window verified. A second setup refused the existing folder and preserved unrelated data and shortcut.'
-    $setup.Dispose();$setup=$null
+    $appPreferences=Join-Path $oldData 'settings.json'
+    foreach($case in @(
+        @{Language='ru'; Needle='Папка установки уже существует.'; Screenshot='existing-installation-warning-ru'},
+        @{Language='en'; Needle='The installation folder already exists.'; Screenshot='existing-installation-warning-en'}
+    )){
+        $preferences='{"language":"'+$case.Language+'","fixture":"preserved"}'
+        [IO.File]::WriteAllText($appPreferences,$preferences,[Text.UTF8Encoding]::new($false))
+        $start=New-IsolatedStart $Installer $values
+        $setup=[Diagnostics.Process]::Start($start)
+        $dialog=Find-Window $setup 30
+        Save-DialogScreenshot $dialog $setup $case.Screenshot
+        $names=Get-Names $dialog
+        Check (@($names|Where-Object {$_.Contains($case.Needle)}).Count -gt 0) 'The repeated installer did not use the selected language for its warning.'
+        Dismiss-Dialog $dialog $setup
+        Check ($setup.WaitForExit(10000) -and $setup.ExitCode -eq 1) 'The repeated synthetic installation did not stop.'
+        Check ([IO.File]::ReadAllText($foreign) -ceq 'synthetic unrelated file' -and
+            (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash -ceq $launcherHash -and
+            (Get-FileHash -LiteralPath $shortcut -Algorithm SHA256).Hash -ceq $shortcutHash -and (Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash -ceq $oldShortcutHash -and
+            [IO.File]::ReadAllText($oldSentinel) -ceq 'synthetic user data' -and [IO.File]::ReadAllText($appPreferences) -ceq $preferences) 'The repeated synthetic installation changed existing files or data.'
+        $setup.Dispose();$setup=$null
+    }
+    Write-Output 'Full compiled setup: isolated known folders, clean install, shortcut and WPF window verified. Repeated setup refused the existing folder in both selected languages and preserved unrelated data, settings and shortcuts.'
     $modified=Join-Path $install 'DiagnosticStore.ps1'
     [IO.File]::WriteAllText($modified,'synthetic user modification')
     $removalScript=Join-Path $install 'Uninstall-CodexProgress.ps1'

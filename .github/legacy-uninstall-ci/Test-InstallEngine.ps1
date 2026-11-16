@@ -86,4 +86,49 @@ $link=$shell.CreateShortcut($shortcut)
 Check ([string]::Equals([string]$link.TargetPath,$target,[StringComparison]::OrdinalIgnoreCase)) 'The new shortcut has a different target.'
 Check ([string]::Equals([string]$link.WorkingDirectory,$engineRoot,[StringComparison]::OrdinalIgnoreCase)) 'The new shortcut has a different working directory.'
 Check ([string]$link.IconLocation -ceq ($icon+',0')) 'The new shortcut has a different icon.'
+# The setup reads only the synthetic language preference and otherwise follows
+# the UI culture. Exercise both selected languages, fallback, size and links.
+$languageType=$assembly.GetType('InstallerLanguage',$true)
+$resolveLanguage=$languageType.GetMethod('Resolve',$flags)
+$initializeLanguage=$languageType.GetMethod('Initialize',$flags)
+$existingMessage=$type.GetMethod('ExistingInstallMessage',$flags)
+Check ($null -ne $resolveLanguage -and $null -ne $initializeLanguage -and $null -ne $existingMessage) 'The installer language resolver is unavailable.'
+$languageRoot=Join-Path $engineRoot 'language-local'
+$languageFolder=Join-Path $languageRoot 'CodexTaskProgress'
+[void][IO.Directory]::CreateDirectory($languageFolder)
+$languageFile=Join-Path $languageFolder 'settings.json'
+$oldCulture=[Threading.Thread]::CurrentThread.CurrentUICulture
+$oldLocal=[Environment]::GetEnvironmentVariable('LOCALAPPDATA','Process')
+try{
+    [Environment]::SetEnvironmentVariable('LOCALAPPDATA',$languageRoot,'Process')
+    [Threading.Thread]::CurrentThread.CurrentUICulture=[Globalization.CultureInfo]::GetCultureInfo('en-US')
+    Check (-not [bool]$resolveLanguage.Invoke($null,[object[]]@([string]$languageRoot))) 'Missing preferences did not use English UI culture.'
+    $ru='{"language":"ru","fixture":"preserved"}'
+    [IO.File]::WriteAllText($languageFile,$ru,[Text.UTF8Encoding]::new($false))
+    Check ([bool]$resolveLanguage.Invoke($null,[object[]]@([string]$languageRoot))) 'Russian preference did not override English UI culture.'
+    $initializeLanguage.Invoke($null,[object[]]@())
+    Check ([string]$existingMessage.Invoke($null,[object[]]@([string]$existing)) -match 'Папка установки уже существует') 'The installation warning ignored the selected Russian language.'
+    $langLink=Join-Path $engineRoot 'language-link'
+    $null=New-Item -ItemType Junction -Path $langLink -Target $languageRoot
+    Check (-not [bool]$resolveLanguage.Invoke($null,[object[]]@([string]$langLink))) 'A redirected settings directory was followed.'
+    [Threading.Thread]::CurrentThread.CurrentUICulture=[Globalization.CultureInfo]::GetCultureInfo('ru-RU')
+    $en='{"language":"en","fixture":"preserved"}'
+    [IO.File]::WriteAllText($languageFile,$en,[Text.UTF8Encoding]::new($false))
+    Check (-not [bool]$resolveLanguage.Invoke($null,[object[]]@([string]$languageRoot))) 'English preference did not override Russian UI culture.'
+    $initializeLanguage.Invoke($null,[object[]]@())
+    Check ([string]$existingMessage.Invoke($null,[object[]]@([string]$existing)) -match 'The installation folder already exists') 'The installation warning ignored the selected English language.'
+    Check ([IO.File]::ReadAllText($languageFile) -ceq $en) 'The language resolver changed settings.'
+    foreach($bad in @('{"language":"fr"}','{"language":42}','{"language":','[]')){
+        [IO.File]::WriteAllText($languageFile,$bad,[Text.UTF8Encoding]::new($false))
+        Check ([bool]$resolveLanguage.Invoke($null,[object[]]@([string]$languageRoot))) 'An invalid language preference did not use the Russian UI culture.'
+    }
+    [IO.File]::WriteAllText($languageFile,('x'*65537),[Text.UTF8Encoding]::new($false))
+    Check ([bool]$resolveLanguage.Invoke($null,[object[]]@([string]$languageRoot))) 'Oversized preferences did not fall back to UI culture.'
+    [IO.File]::WriteAllBytes($languageFile,[byte[]]@(0xff))
+    Check ([bool]$resolveLanguage.Invoke($null,[object[]]@([string]$languageRoot))) 'Invalid UTF-8 preferences did not fall back to UI culture.'
+}finally{
+    [Threading.Thread]::CurrentThread.CurrentUICulture=$oldCulture
+    [Environment]::SetEnvironmentVariable('LOCALAPPDATA',$oldLocal,'Process')
+}
+Write-Output 'Installer language: en/ru preferences, culture fallback, invalid/oversized settings, redirected path and unchanged settings verified.'
 Write-Output 'Installer assembly guard: refused existing directory and redirected ancestor; protected held ancestor and CreateNew file; preserved existing shortcut and generated a usable new shortcut.'

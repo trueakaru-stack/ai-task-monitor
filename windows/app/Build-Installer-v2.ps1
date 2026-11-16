@@ -51,6 +51,7 @@ $arguments = @(
     "/out:$output",
     "/win32icon:$(Join-Path $source 'assets\app-icon.ico')",
     "/reference:System.Windows.Forms.dll",
+    "/reference:System.Web.Extensions.dll",
     "/resource:$(Join-Path $source 'CodexProgress.ps1'),CodexProgress.ps1",
     "/resource:$(Join-Path $source 'Uninstall-CodexProgress.ps1'),Uninstall-CodexProgress.ps1",
     "/resource:$(Join-Path $source 'Uninstall-CodexProgress.cmd'),Uninstall-CodexProgress.cmd",
