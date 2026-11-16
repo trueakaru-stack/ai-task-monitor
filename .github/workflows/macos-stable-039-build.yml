@@ -11,7 +11,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-26
+          - runner: macos-15-intel
             developer: /Applications/Xcode.app/Contents/Developer
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -313,7 +313,6 @@ jobs:
           cd "$AITM_TEST_TASK_ROOT/source/macos"
           "$AITM_TEST_TASK_ROOT/run-isolated" /bin/bash ./scripts/smoke-test.sh "dist/AI Task Monitor.app"
       - name: Create and verify candidate disk image
-        if: ${{ matrix.runner == 'macos-26' }}
         id: image
         continue-on-error: true
         shell: bash
@@ -603,4 +602,5 @@ jobs:
           test "$UPDATE_OUTCOME" = success
           test "$CLAUDE_OUTCOME" = success
           test "$CODEX_OUTCOME" = success
-          if test "$RUNNER_KIND" = macos-26; then test "$IMAGE_OUTCOME" = success; fi
+          test "$RUNNER_KIND" = macos-15-intel
+          test "$IMAGE_OUTCOME" = success
