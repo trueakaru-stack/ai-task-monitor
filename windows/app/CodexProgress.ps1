@@ -2533,7 +2533,12 @@ function Codex-UnindexedCandidates([bool]$HasIndexedHistory=$false) {
  # Keep a resumable directory cursor so a full page cannot hide later files.
  $now=[Diagnostics.Stopwatch]::GetTimestamp()
  $cached=Get-Variable -Scope Script -Name unindexedScan -ErrorAction SilentlyContinue
- if($null -ne $cached -and $null -ne $cached.Value -and
+ $cachedRootSafe=$false
+ try{
+  $cachedAttributes=[IO.File]::GetAttributes($sessionsDirectory)
+  $cachedRootSafe=(($cachedAttributes -band [IO.FileAttributes]::Directory) -ne 0 -and ($cachedAttributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)
+ }catch{}
+ if($cachedRootSafe -and $null -ne $cached -and $null -ne $cached.Value -and
     [string]::Equals([string]$cached.Value.Root,[string]$sessionsDirectory,[StringComparison]::OrdinalIgnoreCase) -and -not [bool]$cached.Value.RootMissing -and
     ($now-[long]$cached.Value.Tick) -ge 0 -and ($now-[long]$cached.Value.Tick) -lt ([long][Diagnostics.Stopwatch]::Frequency*5)){
   $script:codexDiscoveryFailed=[bool]$cached.Value.Failed

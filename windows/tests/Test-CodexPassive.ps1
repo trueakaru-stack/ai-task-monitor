@@ -90,7 +90,8 @@ try{
  $moved=$sessionsDirectory+'.moved'
  [IO.Directory]::Move($sessionsDirectory,$moved)
  $lost=Source-Snapshot
- Require (@($lost.PartialData) -ccontains 'Codex' -and @($lost.Tasks|Where-Object {$_.Id -eq $freshId -and -not $_.Active}).Count -eq 1) 'A missing sessions directory lost its prior task or warning.'
+ Require (@($lost.PartialData) -ccontains 'Codex') 'A missing sessions directory hid the read warning.'
+ Require (@($lost.Tasks|Where-Object {$_.Id -eq $freshId -and -not $_.Active}).Count -eq 1) 'A missing sessions directory lost its prior task.'
  [IO.Directory]::Move($moved,$sessionsDirectory)
  $returned=Source-Snapshot
  Require ($returned.CodexIncomplete -and @($returned.PartialData) -cnotcontains 'Codex' -and @($returned.Tasks|Where-Object Id -eq $freshId).Count -eq 1) 'The restored sessions directory did not recover.'
