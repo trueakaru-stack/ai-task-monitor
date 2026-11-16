@@ -5,6 +5,8 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Input;
+using AITaskMonitor.NativeUpdateController;
 using AITaskMonitor.Claude;
 using AITaskMonitor.CodexCloud;
 using ShapePath = System.Windows.Shapes.Path;
@@ -51,6 +53,11 @@ internal sealed class PrototypeWindow
     private readonly HashSet<string> cloudTaskIds = new(StringComparer.Ordinal);
     private Dictionary<string, LoopWarningView> loopWarnings = new(StringComparer.Ordinal);
     private Func<string, bool>? dismissLoopWarning;
+    // The live distribution/version contract is not available yet. This state
+    // is supplied only by the isolated synthetic update-host test.
+    private UpdateInfo? syntheticUpdate;
+    private string dismissedSyntheticVersion = "";
+    private Action? syntheticDownload;
 
     public PrototypeWindow(Window window, Options options)
     {
@@ -75,6 +82,27 @@ internal sealed class PrototypeWindow
         ApplyPalette();
         ApplyIcon();
         if (options.Language == "en") TranslateVisibleStaticText(window);
+
+        var updateDialog = Find<Grid>("UpdateDialog");
+        updateDialog.SizeChanged += (_, _) =>
+        {
+            if (updateDialog.ActualWidth > 0 && updateDialog.ActualHeight > 0)
+                Find<ShapePath>("UpdateDialogShape").Data =
+                    Squircle.Create(updateDialog.ActualWidth, updateDialog.ActualHeight, 16, 0.5);
+        };
+        Find<Button>("UpdateLaterButton").Click += (_, _) => DismissSyntheticUpdate();
+        Find<Button>("UpdateDownloadButton").Click += (_, _) =>
+        {
+            if (syntheticDownload is null) return;
+            try { syntheticDownload(); DismissSyntheticUpdate(); }
+            catch { Find<TextBlock>("UpdateOpenError").Visibility = Visibility.Visible; }
+        };
+        Find<Grid>("UpdateOverlay").PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key != Key.Escape) return;
+            DismissSyntheticUpdate();
+            e.Handled = true;
+        };
 
         frame.SizeChanged += (_, _) => UpdateShapes();
         tabsHost.SizeChanged += (_, _) => { SizeTabs(); UpdateShapes(); };
@@ -173,6 +201,42 @@ internal sealed class PrototypeWindow
         samples = next.OrderByDescending(task => taskPriority[task.Id]).ThenByDescending(task => task.Active)
             .ThenByDescending(task => task.Updated).ToList();
         if (!samples.Any(task => task.Id == compactSelection)) compactSelection = samples.FirstOrDefault()?.Id ?? "";
+    }
+
+    // Test-only input: the default application never creates a release service
+    // or opens a download. The supplied callback belongs to a fake test handler.
+    internal void ApplySyntheticUpdate(UpdateInfo update, Action download)
+    {
+        if (!window.Dispatcher.CheckAccess()) throw new InvalidOperationException("UI updates must run on the window dispatcher.");
+        ArgumentNullException.ThrowIfNull(update);
+        ArgumentNullException.ThrowIfNull(download);
+        if (string.IsNullOrWhiteSpace(update.Version)) throw new ArgumentException("A synthetic version is required.", nameof(update));
+        syntheticUpdate = update;
+        syntheticDownload = download;
+        ShowSyntheticPendingUpdate();
+    }
+
+    private void ShowSyntheticPendingUpdate()
+    {
+        var overlay = Find<Grid>("UpdateOverlay");
+        if (compact || syntheticUpdate is null || syntheticUpdate.Version == dismissedSyntheticVersion)
+        {
+            overlay.Visibility = Visibility.Collapsed;
+            return;
+        }
+        Find<TextBlock>("UpdateVersionText").Text = options.Language == "en"
+            ? $"Version {syntheticUpdate.Version} is available to download"
+            : $"Версия {syntheticUpdate.Version} доступна для скачивания";
+        Find<TextBlock>("UpdateOpenError").Visibility = Visibility.Collapsed;
+        overlay.Visibility = Visibility.Visible;
+        Find<Button>("UpdateLaterButton").Focus();
+    }
+
+    private void DismissSyntheticUpdate()
+    {
+        if (syntheticUpdate is not null) dismissedSyntheticVersion = syntheticUpdate.Version;
+        Find<Grid>("UpdateOverlay").Visibility = Visibility.Collapsed;
+        Keyboard.ClearFocus();
     }
 
     internal string SelectedTaskId => compactSelection;
@@ -322,14 +386,26 @@ internal sealed class PrototypeWindow
     {
         if (root is TextBlock text)
         {
-            if (text.Text == "Ход выполнения") text.Text = "Progress";
-            else if (text.Text == "Настройки") text.Text = "Settings";
+            text.Text = text.Text switch
+            {
+                "Ход выполнения" => "Progress",
+                "Настройки" => "Settings",
+                "Доступна новая версия" => "A new version is available",
+                "Скачайте приложение, полностью закройте старую версию и переустановите новую." =>
+                    "Download the app, quit the old version completely, and install the new one.",
+                "Не удалось открыть страницу загрузки." => "Could not open the download page.",
+                _ => text.Text
+            };
         }
+        if (root is Button button && button.Content is string label)
+            button.Content = label switch { "Позже" => "Later", "Скачать" => "Download", _ => label };
         string name = AutomationProperties.GetName(root);
         string translated = name switch
         {
             "Свернуть в панель задач" => "Minimize to taskbar", "Компактный режим" => "Compact view",
-            "Закрыть" => "Close", "Открыть настройки" => "Open settings", "Развернуть" => "Expand", _ => name
+            "Закрыть" => "Close", "Открыть настройки" => "Open settings", "Развернуть" => "Expand",
+            "Напомнить при следующем запуске" => "Remind me next time",
+            "Скачать новую версию" => "Download the new version", _ => name
         };
         if (translated != name) AutomationProperties.SetName(root, translated);
         foreach (object child in LogicalTreeHelper.GetChildren(root))
@@ -375,6 +451,7 @@ internal sealed class PrototypeWindow
         }
         Render();
         if (restoreToggleFocus) Find<Button>(value ? "ExpandButton" : "MinimizeButton").Focus();
+        ShowSyntheticPendingUpdate();
     }
 
     private TextBlock Text(string value, double size, string color, bool semiBold = false) => new()
