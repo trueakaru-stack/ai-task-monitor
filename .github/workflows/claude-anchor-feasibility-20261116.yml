@@ -1,0 +1,35 @@
+name: Synthetic Claude file anchor feasibility
+on:
+  push:
+    branches: ['codex/claude-real-source-20261116']
+permissions:
+  contents: read
+jobs:
+  synthetic-claude-anchor:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - name: Run isolated hosted file-sharing checks
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceRoot = Join-Path $env:RUNNER_TEMP ('aitm-claude-anchor-source-' + [guid]::NewGuid().ToString('N'))
+          $source = Join-Path $sourceRoot 'source'
+          $template = Join-Path $sourceRoot 'template'
+          $hooks = Join-Path $sourceRoot 'hooks'
+          New-Item -ItemType Directory -Path $source,$template,$hooks | Out-Null
+          $env:GIT_CONFIG_NOSYSTEM='1'
+          $env:GIT_CONFIG_GLOBAL=Join-Path $sourceRoot 'empty.gitconfig'
+          [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL,'')
+          $env:GIT_TERMINAL_PROMPT='0'
+          git -c credential.helper= -c core.hooksPath="$hooks" init --quiet --template="$template" "$source"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot initialize source checkout.' }
+          git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch exact test revision.' }
+          git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot select test revision.' }
+          & (Join-Path $source '.github/claude-anchor-ci/Run.ps1')
