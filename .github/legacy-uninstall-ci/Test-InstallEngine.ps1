@@ -5,6 +5,10 @@ if($env:CI -cne 'true' -or $env:GITHUB_ACTIONS -cne 'true' -or
    $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or
    $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH -cne '0'){throw 'Requires a disposable hosted Windows runner.'}
 function Check([bool]$value,[string]$message){if(-not $value){throw $message}}
+function LeafException([Exception]$error){
+    while($null -ne $error.InnerException){$error=$error.InnerException}
+    return $error
+}
 $root=[IO.Path]::GetFullPath($FixtureRoot)
 $temp=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')+'\'
 Check ($root.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase) -and [IO.Directory]::Exists($root)) 'The fixture root is outside runner temp.'
@@ -25,8 +29,8 @@ $linkedRejected=$false
 try{
     $bad=$open.Invoke($null,[object[]]@([string]$linked))
     if($null -ne $bad){$bad.Dispose()}
-}catch [Reflection.TargetInvocationException]{
-    if($_.Exception.InnerException -is [IO.IOException]){$linkedRejected=$true}else{throw}
+}catch{
+    if((LeafException $_.Exception) -is [IO.IOException]){$linkedRejected=$true}else{throw}
 }
 Check $linkedRejected 'A redirected installation ancestor was accepted.'
 Check ([IO.File]::ReadAllText($outside) -ceq 'synthetic outside') 'The redirected target was modified.'
@@ -37,8 +41,8 @@ $guard=$open.Invoke($null,[object[]]@([string]$local))
 try{
     $collisionRejected=$false
     try{$child.Invoke($guard,[object[]]@([string]$existing))}
-    catch [Reflection.TargetInvocationException]{
-        if($_.Exception.InnerException -is [IO.IOException]){$collisionRejected=$true}else{throw}
+    catch{
+        if((LeafException $_.Exception) -is [IO.IOException]){$collisionRejected=$true}else{throw}
     }
     Check $collisionRejected 'An existing installation directory was accepted.'
     Check ([IO.File]::ReadAllText($sentinel) -ceq 'synthetic foreign content') 'An existing foreign file was changed.'
@@ -54,8 +58,8 @@ try{
     try{$bytes=[Text.Encoding]::UTF8.GetBytes('fresh app');$file.Write($bytes,0,$bytes.Length)}finally{$file.Dispose()}
     $fileCollisionRejected=$false
     try{$duplicate=$newFile.Invoke($guard,[object[]]@([string]$newPath));if($null -ne $duplicate){$duplicate.Dispose()}}
-    catch [Reflection.TargetInvocationException]{
-        if($_.Exception.InnerException -is [IO.IOException]){$fileCollisionRejected=$true}else{throw}
+    catch{
+        if((LeafException $_.Exception) -is [IO.IOException]){$fileCollisionRejected=$true}else{throw}
     }
     Check ($fileCollisionRejected -and [IO.File]::ReadAllText($newPath) -ceq 'fresh app') 'An existing file was overwritten.'
 }finally{$guard.Dispose()}
