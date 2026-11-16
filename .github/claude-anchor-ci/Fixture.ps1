@@ -71,6 +71,7 @@ try {
 $metadataSource=@'
 using System;
 using System.ComponentModel;
+using System.IO;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 public static class SyntheticMetadataAnchor {
@@ -80,11 +81,19 @@ public static class SyntheticMetadataAnchor {
     private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security,
         uint creation, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern SafeFileHandle ReOpenFile(SafeFileHandle original, uint access, uint sharing, uint flags);
+    [DllImport("kernel32.dll", SetLastError=true)]
     private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int kind, out Identity identity, uint size);
     public static SafeFileHandle Open(string path) {
         SafeFileHandle h=CreateFileW(path,0x80,7,IntPtr.Zero,3,0x00200000,IntPtr.Zero);
         if(h.IsInvalid){int error=Marshal.GetLastWin32Error(); h.Dispose(); throw new Win32Exception(error);}
         return h;
+    }
+    public static string ReadPinned(SafeFileHandle original) {
+        SafeFileHandle input=ReOpenFile(original,0x80000000,7,0x08000000);
+        if(input.IsInvalid){int error=Marshal.GetLastWin32Error(); input.Dispose(); throw new Win32Exception(error);}
+        using(var stream=new FileStream(input,FileAccess.Read,4096,false))
+        using(var reader=new StreamReader(stream)) return reader.ReadToEnd();
     }
     public static bool Same(SafeFileHandle held, string path) {
         using(SafeFileHandle current=Open(path)) {
@@ -105,6 +114,7 @@ $metadataNext = Join-Path $case 'metadata-replacement.jsonl'
 $metadata = [SyntheticMetadataAnchor]::Open($metadataPath)
 try {
     Check ([SyntheticMetadataAnchor]::Same($metadata, $metadataPath)) 'Metadata identity comparison failed.'
+    Check ([SyntheticMetadataAnchor]::ReadPinned($metadata) -ceq 'synthetic-same') 'Pinned reopen did not read the expected synthetic content.'
     $exclusiveOutcome = 'not attempted'
     try {
         $exclusive = [IO.FileStream]::new($metadataPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
