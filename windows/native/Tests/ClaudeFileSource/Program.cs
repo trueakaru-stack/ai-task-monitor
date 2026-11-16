@@ -1046,6 +1046,34 @@ Check(new[] { firstPollNames, repeatPollNames }.All(task => task.Unconfirmed &&
     task.Steps.All(step => step.status == "unknown")),
     "An ambiguous stop before the first poll must preserve both observed names on repeated reads.");
 
+
+string futureRename = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "observed", ["timestamp"] = now.AddMinutes(10).ToString("O"),
+    ["event"] = "TaskCreated", ["active"] = true, ["task_id"] = "first",
+    ["task_subject"] = "Future step", ["task_status"] = "pending" }) + "\n";
+var futureTimeNames = new SessionReader();
+var firstFuturePoll = futureTimeNames.Read(complete + futureRename, "", now,
+    DateTime.MinValue.ToUniversalTime()).Single();
+var futureClockCatchesUp = futureTimeNames.Read(complete + futureRename, "", now.AddMinutes(11),
+    DateTime.MinValue.ToUniversalTime()).Single();
+Check(new[] { firstFuturePoll, futureClockCatchesUp }.All(task => task.Unconfirmed &&
+    task.Steps.Any(step => step.title == "First step") &&
+    task.Steps.Any(step => step.title == "Future step") &&
+    task.Steps.All(step => step.status == "unknown")),
+    "Future-dated conflicting names must stay unconfirmed after the clock catches up.");
+
+var quietThenResumed = new SessionReader();
+quietThenResumed.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
+Check(quietThenResumed.Read(complete, "", now.AddMinutes(121), DateTime.MinValue.ToUniversalTime()).Single().Unconfirmed,
+    "A quiet session must be unconfirmed while no recent event is observed.");
+string freshAfterQuiet = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "observed", ["timestamp"] = now.AddMinutes(121).ToString("O"),
+    ["event"] = "PreToolUse", ["tool_name"] = "Read", ["active"] = true }) + "\n";
+var afterQuiet = quietThenResumed.Read(complete + freshAfterQuiet, "", now.AddMinutes(121),
+    DateTime.MinValue.ToUniversalTime()).Single();
+Check(!afterQuiet.Unconfirmed && !quietThenResumed.SourceUncertain,
+    "Fresh activity after ordinary silence must not inherit a permanent clock anomaly.");
+
 var sameTurnRename = new SessionReader();
 sameTurnRename.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
 var renamedInTurn = sameTurnRename.Read(complete + renamedAfterPrompt, "", now.AddSeconds(5),
