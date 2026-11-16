@@ -7,6 +7,7 @@ import io
 import marshal
 import json
 import os
+import errno
 from pathlib import Path
 import shlex
 import shutil
@@ -18,6 +19,26 @@ import types
 import unittest
 from unittest.mock import patch
 
+
+
+# A marker alone is not a boundary; verify that the surrounding macOS sandbox
+# actually denies access to a synthetic file in the disposable runner profile.
+if (sys.platform != "darwin" or os.environ.get("CI") != "true" or
+        os.environ.get("GITHUB_ACTIONS") != "true" or
+        os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or
+        os.environ.get("RUNNER_OS") != "macOS" or
+        os.environ.get("AITM_MACOS_TEST_SANDBOX") != "1" or
+        "HOME" in os.environ or "CODEX_HOME" in os.environ or
+        not os.environ.get("AITM_CI_DENIED_FILE", "").startswith("/Users/")):
+    raise SystemExit("Disposable macOS profile sandbox is required.")
+try:
+    with open(os.environ["AITM_CI_DENIED_FILE"], "rb") as _marker:
+        _marker.read(1)
+except OSError as _error:
+    if _error.errno not in (errno.EACCES, errno.EPERM):
+        raise SystemExit("Profile sandbox was not confirmed.")
+else:
+    raise SystemExit("Profile sandbox did not deny the test marker.")
 
 ASSETS = Path(sys.argv.pop(1)).resolve(strict=True)
 SOURCE = Path(sys.argv.pop(1)).resolve(strict=True)
@@ -52,7 +73,7 @@ class HermesManagerTests(unittest.TestCase):
         self.python.write_bytes(b"synthetic")
         (self.venv / "pyvenv.cfg").write_text("fixture\n", encoding="utf-8")
         self.environment = {name: os.environ[name] for name in ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT") if name in os.environ}
-        self.environment.update({"HOME": str(self.root), "USERPROFILE": str(self.root), "LOCALAPPDATA": str(self.root),
+        self.environment.update({"USERPROFILE": str(self.root), "LOCALAPPDATA": str(self.root),
                                  "APPDATA": str(self.root), "TEMP": str(self.root), "TMP": str(self.root),
                                  "TMPDIR": str(self.root), "PATH": "", "HERMES_HOME": str(self.root / "wrong")})
 

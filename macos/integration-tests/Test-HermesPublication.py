@@ -3,10 +3,31 @@ import hashlib
 import importlib
 from pathlib import Path
 import os
+import errno
 import subprocess
 import sys
 import tempfile
 import types
+
+
+# A marker alone is not a boundary; verify that the surrounding macOS sandbox
+# actually denies access to a synthetic file in the disposable runner profile.
+if (sys.platform != "darwin" or os.environ.get("CI") != "true" or
+        os.environ.get("GITHUB_ACTIONS") != "true" or
+        os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or
+        os.environ.get("RUNNER_OS") != "macOS" or
+        os.environ.get("AITM_MACOS_TEST_SANDBOX") != "1" or
+        "HOME" in os.environ or "CODEX_HOME" in os.environ or
+        not os.environ.get("AITM_CI_DENIED_FILE", "").startswith("/Users/")):
+    raise SystemExit("Disposable macOS profile sandbox is required.")
+try:
+    with open(os.environ["AITM_CI_DENIED_FILE"], "rb") as _marker:
+        _marker.read(1)
+except OSError as _error:
+    if _error.errno not in (errno.EACCES, errno.EPERM):
+        raise SystemExit("Profile sandbox was not confirmed.")
+else:
+    raise SystemExit("Profile sandbox did not deny the test marker.")
 
 EXPECTED = {
     "hermes_cli/__init__.py": "6a4ab05b8621ec1cd66a5abbe30fa32ed5bddddea95903036da01f0af1af94ce",
@@ -50,8 +71,8 @@ if len(sys.argv) == 2:
         root = Path(temporary)
         home = root / "home"
         home.mkdir()
-        env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "WINDIR") if name in os.environ}
-        env.update({"HOME": str(root), "USERPROFILE": str(root), "LOCALAPPDATA": str(root),
+        env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "WINDIR", "CI", "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "RUNNER_OS", "AITM_MACOS_TEST_SANDBOX", "AITM_CI_DENIED_FILE") if name in os.environ}
+        env.update({"USERPROFILE": str(root), "LOCALAPPDATA": str(root),
                     "APPDATA": str(root), "HERMES_HOME": str(home), "XDG_STATE_HOME": str(root / "state"),
                     "HERMES_GATEWAY_LOCK_DIR": str(root / "locks"), "TMP": str(root), "TEMP": str(root),
                     "TMPDIR": str(root), "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1"})

@@ -1,5 +1,6 @@
 // Pinned Kimi web server, fake model and disposable profiles; no user account.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -9,6 +10,25 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+
+
+// These tests execute upstream packages and may run only in a disposable
+// macOS runner whose profile access is denied by the surrounding sandbox.
+if (process.platform !== 'darwin' || process.env.CI !== 'true' ||
+    process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' ||
+    process.env.RUNNER_OS !== 'macOS' || process.env.AITM_MACOS_TEST_SANDBOX !== '1' ||
+    'HOME' in process.env || 'CODEX_HOME' in process.env ||
+    !process.env.AITM_CI_DENIED_FILE?.startsWith('/Users/')) {
+  throw new Error('Disposable macOS profile sandbox is required.');
+}
+try {
+  readFileSync(process.env.AITM_CI_DENIED_FILE);
+  throw new Error('Profile sandbox did not deny the test marker.');
+} catch (error) {
+  if (error.code !== 'EACCES' && error.code !== 'EPERM') {
+    throw new Error('Profile sandbox was not confirmed.');
+  }
+}
 
 const installed = resolve(process.argv[2] || '');
 const executable = join(installed, 'node_modules/@moonshot-ai/kimi-code/dist/main.mjs');
@@ -61,7 +81,7 @@ async function run(withPlugin) {
   Object.assign(env, {
     PATH: [dirname(process.execPath), process.platform === 'win32' ? `${process.env.SystemRoot}\\System32` : '/usr/bin',
       process.platform === 'win32' ? process.env.SystemRoot : '/bin'].join(delimiter),
-    HOME: home, USERPROFILE: home, APPDATA: join(home, 'appdata'), LOCALAPPDATA: join(home, 'localappdata'),
+    USERPROFILE: home, APPDATA: join(home, 'appdata'), LOCALAPPDATA: join(home, 'localappdata'),
     TEMP: home, TMP: home, TMPDIR: home, XDG_CONFIG_HOME: join(home, 'xdg-config'), XDG_CACHE_HOME: join(home, 'xdg-cache'),
     KIMI_CODE_HOME: home, KIMI_DISABLE_TELEMETRY: '1', KIMI_MODEL_NAME: 'fixture', KIMI_MODEL_API_KEY: 'dummy-fixture',
     KIMI_MODEL_PROVIDER_TYPE: 'openai', KIMI_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`,

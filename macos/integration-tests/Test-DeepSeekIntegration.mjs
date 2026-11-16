@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { execFile, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, realpath, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,6 +8,25 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { deepSeekProfileState, listDeepSeekProfiles, setDeepSeekConnected } from '../integrations/deepseek-integration.mjs';
+
+
+// These tests execute upstream packages and may run only in a disposable
+// macOS runner whose profile access is denied by the surrounding sandbox.
+if (process.platform !== 'darwin' || process.env.CI !== 'true' ||
+    process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted' ||
+    process.env.RUNNER_OS !== 'macOS' || process.env.AITM_MACOS_TEST_SANDBOX !== '1' ||
+    'HOME' in process.env || 'CODEX_HOME' in process.env ||
+    !process.env.AITM_CI_DENIED_FILE?.startsWith('/Users/')) {
+  throw new Error('Disposable macOS profile sandbox is required.');
+}
+try {
+  readFileSync(process.env.AITM_CI_DENIED_FILE);
+  throw new Error('Profile sandbox did not deny the test marker.');
+} catch (error) {
+  if (error.code !== 'EACCES' && error.code !== 'EPERM') {
+    throw new Error('Profile sandbox was not confirmed.');
+  }
+}
 
 const [anchorArgument, pnpmArgument] = process.argv.slice(2);
 assert.ok(anchorArgument && pnpmArgument, 'Pass isolated DeepSeek package.json and pnpm script paths.');
@@ -25,7 +45,7 @@ const marker = join(fixture, 'foreign-script-ran');
 const setup = join(assets, 'deepseek-setup.mjs');
 const inherited = Object.fromEntries(['PATH', 'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'OS', 'LANG', 'LC_ALL']
   .filter(name => typeof process.env[name] === 'string').map(name => [name, process.env[name]]));
-const env = { ...inherited, USERPROFILE: fixture, HOME: fixture, APPDATA: fixture, LOCALAPPDATA: fixture,
+const env = { ...inherited, USERPROFILE: fixture, APPDATA: fixture, LOCALAPPDATA: fixture,
   DSH_HOME: home, XDG_CONFIG_HOME: join(fixture, 'xdg-config'), XDG_CACHE_HOME: join(fixture, 'xdg-cache'),
   NPM_CONFIG_CACHE: join(fixture, 'cache'), NPM_CONFIG_USERCONFIG: join(fixture, 'empty-npmrc'),
   PNPM_CONFIG_STORE_DIR: join(fixture, 'store'), PNPM_CONFIG_OFFLINE: 'true', PNPM_CONFIG_IGNORE_SCRIPTS: 'true',

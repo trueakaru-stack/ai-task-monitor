@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import AITaskMonitor
 
@@ -49,6 +50,21 @@ final class DeepSeekIntegrationTests: XCTestCase {
         let environment = ProcessInfo.processInfo.environment
         guard let anchorPath = environment["AITM_DSH_ANCHOR"], let pnpmPath = environment["AITM_PNPM_SCRIPT"],
               let nodePath = environment["AITM_NODE"] else { throw XCTSkip("Isolated upstream DeepSeek fixture is unavailable.") }
+        guard environment["CI"] == "true", environment["GITHUB_ACTIONS"] == "true",
+              environment["RUNNER_ENVIRONMENT"] == "github-hosted", environment["RUNNER_OS"] == "macOS",
+              environment["AITM_MACOS_TEST_SANDBOX"] == "1", environment["HOME"] == nil,
+              environment["CODEX_HOME"] == nil,
+              let marker = environment["AITM_CI_DENIED_FILE"], marker.hasPrefix("/Users/") else {
+            XCTFail("Disposable macOS profile sandbox is required.")
+            return
+        }
+        let markerDescriptor = Darwin.open(marker, O_RDONLY)
+        let markerError = errno
+        if markerDescriptor >= 0 { Darwin.close(markerDescriptor) }
+        guard markerDescriptor < 0 && (markerError == EACCES || markerError == EPERM) else {
+            XCTFail("Profile sandbox was not confirmed.")
+            return
+        }
         let manager = FileManager.default
         let temp = URL(fileURLWithPath: environment["RUNNER_TEMP"] ?? manager.temporaryDirectory.path,
                        isDirectory: true).resolvingSymlinksInPath()
@@ -67,7 +83,7 @@ final class DeepSeekIntegrationTests: XCTestCase {
         try Data("export function apply() {}".utf8).write(to: foreign.appendingPathComponent("index.js"))
         try Data("- insert:\n    - id: foreign-fixture\n      name: aitm-foreign-fixture\n".utf8).write(to: foreign.appendingPathComponent("cordis.patch.yml"))
         let fixtureEnvironment = [
-            "HOME": root.path, "USERPROFILE": root.path, "DSH_HOME": dshHome.path,
+            "USERPROFILE": root.path, "DSH_HOME": dshHome.path,
             "PATH": tools.path + ":" + URL(fileURLWithPath: nodePath).deletingLastPathComponent().path + ":/usr/bin:/bin",
             "XDG_CONFIG_HOME": root.appendingPathComponent("config").path,
             "XDG_CACHE_HOME": root.appendingPathComponent("cache").path,

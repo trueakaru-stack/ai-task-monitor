@@ -2,6 +2,7 @@
 
 import json
 import os
+import errno
 from pathlib import Path
 import shutil
 import subprocess
@@ -9,6 +10,26 @@ import sys
 import tempfile
 import unittest
 
+
+
+# A marker alone is not a boundary; verify that the surrounding macOS sandbox
+# actually denies access to a synthetic file in the disposable runner profile.
+if (sys.platform != "darwin" or os.environ.get("CI") != "true" or
+        os.environ.get("GITHUB_ACTIONS") != "true" or
+        os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or
+        os.environ.get("RUNNER_OS") != "macOS" or
+        os.environ.get("AITM_MACOS_TEST_SANDBOX") != "1" or
+        "HOME" in os.environ or "CODEX_HOME" in os.environ or
+        not os.environ.get("AITM_CI_DENIED_FILE", "").startswith("/Users/")):
+    raise SystemExit("Disposable macOS profile sandbox is required.")
+try:
+    with open(os.environ["AITM_CI_DENIED_FILE"], "rb") as _marker:
+        _marker.read(1)
+except OSError as _error:
+    if _error.errno not in (errno.EACCES, errno.EPERM):
+        raise SystemExit("Profile sandbox was not confirmed.")
+else:
+    raise SystemExit("Profile sandbox did not deny the test marker.")
 
 ASSETS = Path(sys.argv.pop(1)).resolve(strict=True)
 SOURCE = Path(sys.argv.pop(1)).resolve(strict=True)
@@ -47,7 +68,7 @@ class ManualHermesSetupTests(unittest.TestCase):
         self.named.mkdir(parents=True)
         (self.named / "config.yaml").write_bytes(self.config)
         self.env = {key: os.environ[key] for key in ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT") if key in os.environ}
-        self.env.update({"HOME": str(self.root), "USERPROFILE": str(self.root), "LOCALAPPDATA": str(self.root),
+        self.env.update({"USERPROFILE": str(self.root), "LOCALAPPDATA": str(self.root),
                          "APPDATA": str(self.root), "TMP": str(self.root), "TEMP": str(self.root),
                          "TMPDIR": str(self.root), "PATH": ""})
 

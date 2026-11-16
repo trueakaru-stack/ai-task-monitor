@@ -4,6 +4,7 @@ import importlib
 import importlib.util
 import json
 import os
+import errno
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +12,26 @@ import tempfile
 import time
 import types
 import unittest
+
+
+# A marker alone is not a boundary; verify that the surrounding macOS sandbox
+# actually denies access to a synthetic file in the disposable runner profile.
+if (sys.platform != "darwin" or os.environ.get("CI") != "true" or
+        os.environ.get("GITHUB_ACTIONS") != "true" or
+        os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted" or
+        os.environ.get("RUNNER_OS") != "macOS" or
+        os.environ.get("AITM_MACOS_TEST_SANDBOX") != "1" or
+        "HOME" in os.environ or "CODEX_HOME" in os.environ or
+        not os.environ.get("AITM_CI_DENIED_FILE", "").startswith("/Users/")):
+    raise SystemExit("Disposable macOS profile sandbox is required.")
+try:
+    with open(os.environ["AITM_CI_DENIED_FILE"], "rb") as _marker:
+        _marker.read(1)
+except OSError as _error:
+    if _error.errno not in (errno.EACCES, errno.EPERM):
+        raise SystemExit("Profile sandbox was not confirmed.")
+else:
+    raise SystemExit("Profile sandbox did not deny the test marker.")
 
 source = Path(sys.argv[1]).resolve(strict=True)
 if hashlib.sha256(source.read_bytes()).hexdigest() != "0e3bd5dd93281f4d392850550a8d8bf94b213f965dccd6159513fa5bc6466fb7":
@@ -126,9 +147,9 @@ class HermesLivenessTests(unittest.TestCase):
                  (self.profiles[1] / "runtime" / "active_sessions.lock", "session")]
         for path, mode in cases:
             with self.subTest(mode=mode, name=path.name):
-                env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "WINDIR", "TMP", "TEMP")
+                env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "WINDIR", "TMP", "TEMP", "CI", "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "RUNNER_OS", "AITM_MACOS_TEST_SANDBOX", "AITM_CI_DENIED_FILE")
                        if name in os.environ}
-                env.update({"USERPROFILE": str(self.root), "HOME": str(self.root), "PYTHONDONTWRITEBYTECODE": "1"})
+                env.update({"USERPROFILE": str(self.root), "PYTHONDONTWRITEBYTECODE": "1"})
                 child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), str(source),
                                           "--hold", str(path), mode], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE, env=env,
