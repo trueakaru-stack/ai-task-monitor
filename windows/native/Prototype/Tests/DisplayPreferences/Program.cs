@@ -299,22 +299,32 @@ byte[] standaloneOld = Utf8("{\"theme\":\"dark\",\"language\":\"ru\",\"other\":1
 byte[] storeOldBytes = Utf8("{\"theme\":\"light\",\"language\":\"en\",\"other\":2}");
 File.WriteAllBytes(ordinaryPaths.LegacyPath, standaloneOld);
 File.WriteAllBytes(storePaths.LegacyPath, storeOldBytes);
-var standaloneFactory = PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot);
+var standaloneFactory = PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot, () => PackageIdentityStatus.Unpackaged);
 Check(standaloneFactory.Load().Modes == new DisplayModes("dark", "ru") &&
     standaloneFactory.SaveLanguage("en") == PreferenceStatus.Success && File.Exists(ordinaryPaths.TargetPath) &&
     !File.Exists(storePaths.TargetPath), "An unmarked application did not use the standalone root.");
+byte[] savedStandalone = File.ReadAllBytes(ordinaryPaths.TargetPath);
+Check(PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot, () => PackageIdentityStatus.Packaged)
+    .SaveTheme("light") == PreferenceStatus.Unavailable && Equal(File.ReadAllBytes(ordinaryPaths.TargetPath), savedStandalone),
+    "A package without a marker changed standalone settings.");
+Check(PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot, () => PackageIdentityStatus.Unknown)
+    .Load().Status == PreferenceStatus.Unavailable, "An unknown package identity was treated as standalone.");
 string marker = Path.Combine(applicationDirectory, "store-channel.marker");
 File.WriteAllText(marker, "", new UTF8Encoding(false));
-var storeFactory = PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot);
-Check(storeFactory.Load().Modes == new DisplayModes("light", "en") &&
-    storeFactory.SaveTheme("dark") == PreferenceStatus.Success && File.Exists(storePaths.TargetPath) &&
+var storeFactory = PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot, () => PackageIdentityStatus.Packaged);
+Check(storeFactory.Load().Status == PreferenceStatus.Unavailable &&
+    storeFactory.SaveTheme("dark") == PreferenceStatus.Unavailable && !File.Exists(storePaths.TargetPath) &&
+    PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot, () => PackageIdentityStatus.Unpackaged).Load().Status == PreferenceStatus.Unavailable &&
     Equal(File.ReadAllBytes(ordinaryPaths.LegacyPath), standaloneOld) && Equal(File.ReadAllBytes(storePaths.LegacyPath), storeOldBytes),
-    "A marked application did not use the Store root safely.");
+    "An unvalidated Store marker or package was allowed to write a settings root.");
 File.Delete(marker);
 Directory.CreateDirectory(marker);
-Check(PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot).Load().Status == PreferenceStatus.Unavailable &&
-    PreferenceFiles.ForApplication(Path.Combine(work, "missing-application"), storeRoot, ordinaryRoot).Load().Status == PreferenceStatus.Unavailable,
+Check(PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot, () => PackageIdentityStatus.Unpackaged).Load().Status == PreferenceStatus.Unavailable &&
+    PreferenceFiles.ForApplication(Path.Combine(work, "missing-application"), storeRoot, ordinaryRoot, () => PackageIdentityStatus.Unpackaged).Load().Status == PreferenceStatus.Unavailable &&
+    PreferenceFiles.ForApplication(applicationDirectory, storeRoot, ordinaryRoot, () => PackageIdentityStatus.Unknown).Load().Status == PreferenceStatus.Unavailable,
     "An ambiguous edition marker or missing application directory selected a fallback root.");
+if (OperatingSystem.IsWindows())
+    Check(PreferenceFiles.CurrentPackageIdentity() == PackageIdentityStatus.Unpackaged, "The hosted test process did not report its actual unpackaged identity.");
 string ordinaryOld = Path.Combine(ordinaryRoot, "settings.json"), storeOld = Path.Combine(storeRoot, "settings.json");
 File.WriteAllText(ordinaryOld, "{\"theme\":\"dark\",\"other\":1}", new UTF8Encoding(false));
 File.WriteAllText(storeOld, "{\"theme\":\"light\",\"other\":2}", new UTF8Encoding(false));

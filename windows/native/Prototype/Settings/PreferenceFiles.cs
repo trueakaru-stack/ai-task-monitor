@@ -1,9 +1,12 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security;
 
 namespace AITaskMonitor.Prototype.Settings;
+
+internal enum PackageIdentityStatus { Unknown, Unpackaged, Packaged }
 
 // Explicit paths only. The old file is read without denying concurrent writes;
 // the new file and its lock are separate. Its snapshot can become stale.
@@ -23,29 +26,51 @@ internal sealed class PreferenceFiles
         return (Path.Combine(directory, "settings.json"), Path.Combine(directory, "display-preferences.json"));
     }
 
-    // The caller supplies the executable directory and user roots. Failure to
-    // inspect the edition marker must not silently select the other edition.
-    internal static DisplayPreferenceService ForApplication(string applicationDirectory, string userProfile, string localAppData)
+    // Only the unpackaged standalone edition is enabled. A native Store
+    // package and its marker have not yet been built or validated.
+    internal static DisplayPreferenceService ForApplication(string applicationDirectory, string userProfile, string localAppData,
+        Func<PackageIdentityStatus>? packageIdentity = null)
     {
         try
         {
+            if ((packageIdentity ?? CurrentPackageIdentity)() != PackageIdentityStatus.Unpackaged) return Unavailable();
             if (string.IsNullOrWhiteSpace(applicationDirectory) || !Path.IsPathFullyQualified(applicationDirectory))
                 return Unavailable();
             string directory = Path.GetFullPath(applicationDirectory);
             if (!PlainDirectoryExists(directory)) return Unavailable();
             string marker = Path.Combine(directory, "store-channel.marker");
-            bool store;
             try
             {
-                FileAttributes attributes = File.GetAttributes(marker);
-                if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) return Unavailable();
-                store = true;
+                // Any marker, including an unexpected directory or link,
+                // leaves the unvalidated Store edition unavailable.
+                _ = File.GetAttributes(marker);
+                return Unavailable();
             }
-            catch (FileNotFoundException) { store = false; }
-            var paths = PathsForEdition(userProfile, localAppData, store);
+            catch (FileNotFoundException) { }
+            var paths = PathsForEdition(userProfile, localAppData, false);
             return new PreferenceFiles(paths.LegacyPath, paths.TargetPath).Service;
         }
         catch (Exception error) when (IsStorageError(error)) { return Unavailable(); }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetCurrentPackageFullName(ref uint length, IntPtr name);
+
+    internal static PackageIdentityStatus CurrentPackageIdentity()
+    {
+        if (!OperatingSystem.IsWindows()) return PackageIdentityStatus.Unknown;
+        try
+        {
+            uint length = 0;
+            return GetCurrentPackageFullName(ref length, IntPtr.Zero) switch
+            {
+                122 => PackageIdentityStatus.Packaged, // ERROR_INSUFFICIENT_BUFFER
+                15700 => PackageIdentityStatus.Unpackaged, // APPMODEL_ERROR_NO_PACKAGE
+                _ => PackageIdentityStatus.Unknown
+            };
+        }
+        catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        { return PackageIdentityStatus.Unknown; }
     }
 
     private static DisplayPreferenceService Unavailable() => new(new UnavailableTarget(), new UnavailableLegacy());

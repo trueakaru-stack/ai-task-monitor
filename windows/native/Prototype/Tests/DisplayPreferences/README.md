@@ -12,12 +12,16 @@ The adapter never copies unrelated old properties into the new file.
 The caller supplies distinct absolute legacy and target paths in trusted
 directories. The path helper reproduces the published standalone and Store
 directory conventions. `ForApplication` accepts an executable directory and
-user roots and checks the published Store marker; an invalid or inaccessible
-marker or application directory makes the service unavailable instead of
-choosing the other edition. The target and its lock are separate. Reading an existing target directory can create its lock
+user roots, checks Windows package identity and the published Store marker, and
+currently enables only an unpackaged standalone launch with no marker. A
+packaged process, marker, unknown identity or inaccessible application
+directory makes the service unavailable instead of choosing the wrong edition.
+No native C# Store package has yet been built or verified. The target and its lock are separate. Reading an existing target directory can create its lock
 file; a missing directory is created only when a selection is saved. The
 existing `Initialize(theme, language)` operation remains available to an
 explicit caller but is not required for normal individual selections.
+Package identity uses Windows' `GetCurrentPackageFullName` contract:
+[Microsoft documentation](https://learn.microsoft.com/windows/msix/detect-package-identity).
 
 The window can receive an injected adapter and expose the existing theme and
 language controls. The application entry point does not yet create or inject
