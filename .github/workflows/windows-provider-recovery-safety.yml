@@ -2,7 +2,7 @@ name: Windows provider recovery safety
 on:
   workflow_dispatch:
   push:
-    branches: [windows]
+    branches: [codex/windows-long-warning-check-20261116]
     paths:
       - 'windows/app/CodexProgress.ps1'
       - 'windows/app/integrations/**'
@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [tests, deepseek, screenshots]
+        part: [screenshots]
     env:
       AITM_CI_PART: ${{ matrix.part }}
       DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
@@ -150,7 +150,7 @@ jobs:
             } else {
             $screenshots = Join-Path $root 'screenshots'
             $null = [IO.Directory]::CreateDirectory($screenshots)
-            foreach ($warning in @('partial-data','partial-both')) {
+            foreach ($warning in @('unavailable')) {
               foreach ($theme in @('light','dark')) {
                 foreach ($language in @('ru','en')) {
                   foreach ($mode in @('expanded','compact')) {

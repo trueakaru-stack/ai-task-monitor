@@ -3775,7 +3775,7 @@ function Update-View {
  try {
   $previousAllTasks=@($script:lastAllTasks)
   $sourceSnapshot=if($PreviewActiveTasks -ge 0){
-   $previewWarning=if($PreviewSourceWarning){@('DeepSeek Harness')}else{@()}
+   $previewWarning=if($PreviewSourceWarning){@('Codex','Claude Code','OpenCode','Kimi Code','DeepSeek Harness','Hermes Agent')}else{@()}
    [PSCustomObject]@{Tasks=@();Unavailable=$previewWarning;PartialConnection=$(if($PreviewSourceWarning -in @('partial-connection','partial-both')){$previewWarning}else{@()});PartialData=$(if($PreviewSourceWarning -in @('partial-data','partial-both')){$previewWarning}else{@()})}
   }else{Source-Snapshot}
   $allTasks=@($sourceSnapshot.Tasks)
@@ -4078,6 +4078,16 @@ if($PreviewUpdate){$script:availableUpdate=[PSCustomObject]@{Version='0.3.0-alph
 if ($SnapshotFile) {
  if($PreviewOffscreen){$window.WindowStartupLocation="Manual";$window.Left=-10000;$window.Top=-10000;$window.ShowActivated=$false;$window.ShowInTaskbar=$false}
  $window.Show(); $window.UpdateLayout()
+ if($PreviewSourceWarning -eq 'unavailable' -and $script:isCompact){
+  Render-CompactTasks $script:lastAllTasks; $window.UpdateLayout()
+  $check=@($compactTasksPanel.Children | Where-Object {$_ -is [Windows.Controls.TextBlock] -and $_.Tag -ceq 'source-warning'})
+  if($check.Count -ne 1){throw 'The diagnostic warning is missing.'}
+  $check[0].Measure([Windows.Size]::new($compactTasksPanel.ActualWidth,[double]::PositiveInfinity))
+  $desired=$check[0].DesiredSize.Height-$check[0].Margin.Top-$check[0].Margin.Bottom
+  $bounds=$check[0].TransformToAncestor($compactView).TransformBounds([Windows.Rect]::new(0,0,$check[0].ActualWidth,$check[0].ActualHeight))
+  $cut=($check[0].ActualHeight+0.5 -lt $desired -or $bounds.Bottom -gt $compactView.ActualHeight+0.5)
+  Write-Output ("Synthetic long warning: clipped={0}, desired={1}, actual={2}, bottom={3}, viewport={4}" -f $cut,$desired,$check[0].ActualHeight,$bounds.Bottom,$compactView.ActualHeight)
+ }
  if($PreviewSourceWarning -eq 'partial-both'){
   $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
   if($actual -cne ((Tr 'Часть данных недоступна')+': DeepSeek Harness')){throw 'A source warning was duplicated or translated incorrectly.'}
