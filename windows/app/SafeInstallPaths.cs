@@ -192,7 +192,7 @@ internal static class SafeShortcut
             link.SetDescription("AI task monitor");
             Marshal.ThrowExceptionForHR(CreateStreamOnHGlobal(IntPtr.Zero, true, out stream));
             ((IPersistStream)instance).Save(stream, true);
-            STATSTG info;
+            System.Runtime.InteropServices.ComTypes.STATSTG info;
             stream.Stat(out info, 1);
             if (info.cbSize <= 0 || info.cbSize > 1024 * 1024) throw new IOException("Invalid shortcut length.");
             byte[] data = new byte[(int)info.cbSize];
