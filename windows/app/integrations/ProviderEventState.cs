@@ -157,7 +157,14 @@ namespace AITaskMonitor.ExternalProviders
         private readonly Dictionary<string, long> hermesScopeBarriers = new Dictionary<string, long>(StringComparer.Ordinal);
         private HashSet<string> hermesScopes = new HashSet<string>(StringComparer.Ordinal);
         private HashSet<string> hermesUncertainScopes = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> capacityLimitedProviders = new HashSet<string>(StringComparer.Ordinal);
         private const int MaximumSessions = 256;
+
+        // A rejected event means the source is incomplete until it disconnects.
+        public string[] CapacityLimitedProviders
+        {
+            get { return capacityLimitedProviders.OrderBy(name => name, StringComparer.Ordinal).ToArray(); }
+        }
         private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(30);
         private static readonly TimeSpan HeartbeatLifetime = TimeSpan.FromMinutes(3);
 
@@ -196,9 +203,11 @@ namespace AITaskMonitor.ExternalProviders
             {
                 if (states.Count >= MaximumSessions)
                 {
-                    var oldest = states.Where(pair => pair.Value.Status != "active" && pair.Value.Status != "waiting")
+                    // Unknown tasks are visible evidence, not disposable history.
+                    var oldest = states.Where(pair => pair.Value.Status == "idle" || pair.Value.Status == "completed" ||
+                        pair.Value.Status == "failed" || pair.Value.Status == "interrupted")
                         .OrderBy(pair => pair.Value.Updated).FirstOrDefault();
-                    if (oldest.Key == null) { MarkGap(); return false; }
+                    if (oldest.Key == null) { RejectAtCapacity(input.Provider, scope); return false; }
                     if (oldest.Value.Provider == "hermes") MarkProviderGap("hermes");
                     states.Remove(oldest.Key);
                 }
@@ -268,6 +277,15 @@ namespace AITaskMonitor.ExternalProviders
             return true;
         }
 
+        private void RejectAtCapacity(string provider, string scope)
+        {
+            capacityLimitedProviders.Add(provider);
+            bool validScope = scope.Length == 32 && scope.All(c => (c >= 'a' && c <= 'f') || (c >= '0' && c <= '9'));
+            if (provider == "deepseek" && validScope) MarkSessionScopesGap(provider, new[] { scope });
+            else if (provider == "hermes" && validScope) MarkHermesScopeGap(scope);
+            else MarkProviderGap(provider);
+        }
+
         // An overflow or broken transport invalidates activity claims, never invents completion.
         public void MarkGap()
         {
@@ -292,6 +310,7 @@ namespace AITaskMonitor.ExternalProviders
         public void RetainProviders(string[] providers)
         {
             var allowed = new HashSet<string>(providers ?? new string[0], StringComparer.Ordinal);
+            capacityLimitedProviders.IntersectWith(allowed);
             bool nowAllowed = allowed.Contains("hermes");
             if (nowAllowed != hermesAllowed)
             {

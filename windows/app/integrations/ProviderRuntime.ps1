@@ -121,6 +121,11 @@ function Read-ExternalProviderGroupSnapshot {
    foreach($provider in $newGaps){$Controller.Store.MarkProviderGap($provider)}
    $current=@(Convert-ExternalProviderStates -States @($Controller.Store.Snapshot([DateTimeOffset]::UtcNow)) -Language $Language)
   }
+  if($null -ne $Controller.Store){
+   foreach($provider in @($Controller.Store.CapacityLimitedProviders)){
+    if($allowed.Contains([string]$provider) -and $names.Contains([string]$provider) -and -not $unavailable.Contains([string]$names[$provider])){$unavailable.Add([string]$names[$provider])}
+   }
+  }
   return [PSCustomObject]@{Tasks=@($current+$retained);Unavailable=$unavailable.ToArray()}
  }catch{
   foreach($provider in $allowed){$uncertain.Add($provider);$unavailable.Add($names[$provider])}

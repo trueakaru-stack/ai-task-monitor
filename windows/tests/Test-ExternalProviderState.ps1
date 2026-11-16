@@ -118,4 +118,32 @@ for ($i = 0; $i -lt 256; $i++) {
 $overflow = Parse '{"version":1,"provider":"deepseek","session":"overflow","kind":"active"}'
 Assert (-not $filled.Apply($overflow, $now)) 'An all-active store must fail closed on overflow.'
 Assert (@($filled.Snapshot($now) | Where-Object Status -ne 'unknown').Count -eq 0) 'Overflow must invalidate activity claims.'
+
+# A full store must keep every visible task and report the source that lost an event.
+$bounded = [AITaskMonitor.ExternalProviders.StateStore]::new()
+$bounded.RetainProviders([string[]]@('deepseek','opencode','kimi'))
+$scopeA = 'a' * 32; $scopeB = 'b' * 32
+Apply $bounded ('{"version":1,"provider":"deepseek","session":"' + $scopeA + '_affected","kind":"active"}') $now
+for ($i = 0; $i -lt 253; $i++) {
+    Apply $bounded ('{"version":1,"provider":"deepseek","session":"' + $scopeB + '_s' + $i + '","kind":"active"}') $now
+}
+Apply $bounded '{"version":1,"provider":"opencode","session":"healthy","kind":"active"}' $now
+Apply $bounded '{"version":1,"provider":"kimi","session":"uncertain","kind":"started","turn":"t"}' $now
+$overflowScoped = Parse ('{"version":1,"provider":"deepseek","session":"' + $scopeA + '_missing","kind":"active"}')
+Assert (-not $bounded.Apply($overflowScoped, $now)) 'A full store admitted another task by discarding visible evidence.'
+$visible = @($bounded.Snapshot($now))
+Assert ($visible.Count -eq 256) 'A visible task disappeared at capacity.'
+Assert (@($visible | Where-Object { $_.Provider -eq 'kimi' -and $_.Session -eq 'uncertain' -and $_.Status -eq 'unknown' }).Count -eq 1) 'An unconfirmed Kimi card was evicted.'
+Assert (@($visible | Where-Object { $_.Provider -eq 'opencode' -and $_.Session -eq 'healthy' -and $_.Status -eq 'active' }).Count -eq 1) 'Capacity loss degraded another provider.'
+Assert (@($visible | Where-Object { $_.Provider -eq 'deepseek' -and $_.Session -eq ($scopeA + '_affected') -and $_.Status -eq 'unknown' }).Count -eq 1) 'The affected profile was not marked unconfirmed.'
+Assert (@($visible | Where-Object { $_.Provider -eq 'deepseek' -and $_.Session.StartsWith($scopeB + '_') -and $_.Status -eq 'active' }).Count -eq 253) 'Capacity loss degraded a different profile.'
+Assert (@($bounded.CapacityLimitedProviders) -ccontains 'deepseek') 'The incomplete source was not reported.'
+
+# A terminal entry may be reclaimed, but unconfirmed cards remain visible.
+Apply $bounded ('{"version":1,"provider":"deepseek","session":"' + $scopeA + '_affected","kind":"completed"}') $now
+Assert ($bounded.Apply($overflowScoped, $now)) 'A terminal slot was not reclaimed.'
+Assert (@($bounded.Snapshot($now) | Where-Object { $_.Provider -eq 'kimi' -and $_.Session -eq 'uncertain' }).Count -eq 1) 'Reclaiming a terminal slot removed an unconfirmed card.'
+$bounded.RetainProviders([string[]]@('opencode','kimi'))
+Assert (@($bounded.CapacityLimitedProviders).Count -eq 0) 'Disconnect did not clear the capacity warning.'
+
 Write-Output 'External provider state fixtures passed.'
