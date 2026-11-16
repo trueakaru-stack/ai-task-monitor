@@ -96,11 +96,16 @@ enum SyntheticWindowGroupAudit {
 
     private static var output: URL?
     private static var scheduled = false
+    @MainActor private static var activeStore: TaskStore?
 
     @MainActor static func prepare() -> Bool {
-        let mode = ProcessInfo.processInfo.environment["AITM_SYNTHETIC_APPEARANCE"]
-        let variant = ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_VARIANT"]
-        guard (mode == "light" || mode == "dark"), (variant == "baseline" || variant == "ignore-top") else { return false }
+        let env = ProcessInfo.processInfo.environment
+        let mode = env["AITM_SYNTHETIC_APPEARANCE"]
+        let variant = env["AITM_WINDOWGROUP_VARIANT"]
+        let scenario = env["AITM_WINDOWGROUP_SCENARIO"]
+        guard (mode == "light" || mode == "dark"),
+              (variant == "baseline" || variant == "corrected"),
+              (scenario == "compact-to-full" || scenario == "full-to-compact") else { return false }
         do {
             output = try makeOutput()
             AppLanguage.previewOverride = .ru
@@ -123,8 +128,80 @@ enum SyntheticWindowGroupAudit {
         store.testSetExternalAvailability(previous: [item],
             unavailable: [.codex, .claude, .kimi, .deepseek, .hermes, .opencode],
             partiallyUnavailable: [.deepseek, .hermes, .opencode])
-        store.isCompact = true
+        store.isCompact = ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_SCENARIO"] == "compact-to-full"
+        activeStore = store
         return store
+    }
+
+    @MainActor private static func activeWindow() throws -> NSWindow {
+        let windows = NSApplication.shared.windows.filter {
+            $0.isVisible && $0.windowNumber > 0 && $0.frame.width >= 100 && $0.frame.height >= 80
+        }
+        guard windows.count == 1, let window = windows.first else { throw FixtureError.bitmap }
+        return window
+    }
+
+    @MainActor private static func capture(_ stage: String, toggleMethod: String) throws {
+        guard let output, let store = activeStore,
+              let mode = ProcessInfo.processInfo.environment["AITM_SYNTHETIC_APPEARANCE"],
+              let scenario = ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_SCENARIO"],
+              let variant = ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_VARIANT"] else {
+            throw FixtureError.unsafeEnvironment
+        }
+        let window = try activeWindow()
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        let ownID = CGWindowID(window.windowNumber)
+        FileHandle.standardError.write(Data("WindowGroup capture: \(variant) \(mode) \(scenario) \(stage)\n".utf8))
+        guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow, ownID, [.bestResolution]) else {
+            throw FixtureError.bitmap
+        }
+        let prefix = "windowgroup-\(stage)"
+        let full = NSBitmapImageRep(cgImage: image)
+        try save(full, name: "\(prefix)-system-shadow.png", in: output)
+        try save(onCyan(full), name: "\(prefix)-system-shadow-cyan.png", in: output)
+        let content = window.contentView
+        let insets = content?.safeAreaInsets ?? NSEdgeInsetsZero
+        let layout = window.contentLayoutRect
+        var row: [String: Any] = ["mode": mode, "variant": variant, "scenario": scenario, "stage": stage,
+            "isCompact": store.isCompact, "toggleMethod": toggleMethod,
+            "windowHasShadow": window.hasShadow, "windowIsOpaque": window.isOpaque,
+            "backingScale": Double(window.backingScaleFactor),
+            "windowFrame": [Double(window.frame.minX), Double(window.frame.minY),
+                            Double(window.frame.width), Double(window.frame.height)],
+            "minSize": [Double(window.minSize.width), Double(window.minSize.height)],
+            "maxSize": [Double(window.maxSize.width), Double(window.maxSize.height)],
+            "contentPoints": [Double(content?.bounds.width ?? 0), Double(content?.bounds.height ?? 0)],
+            "contentSafeInsets": [Double(insets.top), Double(insets.left), Double(insets.bottom), Double(insets.right)],
+            "contentLayoutRect": [Double(layout.minX), Double(layout.minY), Double(layout.width), Double(layout.height)],
+            "imagePixels": [full.pixelsWide, full.pixelsHigh]]
+        if let image = CGWindowListCreateImage(.null, .optionIncludingWindow, ownID,
+                                               [.bestResolution, .boundsIgnoreFraming]) {
+            let bounded = NSBitmapImageRep(cgImage: image)
+            try save(bounded, name: "\(prefix)-bounds.png", in: output)
+            try save(onCyan(bounded), name: "\(prefix)-bounds-cyan.png", in: output)
+            row["boundsPixels"] = [bounded.pixelsWide, bounded.pixelsHigh]
+        }
+        let report = try JSONSerialization.data(withJSONObject: row, options: [.prettyPrinted, .sortedKeys])
+        try write(report, name: "\(prefix)-report.json", in: output)
+    }
+
+    @MainActor private static func sendToggleToOwnWindow() throws {
+        let window = try activeWindow()
+        guard let view = window.contentView else { throw FixtureError.bitmap }
+        let variant = ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_VARIANT"]
+        let topInset = variant == "baseline" ? view.safeAreaInsets.top : 0
+        let point = NSPoint(x: view.bounds.width - 68, y: view.bounds.height - topInset - 29)
+        let time = ProcessInfo.processInfo.systemUptime
+        guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
+                                            timestamp: time, windowNumber: window.windowNumber, context: nil,
+                                            eventNumber: 1, clickCount: 1, pressure: 1),
+              let up = NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [],
+                                          timestamp: time + 0.01, windowNumber: window.windowNumber, context: nil,
+                                          eventNumber: 2, clickCount: 1, pressure: 0) else { throw FixtureError.bitmap }
+        window.makeKeyAndOrderFront(nil)
+        window.sendEvent(down)
+        window.sendEvent(up)
     }
 
     @MainActor static func schedule() {
@@ -132,46 +209,35 @@ enum SyntheticWindowGroupAudit {
         scheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             do {
-                guard let output,
-                      let mode = ProcessInfo.processInfo.environment["AITM_SYNTHETIC_APPEARANCE"] else {
-                    throw FixtureError.unsafeEnvironment
+                guard let store = activeStore else { throw FixtureError.unsafeEnvironment }
+                let wasCompact = store.isCompact
+                try capture("before", toggleMethod: "not-attempted")
+                try sendToggleToOwnWindow()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    let method: String
+                    if store.isCompact != wasCompact {
+                        method = "button-event"
+                    } else {
+                        method = "direct-state-fallback"
+                        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                            store.isCompact.toggle()
+                            store.showsSettings = false
+                            store.showsJournal = false
+                            store.showsAbout = false
+                        }
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        do {
+                            guard store.isCompact != wasCompact else { throw FixtureError.bitmap }
+                            try capture("after", toggleMethod: method)
+                            exit(0)
+                        } catch {
+                            FileHandle.standardError.write(Data("Synthetic transition capture failed.\n".utf8))
+                            exit(1)
+                        }
+                    }
                 }
-                let windows = NSApplication.shared.windows.filter {
-                    $0.isVisible && $0.windowNumber > 0 && $0.frame.width >= 100 && $0.frame.height >= 80
-                }
-                guard windows.count == 1, let window = windows.first else { throw FixtureError.bitmap }
-                window.contentView?.layoutSubtreeIfNeeded()
-                window.displayIfNeeded()
-                let ownID = CGWindowID(window.windowNumber)
-                FileHandle.standardError.write(Data("WindowGroup own-window capture: \(mode)\n".utf8))
-                guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow, ownID, [.bestResolution]) else {
-                    throw FixtureError.bitmap
-                }
-                let full = NSBitmapImageRep(cgImage: image)
-                try save(full, name: "windowgroup-\(mode)-system-shadow.png", in: output)
-                try save(onCyan(full), name: "windowgroup-\(mode)-system-shadow-cyan.png", in: output)
-                let content = window.contentView
-                let insets = content?.safeAreaInsets ?? NSEdgeInsetsZero
-                let layout = window.contentLayoutRect
-                var row: [String: Any] = ["mode": mode,
-                    "variant": ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_VARIANT"] ?? "",
-                    "windowHasShadow": window.hasShadow, "windowIsOpaque": window.isOpaque,
-                    "backingScale": Double(window.backingScaleFactor),
-                    "windowPoints": [Double(window.frame.width), Double(window.frame.height)],
-                    "contentPoints": [Double(content?.bounds.width ?? 0), Double(content?.bounds.height ?? 0)],
-                    "contentSafeInsets": [Double(insets.top), Double(insets.left), Double(insets.bottom), Double(insets.right)],
-                    "contentLayoutRect": [Double(layout.minX), Double(layout.minY), Double(layout.width), Double(layout.height)],
-                    "imagePixels": [full.pixelsWide, full.pixelsHigh]]
-                if let image = CGWindowListCreateImage(.null, .optionIncludingWindow, ownID,
-                                                       [.bestResolution, .boundsIgnoreFraming]) {
-                    let bounded = NSBitmapImageRep(cgImage: image)
-                    try save(bounded, name: "windowgroup-\(mode)-bounds.png", in: output)
-                    try save(onCyan(bounded), name: "windowgroup-\(mode)-bounds-cyan.png", in: output)
-                    row["boundsPixels"] = [bounded.pixelsWide, bounded.pixelsHigh]
-                }
-                let report = try JSONSerialization.data(withJSONObject: row, options: [.prettyPrinted, .sortedKeys])
-                try write(report, name: "windowgroup-\(mode)-report.json", in: output)
-                exit(0)
             } catch {
                 FileHandle.standardError.write(Data("Synthetic WindowGroup capture failed.\n".utf8))
                 exit(1)
