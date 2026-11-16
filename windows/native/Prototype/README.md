@@ -8,6 +8,10 @@ button is intentionally inactive. No installer is modified.
 
 Without explicit preview arguments the window opens with an empty task list,
 not the built-in example cards, and says that no sources are connected.
+There is no local Codex source owner in this preview. A future application
+must track the actual connection and confidence of every source when choosing
+the empty-state message; the preview's scene-based fallback is not a usable
+connected-source status and is not final application behavior.
 An injected empty Claude snapshot does not distinguish a disconnected source
 from a connected one; this preview therefore reports the task status as
 unconfirmed until a future owner supplies a verified connection state.
@@ -47,6 +51,10 @@ PowerShell. These are test scenarios rather than continuous observation. The
 captured screenshots are synthetic WPF evidence, not final visual acceptance.
 An immediately reentrant refresh from the busy-lease presentation callback is
 ignored to avoid recursive failures; a later explicit refresh or poll retries.
+The injected scheduler is a test seam: it must return the scheduled task, or
+throw before dispatching any work. A scheduler that starts work and then throws
+can violate the lease. The normal path uses `Task.Run`; exceptional scheduling
+behavior outside that documented test contract has not been reproduced.
 
 The fixed provider scenarios pass compiled-in sanitized events through the
 referenced .NET 10 provider parser, state store and presentation adapter. They
