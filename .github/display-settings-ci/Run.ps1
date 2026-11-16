@@ -74,6 +74,11 @@ try{
  Check ([IO.File]::Exists($hostAssembly)) 'The display-host test assembly is missing.'
  Invoke-Isolated @($hostAssembly,$root)
  Check (@(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File).Count -eq 4) 'The four synthetic frames are missing.'
+ $viewProject=Join-Path $repository 'windows/native/Prototype/Tests/Prototype.Tests.csproj'
+ Invoke-Isolated @('build',$viewProject,'-c','Release','--configfile',$config,'--artifacts-path',$artifacts,'-p:NuGetAudit=false','--nologo')
+ $viewAssembly=Join-Path $artifacts 'bin/Prototype.Tests/release/AITaskMonitor.Prototype.Tests.dll'
+ Check ([IO.File]::Exists($viewAssembly)) 'The existing WPF test assembly is missing.'
+ Invoke-Isolated @($viewAssembly)
 }finally{
  foreach($scope in @('User','Machine')){
   $before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine}
