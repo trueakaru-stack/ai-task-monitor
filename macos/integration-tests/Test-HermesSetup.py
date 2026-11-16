@@ -1,7 +1,10 @@
 """Hermes manual preparation against disposable profiles and pinned source files."""
 
+import errno
 import json
 import os
+import re
+import stat
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,8 +13,45 @@ import tempfile
 import unittest
 
 
+def disposable_test_root():
+    env = os.environ
+    if (sys.platform != "darwin" or env.get("CI") != "true" or env.get("GITHUB_ACTIONS") != "true"
+            or env.get("RUNNER_ENVIRONMENT") != "github-hosted" or env.get("RUNNER_OS") != "macOS"
+            or env.get("AITM_MACOS_TEST_SANDBOX") != "1" or "HOME" in env or "CODEX_HOME" in env):
+        raise RuntimeError("A disposable macOS profile sandbox is required.")
+    root_text = env.get("AITM_MACOS_TEST_ROOT", "")
+    marker_text = env.get("AITM_CI_DENIED_FILE", "")
+    if not root_text.startswith("/Users/") or not marker_text.startswith("/Users/"):
+        raise RuntimeError("Synthetic Hermes test paths are required.")
+    root, marker = Path(root_text), Path(marker_text)
+    task_root = root.parent
+    if (str(root) != root_text or os.path.normpath(root_text) != root_text or root.name != "temp"
+            or re.fullmatch(r"aitm-macos-tests\.[A-Za-z0-9]{8}", task_root.name) is None
+            or re.fullmatch(r"aitm-profile-deny\.[A-Za-z0-9]{8}", marker.name) is None
+            or marker.parent != task_root.parent or root.resolve(strict=True) != root):
+        raise RuntimeError("Synthetic Hermes test paths are invalid.")
+    current = Path("/")
+    for part in root.parts[1:]:
+        current = current / part
+        if not stat.S_ISDIR(current.lstat().st_mode):
+            raise RuntimeError("Synthetic Hermes test root contains a redirected component.")
+    try:
+        descriptor = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as error:
+        if error.errno not in (errno.EACCES, errno.EPERM):
+            raise RuntimeError("The profile sandbox marker could not be verified.") from error
+    else:
+        os.close(descriptor)
+        raise RuntimeError("The profile sandbox did not block the marker.")
+    return root
+
+
+TEST_ROOT = disposable_test_root()
+TASK_ROOT = TEST_ROOT.parent
 ASSETS = Path(sys.argv.pop(1)).resolve(strict=True)
 SOURCE = Path(sys.argv.pop(1)).resolve(strict=True)
+if ASSETS != TASK_ROOT / "source/macos/integrations" or SOURCE != TASK_ROOT / "hermes-source":
+    raise RuntimeError("Hermes assets must come from the disposable checkout and pinned source fixture.")
 FILES = (
     "hermes_cli/middleware.py", "hermes_cli/plugins.py", "hermes_cli/plugins_dispatch.py",
     "hermes_cli/lifecycle.py", "agent/turn_api_request.py", "agent/turn_finalizer.py",
@@ -30,8 +70,9 @@ ASSET_FILES = (
 
 class ManualHermesSetupTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="aitm-hermes-профиль-")
-        self.root = Path(self.temp.name).resolve()
+        self.root = Path(tempfile.mkdtemp(prefix="aitm-hermes-fixture-", dir=TEST_ROOT))
+        if self.root.parent != TEST_ROOT or self.root.resolve(strict=True) != self.root:
+            raise RuntimeError("The synthetic Hermes fixture was redirected.")
         self.home, self.project, self.assets = (self.root / name for name in ("home", "project", "assets"))
         self.home.mkdir()
         self.assets.mkdir()
@@ -47,12 +88,12 @@ class ManualHermesSetupTests(unittest.TestCase):
         self.named.mkdir(parents=True)
         (self.named / "config.yaml").write_bytes(self.config)
         self.env = {key: os.environ[key] for key in ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT") if key in os.environ}
-        self.env.update({"HOME": str(self.root), "USERPROFILE": str(self.root), "LOCALAPPDATA": str(self.root),
+        self.env.update({"USERPROFILE": str(self.root), "LOCALAPPDATA": str(self.root),
                          "APPDATA": str(self.root), "TMP": str(self.root), "TEMP": str(self.root),
                          "TMPDIR": str(self.root), "PATH": ""})
 
-    def tearDown(self):
-        self.temp.cleanup()
+    # The one-time runner disposes of these fixtures; never recursively delete
+    # a path derived from the process environment.
 
     def call(self, action, **extra):
         request = {"action": action, "home": str(self.home), "project": str(self.project),
@@ -63,6 +104,14 @@ class ManualHermesSetupTests(unittest.TestCase):
         self.assertEqual(result.stderr, b"")
         self.assertNotIn(b"PRIVATE_FIXTURE", result.stdout)
         return json.loads(result.stdout)
+
+    def test_bridge_child_has_no_home_environment(self):
+        code = "import os; assert 'HOME' not in os.environ and 'CODEX_HOME' not in os.environ"
+        result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", code],
+                                capture_output=True, timeout=10, env=self.env)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"")
 
     def test_prepare_is_scoped_idempotent_and_preserves_other_settings(self):
         self.assertEqual([item["state"] for item in self.call("list")["result"]], ["absent", "absent"])

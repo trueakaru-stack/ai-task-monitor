@@ -1,0 +1,179 @@
+name: Validate Hermes setup without profile access
+on:
+  push:
+    branches: ['macos']
+    paths:
+      - '.github/workflows/macos-hermes-setup-isolated.yml'
+      - 'macos/integration-tests/Test-HermesSetup.py'
+      - 'macos/integration-tests/Extract-HermesFixture.py'
+      - 'macos/integration-tests/Test-HermesPublication.py'
+      - 'macos/integrations/hermes-*'
+      - 'macos/integrations/provider_*.py'
+      - 'macos/integrations/ruamel.yaml-0.18.16-py3-none-any.whl'
+permissions:
+  contents: read
+jobs:
+  isolated:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Prepare disposable profile sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          task_profile="$(/usr/bin/python3 -I -S -B -c 'import os,pwd; print(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))')"
+          case "$task_profile" in /Users/*) ;; *) echo 'Unexpected hosted runner profile.' >&2; exit 1;; esac
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-macos-tests.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
+          case "$task_marker" in "$task_profile"/*) ;; *) echo 'Runner temp is outside the hosted profile.' >&2; exit 1;; esac
+          printf 'synthetic-only\n' > "$task_marker"
+          task_python=''
+          for name in python3 python3.14 python3.13 python3.12 python3.11; do
+            candidate="$(command -v "$name" || true)"
+            if [[ "$candidate" == /* && -x "$candidate" ]] && "$candidate" -I -S -B -c 'import sys; assert (3, 11) <= sys.version_info[:2] < (3, 15)' 2>/dev/null; then task_python="$candidate"; break; fi
+          done
+          test -n "$task_python"
+          task_python_root="$("$task_python" -I -S -B -c 'import os,sys; print(os.path.realpath(sys.base_prefix))')"
+          case "$task_python_root" in /|/Users|"$task_profile") echo 'Unsafe Python root.' >&2; exit 1;; esac
+          task_path="$(dirname "$task_python"):/usr/bin:/bin:/usr/sbin:/sbin"
+          task_git="$(command -v git)"
+          [[ "$task_git" == /* && -x "$task_git" ]]
+          mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp"
+          task_git_run() {
+            /usr/bin/env -i "PATH=$task_path" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 "$task_git" "$@"
+          }
+          task_git_run -c credential.helper= -c core.hooksPath="$task_root/hooks" -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
+          task_git_run -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          task_git_run -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
+          test "$(task_git_run -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          cat > "$task_root/profile.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath (param "TASK_PROFILE")))
+          (allow file-read-metadata)
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (allow file-read* (subpath (param "TASK_PYTHON_ROOT")))
+          (deny mach-lookup (global-name "com.apple.bsd.dirhelper"))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          PROFILE
+          cat > "$task_root/run-isolated" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" \
+            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 \
+            "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "AITM_MACOS_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" \
+            PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+            /usr/bin/sandbox-exec -D "TASK_PROFILE=$AITM_TEST_PROFILE" -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" \
+              -D "TASK_PYTHON_ROOT=$AITM_TEST_PYTHON_ROOT" -f "$AITM_TEST_TASK_ROOT/profile.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-isolated"
+          { printf 'AITM_TEST_TASK_ROOT=%s\n' "$task_root"; printf 'AITM_TEST_DENIED_FILE=%s\n' "$task_marker"; printf 'AITM_TEST_PROFILE=%s\n' "$task_profile"; printf 'AITM_TEST_PYTHON_ROOT=%s\n' "$task_python_root"; printf 'AITM_TEST_PYTHON_BIN=%s\n' "$task_python"; printf 'AITM_TASK_PATH=%s\n' "$task_path"; } >> "$GITHUB_ENV"
+      - name: Verify profile sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          "$task_run" /usr/bin/true
+          if "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write was not denied.' >&2; exit 1; fi
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import os; assert "HOME" not in os.environ and "CODEX_HOME" not in os.environ'
+          "$task_run" /bin/ln -s "$AITM_TEST_DENIED_FILE" "$AITM_TEST_TASK_ROOT/denied-link"
+          if "$task_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read via link was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write via link was not denied.' >&2; exit 1; fi
+      - name: Prepare pinned upstream Hermes source
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          task_git="$(command -v git)"
+          task_commit='b200f5bc60e31588ba2cb60e288029c4a54ba5fa'
+          task_repo="$AITM_TEST_TASK_ROOT/hermes-git"
+          task_git_run() {
+            "$task_run" /usr/bin/env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+              GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 "$task_git" \
+              -c credential.helper= -c core.hooksPath="$AITM_TEST_TASK_ROOT/hooks" \
+              -c core.attributesFile=/dev/null "$@"
+          }
+          task_git_run init --quiet --bare --template="$AITM_TEST_TASK_ROOT/template" "$task_repo"
+          task_git_run -C "$task_repo" fetch --no-tags --no-recurse-submodules --depth=1 \
+            'https://github.com/NousResearch/hermes-agent.git' "$task_commit"
+          test "$(task_git_run -C "$task_repo" rev-parse 'FETCH_HEAD^{commit}')" = "$task_commit"
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B - "$AITM_TEST_TASK_ROOT/source/macos" \
+            > "$AITM_TEST_TASK_ROOT/fixture-paths" <<'PY'
+          import ast
+          from pathlib import Path, PurePosixPath
+          import re
+          import sys
+
+          root = Path(sys.argv[1])
+          def assignment(path, name):
+              tree = ast.parse(path.read_text(encoding="utf-8"))
+              return next(ast.literal_eval(node.value) for node in tree.body
+                          if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == name for target in node.targets))
+          expected = assignment(root / "integration-tests/Test-HermesPublication.py", "EXPECTED")
+          expected.update(assignment(root / "integrations/hermes-manager.py", "_MANAGER_HASHES"))
+          tree = ast.parse((root / "integration-tests/Extract-HermesFixture.py").read_text(encoding="utf-8"))
+          expected.update(next(ast.literal_eval(node.value.args[0]) for node in tree.body
+                               if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                               and isinstance(node.value.func, ast.Attribute)
+                               and isinstance(node.value.func.value, ast.Name)
+                               and node.value.func.value.id == "expected" and node.value.func.attr == "update"
+                               and len(node.value.args) == 1 and isinstance(node.value.args[0], ast.Dict)))
+          for name in sorted(expected):
+              path = PurePosixPath(name)
+              if (not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9_./-]+", name) is None
+                      or path.is_absolute() or str(path) != name or ".." in path.parts):
+                  raise SystemExit("Unsafe fixture source path.")
+              print(name)
+          PY
+          test -s "$AITM_TEST_TASK_ROOT/fixture-paths"
+          task_paths=()
+          while IFS= read -r task_path; do task_paths+=("$task_path"); done < "$AITM_TEST_TASK_ROOT/fixture-paths"
+          task_git_run -C "$task_repo" archive --format=tar \
+            --prefix="hermes-agent-$task_commit/" --output="$AITM_TEST_TASK_ROOT/hermes.tar" \
+            "$task_commit" -- "${task_paths[@]}"
+          "$task_run" /usr/bin/gzip -n "$AITM_TEST_TASK_ROOT/hermes.tar"
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B integration-tests/Extract-HermesFixture.py \
+            "$AITM_TEST_TASK_ROOT/hermes.tar.gz" "$AITM_TEST_TASK_ROOT/hermes-source"
+      - name: Verify missing marker fails closed
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          if "$task_run" /usr/bin/env -u AITM_CI_DENIED_FILE "$AITM_TEST_PYTHON_BIN" -I -S -B \
+              integration-tests/Test-HermesSetup.py integrations "$AITM_TEST_TASK_ROOT/hermes-source" \
+              >"$AITM_TEST_TASK_ROOT/negative.log" 2>&1; then
+            echo 'Hermes fixture accepted a missing marker.' >&2
+            exit 1
+          fi
+          grep -q 'Synthetic Hermes test paths are required' "$AITM_TEST_TASK_ROOT/negative.log"
+      - name: Exercise isolated Hermes setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B integration-tests/Test-HermesSetup.py \
+            integrations "$AITM_TEST_TASK_ROOT/hermes-source" -v 2>&1 | tee "$AITM_TEST_TASK_ROOT/hermes-setup.log"
+          grep -q 'Ran 12 tests' "$AITM_TEST_TASK_ROOT/hermes-setup.log"
+          grep -q '^OK$' "$AITM_TEST_TASK_ROOT/hermes-setup.log"
+      - name: Report test scope
+        shell: bash
+        run: |
+          {
+            echo '### Hermes test scope'
+            echo 'This workflow verifies synthetic manual setup against pinned upstream source files.'
+            echo 'The actual Hermes manager and the remaining legacy tests-only suite were not run.'
+          } >> "$GITHUB_STEP_SUMMARY"
