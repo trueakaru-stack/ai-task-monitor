@@ -10,13 +10,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-15
-            xcode: /Applications/Xcode_16.1.app/Contents/Developer
-    runs-on: ${{ matrix.os }}
+        mode: [capture, direct]
+    runs-on: macos-15
     timeout-minutes: 10
     env:
-      DEVELOPER_DIR: ${{ matrix.xcode }}
+      DEVELOPER_DIR: /Applications/Xcode_16.1.app/Contents/Developer
+      AITM_FEEDBACK_DIAG_MODE: ${{ matrix.mode }}
     steps:
       - name: Checkout exact revision
         shell: bash
@@ -39,10 +38,10 @@ jobs:
           export AITM_FEEDBACK_SYNTHETIC_CI=1
           swift test --filter FeedbackAlignmentTests
       - name: Upload settings previews
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.mode == 'capture' }}
         uses: actions/upload-artifact@v4
         with:
-          name: macos-feedback-${{ matrix.os }}
+          name: macos-feedback-${{ matrix.mode }}
           path: ${{ runner.temp }}/aitm-feedback-*/feedback-test-host.png
           if-no-files-found: error
           retention-days: 7

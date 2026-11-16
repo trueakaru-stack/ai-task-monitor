@@ -118,11 +118,14 @@ final class FeedbackAlignmentTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(1.2))
         host.layoutSubtreeIfNeeded()
 
-        print("Synthetic feedback host bounds: \(host.bounds)")
-        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-            if let png = bitmap.representation(using: .png, properties: [:]) {
-                try png.write(to: URL(fileURLWithPath: fixture).appendingPathComponent("feedback-test-host.png"))
+        print("Synthetic feedback diagnostic mode=\(environment["AITM_FEEDBACK_DIAG_MODE"] ?? "none")")
+        if environment["AITM_FEEDBACK_DIAG_MODE"] == "capture" {
+            print("Synthetic feedback host bounds: \(host.bounds)")
+            if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                if let png = bitmap.representation(using: .png, properties: [:]) {
+                    try png.write(to: URL(fileURLWithPath: fixture).appendingPathComponent("feedback-test-host.png"))
+                }
             }
         }
 
@@ -130,8 +133,10 @@ final class FeedbackAlignmentTests: XCTestCase {
             .font(.system(size: 13)).fixedSize())
         print("Synthetic intrinsic symbol size: \(symbol.fittingSize)")
         let pasteboard = NSPasteboard.general // Isolated ephemeral CI runner only.
-        let directCopy = FeedbackDraft.copyAddress(to: pasteboard)
-        print("Synthetic direct pasteboard copy success=\(directCopy), matched=\(pasteboard.string(forType: .string) == FeedbackDraft.email)")
+        if environment["AITM_FEEDBACK_DIAG_MODE"] == "direct" {
+            let directCopy = FeedbackDraft.copyAddress(to: pasteboard)
+            print("Synthetic direct pasteboard copy success=\(directCopy), matched=\(pasteboard.string(forType: .string) == FeedbackDraft.email)")
+        }
         defer { pasteboard.clearContents() }
         var eventNumber = 0
         func click(_ point: NSPoint) throws -> Bool {
