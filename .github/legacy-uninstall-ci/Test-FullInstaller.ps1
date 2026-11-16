@@ -35,11 +35,19 @@ function Find-Window([Diagnostics.Process]$process,[int]$seconds){
     $idCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,$process.Id)
     $nameCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,'AI task monitor')
     $condition=[Windows.Automation.AndCondition]::new($idCondition,$nameCondition)
-    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $clock=[Diagnostics.Stopwatch]::StartNew();$firstNative=-1L;$lastNative=-1000L
     while($clock.Elapsed.TotalSeconds -lt $seconds){
         if($process.HasExited){throw 'The synthetic process exited before its window appeared.'}
+        if($clock.ElapsedMilliseconds-$lastNative -ge 1000){
+            $lastNative=$clock.ElapsedMilliseconds
+            $native=Get-NativeWindowSummary $process.Id
+            if($firstNative -lt 0 -and $native.Contains('AI task monitor:visible=True')){$firstNative=$clock.ElapsedMilliseconds}
+        }
         $found=[Windows.Automation.AutomationElement]::RootElement.FindFirst([Windows.Automation.TreeScope]::Children,$condition)
-        if($null -ne $found -and $found.Current.Name -ceq 'AI task monitor'){return $found}
+        if($null -ne $found -and $found.Current.Name -ceq 'AI task monitor'){
+            Write-Host ('Synthetic window timing: UIA='+$clock.ElapsedMilliseconds+'ms; first sampled Win32='+$firstNative+'ms.')
+            return $found
+        }
         Start-Sleep -Milliseconds 100
     }
     $process.Refresh()
@@ -47,7 +55,8 @@ function Find-Window([Diagnostics.Process]$process,[int]$seconds){
     $otherWindows=[Windows.Automation.AutomationElement]::RootElement.FindAll([Windows.Automation.TreeScope]::Children,$idCondition)
     $details=@(foreach($item in $otherWindows){$item.Current.ClassName+':'+$item.Current.Name})
     $children=@(Get-CimInstance Win32_Process -Filter ('ParentProcessId = '+$process.Id) -Property Name|ForEach-Object {$_.Name})
-    Write-Warning ('Window diagnostic: alive='+(-not $process.HasExited)+'; UIA windows='+($details -join ' | ')+'; native windows='+(Get-NativeWindowSummary $process.Id)+'; child process names='+($children -join ','))
+    $postDeadline=[Windows.Automation.AutomationElement]::RootElement.FindFirst([Windows.Automation.TreeScope]::Children,$condition)
+    Write-Warning ('Window diagnostic: elapsed='+$clock.ElapsedMilliseconds+'ms; first sampled Win32='+$firstNative+'ms; post-deadline UIA='+($null -ne $postDeadline)+'; alive='+(-not $process.HasExited)+'; UIA windows='+($details -join ' | ')+'; native windows='+(Get-NativeWindowSummary $process.Id)+'; child process names='+($children -join ','))
     throw 'The synthetic process window was not found in time.'
 }
 function Get-Names($window){
