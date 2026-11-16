@@ -4676,6 +4676,20 @@ if ($SnapshotFile) {
    $window.Dispatcher.Invoke([Action]{},[Windows.Threading.DispatcherPriority]::ApplicationIdle);$window.UpdateLayout()
   }
   if($PreviewSettingsEnd){$settingsScroll.ScrollToEnd();$window.Dispatcher.Invoke([Action]{},[Windows.Threading.DispatcherPriority]::ApplicationIdle);$window.UpdateLayout()}
+  if($env:AITM_SYNTHETIC_FEEDBACK_HOVER -eq '1'){
+   if($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows'){throw 'Synthetic hover requires a disposable hosted Windows runner.'}
+   Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class AitmSyntheticHover { [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); }'
+   [void]$window.Activate()
+   $cursorPoint=$feedbackCopyButton.PointToScreen([Windows.Point]::new($feedbackCopyButton.ActualWidth/2,$feedbackCopyButton.ActualHeight/2))
+   if(-not [AitmSyntheticHover]::SetCursorPos([int]$cursorPoint.X,[int]$cursorPoint.Y)){throw 'Synthetic cursor placement failed.'}
+   $frame=[Windows.Threading.DispatcherFrame]::new()
+   $hoverTimer=[Windows.Threading.DispatcherTimer]::new()
+   $hoverTimer.Interval=[TimeSpan]::FromMilliseconds(350)
+   $hoverTimer.Add_Tick({$hoverTimer.Stop();$frame.Continue=$false})
+   $hoverTimer.Start();[Windows.Threading.Dispatcher]::PushFrame($frame);$window.UpdateLayout()
+   if(-not $feedbackCopyButton.IsMouseOver){throw 'Synthetic hover was not observed.'}
+   Write-Output 'Synthetic feedback hover observed.'
+  }
   if($SettingsSnapshotFile){
    $settingsWidth=[Math]::Max(1,[int][Math]::Ceiling($window.ActualWidth)); $settingsHeight=[Math]::Max(1,[int][Math]::Ceiling($window.ActualHeight))
    $settingsBitmap=[Windows.Media.Imaging.RenderTargetBitmap]::new($settingsWidth,$settingsHeight,96,96,[Windows.Media.PixelFormats]::Pbgra32); $settingsBitmap.Render($window)
