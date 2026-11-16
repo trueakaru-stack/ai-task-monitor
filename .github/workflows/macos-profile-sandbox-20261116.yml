@@ -29,19 +29,22 @@ jobs:
           cat > "$task_root/profile.sb" <<'PROFILE'
           (version 1)
           (allow default)
-          (deny file-read* file-write* (subpath (param "TASK_PROFILE")))
+          (deny file-read* (subpath (param "TASK_PROFILE")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null"))
           PROFILE
-          /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -f "$task_root/profile.sb" /usr/bin/true
-          if /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -f "$task_root/profile.sb" /bin/cat "$task_sentinel" >"$task_root/read.out" 2>"$task_root/read.err"; then
+          /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -D "TASK_ROOT=$task_root" -f "$task_root/profile.sb" /usr/bin/true
+          if /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -D "TASK_ROOT=$task_root" -f "$task_root/profile.sb" /bin/cat "$task_sentinel" >"$task_root/read.out" 2>"$task_root/read.err"; then
             echo "Sandbox unexpectedly read the protected synthetic marker." >&2; exit 1
           fi
-          if /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -f "$task_root/profile.sb" /usr/bin/touch "$task_sentinel" >"$task_root/write.out" 2>"$task_root/write.err"; then
+          if /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -D "TASK_ROOT=$task_root" -f "$task_root/profile.sb" /usr/bin/touch "$task_sentinel" >"$task_root/write.out" 2>"$task_root/write.err"; then
             echo "Sandbox unexpectedly wrote the protected synthetic marker." >&2; exit 1
           fi
           ln -s "$task_sentinel" "$task_root/linked-marker"
-          if /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -f "$task_root/profile.sb" /bin/cat "$task_root/linked-marker" >"$task_root/link.out" 2>"$task_root/link.err"; then
+          if /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -D "TASK_ROOT=$task_root" -f "$task_root/profile.sb" /bin/cat "$task_root/linked-marker" >"$task_root/link.out" 2>"$task_root/link.err"; then
             echo "Sandbox unexpectedly followed a link into the protected profile." >&2; exit 1
           fi
-          /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -f "$task_root/profile.sb" /usr/bin/python3 -I -S -B -c 'import os,sys,subprocess; assert "HOME" not in os.environ and "CODEX_HOME" not in os.environ; assert subprocess.run(["/bin/cat",sys.argv[2]],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode != 0; open(sys.argv[1],"w").write("fixture")' "$task_root/allowed" "$task_sentinel"
+          /usr/bin/env -u HOME -u CODEX_HOME /usr/bin/sandbox-exec -D "TASK_PROFILE=$task_profile_dir" -D "TASK_ROOT=$task_root" -f "$task_root/profile.sb" /usr/bin/python3 -I -S -B -c 'import os,sys,subprocess; assert "HOME" not in os.environ and "CODEX_HOME" not in os.environ; assert subprocess.run(["/bin/cat",sys.argv[2]],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode != 0; open(sys.argv[1],"w").write("fixture")' "$task_root/allowed" "$task_sentinel"
           test "$(cat "$task_root/allowed")" = fixture
           echo "Profile isolation probe passed."
