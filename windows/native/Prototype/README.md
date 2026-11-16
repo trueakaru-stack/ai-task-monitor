@@ -40,7 +40,8 @@ enabled.
 The synthetic host test exercises two-page and incomplete responses, failure,
 disconnect, late results, timeout, two owners, cancellation and the shared
 process lease, including a delayed cancellation callback. It also checks
-coexistence with the Claude source, compact count
+the scheduling-failure cleanup with a controlled second owner, coexistence
+with the Claude source, compact count
 grammar, the executable owning its window and sampled process/module absence of
 PowerShell. These are test scenarios rather than continuous observation. The
 captured screenshots are synthetic WPF evidence, not final visual acceptance.

@@ -15,6 +15,8 @@ internal sealed class CloudSourcePump : IDisposable
     private readonly CodexCloudSource source = new();
     private readonly Action<CloudSnapshot> present;
     private readonly Func<string?, TimeSpan, CancellationToken, Task<CommandResult>>? runner;
+    private readonly Func<Func<Task<CloudSnapshot?>>, Task<CloudSnapshot?>> schedule;
+    private readonly Action? beforeScheduleFailureCleanup;
     private readonly DispatcherTimer pollTimer;
     private readonly DispatcherTimer deadlineTimer;
     private readonly TimeSpan scanLimit;
@@ -27,11 +29,15 @@ internal sealed class CloudSourcePump : IDisposable
 
     internal CloudSourcePump(Dispatcher dispatcher, Action<CloudSnapshot> present,
         Func<string?, TimeSpan, CancellationToken, Task<CommandResult>>? runner,
-        TimeSpan? scanLimit = null, TimeSpan? pageLimit = null, TimeSpan? pollInterval = null)
+        TimeSpan? scanLimit = null, TimeSpan? pageLimit = null, TimeSpan? pollInterval = null,
+        Func<Func<Task<CloudSnapshot?>>, Task<CloudSnapshot?>>? schedule = null,
+        Action? beforeScheduleFailureCleanup = null)
     {
         this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         this.present = present ?? throw new ArgumentNullException(nameof(present));
         this.runner = runner;
+        this.schedule = schedule ?? (work => Task.Run(work));
+        this.beforeScheduleFailureCleanup = beforeScheduleFailureCleanup;
         this.scanLimit = scanLimit ?? TimeSpan.FromSeconds(30);
         this.pageLimit = pageLimit ?? TimeSpan.FromSeconds(12);
         TimeSpan interval = pollInterval ?? TimeSpan.FromSeconds(30);
@@ -126,17 +132,21 @@ internal sealed class CloudSourcePump : IDisposable
         Task<CloudSnapshot?> work;
         try
         {
-            work = Task.Run(() => ScanAsync(request, currentGeneration, started, ownedCancellation));
+            work = schedule(() => ScanAsync(request, currentGeneration, started, ownedCancellation))
+                ?? throw new InvalidOperationException("The scan scheduler returned no task.");
         }
         catch
         {
-            Interlocked.CompareExchange(ref processLease, 0, 1);
             lock (gate) { source.ReportFailure(request); workerFinished = true; }
             inFlight = false;
             deadlineTimer.Stop();
-            ownedCancellation.CompleteWorker();
-            cancellation = null;
-            firstRequest = null;
+            try { beforeScheduleFailureCleanup?.Invoke(); }
+            finally
+            {
+                ownedCancellation.CompleteWorker();
+                cancellation = null;
+                firstRequest = null;
+            }
             present(source.GetSnapshot());
             throw;
         }

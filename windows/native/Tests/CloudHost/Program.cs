@@ -624,6 +624,57 @@ internal static class Program
         }
     }
 
+    private static void SchedulingFailureKeepsLeaseUntilCleanup()
+    {
+        var (firstWindow, firstView) = Open("empty", "en", "dark");
+        var (secondWindow, secondView) = Open("empty", "en", "dark");
+        ConstructorInfo? constructor = typeof(CommandResult).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic, null,
+            [typeof(CommandOutcome), typeof(bool), typeof(bool), typeof(byte[])], null);
+        Check(constructor is not null, "synthetic scheduler-result constructor exists");
+        int secondCalls = 0, cleanupHookCalls = 0;
+        Task<CommandResult> SyntheticRunner(string? cursor, TimeSpan timeout, CancellationToken token)
+        {
+            Interlocked.Increment(ref secondCalls);
+            byte[] page = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                tasks = new[] { new { id = "schedule-test", title = "Synthetic", status = "pending" } },
+                cursor = (string?)null
+            });
+            return Task.FromResult((CommandResult)constructor!.Invoke([CommandOutcome.Success, true, true, page]));
+        }
+        using var second = new CloudSourcePump(secondWindow.Dispatcher, secondView.ApplyCloudSource, SyntheticRunner,
+            pollInterval: TimeSpan.FromMinutes(1));
+        using var first = new CloudSourcePump(firstWindow.Dispatcher, firstView.ApplyCloudSource, SyntheticRunner,
+            pollInterval: TimeSpan.FromMinutes(1),
+            schedule: _ => throw new InvalidOperationException("Synthetic scheduler failure."),
+            beforeScheduleFailureCleanup: () =>
+            {
+                cleanupHookCalls++;
+                second.SetEnabled(true);
+                Check(secondCalls == 0 && !second.InFlight && HasText(secondWindow, "No data from Codex Cloud"),
+                    "new owner cannot acquire lease before scheduler failure cleanup");
+            });
+        try
+        {
+            bool failed = false;
+            try { first.SetEnabled(true); }
+            catch (InvalidOperationException error) when (error.Message == "Synthetic scheduler failure.") { failed = true; }
+            Check(failed && cleanupHookCalls == 1 && !first.InFlight && HasText(firstWindow, "No data from Codex Cloud"),
+                "scheduler failure reports unavailable and cleans up");
+            first.SetEnabled(false);
+            second.RequestRefresh();
+            WaitUntil(() => !second.InFlight && secondView.CurrentTasks.Count == 1,
+                "new owner starts after scheduler failure cleanup");
+            Check(secondCalls == 1, "only one synthetic runner executes");
+        }
+        finally
+        {
+            firstWindow.Close();
+            secondWindow.Close();
+        }
+    }
+
     private delegate bool EnumWindowsCallback(IntPtr window, IntPtr state);
 
     [DllImport("user32.dll")]
@@ -793,6 +844,7 @@ internal static class Program
             DeadlineAndSlot();
             AnotherOwnerCannotOverlap();
             CancelRunningChild();
+            SchedulingFailureKeepsLeaseUntilCleanup();
             CancellationCallbackLifetime();
             UnconfirmedExitBlocksNewScans();
             app.Shutdown();
