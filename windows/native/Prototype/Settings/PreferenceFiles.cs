@@ -53,7 +53,7 @@ internal sealed class PreferenceFiles
         catch (Exception error) when (IsStorageError(error)) { return Unavailable(); }
     }
 
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
     private static extern int GetCurrentPackageFullName(ref uint length, IntPtr name);
 
     internal static PackageIdentityStatus CurrentPackageIdentity()
