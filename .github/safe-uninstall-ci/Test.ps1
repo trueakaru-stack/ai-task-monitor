@@ -116,6 +116,31 @@ Check ([string]::Equals([IO.Directory]::GetParent($resolvedSettings).FullName,[I
       (([IO.File]::GetAttributes($resolvedSettings) -band [IO.FileAttributes]::ReparsePoint) -eq 0)) 'Unsafe synthetic settings directory.'
 [IO.Directory]::Delete($resolvedSettings,$false)
 [IO.File]::WriteAllText($settingsPath,$settings,[Text.UTF8Encoding]::new($false))
+$originalAcl=Get-Acl -LiteralPath $settingsPath
+$deniedAcl=Get-Acl -LiteralPath $settingsPath
+$identity=[Security.Principal.WindowsIdentity]::GetCurrent().User
+$rights=[Security.AccessControl.FileSystemRights]::ReadData -bor [Security.AccessControl.FileSystemRights]::Delete
+$deny=[Security.AccessControl.FileSystemAccessRule]::new($identity,$rights,[Security.AccessControl.AccessControlType]::Deny)
+[void]$deniedAcl.AddAccessRule($deny)
+Set-Acl -LiteralPath $settingsPath -AclObject $deniedAcl
+try{
+ $refused=$false
+ try{$attempt=[IO.File]::Open($settingsPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read);$attempt.Dispose()}
+ catch [UnauthorizedAccessException]{$refused=$true}
+ Check $refused 'The synthetic denial did not block read access.'
+ $start=New-Start $powershell;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+ foreach($arg in @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',$generated)){[void]$start.ArgumentList.Add($arg)}
+ $process=[Diagnostics.Process]::Start($start)
+ try{
+  $out=$process.StandardOutput.ReadToEndAsync();$err=$process.StandardError.ReadToEndAsync()
+  $question=Find-Dialog $process 'Disconnect Claude Code'
+  Press-Button $question $process 'Yes'
+  $blocked=Find-Dialog $process 'Automatic removal stopped.'
+  Press-Button $blocked $process 'OK'
+  Check ($process.WaitForExit(15000) -and $process.ExitCode -eq 1) 'Unreadable Claude settings did not stop removal.'
+ }finally{if(-not $process.HasExited){$process.Kill($true);[void]$process.WaitForExit(5000)};$process.Dispose()}
+ Check ([IO.File]::Exists((Join-Path $install 'CodexProgress.ps1')) -and [IO.File]::Exists($foreign)) 'Unreadable Claude settings changed synthetic files.'
+}finally{Set-Acl -LiteralPath $settingsPath -AclObject $originalAcl}
 $start=New-Start $powershell;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
 foreach($arg in @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',$generated)){[void]$start.ArgumentList.Add($arg)}
 $process=[Diagnostics.Process]::Start($start)
@@ -137,4 +162,4 @@ $remaining=[IO.File]::ReadAllText((Join-Path $claude 'settings.json'))|ConvertFr
 Check ($remaining.model -ceq 'synthetic-preserved') 'Unrelated Claude settings were changed.'
 $commands=@($remaining.hooks.Stop|ForEach-Object {$_.hooks}|ForEach-Object {$_.command})
 Check ($commands -ccontains 'echo synthetic-other' -and $commands -cnotcontains $command) 'Claude hook removal changed another hook or retained its own.'
-Write-Output 'Synthetic uninstall: ambiguous Claude settings refused; owned file removed; modified and foreign files, junction target and unconfirmed providers preserved; Claude own hook removed and other hook retained.'
+Write-Output 'Synthetic uninstall: ambiguous and unreadable Claude settings refused; owned file removed; modified and foreign files, junction target and unconfirmed providers preserved; Claude own hook removed and other hook retained.'
