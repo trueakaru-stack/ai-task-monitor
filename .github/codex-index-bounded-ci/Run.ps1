@@ -96,12 +96,20 @@ internal static class SdkProbe {
     Check ([IO.File]::Exists($compiler)) 'The synthetic SDK probe compiler is missing.'
     $null=Invoke-Isolated $compiler @('/nologo','/target:exe',('/out:'+$fakeDotnet),$probeSource)
     Check ([IO.File]::Exists($fakeDotnet)) 'The synthetic SDK probe was not built.'
+    # Windows PowerShell may initialize its own caches on first launch.
+    # Establish that baseline before measuring the retired script.
+    $null=Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-Command','exit 0')
     $beforeLauncher=@(Get-ChildItem -LiteralPath $root -Recurse -Force | ForEach-Object { $_.FullName } | Sort-Object)
     $forbiddenWork=Join-Path $root 'launcher-must-not-create'
     $legacyLauncher=Join-Path $repository 'windows\native\CodexIndex\Test-CodexIndex.ps1'
     $null=Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$legacyLauncher,
         '-SdkRoot',$fakeSdk,'-WorkDirectory',$forbiddenWork,'-ReferenceSource',$reference) 'The legacy Codex index test launcher is disabled'
     $afterLauncher=@(Get-ChildItem -LiteralPath $root -Recurse -Force | ForEach-Object { $_.FullName } | Sort-Object)
+    if (($beforeLauncher -join "`n") -cne ($afterLauncher -join "`n")) {
+        $added=@($afterLauncher | Where-Object { $_ -cnotin $beforeLauncher } | ForEach-Object { $_.Substring($root.Length) })
+        $removed=@($beforeLauncher | Where-Object { $_ -cnotin $afterLauncher } | ForEach-Object { $_.Substring($root.Length) })
+        Write-Output ('Synthetic launcher inventory changes: added '+($added -join ',')+'; removed '+($removed -join ','))
+    }
     Check (($beforeLauncher -join "`n") -ceq ($afterLauncher -join "`n") -and
         -not [IO.File]::Exists((Join-Path $root 'unexpected-sdk-launch.txt')) -and
         -not [IO.Directory]::Exists($forbiddenWork)) 'The retired launcher created data or started the synthetic SDK.'
