@@ -245,7 +245,7 @@ public static class AitmSelfContainedWindowCheck {
         PayloadFiles = $payloadFiles; PayloadDirectories = $payloadDirectories
         LoadedRuntimeModuleNames = @($runtimeModules | ForEach-Object { $_.Name })
         RuntimeModulesFromPayload = $true; CoreClrFileProductVersion = $productVersion
-        CoreClrSha256 = $coreClrHash; InstallerRetainsPayload = $false; NugetPackages = $packageFiles
+        CoreClrSha256 = $coreClrHash; UnlockedTrackedPayloadRemoved = $true; ExistingRedirectionRejected = $true; NugetPackages = $packageFiles
     }
     $reportPath = Join-Path $testRoot 'selfcontained-inventory.json'
     [IO.File]::WriteAllText($reportPath, ($report | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))

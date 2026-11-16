@@ -48,7 +48,10 @@ The CI-only candidate lets the Inno Setup uninstaller remove tracked installed
 files. It tests user data and unrelated files outside that tracked set, a locked
 file, and a redirected synthetic subdirectory. A modified tracked payload file
 is still considered part of the installed application and is removed if unlocked.
-This is an experiment, not a complete product uninstall: concurrent path
-replacement, interrupted installation, migration, shortcuts and upgrades are
-not established. Never publish this preview or use it on a user's computer.
+On detecting an existing redirected path the candidate aborts; a control test
+restores the synthetic directory and completes uninstall. Its preflight can
+race concurrent path replacement, and its directory enumeration does not
+distinguish every possible read error from the end of enumeration. This is an
+experiment, not a complete product uninstall: interrupted installation,
+migration, shortcuts and upgrades are also not established. Never publish this preview or use it on a user's computer.
 
