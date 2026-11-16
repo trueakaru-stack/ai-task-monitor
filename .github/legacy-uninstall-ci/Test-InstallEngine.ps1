@@ -23,7 +23,7 @@ $newFile=$type.GetMethod('CreateNewFile',$flags)
 Check ($null -ne $open -and $null -ne $child -and $null -ne $newFile) 'Installer guard is unavailable.'
 $linkedRejected=$false
 try{
-    $bad=$open.Invoke($null,@($linked))
+    $bad=$open.Invoke($null,[object[]]@([string]$linked))
     if($null -ne $bad){$bad.Dispose()}
 }catch [Reflection.TargetInvocationException]{
     if($_.Exception.InnerException -is [IO.IOException]){$linkedRejected=$true}else{throw}
@@ -33,10 +33,10 @@ Check ([IO.File]::ReadAllText($outside) -ceq 'synthetic outside') 'The redirecte
 $existing=Join-Path $local 'AITaskMonitor'
 [void][IO.Directory]::CreateDirectory($existing)
 $sentinel=Join-Path $existing 'foreign.txt';[IO.File]::WriteAllText($sentinel,'synthetic foreign content')
-$guard=$open.Invoke($null,@($local))
+$guard=$open.Invoke($null,[object[]]@([string]$local))
 try{
     $collisionRejected=$false
-    try{$child.Invoke($guard,@($existing))}
+    try{$child.Invoke($guard,[object[]]@([string]$existing))}
     catch [Reflection.TargetInvocationException]{
         if($_.Exception.InnerException -is [IO.IOException]){$collisionRejected=$true}else{throw}
     }
@@ -48,12 +48,12 @@ try{
     catch [UnauthorizedAccessException]{$renameRejected=$true}
     Check $renameRejected 'The guarded ancestor could be renamed during installation.'
     $fresh=Join-Path $local 'new-install'
-    $child.Invoke($guard,@($fresh))
+    $child.Invoke($guard,[object[]]@([string]$fresh))
     $newPath=Join-Path $fresh 'app.txt'
-    $file=$newFile.Invoke($guard,@($newPath))
+    $file=$newFile.Invoke($guard,[object[]]@([string]$newPath))
     try{$bytes=[Text.Encoding]::UTF8.GetBytes('fresh app');$file.Write($bytes,0,$bytes.Length)}finally{$file.Dispose()}
     $fileCollisionRejected=$false
-    try{$duplicate=$newFile.Invoke($guard,@($newPath));if($null -ne $duplicate){$duplicate.Dispose()}}
+    try{$duplicate=$newFile.Invoke($guard,[object[]]@([string]$newPath));if($null -ne $duplicate){$duplicate.Dispose()}}
     catch [Reflection.TargetInvocationException]{
         if($_.Exception.InnerException -is [IO.IOException]){$fileCollisionRejected=$true}else{throw}
     }
@@ -65,10 +65,10 @@ $target=Join-Path $engineRoot 'synthetic-app.exe';$icon=Join-Path $engineRoot 's
 [IO.File]::WriteAllText($target,'synthetic target');[IO.File]::WriteAllText($icon,'synthetic icon')
 $occupied=Join-Path $programs 'AI task monitor.lnk'
 [IO.File]::WriteAllText($occupied,'synthetic existing shortcut')
-$created=$tryShortcut.Invoke($null,@($occupied,$target,$engineRoot,$icon))
+$created=$tryShortcut.Invoke($null,[object[]]@([string]$occupied,[string]$target,[string]$engineRoot,[string]$icon))
 Check (-not [bool]$created -and [IO.File]::ReadAllText($occupied) -ceq 'synthetic existing shortcut') 'An existing shortcut was overwritten.'
 $shortcut=Join-Path $programs 'new-shortcut.lnk'
-$created=$tryShortcut.Invoke($null,@($shortcut,$target,$engineRoot,$icon))
+$created=$tryShortcut.Invoke($null,[object[]]@([string]$shortcut,[string]$target,[string]$engineRoot,[string]$icon))
 Check ([bool]$created -and [IO.File]::Exists($shortcut)) 'A new safe shortcut was not created.'
 $shell=New-Object -ComObject WScript.Shell
 $link=$shell.CreateShortcut($shortcut)
