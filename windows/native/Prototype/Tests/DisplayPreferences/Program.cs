@@ -157,6 +157,14 @@ using (var legacyLock = new FileStream(oldFile, FileMode.Open, FileAccess.ReadWr
         "An unconfirmed legacy file created a native settings file.");
 }
 Check(Equal(File.ReadAllBytes(oldFile), legacyBytes), "Deferred migration modified the synthetic legacy file.");
+string missingOldFile = Path.Combine(work, "missing-old-settings.json");
+string missingNewFile = Path.Combine(work, "missing-native-settings.json");
+var missingFiles = new PreferenceFiles(missingOldFile, missingNewFile);
+PreferenceLoad missingLoad = missingFiles.Service.Load();
+Check(missingLoad.Status == PreferenceStatus.MigrationDeferred && missingLoad.Modes is null &&
+    missingFiles.Service.SaveTheme("dark") == PreferenceStatus.MigrationDeferred &&
+    !File.Exists(missingOldFile) && !File.Exists(missingNewFile),
+    "An unverified absent source was treated as a new installation.");
 File.WriteAllBytes(newFile, legacyBytes); // Only a synthetic already-existing native target.
 Check(filesA.Service.Load().Modes == new DisplayModes("dark", "ru") &&
     filesA.Service.SaveTheme("light") == PreferenceStatus.Success, "An existing native target was not updated.");
