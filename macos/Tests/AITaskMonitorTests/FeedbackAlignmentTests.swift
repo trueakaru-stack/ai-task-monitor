@@ -84,6 +84,41 @@ final class FeedbackAlignmentTests: XCTestCase {
     }
 
     @MainActor
+    func testDiagnosticSyntheticButtonReceivesEvents() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["AITM_FEEDBACK_SYNTHETIC_CI"] == "1", env["GITHUB_ACTIONS"] == "true",
+              env["CI"] == "true", env["RUNNER_ENVIRONMENT"] == "github-hosted",
+              env["RUNNER_OS"] == "macOS" else { throw XCTSkip("Disposable hosted runner only.") }
+        _ = NSApplication.shared
+        var clicked = false
+        let host = NSHostingView(rootView: Button("Synthetic event control") { clicked = true }
+            .frame(width: 560, height: 700))
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 560, height: 700),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        defer { window.close() }
+        host.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(1.2))
+        let point = NSPoint(x: 280, y: 350)
+        let now = ProcessInfo.processInfo.systemUptime
+        let down = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: point,
+            modifierFlags: [], timestamp: now, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+        let up = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseUp, location: point,
+            modifierFlags: [], timestamp: now + 0.01, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 2, clickCount: 1, pressure: 0))
+        window.sendEvent(down)
+        window.sendEvent(up)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        print("Synthetic diagnostic control received click=\(clicked)")
+        XCTAssertTrue(clicked, "A basic synthetic button must receive the same injected event.")
+    }
+
+    @MainActor
     func testCopyButtonAcceptsSyntheticMouseClicks() throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["AITM_FEEDBACK_SYNTHETIC_CI"] == "1" else {
@@ -118,10 +153,20 @@ final class FeedbackAlignmentTests: XCTestCase {
         RunLoop.current.run(until: Date().addingTimeInterval(1.2))
         host.layoutSubtreeIfNeeded()
 
+        print("Synthetic feedback host bounds: \(host.bounds)")
+        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            if let png = bitmap.representation(using: .png, properties: [:]) {
+                try png.write(to: URL(fileURLWithPath: fixture).appendingPathComponent("feedback-test-host.png"))
+            }
+        }
+
         let symbol = NSHostingView(rootView: Image(systemName: "doc.on.doc")
             .font(.system(size: 13)).fixedSize())
         print("Synthetic intrinsic symbol size: \(symbol.fittingSize)")
         let pasteboard = NSPasteboard.general // Isolated ephemeral CI runner only.
+        let directCopy = FeedbackDraft.copyAddress(to: pasteboard)
+        print("Synthetic direct pasteboard copy success=\(directCopy), matched=\(pasteboard.string(forType: .string) == FeedbackDraft.email)")
         defer { pasteboard.clearContents() }
         var eventNumber = 0
         func click(_ point: NSPoint) throws -> Bool {
