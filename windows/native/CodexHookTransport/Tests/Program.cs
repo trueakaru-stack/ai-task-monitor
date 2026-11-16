@@ -203,6 +203,9 @@ await using (var access = HookPipeController.Start())
     string dacl = NativeSecurity.ReadDacl(client.SafePipeHandle);
     using WindowsIdentity identity = WindowsIdentity.GetCurrent();
     string userSid = identity.User!.Value;
+    string daclShape = System.Text.RegularExpressions.Regex.Replace(
+        dacl.Replace(userSid, "<CURRENT_USER>", StringComparison.Ordinal), @"S-\d+(?:-\d+)+", "<OTHER_SID>");
+    Console.WriteLine("Synthetic pipe DACL shape: " + daclShape);
     Check(dacl.StartsWith("D:P", StringComparison.Ordinal) &&
         dacl.Count(c => c == '(') == 1 && dacl.Contains(";;;" + userSid + ")", StringComparison.Ordinal),
         "The actual pipe DACL was not restricted to the current user.");
