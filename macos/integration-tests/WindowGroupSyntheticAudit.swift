@@ -4,6 +4,16 @@ import Darwin
 import Foundation
 import SwiftUI
 
+@MainActor
+private protocol SyntheticHostingSizing: AnyObject {
+    func suppressSyntheticSizingBounds()
+}
+extension NSHostingView: SyntheticHostingSizing {
+    fileprivate func suppressSyntheticSizingBounds() {
+        sizingOptions.subtract([.minSize, .maxSize])
+    }
+}
+
 // CI-only helper: the application's real WindowGroup renders synthetic data.
 enum SyntheticWindowGroupAudit {
     private enum FixtureError: Error { case unsafeEnvironment, unsafeRoot, writeFailed, bitmap }
@@ -101,6 +111,34 @@ enum SyntheticWindowGroupAudit {
     @MainActor private static var resizeObserver: NSObjectProtocol?
     @MainActor private static var closeObserver: NSObjectProtocol?
     @MainActor private static var frameEvents: [[String: Any]] = []
+    @MainActor private static var desiredSize: NSSize?
+    @MainActor private static var desiredCompact: Bool?
+    @MainActor private static var lateApplyCount = 0
+
+    @MainActor static func noteDesiredSize(_ size: NSSize, compact: Bool) {
+        desiredSize = size
+        desiredCompact = compact
+    }
+
+    @MainActor private static func applyOneLateFrame() throws {
+        guard let store = activeStore, let target = desiredSize, desiredCompact == store.isCompact else {
+            throw FixtureError.unsafeEnvironment
+        }
+        let window = try activeWindow()
+        guard let host = window.contentView as? any SyntheticHostingSizing else { throw FixtureError.bitmap }
+        host.suppressSyntheticSizingBounds()
+        let oldFrame = window.frame
+        let origin = NSPoint(x: oldFrame.minX, y: oldFrame.maxY - target.height)
+        window.contentMinSize = .zero
+        window.contentMaxSize = NSSize(width: 10_000, height: 10_000)
+        window.minSize = .zero
+        window.maxSize = NSSize(width: 10_000, height: 10_000)
+        window.setFrame(NSRect(origin: origin, size: target), display: true)
+        window.minSize = store.isCompact ? target : NSSize(width: 500, height: 500)
+        window.maxSize = store.isCompact ? target : NSSize(width: 900, height: 1_000)
+        lateApplyCount += 1
+        recordWindow("late-once", window)
+    }
 
     @MainActor static func recordWindow(_ event: String, _ window: NSWindow) {
         guard frameEvents.count < 256 else { return }
@@ -191,6 +229,7 @@ enum SyntheticWindowGroupAudit {
         let layout = window.contentLayoutRect
         var row: [String: Any] = ["mode": mode, "variant": variant, "scenario": scenario, "stage": stage,
             "isCompact": store.isCompact, "toggleMethod": toggleMethod, "frameEvents": frameEvents,
+            "lateApplyCount": lateApplyCount, "desiredSize": [Double(desiredSize?.width ?? 0), Double(desiredSize?.height ?? 0)],
             "windowHasShadow": window.hasShadow, "windowIsOpaque": window.isOpaque,
             "windowLevel": window.level.rawValue, "movableByBackground": window.isMovableByWindowBackground,
             "canBecomeKey": window.canBecomeKey, "isKeyWindow": window.isKeyWindow,
@@ -327,44 +366,63 @@ enum SyntheticWindowGroupAudit {
         }
     }
 
+    @MainActor private static func beginScenario() {
+        do {
+            guard let store = activeStore else { throw FixtureError.unsafeEnvironment }
+            let wasCompact = store.isCompact
+            let corrected = ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_VARIANT"] == "corrected"
+            if corrected { try applyOneLateFrame() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                do {
+                    try capture("before", toggleMethod: "not-attempted")
+                    try sendToggleToOwnWindow()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        let method: String
+                        if store.isCompact != wasCompact {
+                            method = "button-event"
+                        } else {
+                            method = "direct-state-fallback"
+                            let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                                store.isCompact.toggle()
+                                store.showsSettings = false
+                                store.showsJournal = false
+                                store.showsAbout = false
+                            }
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            do {
+                                guard store.isCompact != wasCompact else { throw FixtureError.bitmap }
+                                if corrected { try applyOneLateFrame() }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                    do {
+                                        try capture("after", toggleMethod: method)
+                                        exerciseControls()
+                                    } catch {
+                                        FileHandle.standardError.write(Data("Synthetic transition capture failed.\n".utf8))
+                                        exit(1)
+                                    }
+                                }
+                            } catch {
+                                FileHandle.standardError.write(Data("Synthetic delayed sizing failed.\n".utf8))
+                                exit(1)
+                            }
+                        }
+                    }
+                } catch {
+                    FileHandle.standardError.write(Data("Synthetic WindowGroup capture failed.\n".utf8))
+                    exit(1)
+                }
+            }
+        } catch {
+            FileHandle.standardError.write(Data("Synthetic initial sizing failed.\n".utf8))
+            exit(1)
+        }
+    }
+
     @MainActor static func schedule() {
         guard !scheduled else { return }
         scheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            do {
-                guard let store = activeStore else { throw FixtureError.unsafeEnvironment }
-                let wasCompact = store.isCompact
-                try capture("before", toggleMethod: "not-attempted")
-                try sendToggleToOwnWindow()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    let method: String
-                    if store.isCompact != wasCompact {
-                        method = "button-event"
-                    } else {
-                        method = "direct-state-fallback"
-                        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
-                            store.isCompact.toggle()
-                            store.showsSettings = false
-                            store.showsJournal = false
-                            store.showsAbout = false
-                        }
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        do {
-                            guard store.isCompact != wasCompact else { throw FixtureError.bitmap }
-                            try capture("after", toggleMethod: method)
-                            exerciseControls()
-                        } catch {
-                            FileHandle.standardError.write(Data("Synthetic transition capture failed.\n".utf8))
-                            exit(1)
-                        }
-                    }
-                }
-            } catch {
-                FileHandle.standardError.write(Data("Synthetic WindowGroup capture failed.\n".utf8))
-                exit(1)
-            }
-        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { beginScenario() }
     }
 }
