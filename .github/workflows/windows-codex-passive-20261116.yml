@@ -2,7 +2,7 @@ name: Windows passive Codex safety
 on:
   workflow_dispatch:
   push:
-    branches: [windows, codex/windows-codex-passive-20261116]
+    branches: [windows, codex/windows-codex-passive-20261116, codex/windows-codex-no-index-20261116]
     paths:
       - 'windows/app/CodexProgress.ps1'
       - 'windows/app/VersionInfo.cs'

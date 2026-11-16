@@ -251,7 +251,7 @@ try{
  $script:codexCloudController=New-CodexCloudController
  $script:codexCloudModulesAvailable=$true
 }catch{}
-$script:currentVersion='0.2.8-alpha'
+$script:currentVersion='0.2.8'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateRequest=$null
@@ -1948,7 +1948,7 @@ function Find-PriorLifecycle([string]$path) {
  } finally {$stream.Dispose()}
 }
 
-function Thread-State([string]$id) {
+function Thread-State([string]$id,[bool]$AllowPriorWithoutLock=$false) {
  if($id -notmatch '^[A-Za-z0-9_-]{1,128}$'){return [PSCustomObject]@{State="unknown";HasStartMarker=$false;UpdatedUtc=[DateTime]::MinValue;StartKey="";StartedUtc=[DateTime]::MinValue}}
  $path = Session-File $id
  if (-not $path -or -not (Test-Path -LiteralPath $path)) { return [PSCustomObject]@{State="unknown";HasStartMarker=$false;UpdatedUtc=[DateTime]::MinValue;StartKey="";StartedUtc=[DateTime]::MinValue} }
@@ -2013,7 +2013,7 @@ function Thread-State([string]$id) {
   if($null -eq $seed -and -not $scannedPrior -and -not $parsed.SawStart -and [long]$file.Length -gt $tailLimit){
    $priorLock=Lock-State (Join-Path $lockDirectory "$id.lock")
    if($priorLock -eq 'unavailable'){throw 'Codex session lock cannot be checked.'}
-   if($priorLock -eq 'present'){
+   if($priorLock -eq 'present' -or $AllowPriorWithoutLock){
     $prior=Find-PriorLifecycle $path
     $scannedPrior=$true
     if($null -ne $prior){$parsed=& $parseTail $tail $prior}
@@ -2512,17 +2512,97 @@ function Codex-IndexCandidates {
  return @($sessionMap.Values)
 }
 
+function Codex-UnindexedCandidates {
+ # A rollout is evidence of a session, never evidence that its writer is live.
+ # Scan only recent dated folders, with strict file and byte budgets.
+ $now=[Diagnostics.Stopwatch]::GetTimestamp()
+ $cached=Get-Variable -Scope Script -Name unindexedScan -ErrorAction SilentlyContinue
+ if($null -ne $cached -and $null -ne $cached.Value -and
+    [string]::Equals([string]$cached.Value.Root,[string]$sessionsDirectory,[StringComparison]::OrdinalIgnoreCase) -and
+    ($now-[long]$cached.Value.Tick) -ge 0 -and ($now-[long]$cached.Value.Tick) -lt ([long][Diagnostics.Stopwatch]::Frequency*5)){
+  return @($cached.Value.Items)
+ }
+ $found=@{};$ambiguous=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+ $visited=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+ $count=0;$bytesRead=[long]0;$stop=$false
+ $uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+ try{
+  $rootAttributes=[IO.File]::GetAttributes($sessionsDirectory)
+  if(($rootAttributes -band [IO.FileAttributes]::Directory) -eq 0 -or ($rootAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Unavailable sessions directory.'}
+  for($days=0;$days -lt 7 -and -not $stop;$days++){
+   foreach($date in @([DateTime]::UtcNow.Date.AddDays(-$days),[DateTime]::Now.Date.AddDays(-$days))){
+    $year=Join-Path $sessionsDirectory $date.ToString('yyyy',[Globalization.CultureInfo]::InvariantCulture)
+    $month=Join-Path $year $date.ToString('MM',[Globalization.CultureInfo]::InvariantCulture)
+    $day=Join-Path $month $date.ToString('dd',[Globalization.CultureInfo]::InvariantCulture)
+    if(-not $visited.Add($day)){continue}
+    try{
+     foreach($directory in @($year,$month,$day)){
+      $attributes=[IO.File]::GetAttributes($directory)
+      if(($attributes -band [IO.FileAttributes]::Directory) -eq 0 -or ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Unavailable dated directory.'}
+     }
+     foreach($path in [IO.Directory]::EnumerateFiles($day,'rollout-*.jsonl',[IO.SearchOption]::TopDirectoryOnly)){
+      $count++
+      if($count -gt 256 -or $bytesRead -ge 4194304){$stop=$true;break}
+      $name=[IO.Path]::GetFileName($path)
+      if($name -notmatch ('^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(?<thread>'+ $uuid +')(?:_'+$uuid+')?\.jsonl$')){continue}
+      $id=[string]$Matches.thread
+      if($ambiguous.Contains($id)){continue}
+      try{
+       $attributes=[IO.File]::GetAttributes($path)
+       if(($attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) -ne 0){continue}
+       $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+       try{
+        $length=[int][Math]::Min([long]65536,[long]$stream.Length)
+        if(($bytesRead+$length) -gt 4194304){$stop=$true;break}
+        $bytes=[byte[]]::new($length);$offset=0
+        while($offset -lt $length){$read=$stream.Read($bytes,$offset,$length-$offset);if($read -le 0){throw 'Rollout changed.'};$offset+=$read}
+        $bytesRead+=$length
+       }finally{$stream.Dispose()}
+       $end=[Array]::IndexOf($bytes,[byte]10)
+       if($end -lt 0){continue}
+       $first=[Text.UTF8Encoding]::new($false,$true).GetString($bytes,0,$end).TrimStart([char]0xFEFF).TrimEnd([char]13)
+       $record=$first|ConvertFrom-Json -ErrorAction Stop
+       if([string](Prop $record 'type' '') -ne 'session_meta' -or
+          -not [string]::Equals([string](Prop (Prop $record 'payload') 'id' ''),$id,[StringComparison]::OrdinalIgnoreCase)){continue}
+       if($found.ContainsKey($id)){$found.Remove($id);[void]$ambiguous.Add($id);continue}
+       $found[$id]=[PSCustomObject]@{id=$id;thread_name='Задача Codex';titleGenerated=$true;unindexed=$true;path=$path;updated_at=[IO.File]::GetLastWriteTimeUtc($path).ToString('o')}
+      }catch{continue}
+     }
+    }catch{continue}
+    if($stop){break}
+   }
+  }
+ }catch{}
+ $items=@($found.Values)
+ $script:unindexedScan=[PSCustomObject]@{Root=$sessionsDirectory;Tick=$now;Items=$items;CheckedFiles=[Math]::Min($count,256);BytesRead=$bytesRead}
+ return $items
+}
+
 function Codex-Tasks {
  $script:codexSourcePartial=$false
  $script:codexTerminated=@{}
- if (-not (Test-Path -LiteralPath $sessionIndex -ErrorAction Stop)) {
-  if ($script:lastCodexTasks.Count -gt 0 -or (Test-Path -LiteralPath $codexHome -PathType Container -ErrorAction Stop)) { throw "Codex session index is unavailable." }
-  return @()
- }
+ $indexAvailable=Test-Path -LiteralPath $sessionIndex -PathType Leaf -ErrorAction Stop
+ if (-not $indexAvailable -and -not (Test-Path -LiteralPath $codexHome -PathType Container -ErrorAction Stop)) { return @() }
  # Local journals and lock-file presence do not establish a complete set of
  # current tasks, even when all of the readable events are well formed.
  $script:codexSourcePartial=$true
- $sessions = @(Codex-IndexCandidates)
+ $sessions=@()
+ if($indexAvailable){$sessions=@(Codex-IndexCandidates)}
+ $indexed=@{}
+ foreach($session in $sessions){$indexed[[string](Prop $session 'id' '')]=$true}
+ foreach($candidate in @(Codex-UnindexedCandidates)){
+  $id=[string]$candidate.id
+  if($indexed.ContainsKey($id)){continue}
+  $indexed[$id]=$true
+  $sessions+=@($candidate)
+  $script:sessionDates[$id]=[IO.Path]::GetDirectoryName([string]$candidate.path)
+  $discoveryVariable=Get-Variable -Scope Script -Name 'sessionDiscovery' -ErrorAction SilentlyContinue
+  if($null -ne $discoveryVariable -and $null -ne $discoveryVariable.Value){
+   $cache=$discoveryVariable.Value
+   [Threading.Monitor]::Enter($cache.Gate)
+   try{$cache.Files[$id]=[string]$candidate.path}finally{[Threading.Monitor]::Exit($cache.Gate)}
+  }
+ }
  $discoveryVariable=Get-Variable -Scope Script -Name 'sessionDiscovery' -ErrorAction SilentlyContinue
  if ($null -ne $discoveryVariable -and $null -ne $discoveryVariable.Value) {
   $cache=$discoveryVariable.Value
@@ -2552,16 +2632,21 @@ function Codex-Tasks {
  $items = New-Object Collections.Generic.List[object]
  foreach ($session in $sessions) {
   $id = [string]$session.id; $title = [string]$session.thread_name
+  $titleGenerated=[bool](Prop $session 'titleGenerated' $false)
+  if([string]::IsNullOrWhiteSpace($title)){$title='Задача Codex';$titleGenerated=$true}
+  $unindexed=[bool](Prop $session 'unindexed' $false)
   if($title -eq "Guardian review"){continue}
-  $threadState = Thread-State $id
+  $threadState = Thread-State $id $unindexed
   if($threadState.State -in @('completed','interrupted')){$script:codexTerminated[$id]=$true}
   $eventActive = $threadState.State -eq "active"
+  if($unindexed -and $threadState.State -eq 'unknown' -and $threadState.HasStartMarker){$script:observedCodex[$id]=$true}
   $uncertain = Codex-Uncertain $id $threadState
   if($threadState.State -in @("interrupted","unobserved")){continue}
   $override = if ($manual.ContainsKey($id)) { $manual[$id] } elseif ($manual.ContainsKey("title:$title")) { $manual["title:$title"] } else { $null }
   $paused = $false; $steps = @(); $source = "Оценка активности"; $planConfirmed=$true
   if ($null -ne $override) {
    $title = [string](Prop $override "title" $title)
+   if($null -ne $override.PSObject.Properties['title']){$titleGenerated=$false}
    $paused = [bool](Prop $override "paused" $false)
    $steps = @(Prop $override "steps" @())
    if ($steps.Count -gt 0) { $source = "План задачи" }
@@ -2602,7 +2687,7 @@ function Codex-Tasks {
    $observed=Codex-ObservedActivity $id $startKey
    if($observed){$activityObserved=$true;$activityGenerated=$false;$observed}else{"Статус не подтверждён"}
   }elseif($running){$currentActivity=Codex-Activity $id;if($currentActivity){$currentActivity}else{$activityGenerated=$true;"Выполняется"}}else{""}
-  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; Activity=$activity; ActivityGenerated=$activityGenerated; ActivityObserved=$activityObserved; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; ProgressBasis=$progressBasis; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source; PlanConfirmed=$planConfirmed })
+  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; TitleGenerated=$titleGenerated; Activity=$activity; ActivityGenerated=$activityGenerated; ActivityObserved=$activityObserved; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; ProgressBasis=$progressBasis; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source; PlanConfirmed=$planConfirmed })
  }
  $runningItems = @($items | Where-Object Active | Sort-Object Updated -Descending)
  $trackedItems = @($items | Where-Object { -not $_.Active -and ($_.Status -in @("Статус не подтверждён","Ожидает подтверждения") -or $_.Paused) } | Sort-Object Updated -Descending)
@@ -3028,6 +3113,7 @@ function Plan-StepCount([int]$count) {
 function Localized-TaskTitle($task) {
  $title=[string](Prop $task 'Title' '')
  if([string](Prop $task 'Provider' '') -eq 'claude' -and $title -ceq 'Задача Claude Code'){return (Tr $title)}
+ if([string](Prop $task 'Provider' '') -eq 'codex' -and [bool](Prop $task 'TitleGenerated' $false)){return (Tr $title)}
  return $title
 }
 

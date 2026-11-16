@@ -13,9 +13,9 @@ $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'The monitor source failed to parse.'}
-$names=@('Prop','Tr','Localized-TaskActivity','Lock-State','Find-PriorLifecycle','Thread-State','Codex-Uncertain','Session-File',
+$names=@('Prop','Tr','Localized-TaskTitle','Localized-TaskActivity','Lock-State','Find-PriorLifecycle','Thread-State','Codex-Uncertain','Session-File',
  'Session-Workspace','Progress-Files','Manual-Tasks','Read-TailText','Codex-Plan','Codex-Activity','Read-ObservedCodexTail','Codex-ObservedActivity',
- 'Plan-Progress','Codex-IndexCandidates','Codex-Tasks','Unconfirmed-Tasks','Source-Snapshot')
+ 'Plan-Progress','Codex-IndexCandidates','Codex-UnindexedCandidates','Codex-Tasks','Unconfirmed-Tasks','Source-Snapshot')
 $definitions=foreach($name in $names){
  $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true)
  if($null -eq $node){throw "Missing monitor function: $name"}
@@ -196,6 +196,55 @@ Write-Index @((Record 'long-turn'))
 [void](Codex-IndexCandidates)
 $longState=Thread-State 'long-turn'
 Require ($longState.State -eq 'unknown' -and $longState.HasStartMarker -and (Codex-Uncertain 'long-turn' $longState)) 'A bounded long turn was not retained as unconfirmed.'
+
+# Unindexed CLI sessions must not require a writer-lock file or a recent write.
+$noIndexId='10000000-0000-0000-0000-000000000001'
+$noIndexTurn='10000000-0000-0000-0000-000000000002'
+$filenameTime=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH-mm-ss',[Globalization.CultureInfo]::InvariantCulture)
+$noIndexPath=Join-Path $script:fixtureDay ('rollout-'+$filenameTime+'-'+$noIndexId+'.jsonl')
+$noIndexMeta=@{timestamp=[DateTime]::UtcNow.ToString('o');type='session_meta';payload=@{id=$noIndexId;source='exec'}}|ConvertTo-Json -Compress
+[IO.File]::WriteAllText($noIndexPath,($noIndexMeta+"`n"),[Text.UTF8Encoding]::new($false))
+Write-Event $noIndexPath 'task_started' $noIndexTurn
+[IO.File]::AppendAllText($noIndexPath,($legacyItem+"`n"),[Text.UTF8Encoding]::new($false))
+[IO.File]::SetLastWriteTimeUtc($noIndexPath,[DateTime]::UtcNow.AddMinutes(-10))
+$badId='10000000-0000-0000-0000-000000000003'
+$badPath=Join-Path $script:fixtureDay ('rollout-'+$filenameTime+'-'+$badId+'.jsonl')
+[IO.File]::WriteAllText($badPath,($noIndexMeta+"`n"),[Text.UTF8Encoding]::new($false))
+$partialId='10000000-0000-0000-0000-000000000004'
+$partialPath=Join-Path $script:fixtureDay ('rollout-'+$filenameTime+'-'+$partialId+'.jsonl')
+[IO.File]::WriteAllText($partialPath,'{"type":"session_meta"',[Text.UTF8Encoding]::new($false))
+$duplicateId='10000000-0000-0000-0000-000000000005'
+$duplicateMeta=@{type='session_meta';payload=@{id=$duplicateId}}|ConvertTo-Json -Compress
+$duplicatePath=Join-Path $script:fixtureDay ('rollout-'+$filenameTime+'-'+$duplicateId+'.jsonl')
+$alternatePath=Join-Path $script:fixtureDay ('rollout-'+$filenameTime+'-'+$duplicateId+'_20000000-0000-0000-0000-000000000001.jsonl')
+foreach($path in @($duplicatePath,$alternatePath)){[IO.File]::WriteAllText($path,($duplicateMeta+"`n"),[Text.UTF8Encoding]::new($false))}
+$savedIndex=Join-Path $codexHome 'index-for-fixture.jsonl'
+[IO.File]::Move($sessionIndex,$savedIndex)
+$script:lastCodexTasks=@();$script:observedCodex=@{};$script:unindexedScan=$null
+try{
+ $discovered=@(Codex-UnindexedCandidates)
+ Require (@($discovered|Where-Object id -eq $noIndexId).Count -eq 1 -and
+  @($discovered|Where-Object {$_.id -in @($badId,$partialId,$duplicateId)}).Count -eq 0 -and
+  $script:unindexedScan.CheckedFiles -le 256 -and $script:unindexedScan.BytesRead -le 4194304) 'Invalid, incomplete, ambiguous or oversized discovery was accepted.'
+ $noIndex=Source-Snapshot
+ $card=@($noIndex.Tasks|Where-Object Id -eq $noIndexId)
+ Require ($card.Count -eq 1 -and -not $card[0].Active -and $card[0].Status -eq 'Статус не подтверждён' -and
+  $card[0].TitleGenerated -and $card[0].Title -ceq 'Задача Codex' -and $card[0].ActivityObserved -and
+  @($noIndex.PartialData) -contains 'Codex') 'An unindexed CLI session was lost, confirmed, or not marked partial.'
+ $script:resolvedLanguage='en'
+ Require ((Localized-TaskTitle $card[0]) -ceq 'Codex task') 'The generated Codex title was not translated.'
+ $userTitle=[PSCustomObject]@{Provider='codex';Title='Задача Codex';TitleGenerated=$false}
+ Require ((Localized-TaskTitle $userTitle) -ceq 'Задача Codex') 'A user-provided Codex title was translated.'
+ $script:resolvedLanguage='ru'
+ Require ((Localized-TaskTitle $card[0]) -ceq 'Задача Codex') 'The generated Russian Codex title was changed.'
+}finally{[IO.File]::Move($savedIndex,$sessionIndex)}
+Write-Index @((Record $paginatedId))
+$combined=Source-Snapshot
+Require (@($combined.Tasks|Where-Object Id -eq $paginatedId).Count -eq 1 -and
+ @($combined.Tasks|Where-Object Id -eq $noIndexId).Count -eq 1) 'An existing index hid an unindexed session or its indexed neighbor.'
+Write-Event $noIndexPath 'task_complete' $noIndexTurn
+$finished=Source-Snapshot
+Require (@($finished.Tasks|Where-Object Id -eq $noIndexId).Count -eq 0) 'A matching terminal event did not hide an unindexed task.'
 
 # Oversized and incomplete indices cannot be returned as complete empty lists.
 $script:lastCodexTasks=@($older.Tasks)
