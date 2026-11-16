@@ -15,8 +15,13 @@ filter tracks evicted session IDs: a later matching task is unconfirmed and its
 retained plan is marked incomplete, while the source stays available. False
 positives can conservatively downgrade an unrelated task, and many evictions
 can eventually make these more frequent. The filter lasts for this reader's
-lifetime and resets on explicit disconnect. An overlong step ID is represented
-internally by a SHA-256 identity and also marks the retained plan incomplete. Values no longer present or observed
+lifetime and resets on explicit disconnect. Per-session uncertainty is also
+remembered by separate bounded probabilistic filters, with the same possible
+conservative false positives. A previously uncertain session is not treated as
+confirmed simply because many other sessions were observed. The separate
+limit of 256 simultaneously retained visible cards still applies and can make
+the source unavailable. An overlong step ID is represented internally by a
+SHA-256 identity and also marks the retained plan incomplete. Values no longer present or observed
 cannot be recovered.
 
 Session IDs are limited to 128 UTF-16 code units, matching the length limit in

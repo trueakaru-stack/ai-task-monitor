@@ -992,6 +992,47 @@ Check(activeAfterGap.Unconfirmed && !activeAfterGap.PlanConfirmed &&
     activeAfterGap.Steps.All(step => step.status == "unknown"),
     "Loss after a later prompt must not erase previously observed stopped names.");
 
+
+string renamedAfterPrompt = JsonSerializer.Serialize(new Dictionary<string, object> {
+    ["session_id"] = "observed", ["timestamp"] = now.AddMilliseconds(4500).ToString("O"),
+    ["event"] = "TaskCreated", ["active"] = true, ["task_id"] = "first",
+    ["task_subject"] = "New step", ["task_status"] = "pending" }) + "\n";
+var changedPlan = new SessionReader();
+changedPlan.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
+changedPlan.Read(complete + completeStop, "", now.AddSeconds(2), DateTime.MinValue.ToUniversalTime());
+var newerPlan = changedPlan.Read(complete + completeStop + resumedAfterCoincidentLoss + renamedAfterPrompt,
+    "", now.AddSeconds(5), DateTime.MinValue.ToUniversalTime()).Single();
+Check(!newerPlan.PlanConfirmed && newerPlan.Steps.Any(step => step.title == "New step"),
+    "The new prompt and reused step ID must not be reported as a confirmed plan.");
+var changedAfterLoss = changedPlan.Read(sourceLossMarker + resumedAfterCoincidentLoss,
+    "", now.AddSeconds(5), DateTime.MinValue.ToUniversalTime()).Single();
+Check(changedAfterLoss.Unconfirmed && !changedAfterLoss.PlanConfirmed &&
+    changedAfterLoss.Steps.Any(step => step.title == "First step") &&
+    changedAfterLoss.Steps.Any(step => step.title == "New step") &&
+    changedAfterLoss.Steps.All(step => step.status == "unknown"),
+    "Loss after a reused step ID must retain both observed names as unconfirmed.");
+
+var sameTurnRename = new SessionReader();
+sameTurnRename.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
+var renamedInTurn = sameTurnRename.Read(complete + renamedAfterPrompt, "", now.AddSeconds(5),
+    DateTime.MinValue.ToUniversalTime()).Single();
+Check(renamedInTurn.Steps.Count(step => step.id == "first") == 1 &&
+    renamedInTurn.Steps.Single(step => step.id == "first").title == "New step",
+    "A same-turn rename without source loss must keep its latest observed title.");
+
+var alreadyIncomplete = new AITaskMonitor.Claude.Task {
+    Id = "freeze-bounded", RetainedPlanIncomplete = true,
+    Steps = Enumerable.Range(0, 128).Select(index => new Step {
+        id = "s" + index, title = "Step " + index, status = "unknown" }).ToArray() };
+var frozenOnce = SessionReader.Freeze(alreadyIncomplete, null!, true, out bool firstCut);
+Check(!firstCut && frozenOnce.RetainedPlanIncomplete,
+    "An inherited incomplete flag must not claim that a new cut occurred.");
+var addedStep = new AITaskMonitor.Claude.Task { Id = "freeze-bounded",
+    Steps = new[] { new Step { id = "extra", title = "Extra", status = "unknown" } } };
+var frozenTwice = SessionReader.Freeze(addedStep, frozenOnce, true, out bool secondCut);
+Check(secondCut && frozenTwice.RetainedPlanIncomplete && frozenTwice.Steps.Length == 128,
+    "An additional cut must be detected even when an earlier snapshot was already incomplete.");
+
 var cappedHistory = new SessionReader();
 string Retarget(string value, string id) => value.Replace("\"observed\"", "\"" + id + "\"", StringComparison.Ordinal);
 for (int index = 0; index < 256; index++)
@@ -1030,7 +1071,7 @@ using (var cappedSource = new ClaudeFileSource(cappedFile, null, DateTime.MinVal
     {
         string id = "file-cap-" + index;
         File.AppendAllText(cappedFile, Retarget(complete, id), utf8);
-        _ = cappedSource.Poll(ClaudeConnection.Connected, now);
+        _ = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
         File.AppendAllText(cappedFile, Retarget(completeStop, id), utf8);
         ClaudeSourceSnapshot stopped = cappedSource.Poll(ClaudeConnection.Connected, now.AddSeconds(2));
         if (stopped.Unavailable && firstUnavailable < 0) firstUnavailable = index;
@@ -1063,6 +1104,51 @@ using (var cappedSource = new ClaudeFileSource(cappedFile, null, DateTime.MinVal
         !capComplete.Tasks.Single(x => x.Id == "file-cap-neighbor").Unconfirmed,
         "Completing the tail must restore source availability without confirming an incomplete session.");
 }
+
+
+string EvidenceEvent(string id, int seconds, string name, bool active, string phase = "", string subject = "") =>
+    JsonSerializer.Serialize(new Dictionary<string, object> {
+        ["session_id"] = id, ["timestamp"] = now.AddSeconds(seconds).ToString("O"),
+        ["event"] = name, ["active"] = active, ["stage_version"] = 1, ["stage_phase"] = phase,
+        ["task_id"] = subject.Length == 0 ? "" : "synthetic-step", ["task_subject"] = subject }) + "\n";
+var uncertainSessionRetention = new SessionReader();
+string uncertainA = EvidenceEvent("uncertain-a", -4, "UserPromptSubmit", true) +
+    EvidenceEvent("uncertain-a", -3, "StageNotice", true, "session_uncertain");
+Check(uncertainSessionRetention.Read(uncertainA, "", now, DateTime.MinValue.ToUniversalTime()).Single().Unconfirmed,
+    "The uncertainty filter setup must start with an unconfirmed visible session.");
+for (int index = 0; index < 1024; index++)
+{
+    string id = "uncertain-other-" + index;
+    string hiddenEvidence = EvidenceEvent(id, -4, "UserPromptSubmit", true) +
+        EvidenceEvent(id, -3, "StageNotice", true, "session_uncertain") +
+        EvidenceEvent(id, -2, "Stop", false, "stop_clear");
+    uncertainSessionRetention.Read(hiddenEvidence, "", now, DateTime.MinValue.ToUniversalTime());
+}
+string laterClear = EvidenceEvent("uncertain-a", -4, "UserPromptSubmit", true) +
+    EvidenceEvent("uncertain-a", -2, "Stop", false, "stop_clear");
+var retainedAfterMany = uncertainSessionRetention.Read(laterClear, "", now, DateTime.MinValue.ToUniversalTime()).Single();
+Check(!uncertainSessionRetention.SourceUncertain && !uncertainSessionRetention.RetentionOverflow &&
+    retainedAfterMany.Id == "uncertain-a" && retainedAfterMany.Unconfirmed,
+    "A late stop must not erase a previously uncertain session after many other IDs.");
+
+var uncertainPlanRetention = new SessionReader();
+string PlanEvidence(string id) => EvidenceEvent(id, -6, "UserPromptSubmit", true) +
+    EvidenceEvent(id, -5, "TaskCreated", true, "", "Observed stage") +
+    EvidenceEvent(id, -4, "UserPromptSubmit", true);
+uncertainPlanRetention.Read(PlanEvidence("uncertain-plan-a"), "", now, DateTime.MinValue.ToUniversalTime());
+for (int index = 0; index < 1024; index++)
+{
+    string id = "uncertain-plan-other-" + index;
+    uncertainPlanRetention.Read(PlanEvidence(id) + EvidenceEvent(id, -2, "Stop", false, "stop_clear"),
+        "", now, DateTime.MinValue.ToUniversalTime());
+}
+var earlierUncertainPlan = uncertainPlanRetention.Read(Retarget(complete, "uncertain-plan-a"),
+    "", now, DateTime.MinValue.ToUniversalTime()).Single();
+var independentPlan = uncertainPlanRetention.Read(Retarget(complete, "uncertain-plan-independent"),
+    "", now, DateTime.MinValue.ToUniversalTime()).Single();
+Check(!uncertainPlanRetention.SourceUncertain && !uncertainPlanRetention.RetentionOverflow &&
+    !earlierUncertainPlan.PlanConfirmed && earlierUncertainPlan.KnownStepCount == 0 && independentPlan.PlanConfirmed,
+    "Many unrelated uncertain plans must not erase old uncertainty or disable the entire source.");
 
 Console.WriteLine($"Claude file source: {checks} synthetic checks passed.");
 }

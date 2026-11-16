@@ -457,18 +457,14 @@ public sealed class ClaudeFileSource : IDisposable
         {
             if (positions.TryGetValue(item.Id, out int index))
             {
-                Task previous = result[index];
-                Task merged = SessionReader.Freeze(item, previous, true);
-                // An already incomplete task remains locally uncertain; it
-                // does not alone mean this merge lost source-wide data.
-                if (merged.RetainedPlanIncomplete && !item.RetainedPlanIncomplete &&
-                    !previous.RetainedPlanIncomplete) overflow = true;
+                Task merged = SessionReader.Freeze(item, result[index], true, out bool newlyTruncated);
+                if (newlyTruncated) overflow = true;
                 result[index] = merged;
             }
             else if (result.Count < SessionReader.MaximumRetained)
             {
-                Task retained = SessionReader.Freeze(item, null!, true);
-                if (retained.RetainedPlanIncomplete && !item.RetainedPlanIncomplete) overflow = true;
+                Task retained = SessionReader.Freeze(item, null!, true, out bool newlyTruncated);
+                if (newlyTruncated) overflow = true;
                 positions.Add(item.Id, result.Count);
                 result.Add(retained);
             }
