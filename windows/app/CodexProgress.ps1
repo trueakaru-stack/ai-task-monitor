@@ -251,7 +251,7 @@ try{
  $script:codexCloudController=New-CodexCloudController
  $script:codexCloudModulesAvailable=$true
 }catch{}
-$script:currentVersion='0.2.7-alpha'
+$script:currentVersion='0.2.8-alpha'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateRequest=$null
@@ -381,6 +381,7 @@ $script:translations=@{
  'Нет данных'='No data'
  'Нет данных от '='No data from '
  'Часть данных недоступна'='Some data is unavailable'
+ 'Статус не подтверждён. Из журнала: '='Status unconfirmed. From log: '
  'Подключён'='Connected'
  'Подключён частично'='Partially connected'
  'Не подключён'='Not connected'
@@ -1597,7 +1598,7 @@ function Claude-InstallationState([string]$profile,[string]$appData,[string]$loc
 }
 
 function Update-SourceSettings {
- $codexSourceStatus.Text=Tr $(if($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
+ $codexSourceStatus.Text=Tr $(if($script:sourcePartialData -contains "Codex"){"Часть данных недоступна"}elseif($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
  Update-CodexCloudSourceSettings
  Update-OpenCodeSourceSettings
  Update-KimiSourceSettings
@@ -2315,7 +2316,7 @@ function Codex-Plan([string]$id) {
  return @($latest)
 }
 
-function Codex-Activity([string]$id) {
+function Codex-Activity([string]$id,[string]$expectedStartKey='') {
  $path = Session-File $id
  if (-not $path) { return "" }
  try {
@@ -2330,6 +2331,13 @@ function Codex-Activity([string]$id) {
     $startIndex=$index;$turnId=[string](Prop $payload "turn_id" "");break
    }
   }
+  $requireObservedTurn=$expectedStartKey.StartsWith('turn:',[StringComparison]::Ordinal)
+  if($requireObservedTurn){
+   $expectedTurn=$expectedStartKey.Substring(5)
+   if(-not $expectedTurn){return ''}
+   if($startIndex -ge 0 -and $turnId -cne $expectedTurn){return ''}
+   if($startIndex -lt 0){$turnId=$expectedTurn}
+  }
   for($index=$lines.Count-1;$index -gt $startIndex;$index--){
    $line=$lines[$index]
    if($line.Length -gt 1048576 -or $line -notmatch '"(agent_reasoning|reasoning|Reasoning|commentary)"'){continue}
@@ -2338,6 +2346,8 @@ function Codex-Activity([string]$id) {
    $recordType=[string](Prop $record "type" ""); $kind=[string](Prop $payload "type" "")
    $eventTurn=[string](Prop $payload "turn_id" "")
    if($turnId -and $eventTurn -and $turnId -ne $eventTurn){continue}
+   if($requireObservedTurn -and ($recordType -ne 'event_msg' -or $kind -ne 'item_completed' -or
+      -not $eventTurn -or $eventTurn -cne $turnId -or [string](Prop $payload 'thread_id' '') -ne $id)){continue}
    $summary=""
    if($recordType -eq "event_msg" -and $kind -eq "agent_reasoning"){
     $summary=[string](Prop $payload "text" "")
@@ -2355,6 +2365,7 @@ function Codex-Activity([string]$id) {
    }elseif(-not $latestCommentary -and $kind -eq "message" -and [string](Prop $payload "phase" "") -eq "commentary"){
     foreach($part in @(Prop $payload "content" @())){if([string](Prop $part "type" "") -eq "output_text"){$latestCommentary=[string](Prop $part "text" "")}}
    }
+   if($requireObservedTurn -and $latestCommentary){return [regex]::Replace($latestCommentary.Trim(),'\s+',' ')}
    if($summary){
     $firstLine=@($summary -split "`r?`n" | Where-Object {$_.Trim()} | Select-Object -First 1)
     if($firstLine.Count -gt 0){
@@ -2438,6 +2449,7 @@ function Codex-IndexCandidates {
 
 function Codex-Tasks {
  $script:codexSourcePartial=$false
+ $script:codexTerminated=@{}
  if (-not (Test-Path -LiteralPath $sessionIndex -ErrorAction Stop)) {
   if ($script:lastCodexTasks.Count -gt 0 -or (Test-Path -LiteralPath $codexHome -PathType Container -ErrorAction Stop)) { throw "Codex session index is unavailable." }
   return @()
@@ -2477,6 +2489,7 @@ function Codex-Tasks {
   $id = [string]$session.id; $title = [string]$session.thread_name
   if($title -eq "Guardian review"){continue}
   $threadState = Thread-State $id
+  if($threadState.State -in @('completed','interrupted')){$script:codexTerminated[$id]=$true}
   $eventActive = $threadState.State -eq "active"
   $uncertain = Codex-Uncertain $id $threadState
   if($threadState.State -in @("interrupted","unobserved")){continue}
@@ -2517,11 +2530,14 @@ function Codex-Tasks {
   }
   if($uncertain){$planConfirmed=$false;$progress=$null;$progressKind='none'}
   $updated = if($threadState.UpdatedUtc -ne [DateTime]::MinValue){$threadState.UpdatedUtc.ToLocalTime()}else{[DateTime]::MinValue}
-  $activityGenerated=$uncertain
-  $activity = if($uncertain){"Статус не подтверждён"}elseif($running){$currentActivity=Codex-Activity $id;if($currentActivity){$currentActivity}else{$activityGenerated=$true;"Выполняется"}}else{""}
   $startKey=[string](Prop $threadState "StartKey" "")
   $started=[DateTime](Prop $threadState "StartedUtc" ([DateTime]::MinValue))
-  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; Activity=$activity; ActivityGenerated=$activityGenerated; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; ProgressBasis=$progressBasis; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source; PlanConfirmed=$planConfirmed })
+  $activityGenerated=$uncertain;$activityObserved=$false
+  $activity = if($uncertain){
+   $observed=if($startKey.StartsWith('turn:',[StringComparison]::Ordinal)){Codex-Activity $id $startKey}else{''}
+   if($observed){$activityObserved=$true;$activityGenerated=$false;$observed}else{"Статус не подтверждён"}
+  }elseif($running){$currentActivity=Codex-Activity $id;if($currentActivity){$currentActivity}else{$activityGenerated=$true;"Выполняется"}}else{""}
+  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; Activity=$activity; ActivityGenerated=$activityGenerated; ActivityObserved=$activityObserved; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; ProgressBasis=$progressBasis; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source; PlanConfirmed=$planConfirmed })
  }
  $runningItems = @($items | Where-Object Active | Sort-Object Updated -Descending)
  $trackedItems = @($items | Where-Object { -not $_.Active -and ($_.Status -in @("Статус не подтверждён","Ожидает подтверждения") -or $_.Paused) } | Sort-Object Updated -Descending)
@@ -2629,9 +2645,21 @@ function Source-Snapshot {
  $codex=@(); $claude=@(); $external=@(); $cloud=@(); $unavailable=New-Object Collections.Generic.List[string]
  $partialConnection=New-Object Collections.Generic.List[string];$partialData=New-Object Collections.Generic.List[string]
  try{
-  $codex=@(Codex-Tasks);$script:lastCodexTasks=$codex
+  $previousCodex=@($script:lastCodexTasks)
+  $codex=@(Codex-Tasks)
   $codexPartial=Get-Variable -Scope Script -Name codexSourcePartial -ErrorAction SilentlyContinue
-  if($null -ne $codexPartial -and $codexPartial.Value){[void]$unavailable.Add('Codex');[void]$partialData.Add('Codex')}
+  if($null -ne $codexPartial -and $codexPartial.Value){
+   [void]$unavailable.Add('Codex');[void]$partialData.Add('Codex')
+   $seenCodex=@{};foreach($task in $codex){$seenCodex[[string]$task.Id]=$true}
+   $terminated=Get-Variable -Scope Script -Name codexTerminated -ErrorAction SilentlyContinue
+   foreach($task in $previousCodex){
+    $id=[string]$task.Id
+    if($id -and -not $seenCodex.ContainsKey($id) -and ($null -eq $terminated -or $null -eq $terminated.Value -or -not $terminated.Value.ContainsKey($id))){
+     $codex+=@(Unconfirmed-Tasks @($task));$seenCodex[$id]=$true
+    }
+   }
+  }
+  $script:lastCodexTasks=$codex
  }catch{[void]$unavailable.Add("Codex");$codex=@(Unconfirmed-Tasks $script:lastCodexTasks)}
  try{
   $connectionState=if($ClaudeEventFile){"connected"}else{Claude-ConnectionState}
@@ -2779,7 +2807,8 @@ function Unconfirmed-Tasks($tasks) {
  foreach($task in $tasks){
   if(-not $task.Active -and [string](Prop $task "Status" "") -ne "Статус не подтверждён"){continue}
   $copy=$task.PSObject.Copy()
-  $copy.Active=$false; $copy.Status="Статус не подтверждён"; $copy.Activity="Статус не подтверждён"
+  $copy.Active=$false; $copy.Status="Статус не подтверждён"
+  if(-not ([string](Prop $copy 'Provider' '') -eq 'codex' -and [bool](Prop $copy 'ActivityObserved' $false) -and [string](Prop $copy 'Activity' ''))){$copy.Activity="Статус не подтверждён"}
   if([string](Prop $copy 'Provider' '') -in @('claude','codex')){
    if($null -ne $copy.PSObject.Properties['PlanConfirmed']){$copy.PlanConfirmed=$false}
    if($null -ne $copy.PSObject.Properties['Progress']){$copy.Progress=$null}
@@ -2940,6 +2969,9 @@ function Localized-TaskTitle($task) {
 function Localized-TaskActivity($task) {
  $activity=[string](Prop $task 'Activity' '')
  if(-not $activity){return ''}
+ if([string](Prop $task 'Provider' '') -eq 'codex' -and [string](Prop $task 'Status' '') -eq 'Статус не подтверждён' -and [bool](Prop $task 'ActivityObserved' $false)){
+  return (Tr 'Статус не подтверждён. Из журнала: ')+$activity
+ }
  if([bool](Prop $task 'ActivityGenerated' $false) -or [string](Prop $task 'Status' '') -eq 'Статус не подтверждён'){return (Tr $activity)}
  if([string](Prop $task 'Provider' '') -eq 'claude'){
   foreach($prefix in @('Выполняет: ','Завершено: ','Ошибка: ','Добавлен этап: ','Завершён этап: ')){
@@ -3870,7 +3902,8 @@ function Update-View {
      if($PreviewScenario -eq "unplanned"){$previewSteps=@();$previewValue=$null;$previewKind="none"}
     }
     $previewTime=[DateTime]::Now.AddSeconds(-$i)
-    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;ActivityGenerated=($PreviewManyProviders -and $i -ge 2);Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр";PlanConfirmed=(-not ($PreviewPlanUnconfirmed -and $i -eq 0))}
+    $previewObserved=($previewIsUnconfirmed -and $PreviewSourceWarning -and $PreviewWarningProvider -eq 'codex')
+    $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;ActivityGenerated=($PreviewManyProviders -and $i -ge 2);ActivityObserved=[bool]$previewObserved;Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр";PlanConfirmed=(-not ($PreviewPlanUnconfirmed -and $i -eq 0))}
    }
    if($PreviewCloudTask -and $script:codexCloudModulesAvailable){
     $fixture=[PSCustomObject]@{Id='codex-cloud:synthetic';Title=(Preview-Text 'Тестовая облачная задача' 'Synthetic cloud task');State='pending';Updated=[DateTimeOffset]::UtcNow}
@@ -3895,7 +3928,7 @@ function Update-View {
   Render-ProviderTabs $allTasks
   $tasks=@(Filtered-Tasks $allTasks)
   $script:lastTasks=$tasks
-  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$stepState`:$loopState"})-join"|")
+  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$(Prop $_ 'ActivityObserved' $false):$stepState`:$loopState"})-join"|")
   if($next -ne $script:fingerprint){
    $script:fingerprint=$next; $tasksPanel.Children.Clear()
    if($script:sourceErrors.Count -gt 0){$warning=Text (Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
@@ -4123,6 +4156,10 @@ if ($SnapshotFile) {
   $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
   $previewWarningName=if($PreviewWarningProvider -eq 'codex'){'Codex'}else{'DeepSeek Harness'}
   if($actual -cne ((Tr 'Часть данных недоступна')+': '+$previewWarningName)){throw 'A source warning was duplicated or translated incorrectly.'}
+ }
+ if($PreviewSourceWarning -and $PreviewWarningProvider -eq 'codex' -and $PreviewActiveTasks -eq 1 -and $PreviewUnconfirmed){
+  $previewTask=@($script:lastAllTasks|Where-Object Id -eq 'preview-0')
+  if($previewTask.Count -ne 1 -or (Localized-TaskActivity $previewTask[0]) -cne ((Tr 'Статус не подтверждён. Из журнала: ')+$previewTask[0].Activity)){throw 'The observed Codex message lacks its unconfirmed status.'}
  }
  if($PreviewSourceWarning -in @('partial-data','partial-both') -and $script:isCompact){
   Render-CompactTasks $script:lastAllTasks;$window.UpdateLayout()

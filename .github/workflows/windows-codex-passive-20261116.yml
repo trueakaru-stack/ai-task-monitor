@@ -5,7 +5,9 @@ on:
     branches: [windows, codex/windows-codex-passive-20261116]
     paths:
       - 'windows/app/CodexProgress.ps1'
+      - 'windows/app/VersionInfo.cs'
       - 'windows/tests/Test-Codex*.ps1'
+      - 'windows/tests/Test-ReleaseUpdates.ps1'
       - 'windows/tests/Test-DotnetPathSafety.py'
       - '.github/workflows/windows-codex-passive-20261116.yml'
 permissions:
@@ -54,6 +56,9 @@ jobs:
             git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
             if($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:GITHUB_SHA){throw 'The test revision does not match.'}
             if($env:AITM_TEST_PART -eq 'checks'){
+              $codexCommand=Get-Command -Name 'codex','codex.exe','codex.cmd' -All -ErrorAction SilentlyContinue | Select-Object -First 1
+              if($null -eq $codexCommand){Write-Output 'Real Codex CLI: not found on the hosted runner; no account or local model was used.'}
+              else{Write-Output ('Real Codex CLI: command detected ('+$codexCommand.CommandType+'); it was not launched because its provenance and an isolated model backend were not verified.')}
               $pythonRoot=if($env:RUNNER_TOOL_CACHE){Join-Path $env:RUNNER_TOOL_CACHE 'Python'}else{''}
               $candidate=if($pythonRoot -and [IO.Directory]::Exists($pythonRoot)){Get-ChildItem -LiteralPath $pythonRoot -Filter python.exe -File -Recurse -ErrorAction Stop | Where-Object {$_.FullName -match '\\x64\\python\.exe$'} | Sort-Object FullName -Descending | Select-Object -First 1}else{$null}
               $verified=$false
@@ -96,7 +101,7 @@ jobs:
             }
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if($env:AITM_TEST_PART -eq 'checks'){
-              foreach($test in @('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1')){
+              foreach($test in @('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')){
                 Write-Output ('Running '+$test)
                 Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
               }

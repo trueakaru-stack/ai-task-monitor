@@ -34,6 +34,20 @@ Assert-Activity 'Preparing check' 'Commentary fallback was not used'
 $wrongTurn = '{"type":"event_msg","payload":{"type":"item_completed","turn_id":"old-turn","item":{"type":"Reasoning","summary_text":["**Wrong turn**"]}}}'
 $script:activityTail = $start + "`n" + $comment + "`n" + $wrongTurn
 Assert-Activity 'Preparing check' 'A late event from a previous turn was displayed'
+$matchingComment = '{"type":"event_msg","payload":{"type":"item_completed","thread_id":"fixture","turn_id":"new-turn","item":{"type":"AgentMessage","id":"message-1","phase":"commentary","content":[{"type":"Text","text":"Preparing check"}]}}}'
+$script:activityTail = $start + "`n" + $response + "`n" + $matchingComment
+if ((Codex-Activity 'fixture' 'turn:new-turn') -cne 'Preparing check') { throw 'The newest observed commentary was not selected for the matching turn.' }
+if (Codex-Activity 'fixture' 'turn:other-turn') { throw 'A different turn produced an observed message.' }
+$script:activityTail = $start + "`n" + $response + "`n" + $comment
+if (Codex-Activity 'fixture' 'turn:new-turn') { throw 'A message without a turn ID was incorrectly associated with the observed turn.' }
+$script:activityTail = $response
+if (Codex-Activity 'fixture' 'turn:new-turn') { throw 'An unassociated response was assigned to a turn whose boundary was not observed.' }
+$matchingEvent = '{"type":"event_msg","payload":{"type":"item_completed","thread_id":"fixture","turn_id":"new-turn","item":{"type":"Reasoning","id":"reasoning-1","summary_text":["**Observed after boundary**"],"raw_content":[]}}}'
+$script:activityTail = $wrongTurn + "`n" + $matchingEvent
+if ((Codex-Activity 'fixture' 'turn:new-turn') -cne 'Observed after boundary') { throw 'A turn-identified event in a long tail was not retained.' }
+$wrongThread = '{"type":"event_msg","payload":{"type":"item_completed","thread_id":"other","turn_id":"new-turn","item":{"type":"Reasoning","id":"other-1","summary_text":["Other session"],"raw_content":[]}}}'
+$script:activityTail = $start + "`n" + $wrongThread
+if (Codex-Activity 'fixture' 'turn:new-turn') { throw 'A message from a different thread was attributed to this session.' }
 $unicode = '{ "payload": { "summary": [{"text":"**\u0410**","type":"summary_text"}], "type":"reasoning" }, "type":"response_item" }'
 $script:activityTail = $unicode
 Assert-Activity ([string][char]0x0410) 'An escaped Unicode status was not decoded'

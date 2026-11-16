@@ -70,7 +70,7 @@ try {
 } finally { $owner.Dispose();$oldOwner.Dispose() }
 
 $tasks = @(Codex-Tasks)
-if ($tasks.Count -ne 1 -or $tasks[0].Id -ne "active-id" -or $tasks[0].Active -or $tasks[0].Activity -eq "Synthetic activity") {
+if ($tasks.Count -ne 1 -or $tasks[0].Id -ne "active-id" -or $tasks[0].Active -or -not $tasks[0].ActivityObserved -or $tasks[0].Activity -ne "Synthetic activity") {
     throw "The previously observed task must become unconfirmed after its lock is released."
 }
 $complete = '{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}'
