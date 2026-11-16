@@ -7,10 +7,14 @@ permissions:
   contents: read
 jobs:
   isolated:
-    runs-on: macos-15
-    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.1.app/Contents/Developer
+      DEVELOPER_DIR: ${{ matrix.runner == 'macos-26' && '/Applications/Xcode.app/Contents/Developer' || '/Applications/Xcode_16.1.app/Contents/Developer' }}
     steps:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -24,6 +28,7 @@ jobs:
           test "$RUNNER_OS" = macOS
           task_profile_dir="$(/usr/bin/python3 -I -S -B -c 'import os,pwd; print(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))')"
           case "$task_profile_dir" in /Users/*) ;; *) echo 'Unexpected hosted runner profile.' >&2; exit 1;; esac
+          if compgen -G '/private/tmp/aitm-*' >/dev/null; then echo 'Unexpected test directories in runner temp.' >&2; exit 1; fi
           task_root="$(mktemp -d "$RUNNER_TEMP/aitm-macos-tests.XXXXXXXX")"
           task_marker="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
           case "$task_marker" in "$task_profile_dir"/*) ;; *) echo 'Runner temp is outside expected profile.' >&2; exit 1;; esac
@@ -59,6 +64,7 @@ jobs:
           (allow file-read* (subpath (param "TASK_PYTHON_ROOT")))
           (deny file-write*)
           (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write* (regex #"^/private/tmp/aitm-[^/]+(/|$)"))
           (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
           PROFILE
           cat > "$task_root/run-isolated" <<'SCRIPT'
@@ -83,6 +89,15 @@ jobs:
           if "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read was not denied.' >&2; exit 1; fi
           if "$task_run" /usr/bin/touch "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write was not denied.' >&2; exit 1; fi
           "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import os; assert "HOME" not in os.environ and "CODEX_HOME" not in os.environ'
+          task_probe="/private/tmp/aitm-permit-$(basename "$AITM_TEST_TASK_ROOT")"
+          task_forbidden="/private/tmp/protected-$(basename "$AITM_TEST_TASK_ROOT")"
+          "$task_run" /usr/bin/touch "$task_probe"
+          "$task_run" /bin/rm "$task_probe"
+          if "$task_run" /usr/bin/touch "$task_forbidden" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Unexpected write outside test paths.' >&2; exit 1; fi
+          "$task_run" /bin/ln -s "$AITM_TEST_DENIED_FILE" "$task_probe"
+          if "$task_run" /bin/cat "$task_probe" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read via link was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$task_probe" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write via link was not denied.' >&2; exit 1; fi
+          "$task_run" /bin/rm "$task_probe"
       - name: Prepare pinned synthetic upstream packages
         id: upstream
         shell: bash
@@ -136,3 +151,35 @@ jobs:
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
           cd "$AITM_TEST_TASK_ROOT/source/macos"
           "$task_run" node integration-tests/Test-KimiApprovalWeb.mjs "$AITM_TEST_TASK_ROOT/kimi"
+
+      - name: Exercise complete Swift suite with synthetic fixtures
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          task_bin="$(/usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 swift build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
+          test -d "$task_bin/AITaskMonitorPackageTests.xctest"
+          "$task_run" /usr/bin/env "AITM_TEST_NODE=$AITM_TEST_NODE_BIN" "AITM_NODE=$AITM_TEST_NODE_BIN" "AITM_V2_SENDER_FIXTURE=$AITM_TEST_TASK_ROOT/source/.github/provider-audit/v2-restart-20261109/synthetic/mac-v2-sender-child.mjs" "AITM_V2_DEEPSEEK_FIXTURE=$AITM_TEST_TASK_ROOT/source/.github/provider-audit/v2-restart-20261109/synthetic/mac-v2-deepseek-child.mjs" "AITM_HERMES_PYTHON=$AITM_TEST_TASK_ROOT/hermes-python/bin/python" "AITM_HERMES_SOURCE=$AITM_TEST_TASK_ROOT/hermes-source" "AITM_CLAUDE_TEST_EXECUTABLE=$task_bin/AITaskMonitor" "AITM_DSH_ANCHOR=$AITM_TEST_TASK_ROOT/dsh/node_modules/@deepseek-ai/dsh/package.json" "AITM_PNPM_SCRIPT=$AITM_TEST_TASK_ROOT/dsh/node_modules/pnpm/bin/pnpm.mjs" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest All "$task_bin/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/swift-all.log"
+      - name: Exercise remaining synthetic integration tests
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          "$task_run" node integration-tests/Test-ExternalProviderEvents.mjs
+          "$task_run" node integration-tests/Test-ExternalProviderObservers.mjs
+          "$task_run" node integration-tests/Test-ProviderBundles.mjs
+          "$task_run" node integration-tests/Test-DeepSeekCordisRuntime.mjs "$AITM_TEST_TASK_ROOT/dsh/node_modules"
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -B integration-tests/test_external_provider_hooks.py
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -B integration-tests/test_provider_bundle.py
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B integration-tests/Test-HermesPackaging.py
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -B integration-tests/Test-HermesUpstreamDispatch.py "$AITM_TEST_TASK_ROOT/hermes-source"
+          "$task_run" /usr/bin/tar -xOf "$AITM_TEST_TASK_ROOT/moonshot-ai-kimi-code-2.5.0.tgz" package/dist/main.mjs > "$AITM_TEST_TASK_ROOT/kimi-upstream.mjs"
+          "$task_run" node integration-tests/Test-KimiIntegration.mjs
+          "$task_run" node integration-tests/Test-KimiObserver.mjs
+          "$task_run" node integration-tests/Test-KimiUpstreamHook.mjs "$AITM_TEST_TASK_ROOT/kimi-upstream.mjs"
+          "$task_run" node integration-tests/Test-KimiUpstreamContract.mjs "$AITM_TEST_TASK_ROOT/kimi-upstream.mjs"
+          "$task_run" node integration-tests/Test-KimiUpstreamInstall.mjs "$AITM_TEST_TASK_ROOT/kimi-upstream.mjs"
