@@ -11,13 +11,15 @@ published dialog; the download action invokes a counter, not a browser or an
 installer. A Store service must construct no external handler, and an unknown
 channel must be rejected. The test checks deferral while compact, the existing
 session-only dismissal, a new synthetic version, localization, and asynchronous
-shutdown while fake handler disposal is blocked. Late synthetic responses must
+window-close shutdown while fake handler disposal is blocked. Late synthetic responses must
 not appear after shutdown.
 
 The test writes twelve synthetic frames under a new GitHub-hosted runner-temp
 directory: Russian and English, light and dark, full and compact. Full frames
 show the existing dialog; compact frames show the deferred state. Four further
-frames show the download button with programmatic keyboard focus. These frames
+frames follow synthetic Tab navigation to the download button. The presence
+of a visible focus indicator must still be checked from the rendered frames.
+These frames
 do not constitute visual acceptance against the approved reference. No real
 network, user settings, installation, package download or live update is tested.
 

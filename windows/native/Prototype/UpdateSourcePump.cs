@@ -1,3 +1,4 @@
+using System.Windows;
 using System.Windows.Threading;
 using AITaskMonitor.NativeUpdateController;
 using AITaskMonitor.NativeUpdateIntegration;
@@ -8,6 +9,7 @@ namespace AITaskMonitor.Prototype;
 // distribution, version and installer identity have verified contracts.
 internal sealed class UpdateSourcePump
 {
+    private readonly Window window;
     private readonly Dispatcher dispatcher;
     private readonly WindowsUpdateService service;
     private readonly Action<UpdateInfo> present;
@@ -16,10 +18,11 @@ internal sealed class UpdateSourcePump
     private bool stopped;
     private Task? stopTask;
 
-    internal UpdateSourcePump(Dispatcher dispatcher, WindowsUpdateService service,
+    internal UpdateSourcePump(Window window, WindowsUpdateService service,
         Action<UpdateInfo> present, TimeSpan interval)
     {
-        this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
+        this.window = window ?? throw new ArgumentNullException(nameof(window));
+        dispatcher = window.Dispatcher;
         this.service = service ?? throw new ArgumentNullException(nameof(service));
         this.present = present ?? throw new ArgumentNullException(nameof(present));
         if (!dispatcher.CheckAccess()) throw new InvalidOperationException("The update pump belongs to the window dispatcher.");
@@ -27,6 +30,7 @@ internal sealed class UpdateSourcePump
             throw new ArgumentOutOfRangeException(nameof(interval));
         timer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = interval };
         timer.Tick += OnTick;
+        window.Closed += OnWindowClosed;
     }
 
     internal void Start()
@@ -56,6 +60,8 @@ internal sealed class UpdateSourcePump
 
     private void OnTick(object? sender, EventArgs e) => Poll();
 
+    private void OnWindowClosed(object? sender, EventArgs e) => _ = StopAsync();
+
     internal Task StopAsync()
     {
         VerifyAccess();
@@ -63,6 +69,7 @@ internal sealed class UpdateSourcePump
         stopped = true;
         timer.Stop();
         timer.Tick -= OnTick;
+        window.Closed -= OnWindowClosed;
         stopTask = service.StopAsync();
         return stopTask;
     }

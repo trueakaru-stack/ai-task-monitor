@@ -9,6 +9,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Markup;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -170,7 +171,7 @@ internal static class Program
         var handler = new ImmediateHandler();
         WindowsUpdateService service = Service(WindowsUpdateChannel.Standalone, () => handler);
         int displayed = 0, fakeDownloads = 0;
-        var pump = new UpdateSourcePump(window.Dispatcher, service, update =>
+        var pump = new UpdateSourcePump(window, service, update =>
         {
             displayed++;
             view.ApplySyntheticUpdate(update, () => fakeDownloads++);
@@ -210,9 +211,21 @@ internal static class Program
             if (!compact)
             {
                 Capture(window, $"full-{language}-{theme}.png");
+                Button later = Find<Button>(window, "UpdateLaterButton");
                 Button download = Find<Button>(window, "UpdateDownloadButton");
-                Check(download.Focus() && download.IsKeyboardFocused, "The download button did not receive keyboard focus.");
-                window.UpdateLayout();
+                Check(later.Focus() && later.IsKeyboardFocused, "The later button did not receive keyboard focus.");
+                PresentationSource presentation = PresentationSource.FromVisual(later)
+                    ?? throw new InvalidOperationException("The synthetic window has no presentation source.");
+                var tab = new KeyEventArgs(Keyboard.PrimaryDevice, presentation, Environment.TickCount, Key.Tab)
+                {
+                    RoutedEvent = Keyboard.KeyDownEvent,
+                    Source = later
+                };
+                InputManager.Current.ProcessInput(tab);
+                WaitUntil(() => download.IsKeyboardFocused, "Synthetic Tab did not move focus to download.");
+                bool rendered = false;
+                window.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => rendered = true));
+                WaitUntil(() => rendered, "The focused WPF frame did not render.");
                 Capture(window, $"focus-{language}-{theme}.png");
             }
 
@@ -227,7 +240,7 @@ internal static class Program
             Check(fakeDownloads == 1 && overlay.Visibility == Visibility.Collapsed,
                 "The synthetic download callback did not run exactly once.");
         }
-        finally { Finish(pump); window.Close(); }
+        finally { window.Close(); Finish(pump); }
     }
 
     private static void Store()
@@ -235,7 +248,7 @@ internal static class Program
         var (window, view) = Open("en", "dark", false);
         int factories = 0, presented = 0;
         WindowsUpdateService service = Service(WindowsUpdateChannel.Store, () => { factories++; return new ImmediateHandler(); });
-        var pump = new UpdateSourcePump(window.Dispatcher, service,
+        var pump = new UpdateSourcePump(window, service,
             update => { presented++; view.ApplySyntheticUpdate(update, () => { }); }, TimeSpan.FromMilliseconds(25));
         try
         {
@@ -251,7 +264,7 @@ internal static class Program
             catch (ArgumentOutOfRangeException) { rejected = true; }
             Check(rejected && factories == 0, "An unknown distribution channel created an updater.");
         }
-        finally { Finish(pump); window.Close(); }
+        finally { window.Close(); Finish(pump); }
     }
 
     private static void NonBlockingStop()
@@ -260,16 +273,19 @@ internal static class Program
         using var handler = new BlockingDisposeHandler();
         WindowsUpdateService service = Service(WindowsUpdateChannel.Standalone, () => handler);
         int presented = 0;
-        var pump = new UpdateSourcePump(window.Dispatcher, service,
+        var pump = new UpdateSourcePump(window, service,
             update => { presented++; view.ApplySyntheticUpdate(update, () => { }); }, TimeSpan.FromMilliseconds(25));
         Task? stop = null;
+        bool closed = false;
         try
         {
             pump.Start();
             WaitUntil(() => handler.Started.Task.IsCompleted, "The synthetic request did not start.");
             var watch = Stopwatch.StartNew();
+            window.Close();
+            closed = true;
             stop = pump.StopAsync();
-            Check(watch.Elapsed < TimeSpan.FromSeconds(1), "Stopping blocked the UI dispatcher.");
+            Check(watch.Elapsed < TimeSpan.FromSeconds(1), "Closing blocked the UI dispatcher.");
             WaitUntil(() => handler.Disposing.IsSet, "Asynchronous transport disposal did not start.");
             Check(!stop.IsCompleted, "The blocking synthetic disposal unexpectedly finished.");
             bool uiTick = false;
@@ -289,7 +305,7 @@ internal static class Program
             stop ??= pump.StopAsync();
             WaitUntil(() => stop.IsCompleted, "Synthetic disposal remained blocked.");
             stop.GetAwaiter().GetResult();
-            window.Close();
+            if (!closed) window.Close();
         }
     }
 
