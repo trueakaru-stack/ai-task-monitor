@@ -156,4 +156,15 @@ foreach (bool replaceLegacy in new[] { false, true })
           "A same-content file replacement between polls must retain known names as unconfirmed.");
 }
 
+string linkedTarget = NewPath("symbolic-target");
+string linkPath = Path.Combine(work, "symbolic-journal.jsonl");
+File.CreateSymbolicLink(linkPath, linkedTarget);
+int linkReads = 0;
+using (var linkedSource = new ClaudeFileSource(linkPath, null, observed, null, _ => linkReads++))
+{
+    snapshot = linkedSource.Poll(ClaudeConnection.Connected, now);
+    Check(snapshot.Unavailable && snapshot.Tasks.Count == 0 && linkReads == 0,
+        "A symbolic-link journal must be rejected before reading its target.");
+}
+
 Console.WriteLine($"Claude file identity: {checks} synthetic checks passed.");

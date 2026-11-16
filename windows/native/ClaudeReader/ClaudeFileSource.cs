@@ -42,7 +42,7 @@ public sealed class ClaudeFileSource : IDisposable
     private bool currentSeen, legacySeen;
     private bool pendingRead, pendingLoss, connectionLoss;
     private Cursor? currentCursor, legacyCursor;
-    private FileStream? currentAnchor, legacyAnchor;
+    private SafeFileHandle? currentAnchor, legacyAnchor;
     private bool disposed;
     private ClaudeConnection? signalledConnection;
     private long generation;
@@ -293,7 +293,7 @@ public sealed class ClaudeFileSource : IDisposable
         }
     }
 
-    private static Tail? ReadOptional(string path, ref bool seen, ref Cursor? cursor, ref FileStream? anchor,
+    private static Tail? ReadOptional(string path, ref bool seen, ref Cursor? cursor, ref SafeFileHandle? anchor,
         Action<string>? afterFirstFileRead, Func<SafeFileHandle, ClaudeFileIdentity?> readIdentity)
     {
         try
@@ -307,17 +307,17 @@ public sealed class ClaudeFileSource : IDisposable
         catch (DirectoryNotFoundException) when (!seen) { return null; }
     }
 
-    // Hold the previous file open with delete sharing until the next snapshot.
-    // This makes cross-poll file identity comparison meaningful without denying
-    // the writer's rename or replacement. It does not establish atomic reads.
-    private static Tail ReadCompleteTail(string path, Cursor? prior, ref FileStream? anchor, Action<string>? afterFirstFileRead,
+    // Hold a metadata-only handle until the next snapshot. Compare identities
+    // while handles are open, and reopen the same objects for bounded reads.
+    // This does not establish atomicity or prove that no write was lost.
+    private static Tail ReadCompleteTail(string path, Cursor? prior, ref SafeFileHandle? anchor, Action<string>? afterFirstFileRead,
         Func<SafeFileHandle, ClaudeFileIdentity?> readIdentity)
     {
-        var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
+        SafeFileHandle metadata = ClaudeFileIdentityReader.OpenAnchor(path);
         bool transferred = false;
         try
         {
+            using var stream = ClaudeFileIdentityReader.OpenRead(metadata);
             long length = stream.Length;
             int count = (int)Math.Min(length, MaximumTailBytes);
             long start = length - count;
@@ -330,14 +330,13 @@ public sealed class ClaudeFileSource : IDisposable
             bool identityChanged;
             try
             {
-                using var verify = new FileStream(path, FileMode.Open, FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete, 4096, FileOptions.SequentialScan);
+                using SafeFileHandle verification = ClaudeFileIdentityReader.OpenAnchor(path);
                 ClaudeFileIdentity? capturedIdentity, verifiedIdentity, anchoredIdentity = null;
                 try
                 {
-                    capturedIdentity = readIdentity(stream.SafeFileHandle);
-                    verifiedIdentity = readIdentity(verify.SafeFileHandle);
-                    if (anchor is not null) anchoredIdentity = readIdentity(anchor.SafeFileHandle);
+                    capturedIdentity = readIdentity(metadata);
+                    verifiedIdentity = readIdentity(verification);
+                    if (anchor is not null) anchoredIdentity = readIdentity(anchor);
                 }
                 catch (Exception error) { throw new IOException("Event source identity could not be checked.", error); }
                 if (!capturedIdentity.HasValue || !verifiedIdentity.HasValue ||
@@ -347,6 +346,7 @@ public sealed class ClaudeFileSource : IDisposable
                 if (anchor is not null && (!anchoredIdentity.HasValue || !anchoredIdentity.Value.IsUsable))
                     throw new IOException("Previous event source identity could not be checked.");
                 identityChanged = anchor is not null && capturedIdentity.Value != anchoredIdentity!.Value;
+                using var verify = ClaudeFileIdentityReader.OpenRead(verification);
                 if (verify.Length < length) throw new IOException("Event source shortened during reading.");
                 var repeated = new byte[captured.Length];
                 verify.Seek(readStart, SeekOrigin.Begin);
@@ -395,15 +395,15 @@ public sealed class ClaudeFileSource : IDisposable
                 result = new Tail(text.Length > 0 && text[0] == '\uFEFF' ? text[1..] : text,
                     last != bytes.Length - 1, cursor, discontinuity, windowMoved);
             }
-            FileStream? oldAnchor = anchor;
-            anchor = stream;
+            SafeFileHandle? oldAnchor = anchor;
+            anchor = metadata;
             transferred = true;
             oldAnchor?.Dispose();
             return result;
         }
         finally
         {
-            if (!transferred) stream.Dispose();
+            if (!transferred) metadata.Dispose();
         }
     }
 

@@ -89,12 +89,13 @@ unavailable and unconfirmed rather than silently confirming a partial view.
 These bounds also apply to fallback cards after a failure during a pending read.
 
 During a poll, Windows `FILE_ID_INFO` is compared across simultaneously open
-read handles. A successful read keeps one read-only handle, shared for writes
-and deletion, as an identity anchor until the next poll. Comparing the still-open
+metadata handles. A successful read keeps one metadata-only handle, shared for
+writes and deletion, as an identity anchor until the next poll. Comparing the still-open
 previous and current file identities also detects an identical-content
 replacement between polls. Unsupported or invalid identities are treated as
-loss. This protects observed continuity; it does not make a concurrent read
-atomic. A replacement before first observation, an ABA swap between observations,
+loss. A final symbolic link or other reparse-point journal is rejected before
+reading its target. Reads reopen the metadata handle for the same file object.
+This protects observed continuity; it does not make a concurrent read atomic. A replacement before first observation, an ABA swap between observations,
 a replacement after the verification opens, changes between files, and a writer
 that omits an event can remain undetected. An append after the captured length
 may wait for the next poll. A retained file can occupy storage until its handle
