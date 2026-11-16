@@ -207,7 +207,14 @@ internal static class Program
             Check(Find<ShapePath>(window, "UpdateDialogShape").Data is not null &&
                   Math.Abs(Find<Grid>(window, "UpdateDialog").ActualWidth - 368) < 0.1,
                   "The existing dialog contour was not applied.");
-            if (!compact) Capture(window, $"full-{language}-{theme}.png");
+            if (!compact)
+            {
+                Capture(window, $"full-{language}-{theme}.png");
+                Button download = Find<Button>(window, "UpdateDownloadButton");
+                Check(download.Focus() && download.IsKeyboardFocused, "The download button did not receive keyboard focus.");
+                window.UpdateLayout();
+                Capture(window, $"focus-{language}-{theme}.png");
+            }
 
             Click(window, "UpdateLaterButton");
             Check(overlay.Visibility == Visibility.Collapsed && fakeDownloads == 0, "Later did not dismiss the update.");
@@ -299,7 +306,7 @@ internal static class Program
                         Flow(language, theme, compact);
             Store();
             NonBlockingStop();
-            Console.WriteLine($"Synthetic update host: {checks} checks passed; 8 screenshots written.");
+            Console.WriteLine($"Synthetic update host: {checks} checks passed; 12 screenshots written.");
             return 0;
         }
         finally { app.Shutdown(); }

@@ -14,9 +14,10 @@ session-only dismissal, a new synthetic version, localization, and asynchronous
 shutdown while fake handler disposal is blocked. Late synthetic responses must
 not appear after shutdown.
 
-The test writes eight synthetic frames under a new GitHub-hosted runner-temp
+The test writes twelve synthetic frames under a new GitHub-hosted runner-temp
 directory: Russian and English, light and dark, full and compact. Full frames
-show the existing dialog; compact frames show the deferred state. These frames
+show the existing dialog; compact frames show the deferred state. Four further
+frames show the download button with programmatic keyboard focus. These frames
 do not constitute visual acceptance against the approved reference. No real
 network, user settings, installation, package download or live update is tested.
 

@@ -91,7 +91,7 @@ try {
     $output = Invoke-Isolated @($assembly, $root)
     Write-Output $output.TrimEnd()
     $files = @(Get-ChildItem -LiteralPath $root -Filter '*.png' -File)
-    Check ($files.Count -eq 8) 'The eight requested synthetic frames were not captured.'
+    Check ($files.Count -eq 12) 'The twelve requested synthetic frames were not captured.'
     $summary = [pscustomobject]@{
         SdkVersion=$sdkVersion; Synthetic=$true; RealNetworkUsed=$false
         Frames=@($files | ForEach-Object { [pscustomobject]@{ Name=$_.Name; Sha256=(Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash } })
