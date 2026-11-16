@@ -130,7 +130,7 @@ begin
   if Handle = THandle(-1) then Exit;
   try
     try
-      if (NativeFileType(Handle) <> DiskFile) or (not NativeFileInfo(Handle, Info)) then Exit;
+      if (NativeFileType(Handle) <> DiskFile) or (NativeFileInfo(Handle, Info) = 0) then Exit;
       if (Info.Attributes and (AttributeDirectory or AttributeReparsePoint)) <> 0 then Exit;
       Stream := THandleStream.Create(Handle);
       try

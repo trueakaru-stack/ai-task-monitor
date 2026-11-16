@@ -26,7 +26,10 @@ starts `AI Task Monitor.exe` with an offscreen window in the runner. It verifies
 that the launched executable owns that window and closes it cleanly. The test
 then modifies one payload file, locks another and adds unrelated files and data.
 During synthetic uninstall, unchanged unlocked payload files are removed while
-the modified file, locked file and unrelated data are retained. The test checks
+the modified file, locked file and unrelated data are retained. When the hosted
+runner permits creating a symbolic link, it also replaces one owned path with a
+synthetic link to an outside copy and checks that both survive; otherwise the
+test reports that coverage as not run. The test checks
 user, machine and process PATH before and after; it does not change HOME or
 CODEX_HOME. Its screenshot is test evidence, not final visual acceptance.
 

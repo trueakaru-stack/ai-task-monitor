@@ -138,7 +138,7 @@ try {
         $payloadHashes.Add($file.Name, (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash)
     }
     Assert-Condition ($payloadHashes.ContainsKey('AI Task Monitor.exe') -and $payloadHashes.ContainsKey('AI Task Monitor.deps.json') -and
-        $payloadHashes.ContainsKey('AITaskMonitor.CodexCloud.dll')) 'Expected published preview files are missing.'
+        $payloadHashes.ContainsKey('AITaskMonitor.CodexCloud.dll') -and $payloadHashes.ContainsKey('AITaskMonitor.ClaudeReader.dll')) 'Expected published preview files are missing.'
 
     $ownership = Join-Path $testRoot 'payload-ownership.iss'
     $lines = [Collections.Generic.List[string]]::new()
@@ -268,6 +268,19 @@ public static class AitmWpfInstallerWindowCheck {
     $data = Join-Path $dataDir 'settings.json'
     $dataBytes = [Text.Encoding]::UTF8.GetBytes('{"synthetic":true}')
     [IO.File]::WriteAllBytes($data, $dataBytes)
+    $linkPath = Join-Path $install 'AITaskMonitor.ClaudeReader.dll'
+    $outsideCopy = Join-Path $testRoot 'synthetic-outside-payload.bin'
+    [IO.File]::Copy($linkPath, $outsideCopy, $false)
+    [IO.File]::Delete($linkPath)
+    $linkCreated = $false
+    try {
+        $null = New-Item -ItemType SymbolicLink -Path $linkPath -Target $outsideCopy -ErrorAction Stop
+        $linkCreated = $true
+    } catch {
+        Assert-Condition (-not [IO.File]::Exists($linkPath)) 'Symbolic-link fixture was partially created.'
+        [IO.File]::Copy($outsideCopy, $linkPath, $false)
+        Write-Output 'Symbolic-link preservation was not tested: runner could not create the synthetic link.'
+    }
     $locked = Join-Path $install 'AITaskMonitor.CodexCloud.dll'
     $lockStream = [IO.File]::Open($locked, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
     try {
@@ -277,12 +290,20 @@ public static class AitmWpfInstallerWindowCheck {
     Assert-Condition (-not [IO.File]::Exists($executable)) 'Unchanged application executable was not removed.'
     foreach ($entry in $payloadHashes.GetEnumerator()) {
         $installed = Join-Path $install $entry.Key
-        if ($entry.Key -in @('AI Task Monitor.deps.json', 'AITaskMonitor.CodexCloud.dll')) { continue }
+        if ($entry.Key -in @('AI Task Monitor.deps.json', 'AITaskMonitor.CodexCloud.dll') -or
+            ($linkCreated -and $entry.Key -eq 'AITaskMonitor.ClaudeReader.dll')) { continue }
         Assert-Condition (-not [IO.File]::Exists($installed)) 'An unchanged unlocked payload file remained.'
     }
     Assert-Condition ([Convert]::ToBase64String([IO.File]::ReadAllBytes($modified)) -ceq [Convert]::ToBase64String($modifiedBytes)) 'Modified payload was removed or changed.'
     Assert-Condition ([IO.File]::Exists($locked) -and (Get-FileHash -Algorithm SHA256 -LiteralPath $locked).Hash -ceq
         $payloadHashes['AITaskMonitor.CodexCloud.dll']) 'Locked payload was removed or changed.'
+    Assert-Condition ([IO.File]::Exists($outsideCopy) -and (Get-FileHash -Algorithm SHA256 -LiteralPath $outsideCopy).Hash -ceq
+        $payloadHashes['AITaskMonitor.ClaudeReader.dll']) 'Synthetic file outside the install directory was removed or changed.'
+    if ($linkCreated) {
+        Assert-Condition ([IO.File]::Exists($linkPath) -and
+            (([IO.File]::GetAttributes($linkPath) -band [IO.FileAttributes]::ReparsePoint) -ne 0)) 'Synthetic symbolic link was removed or changed.'
+        Write-Output 'Synthetic symbolic link and its outside target were preserved.'
+    }
     Assert-Condition ([Convert]::ToBase64String([IO.File]::ReadAllBytes($foreign)) -ceq [Convert]::ToBase64String($foreignBytes)) 'Foreign file was removed or changed.'
     Assert-Condition ([Convert]::ToBase64String([IO.File]::ReadAllBytes($data)) -ceq [Convert]::ToBase64String($dataBytes)) 'Synthetic user data was removed or changed.'
     Assert-Condition (-not [IO.File]::Exists($uninstallers[0].FullName)) 'Synthetic uninstaller remained.'
