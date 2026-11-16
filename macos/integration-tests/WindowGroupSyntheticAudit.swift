@@ -97,6 +97,32 @@ enum SyntheticWindowGroupAudit {
     private static var output: URL?
     private static var scheduled = false
     @MainActor private static var activeStore: TaskStore?
+    @MainActor private static weak var observedWindow: NSWindow?
+    @MainActor private static var resizeObserver: NSObjectProtocol?
+    @MainActor private static var closeObserver: NSObjectProtocol?
+    @MainActor private static var frameEvents: [[String: Any]] = []
+
+    @MainActor static func recordWindow(_ event: String, _ window: NSWindow) {
+        guard frameEvents.count < 256 else { return }
+        frameEvents.append(["event": event, "time": ProcessInfo.processInfo.systemUptime,
+                            "frame": [Double(window.frame.minX), Double(window.frame.minY),
+                                      Double(window.frame.width), Double(window.frame.height)],
+                            "minSize": [Double(window.minSize.width), Double(window.minSize.height)],
+                            "maxSize": [Double(window.maxSize.width), Double(window.maxSize.height)]])
+    }
+
+    @MainActor static func observeWindow(_ window: NSWindow) {
+        guard observedWindow !== window else { return }
+        if let resizeObserver { NotificationCenter.default.removeObserver(resizeObserver) }
+        observedWindow = window
+        recordWindow("observe", window)
+        resizeObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification,
+                                                                object: window, queue: .main) { [weak window] _ in
+            guard let window else { return }
+            MainActor.assumeIsolated { recordWindow("resize", window) }
+        }
+    }
+
 
     @MainActor static func prepare() -> Bool {
         let env = ProcessInfo.processInfo.environment
@@ -164,10 +190,10 @@ enum SyntheticWindowGroupAudit {
         let insets = content?.safeAreaInsets ?? NSEdgeInsetsZero
         let layout = window.contentLayoutRect
         var row: [String: Any] = ["mode": mode, "variant": variant, "scenario": scenario, "stage": stage,
-            "isCompact": store.isCompact, "toggleMethod": toggleMethod,
+            "isCompact": store.isCompact, "toggleMethod": toggleMethod, "frameEvents": frameEvents,
             "windowHasShadow": window.hasShadow, "windowIsOpaque": window.isOpaque,
             "windowLevel": window.level.rawValue, "movableByBackground": window.isMovableByWindowBackground,
-            "fullSizeContent": window.styleMask.contains(.fullSizeContentView),
+            "canBecomeKey": window.canBecomeKey, "isKeyWindow": window.isKeyWindow,
             "backingScale": Double(window.backingScaleFactor),
             "windowFrame": [Double(window.frame.minX), Double(window.frame.minY),
                             Double(window.frame.width), Double(window.frame.height)],
@@ -206,6 +232,101 @@ enum SyntheticWindowGroupAudit {
         window.sendEvent(up)
     }
 
+    @MainActor private static func titlePoint(_ window: NSWindow, fromRight: CGFloat) throws -> NSPoint {
+        guard let view = window.contentView else { throw FixtureError.bitmap }
+        let variant = ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_VARIANT"]
+        let inset = variant == "baseline" ? view.safeAreaInsets.top : 0
+        return NSPoint(x: view.bounds.width - fromRight, y: view.bounds.height - inset - 29)
+    }
+
+    @MainActor private static func sendClick(_ window: NSWindow, at point: NSPoint) throws {
+        let time = ProcessInfo.processInfo.systemUptime
+        guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
+                                            timestamp: time, windowNumber: window.windowNumber, context: nil,
+                                            eventNumber: 7, clickCount: 1, pressure: 1),
+              let up = NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [],
+                                          timestamp: time + 0.01, windowNumber: window.windowNumber, context: nil,
+                                          eventNumber: 8, clickCount: 1, pressure: 0) else { throw FixtureError.bitmap }
+        window.sendEvent(down)
+        window.sendEvent(up)
+    }
+
+    @MainActor private static func exerciseControls() {
+        do {
+            guard let output else { throw FixtureError.unsafeEnvironment }
+            let window = try activeWindow()
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                do {
+                    let key = window.isKeyWindow
+                    let canBecomeKey = window.canBecomeKey
+                    let origin = window.frame.origin
+                    let point = try titlePoint(window, fromRight: window.frame.width - 180)
+                    let end = NSPoint(x: point.x + 25, y: point.y + 15)
+                    let time = ProcessInfo.processInfo.systemUptime
+                    guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
+                                                        timestamp: time, windowNumber: window.windowNumber, context: nil,
+                                                        eventNumber: 11, clickCount: 1, pressure: 1),
+                          let drag = NSEvent.mouseEvent(with: .leftMouseDragged, location: end, modifierFlags: [],
+                                                        timestamp: time + 0.03, windowNumber: window.windowNumber, context: nil,
+                                                        eventNumber: 12, clickCount: 1, pressure: 1),
+                          let up = NSEvent.mouseEvent(with: .leftMouseUp, location: end, modifierFlags: [],
+                                                      timestamp: time + 0.06, windowNumber: window.windowNumber, context: nil,
+                                                      eventNumber: 13, clickCount: 1, pressure: 0) else { throw FixtureError.bitmap }
+                    window.sendEvent(down)
+                    window.sendEvent(drag)
+                    window.sendEvent(up)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        do {
+                            let moved = window.frame.origin != origin
+                            try sendClick(window, at: titlePoint(window, fromRight: 104))
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                do {
+                                    let minimized = window.isMiniaturized
+                                    if minimized { window.deminiaturize(nil) }
+                                    let report: [String: Any] = [
+                                        "mode": ProcessInfo.processInfo.environment["AITM_SYNTHETIC_APPEARANCE"] ?? "",
+                                        "variant": ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_VARIANT"] ?? "",
+                                        "scenario": ProcessInfo.processInfo.environment["AITM_WINDOWGROUP_SCENARIO"] ?? "",
+                                        "canBecomeKey": canBecomeKey, "isKeyWindow": key,
+                                        "movableByBackground": window.isMovableByWindowBackground,
+                                        "dragEventMovedWindow": moved, "minimizeEventMiniaturized": minimized
+                                    ]
+                                    let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                                    try write(data, name: "windowgroup-interactions.json", in: output)
+                                    closeObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
+                                                                                           object: nil, queue: nil) { _ in
+                                        MainActor.assumeIsolated {
+                                            try? write(Data("{\"closed\":true}".utf8), name: "windowgroup-close-completed.json", in: output)
+                                        }
+                                    }
+                                    try sendClick(window, at: titlePoint(window, fromRight: 32))
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                                        try? write(Data("{\"closed\":false}".utf8), name: "windowgroup-close-not-observed.json", in: output)
+                                        exit(0)
+                                    }
+                                } catch {
+                                    FileHandle.standardError.write(Data("Synthetic control probe failed.\n".utf8))
+                                    exit(1)
+                                }
+                            }
+                        } catch {
+                            FileHandle.standardError.write(Data("Synthetic drag or minimize probe failed.\n".utf8))
+                            exit(1)
+                        }
+                    }
+                } catch {
+                    FileHandle.standardError.write(Data("Synthetic focus or drag probe failed.\n".utf8))
+                    exit(1)
+                }
+            }
+        } catch {
+            FileHandle.standardError.write(Data("Synthetic control setup failed.\n".utf8))
+            exit(1)
+        }
+    }
+
     @MainActor static func schedule() {
         guard !scheduled else { return }
         scheduled = true
@@ -233,7 +354,7 @@ enum SyntheticWindowGroupAudit {
                         do {
                             guard store.isCompact != wasCompact else { throw FixtureError.bitmap }
                             try capture("after", toggleMethod: method)
-                            exit(0)
+                            exerciseControls()
                         } catch {
                             FileHandle.standardError.write(Data("Synthetic transition capture failed.\n".utf8))
                             exit(1)
