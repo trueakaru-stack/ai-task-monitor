@@ -85,6 +85,22 @@ replace_once("RootView.swift",
 replace_once("RootView.swift", "preferredLanguages: Locale.preferredLanguages",
              'preferredLanguages: ["ru"]')
 
+replace_once("RootView.swift",
+             "    private func configure(_ window: NSWindow?, coordinator: Coordinator) {\n        guard let window else { return }",
+             '    private func configure(_ window: NSWindow?, coordinator: Coordinator) {\n'
+             '        FileHandle.standardError.write(Data("AITM_CONFIG windowIsNil=\\(window == nil)\\n".utf8))\n'
+             '        guard let window else { return }')
+replace_once("RootView.swift",
+             "        defer { coordinator.isApplying = false }",
+             '        defer {\n'
+             '            coordinator.isApplying = false\n'
+             '            FileHandle.standardError.write(Data("AITM_CONFIG after frame=\\(window.frame) min=\\(window.minSize) max=\\(window.maxSize) level=\\(window.level.rawValue) movable=\\(window.isMovableByWindowBackground)\\n".utf8))\n'
+             '        }')
+replace_once("RootView.swift",
+             "        let size = isCompact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)",
+             '        let size = isCompact ? NSSize(width: 372, height: compactHeight) : NSSize(width: 560, height: 700)\n'
+             '        FileHandle.standardError.write(Data("AITM_CONFIG before compact=\\(isCompact) desired=\\(size) frame=\\(window.frame) min=\\(window.minSize) max=\\(window.maxSize)\\n".utf8))')
+
 helper = project / "integration-tests/WindowGroupSyntheticAudit.swift"
 target = source / "SyntheticWindowGroupAudit.swift"
 if not stat.S_ISREG(helper.lstat().st_mode) or target.exists() or target.is_symlink():
