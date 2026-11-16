@@ -1,7 +1,7 @@
 name: Synthetic macOS capacity regressions
 on:
   push:
-    branches: ['macos', 'codex/macos-card-candidate4-20261116']
+    branches: ['macos', 'codex/macos-kimi-scope-fix-20261116']
     paths: ['.github/workflows/macos-card-candidate4-20261116.yml', 'macos/**']
 permissions:
   contents: read
@@ -182,6 +182,22 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testConnectedScopeWithoutCardsStillReportsPartialLoss "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
+      - name: Check Kimi scope change and explicit disconnect
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: '"$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testKimiScopeChangeRetainsObservedCardUntilExplicitDisconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
+      - name: Check Hermes scope change and healthy neighbour
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: '"$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testHermesScopeChangeKeepsHealthyNeighbourAndReportsUncertainty "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
+      - name: Check existing in-memory provider suites
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for suite in ExternalProviderStateTests ExternalProviderTaskMapperTests ExternalProviderFilterTests ExternalProviderV2BrokerTests V1ProtectionTests NeutralTerminalTransitionTests HermesObserverStateTests; do
+            "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/env "AITM_HERMES_PYTHON=$AITM_TEST_PYTHON_BIN" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
+          done
       - name: Render synthetic availability states
         id: render
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -191,7 +207,7 @@ jobs:
         if: ${{ !cancelled() && steps.render.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
-          name: macos-availability-${{ matrix.runner }}
+          name: macos-kimi-scope-${{ matrix.runner }}
           path: ${{ runner.temp }}/aitm-card-tests.*/temp/render-*/renders/*.png
           if-no-files-found: error
           retention-days: 30

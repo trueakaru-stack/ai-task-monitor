@@ -141,6 +141,7 @@ final class TaskStore: ObservableObject {
     private var seenExternalConnections: Set<TaskProvider> = []
     private var kimiScope: String?
     private var kimiSeenScope: String?
+    private var kimiRetiredScopes: Set<String> = []
     private var kimiScanInProgress = false
     private var nextKimiScan = Date.distantPast
     private var deepSeekContext: DeepSeekIntegration.Context?
@@ -259,6 +260,21 @@ final class TaskStore: ObservableObject {
                         self.refresh()
                         return
                     }
+                    if connection.state == "connected" {
+                        // Retain only scopes with an already visible card. A
+                        // replacement scope does not prove that task finished.
+                        let visible = Set(self.previousExternal.compactMap { task in
+                            task.provider == .kimi ? Self.externalScope(task) : nil
+                        })
+                        self.kimiRetiredScopes.formIntersection(visible)
+                        if self.kimiState == "connected", let old = self.kimiScope,
+                           old != connection.scope, visible.contains(old) {
+                            self.kimiRetiredScopes.insert(old)
+                        }
+                        if let current = connection.scope { self.kimiRetiredScopes.remove(current) }
+                    } else {
+                        self.kimiRetiredScopes.removeAll()
+                    }
                     self.kimiScanned = true
                     self.kimiScanError = nil
                     self.kimiState = connection.state
@@ -291,7 +307,8 @@ final class TaskStore: ObservableObject {
             if kimiSeenScope == nil { return .disconnected }
             throw KimiIntegrationError(code: "operation-failed")
         }
-        return kimiScanned && kimiState == "connected" ? .connected : .disconnected
+        guard kimiScanned && kimiState == "connected" else { return .disconnected }
+        return kimiRetiredScopes.isEmpty ? .connected : .connectedDegraded
     }
 
     private func scheduleDeepSeekScan() {
@@ -1096,7 +1113,9 @@ final class TaskStore: ObservableObject {
         }
         if externalConnections[.kimi] == nil {
             if kimiScanError == nil, kimiState == "connected", let scope = kimiScope { scopes[.kimi] = [scope] }
-            if kimiScanError != nil, let scope = kimiSeenScope { uncertainScopes[.kimi] = [scope] }
+            var uncertainKimi = kimiRetiredScopes
+            if kimiScanError != nil, let scope = kimiSeenScope { uncertainKimi.insert(scope) }
+            if !uncertainKimi.isEmpty { uncertainScopes[.kimi] = uncertainKimi }
         }
         if externalConnections[.hermes] == nil {
             scopes[.hermes] = hermesAllowedScopes
