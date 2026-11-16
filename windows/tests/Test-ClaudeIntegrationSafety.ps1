@@ -47,7 +47,8 @@ try {
                     [ordered]@{ type = "command"; command = "echo synthetic" },
                     [ordered]@{ type = "prompt"; prompt = "synthetic" },
                     [ordered]@{ type = "command"; command = $owned + " --other-hook" },
-                    [ordered]@{ type = "command"; command = $owned; shell = "powershell" }
+                    [ordered]@{ type = "command"; command = $owned; shell = "powershell" },
+                    [ordered]@{ type = "command"; command = $legacyEncoded; shell = "powershell" }
                 ) },
                 [ordered]@{ matcher = "Other"; hooks = @() }
             )
@@ -82,7 +83,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Installing the hook failed." }
     $connected = Get-Content -Raw -Encoding UTF8 -LiteralPath $settingsPath | ConvertFrom-Json
     $groups = @($connected.hooks.PreToolUse)
-    if ($groups.Count -ne 3 -or @($groups[0].hooks).Count -ne 4 -or @($groups[1].hooks).Count -ne 0) { throw "Existing hook groups were changed." }
+    if ($groups.Count -ne 3 -or @($groups[0].hooks).Count -ne 5 -or @($groups[1].hooks).Count -ne 0) { throw "Existing hook groups were changed." }
     if ($groups[2].hooks[0].command -ne $owned) { throw "The app hook was not installed exactly." }
     & $assertConnected
     if (@(Get-ChildItem -LiteralPath $directory -Filter 'settings.json.codex-tasks-backup-*').Count -ne 1) { throw "A settings backup was not retained." }
@@ -204,12 +205,15 @@ try {
             $casePath = Join-Path $caseDirectory 'settings.json'
             $targetSpec = '..\..\linked-' + $case + '.json'
             $intermediate = $null
-            if ($case -eq 'chain') {
-                $intermediate = Join-Path $caseDirectory 'settings-target.json'
-                [void](New-Item -ItemType SymbolicLink -Path $intermediate -Target $targetSpec -ErrorAction Stop)
-                $targetSpec = 'settings-target.json'
-            }
-            [void](New-Item -ItemType SymbolicLink -Path $casePath -Target $targetSpec -ErrorAction Stop)
+            Push-Location -LiteralPath $caseDirectory
+            try {
+                if ($case -eq 'chain') {
+                    $intermediate = Join-Path $caseDirectory 'settings-target.json'
+                    [void](New-Item -ItemType SymbolicLink -Path $intermediate -Target $targetSpec -ErrorAction Stop)
+                    $targetSpec = 'settings-target.json'
+                }
+                [void](New-Item -ItemType SymbolicLink -Path $casePath -Target $targetSpec -ErrorAction Stop)
+            } finally { Pop-Location }
             $env:USERPROFILE = $caseProfile
             try {
                 foreach ($mode in @('Install', 'Remove')) {
