@@ -150,10 +150,15 @@ internal static class Program
         Click(window, "RussianLanguageButton");
         Check(Find<TextBlock>(window, "UpdateVersionText").Text == "Версия 0.2.7-alpha доступна для скачивания" &&
             Visible(Find<Grid>(window, "UpdateOverlay")) && Visible(Find<TextBlock>(window, "UpdateOpenError")) &&
+            Find<TextBlock>(window, "UpdateOpenError").Text == "Не удалось открыть страницу загрузки." &&
             ReferenceEquals(Keyboard.FocusedElement, focusBeforeLanguage), "Changing language reset the open update dialog or its state.");
+        retained = first.Controller.CurrentTasks.Single(task => task.Id == "claude:custom");
+        Check(retained.Title == "Задача Claude Code" && retained.Activity == "Пользовательский текст" &&
+            retained.Steps.Single().Title == "Название от источника", "Switching back changed Claude data or left its generated title untranslated.");
         Click(window, "EnglishLanguageButton");
         Check(Find<TextBlock>(window, "UpdateVersionText").Text == "Version 0.2.7-alpha is available to download" &&
-            Visible(Find<TextBlock>(window, "UpdateOpenError")), "The update version did not switch back to English.");
+            Visible(Find<TextBlock>(window, "UpdateOpenError")) &&
+            Find<TextBlock>(window, "UpdateOpenError").Text == "Could not open the download page.", "The update dialog did not switch back to English.");
         Click(window, "UpdateLaterButton");
         Click(window, "SettingsBackButton");
         Check(Visible(Find<Grid>(window, "ExpandedView")) && !Visible(Find<Grid>(window, "SettingsView")), "The back button did not return to tasks.");
