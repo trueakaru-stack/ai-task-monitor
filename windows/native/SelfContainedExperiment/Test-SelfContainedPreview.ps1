@@ -151,6 +151,9 @@ try {
     $dependencyText = [IO.File]::ReadAllText($deps)
     Assert-Condition ($dependencyText.Contains('Microsoft.NETCore.App.Runtime.win-x64/10.0.15') -and
         $dependencyText.Contains('Microsoft.WindowsDesktop.App.Runtime.win-x64/10.0.15')) 'Published runtime pack versions differ from the pin.'
+    $packageCoreClr = Join-Path $isolated 'nuget\microsoft.netcore.app.runtime.win-x64\10.0.15\runtimes\win-x64\native\coreclr.dll'
+    Assert-Condition ([IO.File]::Exists($packageCoreClr)) 'Pinned runtime package does not contain CoreCLR.'
+    $packageCoreClrHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $packageCoreClr).Hash
 
     $entries = @(Get-ChildItem -LiteralPath $payload -Recurse -Force)
     Assert-Condition ($entries.Count -gt 0) 'Published self-contained payload is empty.'
@@ -222,7 +225,8 @@ public static class AitmSelfContainedWindowCheck {
         }
         $coreRuntime = $runtimeModules | Where-Object { $_.Name -eq 'coreclr.dll' } | Select-Object -First 1
         $productVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($coreRuntime.Path).ProductVersion
-        Assert-Condition ($productVersion -match '^10\.0\.15(?:\+|$)') ('Loaded CoreCLR product version differs from the runtime pin: ' + $productVersion)
+        $coreClrHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $coreRuntime.Path).Hash
+        Assert-Condition ($coreClrHash -ceq $packageCoreClrHash) 'Loaded CoreCLR differs from the pinned runtime package.'
         Assert-Condition ([AitmSelfContainedWindowCheck]::PostMessage($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) 'Could not request preview shutdown.'
         Assert-Condition ($process.WaitForExit(10000) -and $process.ExitCode -eq 0) 'Self-contained preview did not exit cleanly.'
     } finally {
@@ -238,7 +242,8 @@ public static class AitmSelfContainedWindowCheck {
         SdkVersion = $version; RuntimeVersion = '10.0.15'; SdkArchiveSha512 = $sdkHash
         PayloadFiles = $payloadFiles; PayloadDirectories = $payloadDirectories
         LoadedRuntimeModuleNames = @($runtimeModules | ForEach-Object { $_.Name })
-        RuntimeModulesFromPayload = $true; NugetPackages = $packageFiles
+        RuntimeModulesFromPayload = $true; CoreClrFileProductVersion = $productVersion
+        CoreClrSha256 = $coreClrHash; NugetPackages = $packageFiles
     }
     $reportPath = Join-Path $testRoot 'selfcontained-inventory.json'
     [IO.File]::WriteAllText($reportPath, ($report | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))

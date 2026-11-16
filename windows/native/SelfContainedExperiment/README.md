@@ -28,8 +28,10 @@ test on the user's machine.
 The test launches the published executable with `DOTNET_ROOT` set to a new empty
 directory and a process PATH that excludes the SDK. It checks that the process
 owns the preview window, that the loaded CoreCLR and any observed host/WPF
-runtime modules come from the published payload, and that the CoreCLR version
-matches the pin. It inventories every payload file, nested directory, size and
+runtime modules come from the published payload, and that the CoreCLR SHA-256
+matches the file in the restored, signed runtime 10.0.15 package. CoreCLR's
+Windows file product version is also recorded; it is a build number, not the
+runtime package version. The test inventories every payload file, nested directory, size and
 SHA-256 without copying to a user profile. The generated screenshot is synthetic
 evidence and is not visual acceptance. A self-contained application still has
 Windows system dependencies; updating its bundled runtime requires rebuilding
