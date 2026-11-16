@@ -60,14 +60,14 @@ type
 function NativeCreateFile(const Name: String; Access, Share: Cardinal;
   Security: NativeUInt; Creation, Flags: Cardinal; Template: THandle): THandle;
   external 'CreateFileW@kernel32.dll stdcall uninstallonly';
-function NativeFileInfo(Handle: THandle; var Info: THandleFileInfo): BOOL;
+function NativeFileInfo(Handle: THandle; var Info: THandleFileInfo): Integer;
   external 'GetFileInformationByHandle@kernel32.dll stdcall uninstallonly';
 function NativeFileType(Handle: THandle): Cardinal;
   external 'GetFileType@kernel32.dll stdcall uninstallonly';
 function NativeSetFileInfo(Handle: THandle; InfoClass: Cardinal;
-  var DeleteFlag: Byte; BufferSize: Cardinal): BOOL;
+  var DeleteFlag: Byte; BufferSize: Cardinal): Integer;
   external 'SetFileInformationByHandle@kernel32.dll stdcall uninstallonly';
-function NativeCloseHandle(Handle: THandle): BOOL;
+function NativeCloseHandle(Handle: THandle): Integer;
   external 'CloseHandle@kernel32.dll stdcall uninstallonly';
 
 function IsSyntheticCi: Boolean;
@@ -130,7 +130,8 @@ begin
   if Handle = THandle(-1) then Exit;
   try
     try
-      if (NativeFileType(Handle) <> DiskFile) or (NativeFileInfo(Handle, Info) = 0) then Exit;
+      if NativeFileType(Handle) <> DiskFile then Exit;
+      if NativeFileInfo(Handle, Info) = 0 then Exit;
       if (Info.Attributes and (AttributeDirectory or AttributeReparsePoint)) <> 0 then Exit;
       Stream := THandleStream.Create(Handle);
       try
