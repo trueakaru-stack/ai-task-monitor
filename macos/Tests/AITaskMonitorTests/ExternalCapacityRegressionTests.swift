@@ -1,6 +1,20 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import AITaskMonitor
+
+private final class CapacityKimiFixture {
+    private let lock = NSLock()
+    private var value: Result<KimiConnection, Error>
+    init(_ value: Result<KimiConnection, Error>) { self.value = value }
+    func set(_ value: Result<KimiConnection, Error>) {
+        lock.lock(); self.value = value; lock.unlock()
+    }
+    func inspect() throws -> KimiConnection {
+        lock.lock(); defer { lock.unlock() }
+        return try value.get()
+    }
+}
 
 final class ExternalCapacityRegressionTests: XCTestCase {
     private let scopeA = String(repeating: "a", count: 32)
@@ -130,6 +144,64 @@ final class ExternalCapacityRegressionTests: XCTestCase {
         XCTAssertTrue(runtime.acknowledge(a))
         XCTAssertTrue(runtime.capacityLimitedScopes.contains(a))
         XCTAssertTrue(runtime.snapshot().contains { $0.id == "deepseek:" + scopeB + "_healthy" && $0.isActive && !$0.isUnconfirmed })
+    }
+
+
+    private func sendV1(_ directory: String, session: String, kind: String) throws {
+        let descriptor = try XCTUnwrap(ClaudeLoopSocket.connect(path: directory + "/events.sock"))
+        defer { Darwin.close(descriptor) }
+        let payload = try JSONSerialization.data(withJSONObject: ["version": 1, "provider": "kimi",
+                                                                   "session": session, "kind": kind])
+        let size = payload.count
+        let header = Data([UInt8(size & 255), UInt8((size >> 8) & 255), UInt8((size >> 16) & 255), UInt8((size >> 24) & 255)])
+        XCTAssertTrue(ClaudeLoopSocket.write(descriptor, data: header + payload))
+        XCTAssertEqual(ClaudeLoopSocket.read(descriptor, count: 1), Data([0x06]))
+    }
+
+    @MainActor
+    func testKimiTemporaryInspectionFailureRetainsCardUntilExplicitDisconnect() throws {
+        let path = try directory("ki")
+        try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: false)
+        let channelPath = path + "/ch"
+        let fixture = CapacityKimiFixture(.success(KimiConnection(state: "connected", scope: scopeA)))
+        var runtime: ExternalProviderRuntime?
+        defer { runtime?.stop(); try? FileManager.default.removeItem(atPath: path) }
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: URL(fileURLWithPath: path + "/codex")),
+                              claudeReader: ClaudeTaskReader(eventFile: URL(fileURLWithPath: path + "/events")),
+                              journal: DiagnosticJournal(directory: URL(fileURLWithPath: path + "/journal")),
+                              enableExternalProviders: true, openCodeConnection: { .connected },
+                              additionalExternalConnections: [.deepseek: { .disconnected }, .hermes: { .disconnected }],
+                              makeExternalRuntime: {
+            let created = ExternalProviderRuntime(channel: try ExternalProviderChannel(directory: channelPath))
+            runtime = created
+            return created
+        }, inspectKimiConnection: { try fixture.inspect() }, kimiScanInterval: 0.1)
+        func wait(_ message: String, _ predicate: () -> Bool) {
+            let deadline = Date().addingTimeInterval(4)
+            while Date() < deadline && !predicate() {
+                store.refresh()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+            }
+            XCTAssertTrue(predicate(), message)
+        }
+        let session = scopeA + "_seen"
+        wait("Kimi was not connected") { store.kimiState == "connected" && runtime != nil }
+        try sendV1(channelPath, session: session, kind: "started")
+        wait("Kimi task did not arrive") { store.tasks.contains { $0.id == "kimi:" + session } }
+        fixture.set(.failure(KimiIntegrationError(code: "modified-bundle")))
+        wait("Kimi check failure was not reported") { store.unavailableSources.contains(.kimi) }
+        XCTAssertTrue(store.tasks.contains { $0.id == "kimi:" + session && $0.isUnconfirmed })
+        fixture.set(.success(KimiConnection(state: "connected", scope: scopeA)))
+        wait("Kimi inspection did not recover") { store.kimiState == "connected" && !store.unavailableSources.contains(.kimi) }
+        XCTAssertTrue(store.tasks.contains { $0.id == "kimi:" + session && $0.isUnconfirmed },
+                      "A temporary inspection error is not evidence that this task finished.")
+        fixture.set(.success(KimiConnection(state: "disabled", scope: nil)))
+        wait("Kimi was not disabled") { store.kimiState == "disabled" }
+        XCTAssertFalse(store.tasks.contains { $0.id == "kimi:" + session })
+        fixture.set(.success(KimiConnection(state: "connected", scope: scopeA)))
+        wait("Kimi did not reconnect") { store.kimiState == "connected" }
+        XCTAssertFalse(store.tasks.contains { $0.id == "kimi:" + session },
+                       "An explicit disconnect must not revive an old Kimi task.")
     }
 
     #if DEBUG
