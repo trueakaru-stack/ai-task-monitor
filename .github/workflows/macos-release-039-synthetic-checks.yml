@@ -1,0 +1,257 @@
+name: Isolated 0.3.9 source and icon probe
+on:
+  push:
+    branches: ['codex/macos-release-0-3-9-candidate-20261116']
+    paths: ['.github/workflows/macos-release-039-synthetic-checks.yml']
+permissions:
+  contents: read
+jobs:
+  windowgroup:
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - name: Prepare disposable source and strict sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-card-tests.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
+          printf 'synthetic-only\n' > "$task_marker"
+          task_path="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin:$DEVELOPER_DIR/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          task_python=/usr/bin/python3
+          test -x "$task_python"
+          mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" \
+            "$task_root/swift-cache" "$task_root/swift-config" "$task_root/swift-security" "$task_root/clang-cache" "$task_root/baseline"
+          task_git() {
+            /usr/bin/env -i "PATH=$task_path" "DEVELOPER_DIR=$DEVELOPER_DIR" GIT_CONFIG_GLOBAL=/dev/null \
+              GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 git "$@"
+          }
+          task_git -c credential.helper= -c core.hooksPath="$task_root/hooks" \
+            -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
+          task_git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" \
+            fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          task_git -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
+          test "$(task_git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(task_git -C "$task_root/source/macos" hash-object Package.swift)" = "144202dfc5f413e896867b219af2e0c3dc621897"
+          test "$(task_git -C "$task_root/source" hash-object macos/Info.plist)" = 20b247bd3e88dd24259912124aac20333e592850
+          test "$(task_git -C "$task_root/source" hash-object macos/Sources/AITaskMonitor/AppVersion.swift)" = 8fa85f8005e27219edb28180a2c91a90f690bdfd
+          cat > "$task_root/profile.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (deny mach-lookup)
+          (allow mach-lookup (global-name "com.apple.windowserver.active") (global-name "com.apple.windowserver.session")
+                             (global-name "com.apple.CARenderServer") (global-name "com.apple.windowmanager.server"))
+          PROFILE
+          cat > "$task_root/run-isolated" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" \
+            "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" \
+            "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 \
+            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 \
+            "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "AITM_SYNTHETIC_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" -f "$AITM_TEST_TASK_ROOT/profile.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-isolated"
+          {
+            printf 'AITM_TEST_TASK_ROOT=%s\n' "$task_root"
+            printf 'AITM_TEST_DENIED_FILE=%s\n' "$task_marker"
+            printf 'AITM_TEST_PYTHON_BIN=%s\n' "$task_python"
+            printf 'AITM_TASK_PATH=%s\n' "$task_path"
+          } >> "$GITHUB_ENV"
+      - name: Verify profile isolation
+        id: isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          "$task_run" /usr/bin/true
+          "$task_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          if "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >out 2>err; then exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_DENIED_FILE" >out 2>err; then exit 1; fi
+          "$task_run" /bin/ln -s "$AITM_TEST_DENIED_FILE" "$AITM_TEST_TASK_ROOT/denied-link"
+          if "$task_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >out 2>err; then exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >out 2>err; then exit 1; fi
+      - name: Probe icon conversion with a single system service
+        id: icon
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          /bin/cp profile.sb profile-icon.sb
+          printf '%s\n' '(allow mach-lookup (global-name "com.apple.lsd.mapdb"))' >> profile-icon.sb
+          /usr/bin/sed 's@profile.sb@profile-icon.sb@' run-isolated > run-icon
+          chmod 700 run-icon
+          icon_run="$AITM_TEST_TASK_ROOT/run-icon"
+          "$icon_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          if "$icon_run" /bin/cat "$AITM_TEST_DENIED_FILE" >out 2>err; then exit 1; fi
+          if "$icon_run" /usr/bin/touch "$AITM_TEST_DENIED_FILE" >out 2>err; then exit 1; fi
+          if "$icon_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >out 2>err; then exit 1; fi
+          if "$icon_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >out 2>err; then exit 1; fi
+          cat > mach-probe.c <<'C'
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
+          #include <errno.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          int main(void) {
+              const char *blocked[] = {"com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon", "com.apple.bsd.dirhelper"};
+              for (unsigned i = 0; i < sizeof(blocked) / sizeof(blocked[0]); ++i) {
+                  mach_port_t service = MACH_PORT_NULL;
+                  kern_return_t result = bootstrap_look_up(bootstrap_port, blocked[i], &service);
+                  if (result == KERN_SUCCESS) mach_port_deallocate(mach_task_self(), service);
+                  if (result != BOOTSTRAP_NOT_PRIVILEGED) { fprintf(stderr, "Profile service not provably blocked: %d\n", result); return 1; }
+              }
+              int fd = socket(AF_INET, SOCK_STREAM, 0);
+              if (fd < 0) {
+                  if (errno != EPERM && errno != EACCES) return 2;
+              } else {
+                  struct sockaddr_in addr = {0};
+                  addr.sin_len = sizeof(addr);
+                  addr.sin_family = AF_INET;
+                  addr.sin_port = htons(9);
+                  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                  errno = 0;
+                  if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || (errno != EPERM && errno != EACCES)) {
+                      close(fd); fprintf(stderr, "Loopback network was not provably denied.\n"); return 3;
+                  }
+                  close(fd);
+              }
+              puts("Profile services and loopback network remain denied.");
+              return 0;
+          }
+          C
+          "$task_run" /usr/bin/clang -mmacosx-version-min=13.0 "$AITM_TEST_TASK_ROOT/mach-probe.c" -o "$AITM_TEST_TASK_ROOT/mach-probe"
+          "$task_run" "$AITM_TEST_TASK_ROOT/mach-probe"
+          "$icon_run" "$AITM_TEST_TASK_ROOT/mach-probe"
+          mkdir -p "$AITM_TEST_TASK_ROOT/icons/AppIcon.iconset"
+          task_icons="$AITM_TEST_TASK_ROOT/source/macos/assets/app-icon"
+          iconset="$AITM_TEST_TASK_ROOT/icons/AppIcon.iconset"
+          cp "$task_icons/icon-16.png" "$iconset/icon_16x16.png"
+          cp "$task_icons/icon-32.png" "$iconset/icon_16x16@2x.png"
+          cp "$task_icons/icon-32.png" "$iconset/icon_32x32.png"
+          cp "$task_icons/icon-64.png" "$iconset/icon_32x32@2x.png"
+          cp "$task_icons/icon-128.png" "$iconset/icon_128x128.png"
+          cp "$task_icons/icon-256.png" "$iconset/icon_128x128@2x.png"
+          cp "$task_icons/icon-256.png" "$iconset/icon_256x256.png"
+          cp "$task_icons/icon-512.png" "$iconset/icon_256x256@2x.png"
+          cp "$task_icons/icon-512.png" "$iconset/icon_512x512.png"
+          cp "$task_icons/icon-1024.png" "$iconset/icon_512x512@2x.png"
+          set +e
+          "$task_run" /usr/bin/iconutil -c icns "$iconset" -o "$AITM_TEST_TASK_ROOT/icons/strict.icns" > "$AITM_TEST_TASK_ROOT/strict-icon.log" 2>&1
+          strict_status=$?
+          set -e
+          echo "Strict iconutil exit status: $strict_status"
+          cat "$AITM_TEST_TASK_ROOT/strict-icon.log"
+          "$icon_run" /usr/bin/iconutil -c icns "$iconset" -o "$AITM_TEST_TASK_ROOT/icons/icon.icns"
+          test -s "$AITM_TEST_TASK_ROOT/icons/icon.icns"
+          /usr/bin/shasum -a 256 "$AITM_TEST_TASK_ROOT/icons/icon.icns"
+          "$icon_run" /usr/bin/iconutil -c iconset "$AITM_TEST_TASK_ROOT/icons/icon.icns" -o "$AITM_TEST_TASK_ROOT/icons/roundtrip.iconset"
+          for n in icon_16x16.png icon_16x16@2x.png icon_32x32.png icon_32x32@2x.png icon_128x128.png icon_128x128@2x.png icon_256x256.png icon_256x256@2x.png icon_512x512.png icon_512x512@2x.png; do
+            test -s "$AITM_TEST_TASK_ROOT/icons/roundtrip.iconset/$n"
+          done
+          echo 'Round-trip includes all ten icon sizes.'
+      - name: Build only synthetic source tests
+        id: test_build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          test ! -e Tests/AITaskMonitorTests/ReleaseCandidateAuditTests.swift
+          cat > Tests/AITaskMonitorTests/ReleaseCandidateAuditTests.swift <<'SWIFT'
+          import Foundation
+          import XCTest
+          @testable import AITaskMonitor
+
+          final class ReleaseCandidateAuditTests: XCTestCase {
+              func testPriorAlphaDetectsCandidateButCandidateDoesNotOfferItself() throws {
+                  let version = "0.3.9-alpha"
+                  XCTAssertEqual(AppVersion.sourceVersion, version)
+                  let name = "AITaskMonitor-macOS-0.3.9-alpha.dmg"
+                  let url = "https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.9-alpha/" + name
+                  let rows: [[String: Any]] = [["tag_name": "v0.3.9-alpha", "draft": false,
+                                                "assets": [["name": name, "browser_download_url": url]]]]
+                  let data = try JSONSerialization.data(withJSONObject: rows)
+                  XCTAssertEqual(ReleaseSelector.select(data: data, currentVersion: "0.3.8-alpha")?.version, version)
+                  XCTAssertNil(ReleaseSelector.select(data: data, currentVersion: version))
+              }
+          }
+          SWIFT
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          "$task_run" swift build --disable-sandbox --build-tests --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" \
+            --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security"
+          task_bin="$("$task_run" swift build --disable-sandbox --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" \
+            --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
+          test -x "$task_bin/AITaskMonitor"
+          test -d "$task_bin/AITaskMonitorPackageTests.xctest"
+          printf 'AITM_TEST_BIN=%s\n' "$task_bin" >> "$GITHUB_ENV"
+      - name: Verify update candidate selection
+        id: update_test
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
+            -XCTest AITaskMonitorTests.ReleaseCandidateAuditTests/testPriorAlphaDetectsCandidateButCandidateDoesNotOfferItself \
+            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee update-test.log
+          grep -F 'Executed 1 test, with 0 failures' update-test.log
+      - name: Verify generated Claude hook with synthetic data
+        id: claude_test
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/env "AITM_CLAUDE_TEST_EXECUTABLE=$AITM_TEST_BIN/AITaskMonitor" \
+            "$DEVELOPER_DIR/usr/bin/xctest" \
+            -XCTest AITaskMonitorTests.ClaudeIntegrationSafetyTests/testGeneratedHookCommandRunsExecutableAndUpdatesReader \
+            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee claude-test.log
+          grep -F 'Executed 1 test, with 0 failures' claude-test.log
+      - name: Verify Codex synthetic session
+        id: codex_test
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT"
+          "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" \
+            -XCTest AITaskMonitorTests.CodexRevertSafetyTests/testCanonicalOrdinaryUUIDStillReadsActivity \
+            "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee codex-test.log
+          grep -F 'Executed 1 test, with 0 failures' codex-test.log
+      - name: Report incomplete checks
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          ICON_RESULT: ${{ steps.icon.outcome }}
+          BUILD_RESULT: ${{ steps.test_build.outcome }}
+          UPDATE_RESULT: ${{ steps.update_test.outcome }}
+          CLAUDE_RESULT: ${{ steps.claude_test.outcome }}
+          CODEX_RESULT: ${{ steps.codex_test.outcome }}
+        run: |
+          set -euo pipefail
+          printf 'icon=%s build=%s update=%s claude=%s codex=%s\n' "$ICON_RESULT" "$BUILD_RESULT" "$UPDATE_RESULT" "$CLAUDE_RESULT" "$CODEX_RESULT"
+          test "$ICON_RESULT" = success
+          test "$BUILD_RESULT" = success
+          test "$UPDATE_RESULT" = success
+          test "$CLAUDE_RESULT" = success
+          test "$CODEX_RESULT" = success
