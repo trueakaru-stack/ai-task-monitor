@@ -5,11 +5,13 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using AITaskMonitor.Prototype;
 using AITaskMonitor.Prototype.Settings;
+using AITaskMonitor.NativeUpdateController;
 
 internal static class Program
 {
@@ -84,6 +86,10 @@ internal static class Program
         Click(window, "SettingsFooterButton");
         Check(Visible(Find<Grid>(window, "SettingsView")) && !Visible(Find<Grid>(window, "ExpandedView")), "Settings did not open.");
         Check(Find<TextBlock>(window, "SettingsHeading").Text == "Настройки", "The old Russian language was not applied.");
+        Check(Find<TextBlock>(window, "CodexCloudSourceStatus").Text == "Нет данных" &&
+            (string)Find<Button>(window, "CodexCloudSourceAction").Content == "Подключить" &&
+            !Find<Button>(window, "CodexCloudSourceAction").IsEnabled,
+            "The unconnected cloud control had no truthful disabled state.");
         Capture(window, root, "settings-dark-ru");
 
         Click(window, "LightThemeButton");
@@ -108,12 +114,37 @@ internal static class Program
         Check(Find<TextBlock>(window, "SettingsHeading").Text == "Settings" &&
             (string)Find<Button>(window, "SystemThemeButton").Content == "System" &&
             (string)Find<Button>(window, "RussianLanguageButton").Content == "Русский", "The settings labels were not translated correctly.");
+        Check(Find<TextBlock>(window, "CodexCloudSourceStatus").Text == "No data" &&
+            (string)Find<Button>(window, "CodexCloudSourceAction").Content == "Connect" &&
+            !Find<Button>(window, "CodexCloudSourceAction").IsEnabled, "The cloud fallback was not translated or was enabled.");
         SampleTask retained = first.Controller.CurrentTasks.Single(task => task.Id == "claude:custom");
         Check(retained.Activity == "Пользовательский текст" && retained.Steps.Single().Title == "Название от источника" &&
             retained.Title == "Claude Code task", "Changing language altered source text or failed to relocalize a generated title.");
         Capture(window, root, "settings-light-en");
         Click(window, "DarkThemeButton");
         Capture(window, root, "settings-dark-en");
+        Click(window, "SystemThemeButton");
+        Click(window, "SystemLanguageButton");
+        using (JsonDocument saved = ReadTarget(target))
+            Check(saved.RootElement.GetProperty("theme").GetString() == "system" &&
+                saved.RootElement.GetProperty("language").GetString() == "system" &&
+                Find<TextBlock>(window, "SettingsHeading").Text == "Настройки" &&
+                ((SolidColorBrush)window.Resources["Surface"]).Color == (Color)ColorConverter.ConvertFromString("#202020"),
+                "The selected system modes did not use the supplied system preferences.");
+        Click(window, "EnglishLanguageButton");
+        Click(window, "DarkThemeButton");
+        first.Controller.ApplySyntheticUpdate(new UpdateInfo("0.2.7-alpha", "https://example.invalid/update"),
+            () => throw new InvalidOperationException("Synthetic download error"));
+        Click(window, "UpdateDownloadButton");
+        IInputElement? focusBeforeLanguage = Keyboard.FocusedElement;
+        Click(window, "RussianLanguageButton");
+        Check(Find<TextBlock>(window, "UpdateVersionText").Text == "Версия 0.2.7-alpha доступна для скачивания" &&
+            Visible(Find<Grid>(window, "UpdateOverlay")) && Visible(Find<TextBlock>(window, "UpdateOpenError")) &&
+            ReferenceEquals(Keyboard.FocusedElement, focusBeforeLanguage), "Changing language reset the open update dialog or its state.");
+        Click(window, "EnglishLanguageButton");
+        Check(Find<TextBlock>(window, "UpdateVersionText").Text == "Version 0.2.7-alpha is available to download" &&
+            Visible(Find<TextBlock>(window, "UpdateOpenError")), "The update version did not switch back to English.");
+        Click(window, "UpdateLaterButton");
         Click(window, "SettingsBackButton");
         Check(Visible(Find<Grid>(window, "ExpandedView")) && !Visible(Find<Grid>(window, "SettingsView")), "The back button did not return to tasks.");
         Check(Find<TextBlock>(window, "ProgressHeading").Text == "Progress", "The main screen did not switch language.");

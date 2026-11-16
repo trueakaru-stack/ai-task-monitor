@@ -30,9 +30,9 @@ try{
  $config=Join-Path $root 'NuGet.Config'
  [IO.File]::WriteAllText($config,'<configuration><packageSources><clear /></packageSources></configuration>',[Text.UTF8Encoding]::new($false))
  $artifacts=Join-Path $root 'artifacts'
- function Invoke-Isolated([string[]]$arguments){
+ function Invoke-Isolated([string[]]$arguments,[string]$executable=$dotnet){
   $info=[Diagnostics.ProcessStartInfo]::new()
-  $info.FileName=$dotnet;$info.WorkingDirectory=$repository;$info.UseShellExecute=$false;$info.CreateNoWindow=$true
+  $info.FileName=$executable;$info.WorkingDirectory=$repository;$info.UseShellExecute=$false;$info.CreateNoWindow=$true
   $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true;$info.Environment.Clear()
   $values=@{
    SystemRoot=$env:SystemRoot;windir=$env:SystemRoot
@@ -47,7 +47,7 @@ try{
    CI=$env:CI;GITHUB_ACTIONS=$env:GITHUB_ACTIONS;RUNNER_ENVIRONMENT=$env:RUNNER_ENVIRONMENT
    RUNNER_OS=$env:RUNNER_OS;RUNNER_TEMP=$env:RUNNER_TEMP
   }
-  foreach($name in @('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','SystemDrive','ComSpec')){
+  foreach($name in @('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','SystemDrive','ComSpec','PATHEXT')){
    $value=[Environment]::GetEnvironmentVariable($name)
    if(-not [string]::IsNullOrEmpty($value)){$values[$name]=$value}
   }
@@ -79,6 +79,29 @@ try{
  $viewAssembly=Join-Path $artifacts 'bin/Prototype.Tests/release/AITaskMonitor.Prototype.Tests.dll'
  Check ([IO.File]::Exists($viewAssembly)) 'The existing WPF test assembly is missing.'
  Invoke-Isolated @($viewAssembly)
+ $released=[IO.Path]::GetFullPath($env:AITM_RELEASE_SOURCE)
+ Check ($released.StartsWith([IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')+'\',[StringComparison]::OrdinalIgnoreCase)) 'Released source is not isolated.'
+ $releasedScript=Join-Path $released 'windows/app/CodexProgress.ps1'
+ Check ([IO.File]::Exists($releasedScript)) 'The released Windows source is missing.'
+ $shell=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+ foreach($theme in @('dark','light')){foreach($language in @('ru','en')){
+  $stem=$theme+'-'+$language
+  $settings=Join-Path $root ('released-'+$stem+'.png')
+  $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',$releasedScript,
+   '-PreviewActiveTasks','1','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,
+   '-PreferencesFile',(Join-Path $root ('temp/released-'+$stem+'.json')),
+   '-DiagnosticDirectory',(Join-Path $root ('temp/diagnostic-'+$stem)),
+   '-SnapshotFile',(Join-Path $root ('temp/main-'+$stem+'.png')),'-SettingsSnapshotFile',$settings)
+  Invoke-Isolated -arguments $arguments -executable $shell
+  Check ([IO.File]::Exists($settings)) 'The published settings frame is missing.'
+ }}
+ foreach($path in @(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File)+@(Get-ChildItem -LiteralPath $root -Filter 'released-*.png' -File)){
+  $bytes=[IO.File]::ReadAllBytes($path.FullName)
+  Check ($bytes.Length -ge 24) 'A rendered frame is too short.'
+  $width=([int]$bytes[16] -shl 24) -bor ([int]$bytes[17] -shl 16) -bor ([int]$bytes[18] -shl 8) -bor [int]$bytes[19]
+  $height=([int]$bytes[20] -shl 24) -bor ([int]$bytes[21] -shl 16) -bor ([int]$bytes[22] -shl 8) -bor [int]$bytes[23]
+  Check ($width -eq 590 -and $height -eq 760) ('Unexpected frame size: '+$path.Name)
+ }
 }finally{
  foreach($scope in @('User','Machine')){
   $before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine}

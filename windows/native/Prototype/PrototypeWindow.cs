@@ -261,12 +261,18 @@ internal sealed class PrototypeWindow
             overlay.Visibility = Visibility.Collapsed;
             return;
         }
-        Find<TextBlock>("UpdateVersionText").Text = options.Language == "en"
-            ? $"Version {syntheticUpdate.Version} is available to download"
-            : $"Версия {syntheticUpdate.Version} доступна для скачивания";
+        UpdateVersionText();
         Find<TextBlock>("UpdateOpenError").Visibility = Visibility.Collapsed;
         overlay.Visibility = Visibility.Visible;
         Find<Button>("UpdateLaterButton").Focus();
+    }
+
+    private void UpdateVersionText()
+    {
+        if (syntheticUpdate is null) return;
+        Find<TextBlock>("UpdateVersionText").Text = options.Language == "en"
+            ? $"Version {syntheticUpdate.Version} is available to download"
+            : $"Версия {syntheticUpdate.Version} доступна для скачивания";
     }
 
     private void DismissSyntheticUpdate()
@@ -548,6 +554,7 @@ internal sealed class PrototypeWindow
         if (changedLanguage)
         {
             ApplyStaticTranslations();
+            UpdateVersionText();
             RelocalizeSamples();
         }
         if (changedTheme || changedLanguage) Render();
@@ -566,6 +573,22 @@ internal sealed class PrototypeWindow
             ? english ? "Could not save display settings" : "Не удалось сохранить настройки оформления"
             : english ? "Could not read display settings" : "Не удалось прочитать настройки оформления";
         error.Visibility = preferenceError.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        // These source controls are not yet connected in this host. Keep the
+        // published labels and report only that their state is unavailable.
+        foreach (string name in new[] { "CodexSourceStatus", "CodexCloudSourceStatus", "ClaudeSourceStatus",
+            "OpenCodeSourceStatus", "KimiSourceStatus", "DeepSeekSourceStatus", "HermesSourceStatus" })
+            Find<TextBlock>(name).Text = english ? "No data" : "Нет данных";
+        foreach (string name in new[] { "CodexCloudSourceAction", "ClaudeSourceAction", "OpenCodeSourceAction", "DeepSeekSourceAction" })
+            Find<Button>(name).Content = english ? "Connect" : "Подключить";
+        Find<Button>("KimiSourceAction").Content = english ? "Copy path" : "Скопировать путь";
+        Find<Button>("HermesSourceAction").Content = english ? "Prepare" : "Подготовить";
+        foreach (var item in new[] { ("CodexCloudSourceAction", "Codex Cloud"), ("ClaudeSourceAction", "Claude Code"),
+            ("OpenCodeSourceAction", "OpenCode"), ("KimiSourceAction", "Kimi Code"),
+            ("DeepSeekSourceAction", "DeepSeek Harness"), ("HermesSourceAction", "Hermes Agent") })
+        {
+            Button button = Find<Button>(item.Item1);
+            AutomationProperties.SetName(button, (string)button.Content + " " + item.Item2);
+        }
     }
 
     private void RelocalizeSamples()

@@ -32,12 +32,23 @@ jobs:
           if($LASTEXITCODE -ne 0){throw 'Cannot fetch the exact source revision.'}
           git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
           if($LASTEXITCODE -ne 0){throw 'Cannot select the exact source revision.'}
+          $released=Join-Path $root 'released'
+          New-Item -ItemType Directory -Path $released | Out-Null
+          git -c credential.helper= -c core.hooksPath="$hooks" init --quiet --template="$template" "$released"
+          if($LASTEXITCODE -ne 0){throw 'Cannot initialize released source checkout.'}
+          git -C "$released" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" 'a04da15354b9d49b368df7ee0e46e0e2527b5d7c'
+          if($LASTEXITCODE -ne 0){throw 'Cannot fetch the published Windows release.'}
+          git -C "$released" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+          if($LASTEXITCODE -ne 0){throw 'Cannot select the published Windows release.'}
+          $env:AITM_RELEASE_SOURCE=$released
           & (Join-Path $source '.github/display-settings-ci/Run.ps1')
       - name: Preserve synthetic settings frames
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: display-settings-frames
-          path: ${{ runner.temp }}/aitm-display-*/settings-*.png
+          path: |
+            ${{ runner.temp }}/aitm-display-*/settings-*.png
+            ${{ runner.temp }}/aitm-display-*/released-*.png
           if-no-files-found: ignore
           retention-days: 7
