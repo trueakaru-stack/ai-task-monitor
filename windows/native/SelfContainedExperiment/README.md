@@ -37,9 +37,18 @@ evidence and is not visual acceptance. A self-contained application still has
 Windows system dependencies; updating its bundled runtime requires rebuilding
 and redeploying the application.
 
-No install/uninstall is performed by this experiment. The inventory is an input
-to a separate CI-only installer investigation: nested files and directories,
-reparse points, locked or replaced files, ownership, interrupted installation
-and safe removal need their own controls and tests. Never treat the experimental
-payload or its build output as a release or publish it to users.
+`SelfContainedPreview.iss` and `Test-SelfContainedInstaller.ps1` additionally
+compile a CI-only installer using the pinned, signature-checked Inno Setup
+compiler, install only into a new synthetic directory, and verify the nested
+payload against the publish output. The test starts the installed executable
+with an empty runtime root and confirms that its runtime modules come from the
+install directory. It checks preservation of modified, locked and foreign nested
+files when running the synthetic uninstaller.
+
+The synthetic uninstaller intentionally retains the entire payload. It is not
+a complete uninstall and must not be used for release. Safe removal of owned
+nested files still needs a separate design and checks for redirected paths,
+reparse points, concurrent replacement, interrupted installation and other
+ownership cases. Never treat the experimental payload or its build output as a
+release or publish it to users.
 

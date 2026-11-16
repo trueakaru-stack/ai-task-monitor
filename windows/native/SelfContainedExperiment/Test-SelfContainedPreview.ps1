@@ -234,6 +234,8 @@ public static class AitmSelfContainedWindowCheck {
         $process.Dispose()
     }
 
+    & (Join-Path $PSScriptRoot 'Test-SelfContainedInstaller.ps1') -TestRoot $testRoot -ExpectedCoreClrHash $packageCoreClrHash
+
     $packageFiles = @(Get-ChildItem -LiteralPath (Join-Path $isolated 'nuget') -Recurse -File -Filter '*.nupkg' | ForEach-Object {
         [pscustomobject]@{ RelativePath = [IO.Path]::GetRelativePath((Join-Path $isolated 'nuget'), $_.FullName).Replace('\', '/');
             Sha512 = (Get-FileHash -Algorithm SHA512 -LiteralPath $_.FullName).Hash }
@@ -243,7 +245,7 @@ public static class AitmSelfContainedWindowCheck {
         PayloadFiles = $payloadFiles; PayloadDirectories = $payloadDirectories
         LoadedRuntimeModuleNames = @($runtimeModules | ForEach-Object { $_.Name })
         RuntimeModulesFromPayload = $true; CoreClrFileProductVersion = $productVersion
-        CoreClrSha256 = $coreClrHash; NugetPackages = $packageFiles
+        CoreClrSha256 = $coreClrHash; InstallerRetainsPayload = $true; NugetPackages = $packageFiles
     }
     $reportPath = Join-Path $testRoot 'selfcontained-inventory.json'
     [IO.File]::WriteAllText($reportPath, ($report | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
