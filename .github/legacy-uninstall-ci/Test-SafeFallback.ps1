@@ -88,6 +88,18 @@ try {
     Check ((Get-FileHash -LiteralPath $extracted -Algorithm SHA256).Hash -ceq (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash) 'The compiled installer does not contain the candidate uninstaller.'
     [IO.File]::Copy($extracted,$uninstaller,$true)
     Add-Type -AssemblyName UIAutomationClient
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class FallbackTestNative
+{
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
+}
+'@
     foreach($culture in @('en-US','ru-RU')){
         $start=New-IsolatedPS
         $literal=$uninstaller.Replace("'","''")
@@ -110,19 +122,15 @@ try {
             $expected=if($culture -eq 'ru-RU'){'Удаление не выполнено.'}else{'Uninstallation was not performed.'}
             $preserved=if($culture -eq 'ru-RU'){'подключения сохранены.'}else{'connections were preserved.'}
             Check (@($names|Where-Object {$_.Contains($expected) -and $_.Contains($preserved)}).Count -gt 0) 'The fallback did not explain that removal was not performed.'
-            $buttonCondition=[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::Button)
-            $button=$null;$buttonClock=[Diagnostics.Stopwatch]::StartNew()
-            while($null -eq $button -and $buttonClock.Elapsed.TotalSeconds -lt 10){
-                $dialog=[Windows.Automation.AutomationElement]::RootElement.FindFirst([Windows.Automation.TreeScope]::Children,$condition)
-                if($null -ne $dialog){$button=$dialog.FindFirst([Windows.Automation.TreeScope]::Descendants,$buttonCondition)}
-                if($null -eq $button){Start-Sleep -Milliseconds 100}
-            }
-            if($null -eq $button){
-                $details=if($null -eq $dialog){@('dialog unavailable')}else{@($dialog.FindAll([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.Condition]::TrueCondition)|ForEach-Object {$_.Current.ControlType.ProgrammaticName + ':' + $_.Current.Name})}
-                Write-Output ('Dialog UIA children: '+($details -join ' | '))
-                throw 'The fallback dialog has no confirmation button.'
-            }
-            $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+            # The hosted UIA provider exposes native message-box controls as
+            # panes. Send BM_CLICK only to its uniquely identified OK control.
+            $buttons=@($all|Where-Object {$_.Current.Name -ceq 'OK' -and $_.Current.ClassName -ceq 'Button'})
+            Check ($buttons.Count -eq 1) 'The fallback dialog has no unique native OK control.'
+            $handle=[IntPtr]$buttons[0].Current.NativeWindowHandle
+            $owner=[uint32]0
+            [void][FallbackTestNative]::GetWindowThreadProcessId($handle,[ref]$owner)
+            Check ($handle -ne [IntPtr]::Zero -and $owner -eq $process.Id) 'The synthetic OK control belongs to another process.'
+            Check ([FallbackTestNative]::PostMessage($handle,0x00F5,[IntPtr]::Zero,[IntPtr]::Zero)) 'Cannot activate the synthetic OK control.'
             Check ($process.WaitForExit(10000) -and $process.ExitCode -eq 1) 'The fallback did not exit with the incomplete-removal status.'
         }finally{
             if(-not $process.HasExited){$process.Kill();[void]$process.WaitForExit(10000)}
