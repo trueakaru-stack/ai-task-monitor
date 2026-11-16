@@ -174,3 +174,111 @@ jobs:
           task_compiler=(/usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 swiftc)
           "${task_compiler[@]}" "$AITM_TEST_TASK_ROOT/probe.swift" -o "$AITM_TEST_TASK_ROOT/probe"
           "$AITM_TEST_TASK_ROOT/run-isolated" "$AITM_TEST_TASK_ROOT/probe"
+      - name: Probe pinned working-directory descriptor
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$AITM_TEST_TASK_ROOT/fake-fd.c" <<'CHILD'
+          #include <errno.h>
+          #include <fcntl.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+          int main(int argc, char **argv) {
+              if (argc != 2 || getenv("HOME") || getenv("CODEX_HOME")) return 19;
+              int descriptor = atoi(argv[1]);
+              errno = 0;
+              int closed = fcntl(descriptor, F_GETFD) == -1 && errno == EBADF;
+              int log = open("error.log", O_CREAT | O_APPEND | O_WRONLY | O_CLOEXEC, 0600);
+              int denied = log < 0 && errno == EACCES;
+              if (log >= 0) { if (write(log, "synthetic\n", 10) != 10) return 20; close(log); }
+              printf("write=%s fd=%s\n", log >= 0 ? "allowed" : (denied ? "denied" : "other"), closed ? "closed" : "open");
+              return 0;
+          }
+          CHILD
+          cat > "$AITM_TEST_TASK_ROOT/fd-probe.c" <<'PARENT'
+          #include <errno.h>
+          #include <fcntl.h>
+          #include <limits.h>
+          #include <spawn.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <sys/stat.h>
+          #include <sys/wait.h>
+          #include <unistd.h>
+
+          static void check(int condition, const char *message) {
+              if (!condition) { fprintf(stderr, "FAIL: %s (errno=%d)\n", message, errno); exit(1); }
+          }
+          static void run_at(int dirfd, const char *fake, const char *expected) {
+              int channel[2];
+              check(pipe(channel) == 0, "pipe");
+              posix_spawn_file_actions_t actions;
+              posix_spawnattr_t attr;
+              check(posix_spawn_file_actions_init(&actions) == 0, "init file actions");
+              check(posix_spawn_file_actions_addfchdir_np(&actions, dirfd) == 0, "add fchdir");
+              check(posix_spawn_file_actions_adddup2(&actions, channel[1], STDOUT_FILENO) == 0, "redirect stdout");
+              check(posix_spawn_file_actions_addclose(&actions, channel[0]) == 0, "close read pipe in child");
+              check(posix_spawn_file_actions_addclose(&actions, channel[1]) == 0, "close write pipe in child");
+              check(posix_spawn_file_actions_addclose(&actions, dirfd) == 0, "close directory in child");
+              check(posix_spawnattr_init(&attr) == 0, "init spawn attrs");
+              check(posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT) == 0, "restrict descriptors");
+              char fd_text[24];
+              snprintf(fd_text, sizeof(fd_text), "%d", dirfd);
+              char *arguments[] = {(char *)fake, fd_text, NULL};
+              char *environment[] = {"PATH=/usr/bin:/bin", NULL};
+              pid_t pid;
+              int result = posix_spawn(&pid, fake, &actions, &attr, arguments, environment);
+              check(result == 0, "spawn fake CLI");
+              posix_spawn_file_actions_destroy(&actions);
+              posix_spawnattr_destroy(&attr);
+              close(channel[1]);
+              char output[160] = {0};
+              ssize_t count = read(channel[0], output, sizeof(output) - 1);
+              check(count > 0, "read fake CLI response");
+              close(channel[0]);
+              int status = 0;
+              check(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0, "fake CLI exit");
+              check(strcmp(output, expected) == 0, output);
+          }
+          int main(int argc, char **argv) {
+              const char *root = getenv("AITM_SYNTHETIC_TEST_ROOT");
+              check(argc == 2 && root && strstr(root, "/aitm-card-tests.") && !getenv("HOME") && !getenv("CODEX_HOME"), "synthetic root and environment");
+              check(geteuid() != 0, "runner must be unprivileged");
+              char base[PATH_MAX], safe[PATH_MAX], held[PATH_MAX], replacement[PATH_MAX], errorlog[PATH_MAX], target[PATH_MAX];
+              check(snprintf(base, sizeof(base), "%s/fd-probe-XXXXXX", root) < sizeof(base), "base path");
+              check(mkdtemp(base) != NULL, "create test root");
+              check(snprintf(safe, sizeof(safe), "%s/safe", base) < sizeof(safe), "safe path");
+              check(snprintf(held, sizeof(held), "%s/held", base) < sizeof(held), "held path");
+              check(snprintf(replacement, sizeof(replacement), "%s/replacement", base) < sizeof(replacement), "replacement path");
+              check(snprintf(errorlog, sizeof(errorlog), "%s/error.log", held) < sizeof(errorlog), "log path");
+              check(snprintf(target, sizeof(target), "%s/target", base) < sizeof(target), "target path");
+              check(mkdir(safe, 0700) == 0 && mkdir(replacement, 0700) == 0 && chmod(safe, 0500) == 0, "create synthetic directories");
+              int original = open(safe, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+              check(original >= 0, "open safe directory");
+              int pinned = fcntl(original, F_DUPFD_CLOEXEC, 90);
+              check(pinned >= 90, "pin a high descriptor");
+              close(original);
+              check(rename(safe, held) == 0 && symlink(replacement, safe) == 0, "replace path after open");
+              run_at(pinned, argv[1], "write=denied fd=closed\n");
+              char otherlog[PATH_MAX];
+              check(snprintf(otherlog, sizeof(otherlog), "%s/error.log", replacement) < sizeof(otherlog), "replacement log path");
+              check(access(otherlog, F_OK) == -1 && errno == ENOENT, "replacement must not receive a log");
+              puts("PASS: pinned descriptor resists path replacement; descriptor closed in child");
+
+              int targetfd = open(target, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600);
+              check(targetfd >= 0 && close(targetfd) == 0, "create synthetic target");
+              check(chmod(held, 0700) == 0 && symlink(target, errorlog) == 0 && chmod(held, 0500) == 0, "replace synthetic directory content");
+              run_at(pinned, argv[1], "write=allowed fd=closed\n");
+              puts("PASS: an owner can still alter directory content before spawn");
+              check(close(pinned) == 0, "close parent descriptor");
+              errno = 0;
+              check(fcntl(pinned, F_GETFD) == -1 && errno == EBADF, "parent descriptor closed");
+              return 0;
+          }
+          PARENT
+          task_compiler=(/usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 clang -mmacosx-version-min=13.0)
+          "${task_compiler[@]}" "$AITM_TEST_TASK_ROOT/fake-fd.c" -o "$AITM_TEST_TASK_ROOT/fake-fd"
+          "${task_compiler[@]}" "$AITM_TEST_TASK_ROOT/fd-probe.c" -o "$AITM_TEST_TASK_ROOT/fd-probe"
+          "$AITM_TEST_TASK_ROOT/run-isolated" "$AITM_TEST_TASK_ROOT/fd-probe" "$AITM_TEST_TASK_ROOT/fake-fd"
