@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo("ClaudeFileIdentity.Tests")]
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("AI Task Monitor")]
 
 namespace AITaskMonitor.Claude;
 

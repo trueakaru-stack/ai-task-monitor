@@ -80,11 +80,27 @@ try {
         } finally { $process.Dispose() }
     }
 
+    $install = Join-Path $isolation 'localappdata\AITaskMonitor'
+    [void][IO.Directory]::CreateDirectory($install)
+    $hookSource = Join-Path $repositoryRoot 'windows\app\ClaudeTaskHook.ps1'
+    $hook = Join-Path $install 'ClaudeTaskHook.ps1'
+    Check ([IO.File]::Exists($hookSource) -and -not [IO.File]::Exists($hook)) 'Synthetic hook fixture rejected.'
+    [IO.File]::Copy($hookSource, $hook, $false)
+    $compiler = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+    Check ([IO.File]::Exists($compiler)) 'Hosted .NET Framework compiler is unavailable.'
+    $stage = Join-Path $install 'ClaudeStageObservation.dll'
+    $stageSource = Join-Path $repositoryRoot 'windows\app\ClaudeStageObservation.cs'
+    $compile = Invoke-Isolated -arguments @('/nologo', '/target:library', '/platform:anycpu',
+        '/reference:System.Web.Extensions.dll', ("/out:" + $stage), $stageSource) -executable $compiler
+    Check ([IO.File]::Exists($stage)) 'Synthetic hook helper did not compile.'
+    if ($compile.Trim()) { Write-Output $compile.TrimEnd() }
+
     $projects = @(
         @{ Project='windows\native\Tests\ClaudeFileSource\ClaudeFileSource.Tests.csproj'; Assembly='bin\ClaudeFileSource.Tests\release\ClaudeFileSource.Tests.dll' },
         @{ Project='windows\native\Tests\ClaudeFileIdentity\ClaudeFileIdentity.Tests.csproj'; Assembly='bin\ClaudeFileIdentity.Tests\release\ClaudeFileIdentity.Tests.dll' },
         @{ Project='windows\native\Tests\ClaudePump\ClaudePump.Tests.csproj'; Assembly='bin\ClaudePump.Tests\release\AITaskMonitor.ClaudePump.Tests.dll' },
         @{ Project='windows\native\Tests\ClaudeFileUi\ClaudeFileUi.Tests.csproj'; Assembly='bin\ClaudeFileUi.Tests\release\AITaskMonitor.Prototype.Tests.dll' }
+        @{ Project='windows\native\Tests\ClaudeRuntimeHost\ClaudeRuntimeHost.Tests.csproj'; Assembly='bin\ClaudeRuntimeHost.Tests\release\AITaskMonitor.Prototype.Tests.dll' }
     )
     foreach ($item in $projects) {
         $project = Join-Path $repositoryRoot $item.Project

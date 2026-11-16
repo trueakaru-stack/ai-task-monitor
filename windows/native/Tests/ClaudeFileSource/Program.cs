@@ -881,6 +881,46 @@ _ = boundedSource.Poll(ClaudeConnection.Connected, now);
 File.WriteAllText(bounded, "", utf8);
 var limited = boundedSource.Poll(ClaudeConnection.Connected, now).Tasks.Single();
 Check(limited.Unconfirmed && limited.RetainedPlanIncomplete && limited.Steps.Length == 128, "Truncated retained plan must be labeled incomplete");
+string forgottenPath = Path.Combine(work, "explicit-disconnect-race.jsonl");
+File.WriteAllText(forgottenPath, complete, utf8);
+using var readEntered = new ManualResetEventSlim();
+using var readRelease = new ManualResetEventSlim();
+int holdRead = 0;
+using (var forgotten = new ClaudeFileSource(forgottenPath, null, DateTime.MinValue.ToUniversalTime(), () =>
+{
+    if (Interlocked.Exchange(ref holdRead, 0) == 1)
+    {
+        readEntered.Set();
+        if (!readRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException("Synthetic read gate timed out.");
+    }
+}))
+{
+    ClaudeSourceSnapshot oldFallback = forgotten.Poll(ClaudeConnection.Connected, now);
+    Check(oldFallback.Tasks.Count > 0, "Forget-race setup needs an old task.");
+    Interlocked.Exchange(ref holdRead, 1);
+    var delayed = System.Threading.Tasks.Task.Run(() => forgotten.Poll(now));
+    Check(readEntered.Wait(TimeSpan.FromSeconds(5)), "Forget-race read did not reach its gate.");
+    forgotten.NotifyConnection(ClaudeConnection.Disconnected);
+    forgotten.ForgetBefore(now.AddSeconds(1));
+    forgotten.NotifyConnection(ClaudeConnection.Connected);
+    forgotten.NotifyUnavailable(oldFallback);
+    readRelease.Set();
+    ClaudeSourceSnapshot late = delayed.GetAwaiter().GetResult();
+    Check(late.Unavailable && late.Tasks.Count == 0, "A late read resurrected explicitly forgotten cards.");
+    ClaudeSourceSnapshot unavailable = forgotten.ReportUnavailable();
+    Check(unavailable.Unavailable && unavailable.Tasks.Count == 0,
+        "An unavailable report resurrected explicitly forgotten cards.");
+    snapshot = forgotten.Poll(now.AddSeconds(2));
+    Check(snapshot.Tasks.Count == 0, "Old records reappeared after an explicit reconnect.");
+    string fresh = JsonSerializer.Serialize(new Dictionary<string, object> {
+        ["session_id"] = "fresh-after-disconnect", ["timestamp"] = now.AddSeconds(3).ToString("O"),
+        ["event"] = "UserPromptSubmit", ["active"] = true }) + "\n";
+    File.AppendAllText(forgottenPath, fresh, utf8);
+    snapshot = forgotten.Poll(now.AddSeconds(4));
+    Check(snapshot.Tasks.Count == 1 && snapshot.Tasks[0].Id == "fresh-after-disconnect" &&
+        snapshot.Tasks[0].Unconfirmed, "Only the new event should appear after an explicit reconnect.");
+}
+
 Console.WriteLine($"Claude file source: {checks} synthetic checks passed.");
 }
 catch (Exception error)

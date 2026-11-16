@@ -84,6 +84,18 @@ internal sealed class ClaudeSourcePump : IDisposable
         else if (next == ClaudeConnection.Partial) Present(lastPresented, true);
     }
 
+    // Clear this owner's retained history on an explicit disconnect. The
+    // source records the boundary without waiting for a blocked read.
+    internal void DisconnectAndForget()
+    {
+        dispatcher.VerifyAccess();
+        ObjectDisposedException.ThrowIf(disposed, this);
+        NotifyConnection(ClaudeConnection.Disconnected);
+        lastSourceSnapshot = null;
+        lastPresented = new ClaudeSourceSnapshot([], false);
+        source.ForgetBefore(utcNow());
+    }
+
     public void RequestRefresh()
     {
         dispatcher.VerifyAccess();
@@ -203,6 +215,8 @@ internal sealed class ClaudeSourcePump : IDisposable
         lastPresented = Copy(snapshot, unconfirmed);
         apply(Copy(lastPresented, false));
     }
+
+    internal static ClaudeSourceSnapshot AsUnconfirmed(ClaudeSourceSnapshot snapshot) => Copy(snapshot, true);
 
     private static ClaudeSourceSnapshot Copy(ClaudeSourceSnapshot snapshot, bool unconfirmed)
     {

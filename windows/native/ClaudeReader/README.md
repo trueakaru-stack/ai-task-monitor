@@ -113,6 +113,12 @@ installation.
 Do not connect this reader to real profiles until the remaining read race,
 connection and lifecycle limitations are handled.
 
+An explicit disconnect can record a UTC boundary and asynchronously forget
+retained cards and names. After reconnecting, only activity observed at or after
+that boundary can create a card, and the source remains unconfirmed because
+events could have been missed while disconnected. A future-dated or delayed
+event can still cross the boundary; this is not proof of a new task.
+
 The phase-aware format must not be passed to the old reader: an older monitor
 can misinterpret a phase event as a confirmed step. A separate journal and an
 explicitly tested migration are required before the new hook can be connected.
