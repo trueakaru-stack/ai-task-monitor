@@ -56,8 +56,14 @@ final class DeepSeekIntegrationTests: XCTestCase {
               environment["CODEX_HOME"] == nil,
               let marker = environment["AITM_CI_DENIED_FILE"], marker.hasPrefix("/Users/"),
               let fixtureRoot = environment["AITM_MACOS_TEST_ROOT"],
-              fixtureRoot.hasPrefix("/private/tmp/aitm-macos-tests.") else {
+              fixtureRoot.hasPrefix("/Users/") else {
             XCTFail("Disposable macOS profile sandbox is required.")
+            return
+        }
+        let markerParent = URL(fileURLWithPath: marker).deletingLastPathComponent().standardizedFileURL.path
+        let fixturePath = URL(fileURLWithPath: fixtureRoot).standardizedFileURL.path
+        guard fixturePath.hasPrefix(markerParent + "/aitm-macos-tests.") else {
+            XCTFail("Synthetic fixture must be inside the isolated runner directory.")
             return
         }
         let markerDescriptor = Darwin.open(marker, O_RDONLY)
@@ -107,30 +113,9 @@ final class DeepSeekIntegrationTests: XCTestCase {
         let project = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
         let context = DeepSeekIntegration.Context(node: node, home: dshHome, assets: project.appendingPathComponent("integrations"),
             installAnchor: anchor, pnpmScript: URL(fileURLWithPath: pnpmPath).resolvingSymlinksInPath().standardizedFileURL, environment: fixtureEnvironment)
-        print("AITM_SYNTHETIC_ANCHOR=\(anchor.path)")
-        print("AITM_SYNTHETIC_PNPM=\(context.pnpmScript.path)")
-        print("AITM_SYNTHETIC_PROFILE=\(dshHome.path)")
-        print("AITM_SYNTHETIC_ASSETS=\(context.assets.path)")
-        func traceComponents(_ label: String, _ url: URL) {
-            var item = URL(fileURLWithPath: "/", isDirectory: true)
-            for component in url.standardizedFileURL.pathComponents.dropFirst() {
-                item.appendPathComponent(component)
-                if let attributes = try? manager.attributesOfItem(atPath: item.path),
-                   let kind = attributes[.type] as? FileAttributeType, kind == .typeSymbolicLink {
-                    print("AITM_SYNTHETIC_LINK_\(label)=\(item.path)")
-                }
-            }
-        }
-        traceComponents("anchor", anchor)
-        traceComponents("pnpm", context.pnpmScript)
-        traceComponents("home", dshHome)
-        traceComponents("profile", dshHome.appendingPathComponent("profiles/тестовый-профиль/package.json"))
-        traceComponents("assets", context.assets)
-        print("AITM_SYNTHETIC_STAGE=list")
         let first = try DeepSeekIntegration.profiles(context)
         XCTAssertEqual(first.map(\.name), ["тестовый-профиль"])
         XCTAssertEqual(first.first?.state, "disconnected")
-        print("AITM_SYNTHETIC_STAGE=connect")
         try DeepSeekIntegration.setConnected(true, profile: "тестовый-профиль", context: context)
         let connected = try XCTUnwrap(DeepSeekIntegration.profiles(context).first)
         XCTAssertEqual(connected.state, "connected", "Fixture profile error: \(connected.error ?? "none")")

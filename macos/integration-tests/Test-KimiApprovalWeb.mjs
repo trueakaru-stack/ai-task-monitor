@@ -88,7 +88,8 @@ async function run(withPlugin) {
     KIMI_MODEL_PROVIDER_TYPE: 'openai', KIMI_MODEL_BASE_URL: `http://127.0.0.1:${modelPort}/v1`,
     KIMI_MODEL_CAPABILITIES: 'tool_use', AITM_FIXTURE_ROOT: root,
     NODE_OPTIONS: `--require="${syntheticHomeGuard.replaceAll('\\', '/')}" --require="${guard.replaceAll('\\', '/')}"`,
-    AITM_CI_DENIED_FILE: process.env.AITM_CI_DENIED_FILE, NO_COLOR: '1',
+    AITM_CI_DENIED_FILE: process.env.AITM_CI_DENIED_FILE,
+    AITM_MACOS_TEST_ROOT: process.env.AITM_MACOS_TEST_ROOT, NO_COLOR: '1',
   });
   if (process.platform === 'win32') env.KIMI_SHELL_PATH = `${process.env.SystemRoot}\\System32\\cmd.exe`;
   const config = `default_model = "fixture"\ndefault_permission_mode = "manual"\ntelemetry = false\nauto_session_title = false\nmerge_all_available_skills = false\n\n[providers.fixture]\ntype = "openai"\nbase_url = "http://127.0.0.1:${modelPort}/v1"\napi_key = "dummy-fixture"\n\n[models.fixture]\nprovider = "fixture"\nmodel = "fixture"\nmax_context_size = 131072\ncapabilities = ["tool_use"]\n`;

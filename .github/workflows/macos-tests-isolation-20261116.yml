@@ -7,10 +7,10 @@ permissions:
   contents: read
 jobs:
   isolated:
-    runs-on: macos-26
+    runs-on: macos-15
     timeout-minutes: 30
     env:
-      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_16.1.app/Contents/Developer
     steps:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -24,7 +24,7 @@ jobs:
           test "$RUNNER_OS" = macOS
           task_profile_dir="$(/usr/bin/python3 -I -S -B -c 'import os,pwd; print(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))')"
           case "$task_profile_dir" in /Users/*) ;; *) echo 'Unexpected hosted runner profile.' >&2; exit 1;; esac
-          task_root="$(mktemp -d /private/tmp/aitm-macos-tests.XXXXXXXX)"
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-macos-tests.XXXXXXXX")"
           task_marker="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
           case "$task_marker" in "$task_profile_dir"/*) ;; *) echo 'Runner temp is outside expected profile.' >&2; exit 1;; esac
           printf 'synthetic-only\n' > "$task_marker"
@@ -53,6 +53,7 @@ jobs:
           (allow default)
           (deny file-read* (subpath (param "TASK_PROFILE")))
           (allow file-read-metadata)
+          (allow file-read* (subpath (param "TASK_ROOT")))
           (deny mach-lookup (global-name "com.apple.bsd.dirhelper"))
           (allow file-read* (subpath (param "TASK_NODE_ROOT")))
           (allow file-read* (subpath (param "TASK_PYTHON_ROOT")))
@@ -90,6 +91,12 @@ jobs:
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
           cd "$AITM_TEST_TASK_ROOT/source/macos"
           "$task_run" npm install --prefix "$AITM_TEST_TASK_ROOT/dsh" --ignore-scripts --no-audit --no-fund @deepseek-ai/dsh@0.2.1-rc.5 pnpm@11.25.0
+          "$task_run" /usr/bin/curl -q --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 'https://codeload.github.com/NousResearch/hermes-agent/tar.gz/b200f5bc60e31588ba2cb60e288029c4a54ba5fa' --output "$AITM_TEST_TASK_ROOT/hermes.tar.gz"
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B integration-tests/Extract-HermesFixture.py "$AITM_TEST_TASK_ROOT/hermes.tar.gz" "$AITM_TEST_TASK_ROOT/hermes-source"
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -m venv "$AITM_TEST_TASK_ROOT/hermes-python"
+          "$task_run" "$AITM_TEST_TASK_ROOT/hermes-python/bin/python" -m pip install --no-cache-dir --disable-pip-version-check --only-binary=:all: 'ruamel.yaml==0.18.16' 'packaging==26.0' 'python-dotenv==1.2.4'
+          "$task_run" npm pack @moonshot-ai/kimi-code@2.5.0 --ignore-scripts --pack-destination "$AITM_TEST_TASK_ROOT" --json > "$AITM_TEST_TASK_ROOT/kimi-package.json"
+          "$task_run" npm install --prefix "$AITM_TEST_TASK_ROOT/kimi" --ignore-scripts --omit=optional --no-audit --no-fund "$AITM_TEST_TASK_ROOT/moonshot-ai-kimi-code-2.5.0.tgz"
       - name: Exercise Swift and DeepSeek synthetic integration
         shell: bash
         run: |
@@ -102,4 +109,30 @@ jobs:
           task_bin="$("${task_compiler[@]}" build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
           "$task_run" /usr/bin/env "AITM_DSH_ANCHOR=$AITM_TEST_TASK_ROOT/dsh/node_modules/@deepseek-ai/dsh/package.json" "AITM_PNPM_SCRIPT=$AITM_TEST_TASK_ROOT/dsh/node_modules/pnpm/bin/pnpm.mjs" "AITM_NODE=$AITM_TEST_NODE_BIN" "AITM_CLAUDE_TEST_EXECUTABLE=$task_bin/AITaskMonitor" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.DeepSeekIntegrationTests/testIsolatedUpstreamConnectionBridge "$task_bin/AITaskMonitorPackageTests.xctest" | tee "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
           grep -q 'testIsolatedUpstreamConnectionBridge.*passed' "$AITM_TEST_TASK_ROOT/swift-deepseek.log"
-
+      - name: Exercise DeepSeek synthetic integration
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          "$task_run" node integration-tests/Test-DeepSeekIntegration.mjs "$AITM_TEST_TASK_ROOT/dsh/node_modules/@deepseek-ai/dsh/package.json" "$AITM_TEST_TASK_ROOT/dsh/node_modules/pnpm/bin/pnpm.mjs"
+      - name: Exercise Hermes synthetic integrations
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          "$task_run" "$AITM_TEST_TASK_ROOT/hermes-python/bin/python" -I -S -B integration-tests/Test-HermesSetup.py integrations "$AITM_TEST_TASK_ROOT/hermes-source"
+          "$task_run" "$AITM_TEST_TASK_ROOT/hermes-python/bin/python" -I -B integration-tests/Test-HermesManager.py integrations "$AITM_TEST_TASK_ROOT/hermes-source"
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -B integration-tests/Test-HermesLiveness.py "$AITM_TEST_TASK_ROOT/hermes-source/hermes_cli/active_sessions.py"
+          "$task_run" "$AITM_TEST_TASK_ROOT/hermes-python/bin/python" -B integration-tests/Test-HermesPublication.py "$AITM_TEST_TASK_ROOT/hermes-source"
+      - name: Exercise Kimi synthetic integration
+        if: ${{ !cancelled() && steps.upstream.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          "$task_run" node integration-tests/Test-KimiApprovalWeb.mjs "$AITM_TEST_TASK_ROOT/kimi"
