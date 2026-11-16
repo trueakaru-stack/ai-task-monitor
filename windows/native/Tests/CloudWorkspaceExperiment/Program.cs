@@ -186,12 +186,12 @@ internal static class Program
             RedirectStandardOutput = true, RedirectStandardError = true
         };
         start.Environment.Clear();
-        foreach (string name in new[] { "SystemRoot", "windir", "PATH", "DOTNET_ROOT", "DOTNET_CLI_HOME",
+        foreach (string variableName in new[] { "SystemRoot", "windir", "PATH", "DOTNET_ROOT", "DOTNET_CLI_HOME",
             "DOTNET_CLI_TELEMETRY_OPTOUT", "DOTNET_GENERATE_ASPNET_CERTIFICATE", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE",
             "DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
             "CI", "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_TEMP", "ProgramFiles", "ProgramW6432",
             "ProgramData", "ALLUSERSPROFILE", "SystemDrive", "ComSpec" })
-            if (Environment.GetEnvironmentVariable(name) is string value) start.Environment[name] = value;
+            if (Environment.GetEnvironmentVariable(variableName) is string value) start.Environment[variableName] = value;
         start.Environment["DOTNET_ADD_GLOBAL_TOOLS_TO_PATH"] = "0";
         start.ArgumentList.Add(typeof(Program).Assembly.Location);
         start.ArgumentList.Add("--child");
