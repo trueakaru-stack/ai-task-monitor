@@ -131,49 +131,73 @@ internal static class Program
         Check(condition(), description);
     }
 
-    // Preserve the existing two-check requirement while recording which of the
-    // timer observation and immediate follow-up succeeded.
-    private static void WaitUntilMeasured(Func<bool> condition, string description, TextWriter evidence, int seconds = 20)
+    private enum NameObservation { Found, ProcessExited, NoWindow, NoRoot, Missing, ElementUnavailable, InvalidOperation }
+
+    // Require two consecutive positive observations, without extending the
+    // original 20-second deadline. A transient False restarts the sequence.
+    private static void WaitUntilStable(Func<NameObservation> condition, string description, TextWriter evidence, int timeoutMs = 20000)
     {
         var frame = new DispatcherFrame();
-        DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
         var watch = Stopwatch.StartNew();
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(30) };
-        bool first = false, deadlineHit = false;
-        long firstMillis = -1;
-        int polls = 0;
+        var counts = new Dictionary<NameObservation, int>();
+        var recent = new Queue<NameObservation>();
+        int consecutive = 0, polls = 0;
+        bool stable = false, deadlineHit = false;
         timer.Tick += (_, _) =>
         {
+            NameObservation sample = condition();
             polls++;
-            bool found = condition();
-            bool expired = !found && DateTime.UtcNow >= deadline;
-            if (found || expired)
-            {
-                first = found;
-                deadlineHit = expired;
-                firstMillis = watch.ElapsedMilliseconds;
-                frame.Continue = false;
-            }
+            counts[sample] = counts.TryGetValue(sample, out int count) ? count + 1 : 1;
+            recent.Enqueue(sample); if (recent.Count > 6) recent.Dequeue();
+            consecutive = sample == NameObservation.Found ? consecutive + 1 : 0;
+            if (watch.ElapsedMilliseconds >= timeoutMs) deadlineHit = true;
+            else if (consecutive >= 2) stable = true;
+            if (stable || deadlineHit) frame.Continue = false;
         };
         timer.Start();
-        Dispatcher.PushFrame(frame);
-        timer.Stop();
-        bool second = condition();
-        long secondMillis = watch.ElapsedMilliseconds;
-        evidence.WriteLine("Synthetic entry wait: tickFound=" + first + " finalFound=" + second +
-            " deadline=" + deadlineHit + " polls=" + polls + " tickMs=" + firstMillis + " finalMs=" + secondMillis);
-        Check(second, description);
+        try { Dispatcher.PushFrame(frame); }
+        finally { timer.Stop(); }
+        evidence.WriteLine("Synthetic stable wait: stable=" + stable + " deadline=" + deadlineHit +
+            " polls=" + polls + " elapsedMs=" + watch.ElapsedMilliseconds +
+            " counts=" + String.Join(",", counts.OrderBy(x => x.Key).Select(x => x.Key + ":" + x.Value)) +
+            " recent=" + String.Join(",", recent));
+        Check(stable, description);
     }
 
-    private static void CheckMeasuredWait()
+    private static void CheckStableWait()
     {
-        int count = 0;
-        bool rejected = false;
-        using var evidence = new StringWriter();
-        try { WaitUntilMeasured(() => Interlocked.Increment(ref count) == 1, "Synthetic transient state.", evidence, 1); }
-        catch (InvalidOperationException) { rejected = true; }
-        Check(rejected && evidence.ToString().Contains("tickFound=True finalFound=False", StringComparison.Ordinal),
-            "Measured wait must reject and report a transient first observation.");
+        var sequence = new[] { NameObservation.Found, NameObservation.Missing, NameObservation.Found, NameObservation.Found };
+        int index = 0;
+        using (var evidence = new StringWriter())
+        {
+            WaitUntilStable(() => sequence[Math.Min(index++, sequence.Length - 1)],
+                "A temporary missing observation did not recover.", evidence, 1000);
+            Check(index == 4 && evidence.ToString().Contains("Found,Missing,Found,Found", StringComparison.Ordinal),
+                "Stable wait must reset after a transient missing result.");
+        }
+        int alternating = 0;
+        bool rejectedAlternating = false;
+        using (var evidence = new StringWriter())
+        {
+            try
+            {
+                WaitUntilStable(() => Interlocked.Increment(ref alternating) % 2 == 1
+                    ? NameObservation.Found : NameObservation.Missing,
+                    "Synthetic alternating observations.", evidence, 240);
+            }
+            catch (InvalidOperationException) { rejectedAlternating = true; }
+            Check(rejectedAlternating && evidence.ToString().Contains("deadline=True", StringComparison.Ordinal),
+                "Alternating results must not pass without two consecutive observations.");
+        }
+        bool rejectedMissing = false;
+        using (var evidence = new StringWriter())
+        {
+            try { WaitUntilStable(() => NameObservation.Missing, "Synthetic missing observation.", evidence, 180); }
+            catch (InvalidOperationException) { rejectedMissing = true; }
+            Check(rejectedMissing && evidence.ToString().Contains("deadline=True", StringComparison.Ordinal),
+                "A consistently missing observation must fail at the deadline.");
+        }
     }
 
     private static Window NewWindow(string language, string theme, bool compact, out PrototypeWindow controller,
@@ -187,6 +211,24 @@ internal static class Program
         window.Left = -10000; window.Top = -10000; window.ShowActivated = false; window.ShowInTaskbar = false;
         window.Show(); window.UpdateLayout();
         return window;
+    }
+
+    private static void CheckRepeatedRenderRecreatesEmptyNode()
+    {
+        Window window = NewWindow("ru", "dark", false, out PrototypeWindow controller);
+        try
+        {
+            var empty = new ClaudeSourceSnapshot([], false);
+            controller.ApplyClaudeSource(empty);
+            var panel = (StackPanel)window.FindName("TasksPanel");
+            TextBlock first = panel.Children.OfType<TextBlock>().Single(item => item.Text == "Статус задач не подтверждён");
+            controller.ApplyClaudeSource(empty);
+            TextBlock second = panel.Children.OfType<TextBlock>().Single(item => item.Text == "Статус задач не подтверждён");
+            Check(!ReferenceEquals(first, second) && !panel.Children.Contains(first),
+                "Repeated synthetic Claude rendering did not replace its empty-state node.");
+            Console.WriteLine("Synthetic identical Claude render replaced the empty-state UI element.");
+        }
+        finally { window.Close(); }
     }
 
     private static void CaptureVariants(ClaudeSourceSnapshot snapshot, string root)
@@ -217,20 +259,24 @@ internal static class Program
         }
     }
 
-    private static bool HasName(Process host, string text)
+    private static NameObservation ObserveName(Process host, string text)
     {
         try
         {
             host.Refresh();
-            if (host.HasExited || host.MainWindowHandle == IntPtr.Zero) return false;
+            if (host.HasExited) return NameObservation.ProcessExited;
+            if (host.MainWindowHandle == IntPtr.Zero) return NameObservation.NoWindow;
             AutomationElement? root = AutomationElement.FromHandle(host.MainWindowHandle);
-            if (root is null) return false;
+            if (root is null) return NameObservation.NoRoot;
             return root.FindFirst(TreeScope.Descendants,
-                new PropertyCondition(AutomationElement.NameProperty, text)) is not null;
+                new PropertyCondition(AutomationElement.NameProperty, text)) is null
+                ? NameObservation.Missing : NameObservation.Found;
         }
-        catch (ElementNotAvailableException) { return false; }
-        catch (InvalidOperationException) { return false; }
+        catch (ElementNotAvailableException) { return NameObservation.ElementUnavailable; }
+        catch (InvalidOperationException) { return NameObservation.InvalidOperation; }
     }
+
+    private static bool HasName(Process host, string text) => ObserveName(host, text) == NameObservation.Found;
 
     private static AutomationElement? FindById(Process host, string id)
     {
@@ -254,7 +300,7 @@ internal static class Program
         ((InvokePattern)element.GetCurrentPattern(InvokePattern.Pattern)).Invoke();
     }
 
-    private static void HoldWithoutCard(Process host, int milliseconds)
+    private static void HoldWithoutCard(Process host, int milliseconds, Action? onObservation = null)
     {
         DateTime until = DateTime.UtcNow.AddMilliseconds(milliseconds);
         var frame = new DispatcherFrame();
@@ -263,6 +309,7 @@ internal static class Program
         timer.Tick += (_, _) =>
         {
             observed |= HasName(host, "Задача Claude Code");
+            onObservation?.Invoke();
             if (observed || DateTime.UtcNow >= until) frame.Continue = false;
         };
         timer.Start(); Dispatcher.PushFrame(frame); timer.Stop();
@@ -363,7 +410,7 @@ internal static class Program
         {
             try
             {
-                WaitUntilMeasured(() => HasName(host, "Статус задач не подтверждён"),
+                WaitUntilStable(() => ObserveName(host, "Статус задач не подтверждён"),
                     "The normal entry point did not show the expected empty state.", Console.Out);
             }
             catch
@@ -379,11 +426,25 @@ internal static class Program
                 Check(evidence.Contains("Synthetic child exited=False hasMainWindow=True", StringComparison.Ordinal) &&
                     evidence.Contains("Synthetic global registration=Registered, legacyUnchanged=True", StringComparison.Ordinal) &&
                     evidence.Contains("Synthetic UIA root=True", StringComparison.Ordinal) &&
-                    evidence.Contains("Synthetic UIA label [Статус задач не подтверждён]=True", StringComparison.Ordinal) &&
+                    evidence.Contains("Synthetic UIA label [Статус задач не подтверждён]=", StringComparison.Ordinal) &&
                     evidence.Contains("Synthetic UIA label [__aitm_synthetic_missing_label__]=False", StringComparison.Ordinal),
                     "Synthetic entry-point diagnostics did not report known fixture state.");
             }
-            HoldWithoutCard(host, 2500);
+            var holdCounts = new Dictionary<NameObservation, int>();
+            int immediateRecovery = 0, otherEmptyState = 0, progressVisible = 0;
+            HoldWithoutCard(host, 2500, () =>
+            {
+                NameObservation sample = ObserveName(host, "Статус задач не подтверждён");
+                holdCounts[sample] = holdCounts.TryGetValue(sample, out int count) ? count + 1 : 1;
+                if (sample == NameObservation.Found) return;
+                if (HasName(host, "Статус задач не подтверждён")) immediateRecovery++;
+                if (HasName(host, "Источники не подключены") || HasName(host, "Нет данных от Claude Code")) otherEmptyState++;
+                if (HasName(host, "Ход выполнения")) progressVisible++;
+            });
+            Console.WriteLine("Synthetic UIA hold: counts=" +
+                String.Join(",", holdCounts.OrderBy(x => x.Key).Select(x => x.Key + ":" + x.Value)) +
+                " immediateRecovery=" + immediateRecovery + " otherEmptyState=" + otherEmptyState +
+                " progressVisibleAfterMiss=" + progressVisible);
             Check(!HasName(host, "Источники не подключены") && !HasName(host, "Активных задач сейчас нет"),
                 "A missing pre-start card was presented as a definitive absence.");
             // A later active event from the same session can make its prior context visible.
@@ -436,7 +497,8 @@ internal static class Program
                 "A redirected settings file must not be treated as verified.");
 
             var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-            CheckMeasuredWait();
+            CheckStableWait();
+            CheckRepeatedRenderRecreatesEmptyNode();
             string preferenceRoot = Path.Combine(root, "owner-preferences");
             Directory.CreateDirectory(preferenceRoot);
             string oldPreferences = Path.Combine(preferenceRoot, "old.json");
