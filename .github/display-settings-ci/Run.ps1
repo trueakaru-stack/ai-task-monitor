@@ -57,7 +57,11 @@ try{
   $process=[Diagnostics.Process]::Start($info)
   try{
    $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
-   if(-not $process.WaitForExit(180000)){$process.Kill($true);throw 'A hosted test timed out.'}
+   if(-not $process.WaitForExit(180000)){
+    try{$process.Kill($true)}catch [InvalidOperationException]{if(-not $process.HasExited){throw}}
+    if(-not $process.WaitForExit(5000)){throw 'The timed-out hosted test did not exit.'}
+    throw 'A hosted test timed out.'
+   }
    if($process.ExitCode -ne 0){throw ('The hosted test failed: '+$stdout.Result+$stderr.Result)}
    Write-Output $stdout.Result.TrimEnd()
   }finally{$process.Dispose()}
@@ -75,7 +79,8 @@ try{
  Check ([IO.File]::Exists($hostAssembly)) 'The display-host test assembly is missing.'
  Invoke-Isolated @($hostAssembly,$root)
  Check (@(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File).Count -eq 4) 'The four synthetic frames are missing.'
- Check (@(Get-ChildItem -LiteralPath $root -Filter 'end-*.png' -File).Count -eq 4) 'The four settings-end frames are missing.'
+ Check (@(Get-ChildItem -LiteralPath $root -Filter 'end-*.png' -File).Count -eq 12) 'The twelve settings and feedback-error frames are missing.'
+ Check (@(Get-ChildItem -LiteralPath $root -Filter 'instant-*.png' -File).Count -eq 8) 'The eight immediate feedback-error frames are missing.'
  $viewProject=Join-Path $repository 'windows/native/Prototype/Tests/Prototype.Tests.csproj'
  Invoke-Isolated @('build',$viewProject,'-c','Release','--configfile',$config,'--artifacts-path',$artifacts,'-p:NuGetAudit=false','--nologo')
  $viewAssembly=Join-Path $artifacts 'bin/Prototype.Tests/release/AITaskMonitor.Prototype.Tests.dll'
@@ -97,7 +102,44 @@ try{
   Invoke-Isolated -arguments $arguments -executable $shell
   Check ([IO.File]::Exists($settings)) 'The published settings frame is missing.'
  }}
- foreach($path in @(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File)+@(Get-ChildItem -LiteralPath $root -Filter 'end-*.png' -File)+@(Get-ChildItem -LiteralPath $root -Filter 'released-*.png' -File)){
+ # Render the released layout's existing error element with synthetic error text.
+ # Only the disposable reference copy is instrumented; no email or clipboard action runs.
+ $referenceText=[IO.File]::ReadAllText($releasedScript)
+ $needle='  if($PreviewSettingsEnd){$settingsScroll.ScrollToEnd();$window.Dispatcher.Invoke([Action]{},[Windows.Threading.DispatcherPriority]::ApplicationIdle);$window.UpdateLayout()}'
+ Check (([regex]::Matches($referenceText,[regex]::Escape($needle))).Count -eq 1) 'Reference settings-end hook changed.'
+ $cases=@(
+  @{Kind='copy';Text='Не удалось скопировать адрес. Выделите его и скопируйте вручную.'},
+  @{Kind='mail';Text='Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com.'}
+ )
+ foreach($case in $cases){
+  $probeScript=Join-Path (Split-Path -Parent $releasedScript) ('AITM-Feedback-'+$case.Kind+'-Preview.ps1')
+  Check (-not [IO.File]::Exists($probeScript)) 'Reference probe path already exists.'
+  # First capture the error immediately after activation at the previous
+  # bottom offset, then scroll to the new bottom for the second comparison.
+  $injection='  if($PreviewSettingsEnd){$feedbackError.Tag='''+$case.Text+''';$feedbackError.Text=Tr ([string]$feedbackError.Tag);$feedbackError.Visibility="Visible";'
+  $injection+='$window.Dispatcher.Invoke([Action]{},[Windows.Threading.DispatcherPriority]::ApplicationIdle);$window.UpdateLayout();'
+  $injection+='$feedbackPreviewWidth=[Math]::Max(1,[int][Math]::Ceiling($window.ActualWidth));$feedbackPreviewHeight=[Math]::Max(1,[int][Math]::Ceiling($window.ActualHeight));'
+  $injection+='$feedbackPreviewBitmap=[Windows.Media.Imaging.RenderTargetBitmap]::new($feedbackPreviewWidth,$feedbackPreviewHeight,96,96,[Windows.Media.PixelFormats]::Pbgra32);$feedbackPreviewBitmap.Render($window);'
+  $injection+='$feedbackPreviewEncoder=New-Object Windows.Media.Imaging.PngBitmapEncoder;$feedbackPreviewEncoder.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($feedbackPreviewBitmap));'
+  $injection+='$feedbackPreviewPath=Join-Path (Split-Path -Parent $SettingsSnapshotFile) ("released-instant-"+([IO.Path]::GetFileName($SettingsSnapshotFile)).Substring(9));'
+  $injection+='$feedbackPreviewStream=[IO.File]::Create($feedbackPreviewPath);try{$feedbackPreviewEncoder.Save($feedbackPreviewStream)}finally{$feedbackPreviewStream.Dispose()};'
+  $injection+='$settingsScroll.ScrollToEnd();$window.Dispatcher.Invoke([Action]{},[Windows.Threading.DispatcherPriority]::ApplicationIdle);$window.UpdateLayout()}'
+  [IO.File]::WriteAllText($probeScript,$referenceText.Replace($needle,$needle+"`r`n"+$injection),[Text.UTF8Encoding]::new($true))
+  foreach($theme in @('dark','light')){foreach($language in @('ru','en')){
+   $stem=$theme+'-'+$language
+   $snapshot=Join-Path $root ('released-error-'+$case.Kind+'-'+$stem+'.png')
+   $key='ref-error-'+$case.Kind+'-'+$stem
+   $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',$probeScript,
+    '-PreviewActiveTasks','1','-PreviewOffscreen','-PreviewSettingsEnd','-ThemeOverride',$theme,'-LanguageOverride',$language,
+    '-PreferencesFile',(Join-Path $root ('temp/'+$key+'.json')),
+    '-DiagnosticDirectory',(Join-Path $root ('temp/'+$key)),
+    '-SnapshotFile',(Join-Path $root ('temp/'+$key+'-main.png')),'-SettingsSnapshotFile',$snapshot)
+   Invoke-Isolated -arguments $arguments -executable $shell
+   Check ([IO.File]::Exists($snapshot)) 'The released error frame is missing.'
+   Check ([IO.File]::Exists((Join-Path $root ('released-instant-error-'+$case.Kind+'-'+$stem+'.png')))) 'The released immediate error frame is missing.'
+  }}
+ }
+ foreach($path in @(Get-ChildItem -LiteralPath $root -Filter 'settings-*.png' -File)+@(Get-ChildItem -LiteralPath $root -Filter 'end-*.png' -File)+@(Get-ChildItem -LiteralPath $root -Filter 'instant-*.png' -File)+@(Get-ChildItem -LiteralPath $root -Filter 'released-*.png' -File)){
   $bytes=[IO.File]::ReadAllBytes($path.FullName)
   Check ($bytes.Length -ge 24) 'A rendered frame is too short.'
   $width=([int]$bytes[16] -shl 24) -bor ([int]$bytes[17] -shl 16) -bor ([int]$bytes[18] -shl 8) -bor [int]$bytes[19]

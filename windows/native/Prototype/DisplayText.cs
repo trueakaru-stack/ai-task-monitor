@@ -62,6 +62,7 @@ internal static class DisplayText
         ["Адрес для отзывов и предложений"] = "Feedback email address",
         ["Скопировать адрес"] = "Copy email address",
         ["Не удалось открыть почтовое приложение. Напишите на truea.k.a.ru@gmail.com."] = "Could not open your email app. Write to truea.k.a.ru@gmail.com.",
+        ["Не удалось скопировать адрес. Выделите его и скопируйте вручную."] = "Could not copy the address. Select and copy it manually.",
         ["Назад к настройкам"] = "Back to settings",
         ["AI Task Monitor показывает задачи и доступные сведения об их ходе. Локальные источники: Codex, Claude Code, OpenCode, DeepSeek Harness, Kimi Code и Hermes Agent. Для Codex также доступны облачные задачи с неподтверждённым статусом."] = "AI Task Monitor shows tasks and available progress information. Local sources: Codex, Claude Code, OpenCode, DeepSeek Harness, Kimi Code and Hermes Agent. Codex cloud tasks are also available with unconfirmed status.",
         ["При нескольких источниках можно переключать задачи по вкладкам. Компактное окно остаётся поверх других и показывает до трёх задач с переключением между ними. Тему можно выбрать вручную или использовать тему Windows. Если источник недоступен, приложение сообщит об этом."] = "When multiple sources are available, use tabs to switch between them. The compact window stays on top and lets you switch between up to three tasks. Choose a theme or follow Windows. The app reports unavailable sources.",

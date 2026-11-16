@@ -50,6 +50,7 @@ jobs:
           path: |
             ${{ runner.temp }}/aitm-display-*/settings-*.png
             ${{ runner.temp }}/aitm-display-*/end-*.png
+            ${{ runner.temp }}/aitm-display-*/instant-*.png
             ${{ runner.temp }}/aitm-display-*/released-*.png
           if-no-files-found: ignore
           retention-days: 7
