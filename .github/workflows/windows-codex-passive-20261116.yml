@@ -29,7 +29,7 @@ jobs:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
     steps:
       - name: Verify passive observation in isolated Windows
-        if: ${{ matrix.part == 'checks' || !contains(github.event.head_commit.message, '[remaining-checks]') }}
+        if: ${{ matrix.part == 'checks' || (!contains(github.event.head_commit.message, '[remaining-checks]') && !contains(github.event.head_commit.message, '[checks-only]')) }}
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -125,7 +125,7 @@ jobs:
             if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}
           }
       - name: Preserve synthetic screenshots
-        if: always() && matrix.part != 'checks' && !contains(github.event.head_commit.message, '[remaining-checks]')
+        if: always() && matrix.part != 'checks' && !contains(github.event.head_commit.message, '[remaining-checks]') && !contains(github.event.head_commit.message, '[checks-only]')
         uses: actions/upload-artifact@v4
         with:
           name: windows-codex-passive-${{ matrix.part }}

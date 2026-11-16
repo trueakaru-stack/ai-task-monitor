@@ -99,7 +99,7 @@ try{
  $script:lastCodexTasks=@()
  [IO.Directory]::Move($sessionsDirectory,$moved)
  $indexedMissing=Source-Snapshot
- Require (@($indexedMissing.PartialData) -ccontains 'Codex') 'An index with a missing sessions directory hid the read failure.'
+ Require (@($indexedMissing.Unavailable) -ccontains 'Codex' -and -not $indexedMissing.CodexIncomplete) 'An index with a missing sessions directory hid the read failure.'
 }finally{
  if($null -ne $script:unindexedCursor -and $null -ne $script:unindexedCursor.Enumerator){try{$script:unindexedCursor.Enumerator.Dispose()}catch{}}
  $codexHome=$originalHome;$sessionIndex=$originalIndex;$sessionsDirectory=$originalSessions;$lockDirectory=$originalLocks
