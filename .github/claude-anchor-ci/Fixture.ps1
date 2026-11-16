@@ -33,7 +33,7 @@ try {
     [IO.File]::AppendAllText($target, '-append', $utf8)
     Check ((Read-Held $held) -ceq 'synthetic-before-append') 'Ordinary append could not be observed.'
     $replace = 'not attempted'
-    try { [IO.File]::Replace($replacement, $target, $null); $replace = 'succeeded' }
+    try { [IO.File]::Replace($replacement, $target, [System.Management.Automation.Language.NullString]::Value); $replace = 'succeeded' }
     catch [IO.IOException] { $replace = 'blocked: IOException' }
     catch [UnauthorizedAccessException] { $replace = 'blocked: UnauthorizedAccessException' }
     if ($replace -ceq 'succeeded') {
