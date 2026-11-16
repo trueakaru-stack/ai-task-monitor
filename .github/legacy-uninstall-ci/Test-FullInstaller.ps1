@@ -45,9 +45,10 @@ $values=@{}
 foreach($key in $ProcessValues.Keys){$values[$key]=$ProcessValues[$key]}
 $profile=Join-Path $FixtureRoot 'full-profile';$local=Join-Path $FixtureRoot 'full-local';$roaming=Join-Path $FixtureRoot 'full-roaming';$tmp=Join-Path $FixtureRoot 'full-temp'
 foreach($dir in @($profile,$local,$roaming,$tmp)){[void][IO.Directory]::CreateDirectory($dir)}
+[void][IO.Directory]::CreateDirectory((Join-Path $roaming 'Microsoft\Windows\Start Menu\Programs'))
 $values.USERPROFILE=$profile;$values.LOCALAPPDATA=$local;$values.APPDATA=$roaming;$values.TEMP=$tmp;$values.TMP=$tmp
 $values.DOTNET_CLI_HOME=$tmp;$values.NUGET_PACKAGES=Join-Path $tmp 'nuget'
-$probeCode='[Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile);[Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData);[Environment]::GetFolderPath([Environment+SpecialFolder]::Programs)'
+$probeCode='foreach($name in @("UserProfile","LocalApplicationData","Programs")){$item=[Enum]::Parse([Environment+SpecialFolder],$name);$path=[Environment]::GetFolderPath($item);if($path){$path}else{"<empty>"}}'
 $probe=New-IsolatedStart $SystemPowerShell $values
 $probe.RedirectStandardOutput=$true;$probe.RedirectStandardError=$true
 foreach($arg in @('-NoProfile','-NonInteractive','-EncodedCommand',[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probeCode)))){[void]$probe.ArgumentList.Add($arg)}
@@ -57,7 +58,12 @@ try{
     Check ($process.WaitForExit(15000) -and $process.ExitCode -eq 0) 'The known-folder probe failed.'
     $paths=@($out.Result -split "\r?\n"|Where-Object {$_})
 }finally{$process.Dispose()}
-Check ($paths.Count -eq 3) 'The known-folder probe did not return three paths.'
+if($paths.Count -ne 3 -or @($paths|Where-Object {$_ -ceq '<empty>'}).Count -gt 0){
+    $empty=@()
+    for($i=0;$i -lt $paths.Count;$i++){if($paths[$i] -ceq '<empty>'){$empty+=@('UserProfile','LocalApplicationData','Programs')[$i]}}
+    Write-Output ('Known-folder probe returned '+$paths.Count+' entries; empty fields: '+($empty -join ','))
+    throw 'The known-folder probe did not return three populated paths.'
+}
 $knownProfile=[IO.Path]::GetFullPath($paths[0]);$knownLocal=[IO.Path]::GetFullPath($paths[1]);$knownPrograms=[IO.Path]::GetFullPath($paths[2])
 foreach($path in @($knownProfile,$knownLocal,$knownPrograms)){
     Check ((Within $path $runnerProfile) -or (Within $path $FixtureRoot)) 'A known folder escaped the disposable runner profile and synthetic fixture.'
@@ -65,8 +71,15 @@ foreach($path in @($knownProfile,$knownLocal,$knownPrograms)){
 Check ([IO.Directory]::Exists($knownLocal) -and [IO.Directory]::Exists($knownPrograms)) 'The disposable known folders are unavailable.'
 Check (-not [IO.Directory]::Exists((Join-Path $knownProfile '.claude')) -and -not [IO.Directory]::Exists((Join-Path $knownProfile '.codex'))) 'The disposable runner profile unexpectedly contains real-looking agent sources.'
 $install=[IO.Path]::GetFullPath((Join-Path $knownLocal 'AITaskMonitor'))
-$shortcut=[IO.Path]::GetFullPath((Join-Path $knownPrograms 'AI task monitor.lnk'))
-Check (-not [IO.Directory]::Exists($install) -and -not [IO.File]::Exists($install) -and -not [IO.File]::Exists($shortcut) -and -not [IO.Directory]::Exists($shortcut)) 'The synthetic setup target already exists.'
+$oldShortcut=[IO.Path]::GetFullPath((Join-Path $knownPrograms 'AI task monitor.lnk'))
+$shortcut=[IO.Path]::GetFullPath((Join-Path $knownPrograms 'AI task monitor (new).lnk'))
+Check (-not [IO.Directory]::Exists($install) -and -not [IO.File]::Exists($install) -and
+    -not [IO.File]::Exists($oldShortcut) -and -not [IO.Directory]::Exists($oldShortcut) -and
+    -not [IO.File]::Exists($shortcut) -and -not [IO.Directory]::Exists($shortcut)) 'The synthetic setup target already exists.'
+$seedShortcut=Join-Path $FixtureRoot 'install-engine\programs\AI task monitor.lnk'
+Check ([IO.File]::Exists($seedShortcut)) 'The old CMD shortcut fixture is missing.'
+[IO.File]::Copy($seedShortcut,$oldShortcut,$false)
+$oldShortcutHash=(Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash
 $oldData=Join-Path $local 'CodexTaskProgress'
 [void][IO.Directory]::CreateDirectory($oldData)
 $oldSentinel=Join-Path $oldData 'user-note.txt';[IO.File]::WriteAllText($oldSentinel,'synthetic user data')
@@ -77,9 +90,9 @@ try{
     $setupTime=$setup.StartTime.ToUniversalTime()
     $dialog=Find-Window $setup 30
     $names=Get-Names $dialog
-    Check (@($names|Where-Object {$_.Contains('AI task monitor установлен.')}).Count -gt 0) 'The installer did not report a completed installation.'
+    Check (@($names|Where-Object {$_.Contains('AI task monitor установлен.') -and $_.Contains('AI task monitor (new)')}).Count -gt 0) 'The installer did not report a completed installation with the alternative shortcut.'
     $launcher=Join-Path $install 'AI task monitor.exe';$appScript=Join-Path $install 'CodexProgress.ps1'
-    Check ([IO.File]::Exists($launcher) -and [IO.File]::Exists($appScript) -and [IO.File]::Exists($shortcut)) 'The full installer did not create the application and shortcut.'
+    Check ([IO.File]::Exists($launcher) -and [IO.File]::Exists($appScript) -and [IO.File]::Exists($shortcut) -and (Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash -ceq $oldShortcutHash) 'The full installer did not create the application and alternative shortcut while preserving the old one.'
     $clock=[Diagnostics.Stopwatch]::StartNew();$candidate=$null
     while($null -eq $candidate -and $clock.Elapsed.TotalSeconds -lt 30){
         $matches=@(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -Property ProcessId,CreationDate,ExecutablePath,CommandLine |
@@ -107,12 +120,12 @@ try{
     $setup=[Diagnostics.Process]::Start($start)
     $dialog=Find-Window $setup 30
     $names=Get-Names $dialog
-    Check (@($names|Where-Object {$_.Contains('Папка установки уже существует.')}).Count -gt 0) 'The installer did not explain why the existing folder is preserved.'
+    Check (@($names|Where-Object {$_.Contains('Папка установки уже существует.') -or $_.Contains('The installation folder already exists.')}).Count -gt 0) 'The installer did not explain why the existing folder is preserved.'
     Dismiss-Dialog $dialog $setup
     Check ($setup.WaitForExit(10000) -and $setup.ExitCode -eq 1) 'The repeated synthetic installation did not stop.'
     Check ([IO.File]::ReadAllText($foreign) -ceq 'synthetic unrelated file' -and
         (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash -ceq $launcherHash -and
-        (Get-FileHash -LiteralPath $shortcut -Algorithm SHA256).Hash -ceq $shortcutHash -and
+        (Get-FileHash -LiteralPath $shortcut -Algorithm SHA256).Hash -ceq $shortcutHash -and (Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash -ceq $oldShortcutHash -and
         [IO.File]::ReadAllText($oldSentinel) -ceq 'synthetic user data') 'The repeated synthetic installation changed existing files or data.'
     Write-Output 'Full compiled setup: isolated known folders, clean install, shortcut and WPF window verified. A second setup refused the existing folder and preserved unrelated data and shortcut.'
 }finally{

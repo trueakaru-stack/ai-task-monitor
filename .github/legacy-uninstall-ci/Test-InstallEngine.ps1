@@ -68,13 +68,20 @@ $tryShortcut=$shortcutType.GetMethod('TryCreate',$flags)
 $target=Join-Path $engineRoot 'synthetic-app.exe';$icon=Join-Path $engineRoot 'synthetic-icon.ico'
 [IO.File]::WriteAllText($target,'synthetic target');[IO.File]::WriteAllText($icon,'synthetic icon')
 $occupied=Join-Path $programs 'AI task monitor.lnk'
-[IO.File]::WriteAllText($occupied,'synthetic existing shortcut')
-$created=$tryShortcut.Invoke($null,[object[]]@([string]$occupied,[string]$target,[string]$engineRoot,[string]$icon))
-Check (-not [bool]$created -and [IO.File]::ReadAllText($occupied) -ceq 'synthetic existing shortcut') 'An existing shortcut was overwritten.'
-$shortcut=Join-Path $programs 'new-shortcut.lnk'
-$created=$tryShortcut.Invoke($null,[object[]]@([string]$shortcut,[string]$target,[string]$engineRoot,[string]$icon))
-Check ([bool]$created -and [IO.File]::Exists($shortcut)) 'A new safe shortcut was not created.'
+$oldTarget=Join-Path $engineRoot 'AI task monitor.cmd'
+$makeShortcut=$shortcutType.GetMethod('Create',$flags)
+$oldBytes=[byte[]]$makeShortcut.Invoke($null,[object[]]@([string]$oldTarget,[string]$engineRoot,[string]$icon))
+$oldFile=[IO.File]::Open($occupied,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+try{$oldFile.Write($oldBytes,0,$oldBytes.Length)}finally{$oldFile.Dispose()}
+$oldHash=(Get-FileHash -LiteralPath $occupied -Algorithm SHA256).Hash
 $shell=New-Object -ComObject WScript.Shell
+$oldLink=$shell.CreateShortcut($occupied)
+Check ([string]::Equals([string]$oldLink.TargetPath,$oldTarget,[StringComparison]::OrdinalIgnoreCase)) 'The old shortcut fixture does not target the legacy CMD.'
+$created=$tryShortcut.Invoke($null,[object[]]@([string]$occupied,[string]$target,[string]$engineRoot,[string]$icon))
+Check (-not [bool]$created -and (Get-FileHash -LiteralPath $occupied -Algorithm SHA256).Hash -ceq $oldHash) 'An existing shortcut was overwritten.'
+$shortcut=Join-Path $programs 'AI task monitor (new).lnk'
+$created=$tryShortcut.Invoke($null,[object[]]@([string]$shortcut,[string]$target,[string]$engineRoot,[string]$icon))
+Check ([bool]$created -and [IO.File]::Exists($shortcut)) 'The alternative shortcut was not created.'
 $link=$shell.CreateShortcut($shortcut)
 Check ([string]::Equals([string]$link.TargetPath,$target,[StringComparison]::OrdinalIgnoreCase)) 'The new shortcut has a different target.'
 Check ([string]::Equals([string]$link.WorkingDirectory,$engineRoot,[StringComparison]::OrdinalIgnoreCase)) 'The new shortcut has a different working directory.'

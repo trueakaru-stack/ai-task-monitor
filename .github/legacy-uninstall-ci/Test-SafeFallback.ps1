@@ -139,7 +139,7 @@ public static class FallbackTestNative
             $names=@(foreach($element in $all){$element.Current.Name})
             $expected=if($culture -eq 'ru-RU'){'Удаление не выполнено.'}else{'Uninstallation was not performed.'}
             $preserved=if($culture -eq 'ru-RU'){'подключения сохранены.'}else{'connections were preserved.'}
-            Check (@($names|Where-Object {$_.Contains($expected) -and $_.Contains($preserved)}).Count -gt 0) 'The fallback did not explain that removal was not performed.'
+            Check (@($names|Where-Object {$_.Contains($expected) -and $_.Contains($preserved) -and $_.Contains('%LOCALAPPDATA%\AITaskMonitor')}).Count -gt 0) 'The fallback did not explain that removal was not performed and where files remain.'
             # The hosted UIA provider exposes native message-box controls as
             # panes. Send BM_CLICK only to its uniquely identified OK control.
             $buttons=@($all|Where-Object {$_.Current.Name -ceq 'OK' -and $_.Current.ClassName -ceq 'Button'})

@@ -9,15 +9,30 @@ internal static class CodexProgressInstaller
     [STAThread]
     private static void Main()
     {
+        bool installationAttempted = false;
         try
         {
             string localDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string installDirectory = Path.Combine(localDirectory, "AITaskMonitor");
             bool claudeConnected = false;
-            bool shortcutCreated = false;
+            string shortcutName = null;
             string launcher = Path.Combine(installDirectory, "AI task monitor.exe");
+            if (Directory.Exists(installDirectory) || File.Exists(installDirectory))
+                throw new IOException(SafeInstallPaths.ExistingInstallMessage());
+            bool connectClaude = false;
+            string claudeDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
+            if (Directory.Exists(claudeDirectory))
+            {
+                DialogResult answer = MessageBox.Show(
+                    "Перед подключением обновите все используемые копии Claude Code, включая Claude Desktop, до версии 2.1.101 или новее. Закройте Claude Code, Claude Desktop и другие программы, которые могут изменять настройки Claude Code, включая их фоновые процессы. Приложение не проверяет версии и закрытие программ автоматически.\n\nПодключить Claude Code? AI task monitor добавит локальные hooks в настройки Claude. Существующие hooks сохранятся.",
+                    "AI task monitor",
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Question);
+                connectClaude = answer == DialogResult.Yes;
+            }
             using (SafeInstallPaths installGuard = SafeInstallPaths.OpenExisting(localDirectory))
             {
+                installationAttempted = true;
                 installGuard.CreateChild(installDirectory);
 
                 Extract(installGuard, "CodexProgress.ps1", Path.Combine(installDirectory, "CodexProgress.ps1"));
@@ -56,18 +71,12 @@ internal static class CodexProgressInstaller
 
                 string programs = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
                 string shortcut = Path.Combine(programs, "AI task monitor.lnk");
-                shortcutCreated = SafeShortcut.TryCreate(shortcut, launcher, installDirectory, iconPath);
-            }
+                if (SafeShortcut.TryCreate(shortcut, launcher, installDirectory, iconPath))
+                    shortcutName = "AI task monitor.lnk";
+                else if (SafeShortcut.TryCreate(Path.Combine(programs, "AI task monitor (new).lnk"), launcher, installDirectory, iconPath))
+                    shortcutName = "AI task monitor (new).lnk";
 
-            string claudeDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
-            if (Directory.Exists(claudeDirectory))
-            {
-                DialogResult answer = MessageBox.Show(
-                    "Перед подключением обновите все используемые копии Claude Code, включая Claude Desktop, до версии 2.1.101 или новее. Закройте Claude Code, Claude Desktop и другие программы, которые могут изменять настройки Claude Code, включая их фоновые процессы. Приложение не проверяет версии и закрытие программ автоматически.\n\nПодключить Claude Code? AI task monitor добавит локальные hooks в настройки Claude. Существующие hooks сохранятся.",
-                    "AI task monitor",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question);
-                if (answer == DialogResult.Yes)
+                if (connectClaude)
                 {
                     Process setup = Process.Start(new ProcessStartInfo
                     {
@@ -81,12 +90,14 @@ internal static class CodexProgressInstaller
                     if (setup.ExitCode != 0) throw new InvalidOperationException("Не удалось подключить Claude Code.");
                     claudeConnected = true;
                 }
+                Process.Start(new ProcessStartInfo(launcher) { WorkingDirectory = installDirectory, UseShellExecute = false });
             }
 
-            Process.Start(new ProcessStartInfo(launcher) { WorkingDirectory = installDirectory, UseShellExecute = false });
             MessageBox.Show(
                 "AI task monitor установлен. " +
-                (shortcutCreated ? "Ярлык добавлен в меню «Пуск»." : "Существующий ярлык не изменён или новый не удалось создать. Приложение можно открыть из папки установки.") +
+                (shortcutName == "AI task monitor.lnk" ? "Ярлык добавлен в меню «Пуск»." :
+                    shortcutName != null ? "Существующий ярлык сохранён. Добавлен новый ярлык «AI task monitor (new)»." :
+                    "Новый ярлык создать не удалось. Приложение можно открыть из папки %LOCALAPPDATA%\\AITaskMonitor.") +
                 (claudeConnected ? " Claude Code подключён. Перезапустите Claude Code." : ""),
                 "AI task monitor",
                 MessageBoxButtons.OK,
@@ -94,7 +105,8 @@ internal static class CodexProgressInstaller
         }
         catch (Exception error)
         {
-            MessageBox.Show(error.Message, "AI task monitor", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            string advice = installationAttempted ? SafeInstallPaths.PartialInstallMessage() : "";
+            MessageBox.Show(error.Message + advice, "AI task monitor", MessageBoxButtons.OK, MessageBoxIcon.Error);
             Environment.ExitCode = 1;
         }
     }
