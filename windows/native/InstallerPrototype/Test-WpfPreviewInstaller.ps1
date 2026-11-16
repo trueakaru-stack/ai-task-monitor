@@ -286,6 +286,11 @@ public static class AitmWpfInstallerWindowCheck {
     try {
         $uninstallCode = Invoke-HiddenSetup $uninstallers[0].FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
         Assert-Condition ($uninstallCode -eq 0) 'Synthetic WPF uninstall failed.'
+        $cleanupDeadline = [DateTime]::UtcNow.AddSeconds(15)
+        while ([IO.File]::Exists($uninstallers[0].FullName) -and [DateTime]::UtcNow -lt $cleanupDeadline) {
+            Start-Sleep -Milliseconds 100
+        }
+        Assert-Condition (-not [IO.File]::Exists($uninstallers[0].FullName)) 'Synthetic uninstaller remained.'
     } finally { $lockStream.Dispose() }
     Assert-Condition (-not [IO.File]::Exists($executable)) 'Unchanged application executable was not removed.'
     foreach ($entry in $payloadHashes.GetEnumerator()) {
@@ -306,7 +311,6 @@ public static class AitmWpfInstallerWindowCheck {
     }
     Assert-Condition ([Convert]::ToBase64String([IO.File]::ReadAllBytes($foreign)) -ceq [Convert]::ToBase64String($foreignBytes)) 'Foreign file was removed or changed.'
     Assert-Condition ([Convert]::ToBase64String([IO.File]::ReadAllBytes($data)) -ceq [Convert]::ToBase64String($dataBytes)) 'Synthetic user data was removed or changed.'
-    Assert-Condition (-not [IO.File]::Exists($uninstallers[0].FullName)) 'Synthetic uninstaller remained.'
     Write-Output ('Synthetic WPF installer: published {0} files, installed, launched owned window, and preserved modified, locked and foreign files.' -f $payloadHashes.Count)
 } finally {
     foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $previous[$name], 'Process') }
