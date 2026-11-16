@@ -53,9 +53,9 @@ internal sealed class CodexSourceController
         this.fileSystem = fileSystem;
     }
 
-    // Fresh helper instances prevent their internal per-ID caches from growing
-    // across refreshes. Their individual scans are still unbounded: do not use
-    // this synthetic controller with real profiles or on the UI thread.
+    // Fresh helpers prevent per-ID caches from growing across refreshes. Index
+    // reads are bounded, but discovery is unbounded and filesystem calls can
+    // block. Do not use this synthetic controller with real profiles or on the UI thread.
     internal CodexSourceSnapshot Refresh(IEnumerable<string> heldOrUnavailableLockIds)
     {
         ArgumentNullException.ThrowIfNull(heldOrUnavailableLockIds);

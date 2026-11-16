@@ -57,8 +57,8 @@ confirmed after capacity has been sealed. Up to 128 session/loss anchors are
 retained for the controller's lifetime.
 
 Fresh index and discovery helpers prevent their internal per-ID caches from
-growing across refreshes, but their individual historical index reads and
-recursive discovery scans remain unbounded. The journal checks also do not make
+growing across refreshes. Historical index reads are bounded per pass, but
+recursive discovery scans remain unbounded and filesystem calls can block. The journal checks also do not make
 a read atomic: same-length concurrent replacement with unchanged metadata can
 escape detection, and a replacement before first observation cannot be seen.
 Official Codex can have multiple rollout files with the same session ID and
