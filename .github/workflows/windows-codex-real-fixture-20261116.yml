@@ -1,0 +1,66 @@
+name: Windows official Codex synthetic rollout
+on:
+  push:
+    branches: [codex/windows-codex-no-index-20261116]
+    paths:
+      - '.github/codex-real-fixture-ci/**'
+      - '.github/workflows/windows-codex-real-fixture-20261116.yml'
+permissions:
+  contents: read
+  actions: read
+jobs:
+  test:
+    runs-on: windows-2025
+    timeout-minutes: 8
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+    steps:
+      - name: Download only the synthetic CLI fixture
+        uses: actions/download-artifact@v4
+        with:
+          name: official-codex-exec-fixture
+          run-id: 43900947332
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/aitm-real-rollout
+      - name: Check the Windows monitor pipeline in a disposable profile
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          function PathState([string]$scope){
+            $key=if($scope -eq 'User'){[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment',$false)}else{[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment',$false)}
+            try{$value=$key.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames);$kind=if($null -eq $value){'Missing'}else{[string]$key.GetValueKind('Path')};return [pscustomobject]@{Value=[string]$value;Kind=$kind}}finally{$key.Dispose()}
+          }
+          $beforeUser=PathState 'User';$beforeMachine=PathState 'Machine';$beforeProcess=[Environment]::GetEnvironmentVariable('Path','Process')
+          try{
+            $runnerTemp=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')
+            $root=[IO.Path]::GetFullPath((Join-Path $runnerTemp ('aitm-real-source-'+[Guid]::NewGuid().ToString('N'))))
+            if(-not $root.StartsWith($runnerTemp+'\',[StringComparison]::OrdinalIgnoreCase) -or [IO.Directory]::Exists($root)){throw 'Unsafe synthetic source root.'}
+            $source=Join-Path $root 'source';$hooks=Join-Path $root 'hooks';$template=Join-Path $root 'template';$profile=Join-Path $root 'profile';$temp=Join-Path $root 'temp'
+            foreach($dir in @($source,$hooks,$template,$profile,$temp)){[void][IO.Directory]::CreateDirectory($dir)}
+            $env:GIT_CONFIG_NOSYSTEM='1';$env:GIT_TERMINAL_PROMPT='0';$env:GIT_CONFIG_GLOBAL=Join-Path $root 'empty.gitconfig'
+            [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL,'')
+            git -c credential.helper= -c core.hooksPath="$hooks" init --quiet --template="$template" "$source"
+            if($LASTEXITCODE -ne 0){throw 'Cannot initialize the synthetic checkout.'}
+            git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$env:GITHUB_SHA"
+            if($LASTEXITCODE -ne 0){throw 'Cannot fetch the exact candidate.'}
+            git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+            if($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:GITHUB_SHA){throw 'Cannot select the exact candidate.'}
+            $powershell=[IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'))
+            $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$powershell;$start.WorkingDirectory=$root;$start.UseShellExecute=$false;$start.CreateNoWindow=$true
+            $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true;$start.Environment.Clear()
+            $values=@{SystemRoot=$env:SystemRoot;windir=$env:SystemRoot;PATH=((Split-Path -Parent $powershell)+';'+(Join-Path $env:SystemRoot 'System32')+';'+$env:SystemRoot);USERPROFILE=$profile;LOCALAPPDATA=$profile;APPDATA=$profile;TEMP=$temp;TMP=$temp;RUNNER_TEMP=$runnerTemp;DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='0';GITHUB_ACTIONS='true';RUNNER_ENVIRONMENT='github-hosted';RUNNER_OS='Windows'}
+            foreach($key in @('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','SystemDrive','ComSpec','PATHEXT')){$value=[Environment]::GetEnvironmentVariable($key);if($value){$values[$key]=$value}}
+            foreach($key in $values.Keys){$start.Environment[$key]=[string]$values[$key]}
+            foreach($argument in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source '.github/codex-real-fixture-ci/Test.ps1'))){[void]$start.ArgumentList.Add($argument)}
+            $process=[Diagnostics.Process]::Start($start)
+            try{
+              $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+              if(-not $process.WaitForExit(90000)){$process.Kill($true);[void]$process.WaitForExit(5000);throw 'The synthetic CLI fixture check timed out.'}
+              if($process.ExitCode -ne 0){throw 'The synthetic CLI fixture check failed.'}
+              Write-Output $stdout.Result
+            }finally{$process.Dispose()}
+          }finally{
+            foreach($scope in @('User','Machine')){$before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine};$after=PathState $scope;if($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind){throw "$scope PATH changed."}}
+            if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}
+          }
