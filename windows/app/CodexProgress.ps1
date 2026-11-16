@@ -2058,6 +2058,20 @@ function Session-File([string]$id) {
     throw 'Codex session file cannot be read.'
    }
   }
+  $unindexed=Get-Variable -Scope Script -Name 'unindexedPaths' -ErrorAction SilentlyContinue
+  if($null -ne $unindexed -and $null -ne $unindexed.Value -and $unindexed.Value.ContainsKey($id)){
+   $candidate=[string]$unindexed.Value[$id]
+   try{
+    $attributes=[IO.File]::GetAttributes($candidate)
+    if(($attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) -ne 0){throw 'Invalid unindexed session file.'}
+    return $candidate
+   }catch{
+    $exception=$_.Exception
+    while($null -ne $exception.InnerException){$exception=$exception.InnerException}
+    if($exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException]){return ''}
+    throw 'Codex session file cannot be read.'
+   }
+  }
   if ($cache.Files.ContainsKey($id)) {
    $cached=[string]$cache.Files[$id]
    if ($cached -and (& $fileAvailable $cached)) { return $cached }
@@ -2589,19 +2603,14 @@ function Codex-Tasks {
  $sessions=@()
  if($indexAvailable){$sessions=@(Codex-IndexCandidates)}
  $indexed=@{}
+ $script:unindexedPaths=@{}
  foreach($session in $sessions){$indexed[[string](Prop $session 'id' '')]=$true}
  foreach($candidate in @(Codex-UnindexedCandidates)){
   $id=[string]$candidate.id
   if($indexed.ContainsKey($id)){continue}
   $indexed[$id]=$true
   $sessions+=@($candidate)
-  $script:sessionDates[$id]=[IO.Path]::GetDirectoryName([string]$candidate.path)
-  $discoveryVariable=Get-Variable -Scope Script -Name 'sessionDiscovery' -ErrorAction SilentlyContinue
-  if($null -ne $discoveryVariable -and $null -ne $discoveryVariable.Value){
-   $cache=$discoveryVariable.Value
-   [Threading.Monitor]::Enter($cache.Gate)
-   try{$cache.Files[$id]=[string]$candidate.path}finally{[Threading.Monitor]::Exit($cache.Gate)}
-  }
+  $script:unindexedPaths[$id]=[string]$candidate.path
  }
  $discoveryVariable=Get-Variable -Scope Script -Name 'sessionDiscovery' -ErrorAction SilentlyContinue
  if ($null -ne $discoveryVariable -and $null -ne $discoveryVariable.Value) {

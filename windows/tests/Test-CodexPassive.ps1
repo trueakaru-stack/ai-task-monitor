@@ -241,6 +241,12 @@ try{
  Require ((Localized-TaskTitle $userTitle) -ceq 'Задача Codex') 'A user-provided Codex title was translated.'
  $script:resolvedLanguage='ru'
  Require ((Localized-TaskTitle $card[0]) -ceq 'Задача Codex') 'The generated Russian Codex title was changed.'
+ $hiddenPath=$noIndexPath+'.fixture-hidden'
+ $scanTick=$script:sessionDiscovery.LastScanTicks
+ [IO.File]::Move($noIndexPath,$hiddenPath)
+ try{
+  Require ((Session-File $noIndexId) -ceq '' -and $script:sessionDiscovery.LastScanTicks -eq $scanTick) 'A missing unindexed file triggered an unbounded recursive scan.'
+ }finally{[IO.File]::Move($hiddenPath,$noIndexPath)}
  $longId='10000000-0000-0000-0000-000000000006'
  $longTurn='10000000-0000-0000-0000-000000000007'
  $longUnindexed=Join-Path $script:fixtureDay ('rollout-'+$filenameTime+'-'+$longId+'.jsonl')
