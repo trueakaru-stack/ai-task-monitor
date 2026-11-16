@@ -1,4 +1,4 @@
-param([switch]$RequireSymbolicLink,[string]$ApplicationDirectory='')
+﻿param([switch]$RequireSymbolicLink,[string]$ApplicationDirectory='')
 $ErrorActionPreference = "Stop"
 $root = [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) ("ai-task-monitor-integration-" + [Guid]::NewGuid().ToString("N"))))
 $prefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
@@ -28,7 +28,9 @@ try {
     $assertDisconnected = [scriptblock]::Create($connectionDefinition + "`n" + 'if (Claude-HookConnected) { throw "An unrelated hook was recognized as the app hook." }')
     $legacy = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + $hook + '"'
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("& '" + $hook.Replace("'", "''") + "'"))
-    $owned = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    $legacyEncoded = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    $systemPowerShell = [IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'WindowsPowerShell\v1.0\powershell.exe')
+    $owned = $legacyEncoded
     $directory = Join-Path $root ".claude"
     [void][IO.Directory]::CreateDirectory($directory)
     $settingsPath = Join-Path $directory "settings.json"
@@ -60,16 +62,28 @@ try {
     if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $settingsPath -Algorithm SHA256).Hash -ne $originalHash) { throw "Removing an absent hook must not rewrite unrelated settings." }
     & $assertDisconnected
 
+    # Either prior standalone form can also be removed directly.
+    foreach($priorCommand in @($legacy,$legacyEncoded)){
+        $onePrior = $original | ConvertFrom-Json
+        $onePrior.hooks.PreToolUse[0].hooks = @($onePrior.hooks.PreToolUse[0].hooks) + [PSCustomObject]@{type="command";command=$priorCommand}
+        [IO.File]::WriteAllText($settingsPath, ($onePrior | ConvertTo-Json -Depth 100), [Text.UTF8Encoding]::new($false))
+        & $assertPartial
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setup -Mode Remove
+        if ($LASTEXITCODE -ne 0) { throw "Removing a prior app hook failed." }
+        $remaining = Get-Content -Raw -Encoding UTF8 -LiteralPath $settingsPath | ConvertFrom-Json
+        if (($remaining | ConvertTo-Json -Depth 100) -cne (($original | ConvertFrom-Json) | ConvertTo-Json -Depth 100)) { throw "Removing a prior hook changed unrelated settings or hooks." }
+    }
+
     $withLegacy = $original | ConvertFrom-Json
-    $withLegacy.hooks.PreToolUse[0].hooks = @($withLegacy.hooks.PreToolUse[0].hooks) + [PSCustomObject]@{type="command";command=$legacy}
+    $withLegacy.hooks.PreToolUse[0].hooks = @($withLegacy.hooks.PreToolUse[0].hooks) + @([PSCustomObject]@{type="command";command=$legacy},[PSCustomObject]@{type="command";command=$legacyEncoded})
     [IO.File]::WriteAllText($settingsPath, ($withLegacy | ConvertTo-Json -Depth 100), [Text.UTF8Encoding]::new($false))
     & $assertPartial
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setup -Mode Install
     if ($LASTEXITCODE -ne 0) { throw "Installing the hook failed." }
     $connected = Get-Content -Raw -Encoding UTF8 -LiteralPath $settingsPath | ConvertFrom-Json
     $groups = @($connected.hooks.PreToolUse)
-    if ($groups.Count -ne 3 -or @($groups[0].hooks).Count -ne 4 -or @($groups[1].hooks).Count -ne 0) { throw "Existing hook groups were changed." }
-    if ($groups[2].hooks[0].command -ne $owned) { throw "The app hook was not installed exactly." }
+    if ($groups.Count -ne 2 -or @($groups[0].hooks).Count -ne 5 -or @($groups[1].hooks).Count -ne 0) { throw "Existing hook groups were changed." }
+    if ($groups[0].hooks[4].command -ne $owned) { throw "The app hook was not installed exactly." }
     & $assertConnected
     if (@(Get-ChildItem -LiteralPath $directory -Filter 'settings.json.codex-tasks-backup-*').Count -ne 1) { throw "A settings backup was not retained." }
     if (@(Get-ChildItem -LiteralPath $directory -Filter '.ai-task-monitor-settings-*.tmp' -Force).Count -ne 0) { throw "A temporary settings file was left behind." }
@@ -97,8 +111,27 @@ try {
     $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encodedSpecial))
     $expectedScript = "& '" + (Join-Path $specialDirectory "ClaudeTaskHook.ps1").Replace("'", "''") + "'"
     if ($decoded -cne $expectedScript) { throw "The encoded hook did not preserve the exact script path." }
-    '{"hook_event_name":"UserPromptSubmit","session_id":"synthetic-special"}' | & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedSpecial
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $root 'CodexTaskProgress\claude-events-v2.jsonl'))) { throw "The encoded hook did not receive input and write its synthetic event." }
+    # Run the actual registered command through the Windows shell using an
+    # isolated fixture PATH containing the system PowerShell directory.
+    $hookStart = New-Object Diagnostics.ProcessStartInfo
+    $hookStart.FileName = [IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'cmd.exe')
+    $hookStart.Arguments = '/d /s /c "' + $registered + '"'
+    $hookStart.WorkingDirectory = $root
+    $hookStart.UseShellExecute = $false
+    $hookStart.CreateNoWindow = $true
+    $hookStart.RedirectStandardInput = $true
+    $hookStart.RedirectStandardOutput = $true
+    $hookStart.RedirectStandardError = $true
+    $hookStart.EnvironmentVariables['PATH'] = (Split-Path -Parent $systemPowerShell)+';'+[Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+    $hookProcess = [Diagnostics.Process]::Start($hookStart)
+    try {
+        $hookOut=$hookProcess.StandardOutput.ReadToEndAsync();$hookErr=$hookProcess.StandardError.ReadToEndAsync()
+        $hookProcess.StandardInput.WriteLine('{"hook_event_name":"UserPromptSubmit","session_id":"synthetic-special"}')
+        $hookProcess.StandardInput.Close()
+        if (-not $hookProcess.WaitForExit(30000)) { throw 'The synthetic hook timed out.' }
+        if ($hookProcess.ExitCode -ne 0) { throw ('The registered hook failed in the isolated shell: '+$hookOut.Result+' '+$hookErr.Result) }
+    } finally { $hookProcess.Dispose() }
+    if (-not (Test-Path -LiteralPath (Join-Path $root 'CodexTaskProgress\claude-events-v2.jsonl'))) { throw "The registered hook did not receive input and write its synthetic event." }
 
     $invalid = '[1, 2, 3]'
     [IO.File]::WriteAllText($settingsPath, $invalid, [Text.UTF8Encoding]::new($false))
@@ -171,12 +204,15 @@ try {
             $casePath = Join-Path $caseDirectory 'settings.json'
             $targetSpec = '..\..\linked-' + $case + '.json'
             $intermediate = $null
-            if ($case -eq 'chain') {
-                $intermediate = Join-Path $caseDirectory 'settings-target.json'
-                [void](New-Item -ItemType SymbolicLink -Path $intermediate -Target $targetSpec -ErrorAction Stop)
-                $targetSpec = 'settings-target.json'
-            }
-            [void](New-Item -ItemType SymbolicLink -Path $casePath -Target $targetSpec -ErrorAction Stop)
+            Push-Location -LiteralPath $caseDirectory
+            try {
+                if ($case -eq 'chain') {
+                    $intermediate = Join-Path $caseDirectory 'settings-target.json'
+                    [void](New-Item -ItemType SymbolicLink -Path $intermediate -Target $targetSpec -ErrorAction Stop)
+                    $targetSpec = 'settings-target.json'
+                }
+                [void](New-Item -ItemType SymbolicLink -Path $casePath -Target $targetSpec -ErrorAction Stop)
+            } finally { Pop-Location }
             $env:USERPROFILE = $caseProfile
             try {
                 foreach ($mode in @('Install', 'Remove')) {
@@ -199,9 +235,25 @@ try {
             [void][IO.Directory]::CreateDirectory($caseDirectory)
             $casePath = Join-Path $caseDirectory 'settings.json'
             $second = Join-Path $caseDirectory 'second.json'
-            if ($case -eq 'cycle') { [void](New-Item -ItemType SymbolicLink -Path $second -Target 'settings.json' -ErrorAction Stop) }
-            $targetSpec = if ($case -eq 'cycle') { 'second.json' } else { 'missing.json' }
-            [void](New-Item -ItemType SymbolicLink -Path $casePath -Target $targetSpec -ErrorAction Stop)
+            Push-Location -LiteralPath $caseDirectory
+            try {
+                if ($case -eq 'dangling') {
+                    # Windows PowerShell 5 requires the initial target to exist.
+                    $placeholder=Join-Path $caseDirectory 'missing.json'
+                    [IO.File]::WriteAllText($placeholder,'synthetic')
+                    [void](New-Item -ItemType SymbolicLink -Path $casePath -Target 'missing.json' -ErrorAction Stop)
+                    [IO.File]::Delete($placeholder)
+                } else {
+                    # Create the first link against a temporary file, then use
+                    # the system shell to link back to the now-dangling link.
+                    [IO.File]::WriteAllText($casePath,'synthetic')
+                    [void](New-Item -ItemType SymbolicLink -Path $second -Target 'settings.json' -ErrorAction Stop)
+                    [IO.File]::Delete($casePath)
+                    $cmd=[IO.Path]::Combine([Environment]::GetFolderPath([Environment+SpecialFolder]::System),'cmd.exe')
+                    $linkResult=& $cmd /d /c ('mklink "'+$casePath+'" "second.json"')
+                    if ($LASTEXITCODE -ne 0) { throw ('Cannot create the synthetic cyclic link: '+($linkResult -join ' ')) }
+                }
+            } finally { Pop-Location }
             $env:USERPROFILE = $caseProfile
             try {
                 $previousErrorPreference = $ErrorActionPreference

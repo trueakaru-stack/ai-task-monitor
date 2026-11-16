@@ -170,6 +170,7 @@ $script:lastClaudeTasks = @()
 $script:sourceErrors = @()
 $script:sourcePartialConnections = @()
 $script:sourcePartialData = @()
+$script:sourceCodexIncomplete = $false
 $script:compactTaskId = ""
 $script:taskPriority = @{}
 $script:taskPriorityCounter = 0
@@ -251,7 +252,7 @@ try{
  $script:codexCloudController=New-CodexCloudController
  $script:codexCloudModulesAvailable=$true
 }catch{}
-$script:currentVersion='0.2.8-alpha'
+$script:currentVersion='0.2.8'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateRequest=$null
@@ -381,6 +382,7 @@ $script:translations=@{
  'Нет данных'='No data'
  'Нет данных от '='No data from '
  'Часть данных недоступна'='Some data is unavailable'
+ 'Список задач Codex может быть неполным'='The Codex task list may be incomplete'
  'Статус не подтверждён. Из журнала: '='Status unconfirmed. From log: '
  'Подключён'='Connected'
  'Подключён частично'='Partially connected'
@@ -1598,7 +1600,7 @@ function Claude-InstallationState([string]$profile,[string]$appData,[string]$loc
 }
 
 function Update-SourceSettings {
- $codexSourceStatus.Text=Tr $(if($script:sourcePartialData -contains "Codex"){"Часть данных недоступна"}elseif($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
+ $codexSourceStatus.Text=Tr $(if($script:sourcePartialData -contains "Codex"){"Часть данных недоступна"}elseif($script:sourceCodexIncomplete){"Статус не подтверждён"}elseif($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
  Update-CodexCloudSourceSettings
  Update-OpenCodeSourceSettings
  Update-KimiSourceSettings
@@ -1948,7 +1950,7 @@ function Find-PriorLifecycle([string]$path) {
  } finally {$stream.Dispose()}
 }
 
-function Thread-State([string]$id) {
+function Thread-State([string]$id,[bool]$AllowPriorWithoutLock=$false) {
  if($id -notmatch '^[A-Za-z0-9_-]{1,128}$'){return [PSCustomObject]@{State="unknown";HasStartMarker=$false;UpdatedUtc=[DateTime]::MinValue;StartKey="";StartedUtc=[DateTime]::MinValue}}
  $path = Session-File $id
  if (-not $path -or -not (Test-Path -LiteralPath $path)) { return [PSCustomObject]@{State="unknown";HasStartMarker=$false;UpdatedUtc=[DateTime]::MinValue;StartKey="";StartedUtc=[DateTime]::MinValue} }
@@ -2013,7 +2015,7 @@ function Thread-State([string]$id) {
   if($null -eq $seed -and -not $scannedPrior -and -not $parsed.SawStart -and [long]$file.Length -gt $tailLimit){
    $priorLock=Lock-State (Join-Path $lockDirectory "$id.lock")
    if($priorLock -eq 'unavailable'){throw 'Codex session lock cannot be checked.'}
-   if($priorLock -eq 'present'){
+   if($priorLock -eq 'present' -or $AllowPriorWithoutLock){
     $prior=Find-PriorLifecycle $path
     $scannedPrior=$true
     if($null -ne $prior){$parsed=& $parseTail $tail $prior}
@@ -2055,6 +2057,20 @@ function Session-File([string]$id) {
     $exception=$_.Exception
     while($null -ne $exception.InnerException){$exception=$exception.InnerException}
     if($exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException]){return $false}
+    throw 'Codex session file cannot be read.'
+   }
+  }
+  $unindexed=Get-Variable -Scope Script -Name 'unindexedPaths' -ErrorAction SilentlyContinue
+  if($null -ne $unindexed -and $null -ne $unindexed.Value -and $unindexed.Value.ContainsKey($id)){
+   $candidate=[string]$unindexed.Value[$id]
+   try{
+    $attributes=[IO.File]::GetAttributes($candidate)
+    if(($attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) -ne 0){throw 'Invalid unindexed session file.'}
+    return $candidate
+   }catch{
+    $exception=$_.Exception
+    while($null -ne $exception.InnerException){$exception=$exception.InnerException}
+    if($exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException]){return ''}
     throw 'Codex session file cannot be read.'
    }
   }
@@ -2512,17 +2528,159 @@ function Codex-IndexCandidates {
  return @($sessionMap.Values)
 }
 
+function Codex-UnindexedCandidates([bool]$HasIndexedHistory=$false) {
+ # A rollout is evidence of a session, never evidence that its writer is live.
+ # Keep a resumable directory cursor so a full page cannot hide later files.
+ $now=[Diagnostics.Stopwatch]::GetTimestamp()
+ $cached=Get-Variable -Scope Script -Name unindexedScan -ErrorAction SilentlyContinue
+ $cachedRootSafe=$false
+ try{
+  $cachedAttributes=[IO.File]::GetAttributes($sessionsDirectory)
+  $cachedRootSafe=(($cachedAttributes -band [IO.FileAttributes]::Directory) -ne 0 -and ($cachedAttributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)
+ }catch{}
+ if($cachedRootSafe -and $null -ne $cached -and $null -ne $cached.Value -and
+    [string]::Equals([string]$cached.Value.Root,[string]$sessionsDirectory,[StringComparison]::OrdinalIgnoreCase) -and -not [bool]$cached.Value.RootMissing -and
+    ($now-[long]$cached.Value.Tick) -ge 0 -and ($now-[long]$cached.Value.Tick) -lt ([long][Diagnostics.Stopwatch]::Frequency*5)){
+  $script:codexDiscoveryFailed=[bool]$cached.Value.Failed
+  return @($cached.Value.Items)
+ }
+ $found=@{};$ambiguous=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+ $count=0;$bytesRead=[long]0;$failed=$false;$completedRound=$false;$rootMissing=$false
+ $uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+ $cursorVariable=Get-Variable -Scope Script -Name unindexedCursor -ErrorAction SilentlyContinue
+ $cursor=if($null -ne $cursorVariable){$cursorVariable.Value}else{$null}
+ $today=[DateTime]::UtcNow.Date
+ $localToday=[DateTime]::Now.Date
+ if($null -ne $cursor -and (-not [string]::Equals([string]$cursor.Root,[string]$sessionsDirectory,[StringComparison]::OrdinalIgnoreCase) -or $cursor.Day -ne $today -or $cursor.LocalDay -ne $localToday)){
+  if($null -ne $cursor.Enumerator){try{$cursor.Enumerator.Dispose()}catch{}}
+  $cursor=$null
+ }
+ try{
+  $rootAttributes=[IO.File]::GetAttributes($sessionsDirectory)
+  if(($rootAttributes -band [IO.FileAttributes]::Directory) -eq 0 -or ($rootAttributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Unavailable sessions directory.'}
+  if($null -eq $cursor){
+   $visited=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+   $days=New-Object 'Collections.Generic.List[object]'
+   for($offset=0;$offset -lt 7;$offset++){
+    foreach($date in @($today.AddDays(-$offset),$localToday.AddDays(-$offset))){
+     $year=Join-Path $sessionsDirectory $date.ToString('yyyy',[Globalization.CultureInfo]::InvariantCulture)
+     $month=Join-Path $year $date.ToString('MM',[Globalization.CultureInfo]::InvariantCulture)
+     $day=Join-Path $month $date.ToString('dd',[Globalization.CultureInfo]::InvariantCulture)
+     if($visited.Add($day)){$days.Add([PSCustomObject]@{Year=$year;Month=$month;Day=$day})}
+    }
+   }
+   $cursor=[PSCustomObject]@{Root=$sessionsDirectory;Day=$today;LocalDay=$localToday;Days=$days.ToArray();Index=0;Enumerator=$null;Pending='';PassFailed=$false;ReportFailed=$false}
+   $script:unindexedCursor=$cursor
+  }
+  while($count -lt 256 -and $bytesRead -lt 4194304){
+   if($null -eq $cursor.Enumerator){
+    if($cursor.Index -ge $cursor.Days.Count){$cursor.Index=0;$completedRound=$true;break}
+    $entry=$cursor.Days[$cursor.Index]
+    try{
+     foreach($directory in @($entry.Year,$entry.Month,$entry.Day)){
+      $attributes=[IO.File]::GetAttributes($directory)
+      if(($attributes -band [IO.FileAttributes]::Directory) -eq 0 -or ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Unavailable dated directory.'}
+     }
+     $cursor.Enumerator=([IO.Directory]::EnumerateFiles($entry.Day,'rollout-*.jsonl',[IO.SearchOption]::TopDirectoryOnly)).GetEnumerator()
+    }catch{
+     $exception=$_.Exception
+     while($null -ne $exception.InnerException){$exception=$exception.InnerException}
+     if($exception -isnot [IO.FileNotFoundException] -and $exception -isnot [IO.DirectoryNotFoundException]){$failed=$true}
+     $cursor.Index++;continue
+    }
+   }
+   if($cursor.Pending){$path=[string]$cursor.Pending;$cursor.Pending=''}
+   else{
+    try{$hasNext=$cursor.Enumerator.MoveNext()}
+    catch{$failed=$true;try{$cursor.Enumerator.Dispose()}catch{};$cursor.Enumerator=$null;$cursor.Index++;continue}
+    if(-not $hasNext){try{$cursor.Enumerator.Dispose()}catch{};$cursor.Enumerator=$null;$cursor.Index++;continue}
+    $path=[string]$cursor.Enumerator.Current
+   }
+   $count++
+   $name=[IO.Path]::GetFileName($path)
+   if($name -notmatch ('^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(?<thread>'+ $uuid +')(?:_'+$uuid+')?\.jsonl$')){continue}
+   $id=[string]$Matches.thread
+   if($ambiguous.Contains($id)){continue}
+   try{
+    $attributes=[IO.File]::GetAttributes($path)
+    if(($attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) -ne 0){$failed=$true;continue}
+    $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try{
+     $length=[int][Math]::Min([long]65536,[long]$stream.Length)
+     if(($bytesRead+$length) -gt 4194304){$cursor.Pending=$path;break}
+     $bytes=[byte[]]::new($length);$offset=0
+     while($offset -lt $length){$read=$stream.Read($bytes,$offset,$length-$offset);if($read -le 0){throw 'Rollout changed.'};$offset+=$read;$bytesRead+=$read}
+    }finally{$stream.Dispose()}
+    $end=[Array]::IndexOf($bytes,[byte]10)
+    if($end -lt 0){continue}
+    $first=[Text.UTF8Encoding]::new($false,$true).GetString($bytes,0,$end).TrimStart([char]0xFEFF).TrimEnd([char]13)
+    $record=$first|ConvertFrom-Json -ErrorAction Stop
+    if([string](Prop $record 'type' '') -ne 'session_meta' -or
+       -not [string]::Equals([string](Prop (Prop $record 'payload') 'id' ''),$id,[StringComparison]::OrdinalIgnoreCase)){continue}
+    if($found.ContainsKey($id)){$found.Remove($id);[void]$ambiguous.Add($id);continue}
+    $found[$id]=[PSCustomObject]@{id=$id;thread_name='Задача Codex';titleGenerated=$true;unindexed=$true;path=$path;updated_at=[IO.File]::GetLastWriteTimeUtc($path).ToString('o')}
+   }catch{
+    $exception=$_.Exception
+    while($null -ne $exception.InnerException){$exception=$exception.InnerException}
+    if($exception -isnot [IO.FileNotFoundException] -and $exception -isnot [IO.DirectoryNotFoundException]){$failed=$true}
+   }
+  }
+ }catch{
+  $exception=$_.Exception
+  while($null -ne $exception.InnerException){$exception=$exception.InnerException}
+  $rootMissing=($exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException])
+  if($rootMissing){
+   $previous=Get-Variable -Scope Script -Name lastCodexTasks -ErrorAction SilentlyContinue
+   $failed=$HasIndexedHistory -or ($null -ne $previous -and @($previous.Value|Where-Object {$null -ne $_}).Count -gt 0)
+  }else{$failed=$true}
+  if($null -ne $cursor -and $null -ne $cursor.Enumerator){try{$cursor.Enumerator.Dispose()}catch{};$cursor.Enumerator=$null}
+  if($rootMissing){$cursor=$null;$script:unindexedCursor=$null}
+ }
+ if($null -ne $cursor){
+  $cursor.PassFailed=[bool]$cursor.PassFailed -or $failed
+  if($completedRound){$cursor.ReportFailed=[bool]$cursor.PassFailed;$cursor.PassFailed=$false}
+  $failed=$failed -or [bool]$cursor.PassFailed -or [bool]$cursor.ReportFailed
+ }
+ $items=@($found.Values)
+ $script:codexDiscoveryFailed=$failed
+ $script:unindexedScan=[PSCustomObject]@{Root=$sessionsDirectory;Tick=$now;Items=$items;CheckedFiles=$count;BytesRead=$bytesRead;Failed=$failed;RootMissing=$rootMissing}
+ return $items
+}
+
 function Codex-Tasks {
  $script:codexSourcePartial=$false
+ $script:codexDiscoveryFailed=$false
  $script:codexTerminated=@{}
- if (-not (Test-Path -LiteralPath $sessionIndex -ErrorAction Stop)) {
-  if ($script:lastCodexTasks.Count -gt 0 -or (Test-Path -LiteralPath $codexHome -PathType Container -ErrorAction Stop)) { throw "Codex session index is unavailable." }
+ $indexAvailable=Test-Path -LiteralPath $sessionIndex -PathType Leaf -ErrorAction Stop
+ if (-not $indexAvailable -and -not (Test-Path -LiteralPath $codexHome -PathType Container -ErrorAction Stop)) {
+  $cursorVariable=Get-Variable -Scope Script -Name unindexedCursor -ErrorAction SilentlyContinue
+  if($null -ne $cursorVariable -and $null -ne $cursorVariable.Value -and $null -ne $cursorVariable.Value.Enumerator){try{$cursorVariable.Value.Enumerator.Dispose()}catch{}}
+  $script:unindexedCursor=$null;$script:unindexedScan=$null
+  if(@($script:lastCodexTasks).Count -gt 0){throw 'Codex source is unavailable.'}
   return @()
  }
  # Local journals and lock-file presence do not establish a complete set of
  # current tasks, even when all of the readable events are well formed.
  $script:codexSourcePartial=$true
- $sessions = @(Codex-IndexCandidates)
+ $sessions=@()
+ if($indexAvailable){$sessions=@(Codex-IndexCandidates)}
+ $indexed=@{}
+ if($null -eq (Get-Variable -Scope Script -Name unindexedPaths -ErrorAction SilentlyContinue)){$script:unindexedPaths=@{}}
+ foreach($session in $sessions){
+  $id=[string](Prop $session 'id' '')
+  $indexed[$id]=$true
+  if($id){[void]$script:unindexedPaths.Remove($id)}
+ }
+ foreach($candidate in @(Codex-UnindexedCandidates -HasIndexedHistory ($sessions.Count -gt 0))){
+  $id=[string]$candidate.id
+  if($indexed.ContainsKey($id)){continue}
+  if($script:unindexedPaths.ContainsKey($id) -and
+     -not [string]::Equals([string]$script:unindexedPaths[$id],[string]$candidate.path,[StringComparison]::OrdinalIgnoreCase)){continue}
+  if(-not $script:unindexedPaths.ContainsKey($id) -and $script:unindexedPaths.Count -ge 256){continue}
+  $indexed[$id]=$true
+  $sessions+=@($candidate)
+  $script:unindexedPaths[$id]=[string]$candidate.path
+ }
  $discoveryVariable=Get-Variable -Scope Script -Name 'sessionDiscovery' -ErrorAction SilentlyContinue
  if ($null -ne $discoveryVariable -and $null -ne $discoveryVariable.Value) {
   $cache=$discoveryVariable.Value
@@ -2552,16 +2710,26 @@ function Codex-Tasks {
  $items = New-Object Collections.Generic.List[object]
  foreach ($session in $sessions) {
   $id = [string]$session.id; $title = [string]$session.thread_name
+  $titleGenerated=[bool](Prop $session 'titleGenerated' $false)
+  if([string]::IsNullOrWhiteSpace($title)){$title='Задача Codex';$titleGenerated=$true}
+  $unindexed=[bool](Prop $session 'unindexed' $false)
   if($title -eq "Guardian review"){continue}
-  $threadState = Thread-State $id
+  $threadState = Thread-State $id $unindexed
   if($threadState.State -in @('completed','interrupted')){$script:codexTerminated[$id]=$true}
   $eventActive = $threadState.State -eq "active"
   $uncertain = Codex-Uncertain $id $threadState
-  if($threadState.State -in @("interrupted","unobserved")){continue}
+  if($threadState.State -in @("interrupted","unobserved")){
+   if($unindexed){
+    $oldPath=[string]$script:unindexedPaths[$id];[void]$script:unindexedPaths.Remove($id)
+    foreach($cacheName in @('lifecycleState','planCache')){$item=Get-Variable -Scope Script -Name $cacheName -ErrorAction SilentlyContinue;if($null -ne $item -and $null -ne $item.Value -and $oldPath){[void]$item.Value.Remove($oldPath)}}
+   }
+   continue
+  }
   $override = if ($manual.ContainsKey($id)) { $manual[$id] } elseif ($manual.ContainsKey("title:$title")) { $manual["title:$title"] } else { $null }
   $paused = $false; $steps = @(); $source = "Оценка активности"; $planConfirmed=$true
   if ($null -ne $override) {
    $title = [string](Prop $override "title" $title)
+   if($null -ne $override.PSObject.Properties['title']){$titleGenerated=$false}
    $paused = [bool](Prop $override "paused" $false)
    $steps = @(Prop $override "steps" @())
    if ($steps.Count -gt 0) { $source = "План задачи" }
@@ -2602,7 +2770,11 @@ function Codex-Tasks {
    $observed=Codex-ObservedActivity $id $startKey
    if($observed){$activityObserved=$true;$activityGenerated=$false;$observed}else{"Статус не подтверждён"}
   }elseif($running){$currentActivity=Codex-Activity $id;if($currentActivity){$currentActivity}else{$activityGenerated=$true;"Выполняется"}}else{""}
-  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; Activity=$activity; ActivityGenerated=$activityGenerated; ActivityObserved=$activityObserved; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; ProgressBasis=$progressBasis; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source; PlanConfirmed=$planConfirmed })
+  if($unindexed -and -not $running -and -not $paused -and $status -notin @('Статус не подтверждён','Ожидает подтверждения')){
+   $oldPath=[string]$script:unindexedPaths[$id];[void]$script:unindexedPaths.Remove($id)
+   foreach($cacheName in @('lifecycleState','planCache')){$item=Get-Variable -Scope Script -Name $cacheName -ErrorAction SilentlyContinue;if($null -ne $item -and $null -ne $item.Value -and $oldPath){[void]$item.Value.Remove($oldPath)}}
+  }
+  $items.Add([PSCustomObject]@{ Id=$id; Title=$title; TitleGenerated=$titleGenerated; Activity=$activity; ActivityGenerated=$activityGenerated; ActivityObserved=$activityObserved; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; ProgressBasis=$progressBasis; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source; PlanConfirmed=$planConfirmed })
  }
  $runningItems = @($items | Where-Object Active | Sort-Object Updated -Descending)
  $trackedItems = @($items | Where-Object { -not $_.Active -and ($_.Status -in @("Статус не подтверждён","Ожидает подтверждения") -or $_.Paused) } | Sort-Object Updated -Descending)
@@ -2709,12 +2881,15 @@ function Claude-Tasks {
 function Source-Snapshot {
  $codex=@(); $claude=@(); $external=@(); $cloud=@(); $unavailable=New-Object Collections.Generic.List[string]
  $partialConnection=New-Object Collections.Generic.List[string];$partialData=New-Object Collections.Generic.List[string]
+ $codexIncomplete=$false
  try{
   $previousCodex=@($script:lastCodexTasks)
   $codex=@(Codex-Tasks)
   $codexPartial=Get-Variable -Scope Script -Name codexSourcePartial -ErrorAction SilentlyContinue
   if($null -ne $codexPartial -and $codexPartial.Value){
-   [void]$unavailable.Add('Codex');[void]$partialData.Add('Codex')
+   [void]$unavailable.Add('Codex')
+   $discoveryFailed=Get-Variable -Scope Script -Name codexDiscoveryFailed -ErrorAction SilentlyContinue
+   if($null -ne $discoveryFailed -and [bool]$discoveryFailed.Value){[void]$partialData.Add('Codex')}else{$codexIncomplete=$true}
    $seenCodex=@{};foreach($task in $codex){$seenCodex[[string]$task.Id]=$true}
    $terminated=Get-Variable -Scope Script -Name codexTerminated -ErrorAction SilentlyContinue
    foreach($task in $previousCodex){
@@ -2789,7 +2964,7 @@ function Source-Snapshot {
    try{Stop-ExternalProviderController $script:externalProviderController}catch{}
   }
  }
- return [PSCustomObject]@{Tasks=@($codex+$claude+$external+$cloud);Unavailable=$unavailable.ToArray();PartialConnection=$partialConnection.ToArray();PartialData=$partialData.ToArray()}
+ return [PSCustomObject]@{Tasks=@($codex+$claude+$external+$cloud);Unavailable=$unavailable.ToArray();PartialConnection=$partialConnection.ToArray();PartialData=$partialData.ToArray();CodexIncomplete=$codexIncomplete}
 }
 
 function Sync-ClaudeLoopChannel {
@@ -3028,6 +3203,7 @@ function Plan-StepCount([int]$count) {
 function Localized-TaskTitle($task) {
  $title=[string](Prop $task 'Title' '')
  if([string](Prop $task 'Provider' '') -eq 'claude' -and $title -ceq 'Задача Claude Code'){return (Tr $title)}
+ if([string](Prop $task 'Provider' '') -eq 'codex' -and [bool](Prop $task 'TitleGenerated' $false)){return (Tr $title)}
  return $title
 }
 
@@ -3307,14 +3483,16 @@ function Compact-VisibleTasks($tasks) {
  return @($tasks|Where-Object {$_.Active -or [string](Prop $_ "Status" "") -in @("Статус не подтверждён","Ожидает подтверждения")})
 }
 
-function Source-WarningText([string[]]$Unavailable,[string[]]$PartialConnection,[string[]]$PartialData) {
+function Source-WarningText([string[]]$Unavailable,[string[]]$PartialConnection,[string[]]$PartialData,[bool]$CodexIncomplete=$false) {
+ $coverage=$CodexIncomplete -and $Unavailable -ccontains 'Codex' -and $PartialData -cnotcontains 'Codex'
  $data=@($Unavailable | Where-Object {$PartialData -ccontains $_})
  $connection=@($Unavailable | Where-Object {$PartialConnection -ccontains $_ -and $data -cnotcontains $_})
- $full=@($Unavailable | Where-Object {$data -cnotcontains $_ -and $connection -cnotcontains $_})
+ $full=@($Unavailable | Where-Object {$data -cnotcontains $_ -and $connection -cnotcontains $_ -and (-not $coverage -or $_ -cne 'Codex')})
  $parts=New-Object 'Collections.Generic.List[string]'
  if($full.Count){$parts.Add((Tr 'Нет данных от ')+($full -join ', '))}
  if($connection.Count){$parts.Add((Tr 'Подключён частично')+': '+($connection -join ', '))}
  if($data.Count){$parts.Add((Tr 'Часть данных недоступна')+': '+($data -join ', '))}
+ if($coverage){$parts.Add((Tr 'Список задач Codex может быть неполным'))}
  return ($parts -join '; ')
 }
 
@@ -3322,7 +3500,7 @@ function Render-CompactTasks($tasks) {
  $compactTasksPanel.Children.Clear(); $compactDotsPanel.Children.Clear()
  $compactTasks=@(Compact-VisibleTasks $tasks)
  $visibleTasks=@($compactTasks|Select-Object -First 3)
- $warningText=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
+ $warningText=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete
  if($visibleTasks.Count -eq 0){
   $script:compactTaskId=""
   $compactEmpty=Text $(if($warningText){$warningText}else{Tr "Активных задач сейчас нет"}) 12.5 $script:palette.Activity
@@ -3909,12 +4087,14 @@ function Update-View {
   $previousAllTasks=@($script:lastAllTasks)
   $sourceSnapshot=if($PreviewActiveTasks -ge 0){
    $previewWarning=if($PreviewSourceWarning){@($(if($PreviewWarningProvider -eq 'codex'){'Codex'}else{'DeepSeek Harness'}))}else{@()}
-   [PSCustomObject]@{Tasks=@();Unavailable=$previewWarning;PartialConnection=$(if($PreviewSourceWarning -in @('partial-connection','partial-both')){$previewWarning}else{@()});PartialData=$(if($PreviewSourceWarning -in @('partial-data','partial-both')){$previewWarning}else{@()})}
+   $previewIncomplete=($PreviewWarningProvider -eq 'codex' -and $PreviewSourceWarning -eq 'partial-data')
+   [PSCustomObject]@{Tasks=@();Unavailable=$previewWarning;PartialConnection=$(if($PreviewSourceWarning -in @('partial-connection','partial-both')){$previewWarning}else{@()});PartialData=$(if(-not $previewIncomplete -and $PreviewSourceWarning -in @('partial-data','partial-both')){$previewWarning}else{@()});CodexIncomplete=$previewIncomplete}
   }else{Source-Snapshot}
   $allTasks=@($sourceSnapshot.Tasks)
   $script:sourceErrors=@($sourceSnapshot.Unavailable)
   $script:sourcePartialConnections=@($sourceSnapshot.PartialConnection)
   $script:sourcePartialData=@($sourceSnapshot.PartialData)
+  $script:sourceCodexIncomplete=[bool](Prop $sourceSnapshot 'CodexIncomplete' $false)
   if($PreviewActiveTasks -ge 0){
    $previewTitles=@((Preview-Text 'Создать индикатор прогресса задач' 'Create a task progress indicator'),(Preview-Text 'Задача Claude Code' 'Claude Code task'),(Preview-Text 'Задача Claude Code' 'Claude Code task'),(Preview-Text 'Задача DeepSeek Harness' 'DeepSeek Harness task'),(Preview-Text 'Задача Hermes Agent' 'Hermes Agent task'),(Preview-Text 'Задача OpenCode' 'OpenCode task'))
    $previewActivities=@((Preview-Text 'Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний' 'Checking plan cards, source filters, scrolling, the light theme and long descriptions before release'),(Preview-Text 'Запускаю визуальную проверку' 'Running visual checks'),(Preview-Text 'Собираю данные для переноса' 'Preparing migration data'),(Preview-Text 'Проверяю план' 'Checking the plan'),(Preview-Text 'Проверяю данные' 'Checking data'),(Preview-Text 'Выполняю действие' 'Performing an action'))
@@ -3993,10 +4173,10 @@ function Update-View {
   Render-ProviderTabs $allTasks
   $tasks=@(Filtered-Tasks $allTasks)
   $script:lastTasks=$tasks
-  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$(Prop $_ 'ActivityObserved' $false):$stepState`:$loopState"})-join"|")
+  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+$script:sourceCodexIncomplete+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$(Prop $_ 'ActivityObserved' $false):$stepState`:$loopState"})-join"|")
   if($next -ne $script:fingerprint){
    $script:fingerprint=$next; $tasksPanel.Children.Clear()
-   if($script:sourceErrors.Count -gt 0){$warning=Text (Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
+   if($script:sourceErrors.Count -gt 0){$warning=Text (Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
    foreach($task in $tasks){Add-Card $task}
    if($tasks.Count -eq 0 -and $script:sourceErrors.Count -eq 0){$empty=Text (Tr "Активных задач сейчас нет") 14 $script:palette.Secondary; $empty.Margin=New-Object Windows.Thickness(4,24,0,0); $tasksPanel.Children.Add($empty)|Out-Null}
    Render-CompactTasks $allTasks
@@ -4185,7 +4365,7 @@ $journalCloseButton.Add_Click({$window.Close()})
 $windowFrame.Add_SizeChanged({Update-SquircleGeometry})
 $tray=New-Object Windows.Forms.NotifyIcon; $tray.Icon=if($null -ne $script:applicationIcon){$script:applicationIcon}else{[Drawing.SystemIcons]::Application}; $tray.Text="AI task monitor"; $tray.Visible=$true; $tray.Add_DoubleClick({Restore-Window})
 $menu=New-Object Windows.Forms.ContextMenuStrip; $script:trayShowMenu=$menu.Items.Add("Развернуть"); $script:trayExitMenu=$menu.Items.Add("Выход"); $script:trayShowMenu.Add_Click({Restore-Window;Set-CompactMode $false}); $script:trayExitMenu.Add_Click({$window.Close()}); $tray.ContextMenuStrip=$menu
-$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};Stop-UpdateCheck;if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:kimiModulesAvailable){Stop-KimiMonitorController $script:kimiController};if($script:hermesModulesAvailable -and -not $PreviewSources){try{Stop-HermesMonitorController $script:hermesController}catch{}};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
+$timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();$cursorVariable=Get-Variable -Scope Script -Name unindexedCursor -ErrorAction SilentlyContinue;if($null -ne $cursorVariable -and $null -ne $cursorVariable.Value -and $null -ne $cursorVariable.Value.Enumerator){try{$cursorVariable.Value.Enumerator.Dispose()}catch{}};if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};Stop-UpdateCheck;if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:kimiModulesAvailable){Stop-KimiMonitorController $script:kimiController};if($script:hermesModulesAvailable -and -not $PreviewSources){try{Stop-HermesMonitorController $script:hermesController}catch{}};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
 if($script:codexCloudModulesAvailable -and -not $SnapshotFile -and $PreviewActiveTasks -lt 0 -and (Load-CodexCloudEnabled)){Set-CodexCloudControllerEnabled $script:codexCloudController $true}
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
@@ -4221,6 +4401,10 @@ if ($SnapshotFile) {
   $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
   $previewWarningName=if($PreviewWarningProvider -eq 'codex'){'Codex'}else{'DeepSeek Harness'}
   if($actual -cne ((Tr 'Часть данных недоступна')+': '+$previewWarningName)){throw 'A source warning was duplicated or translated incorrectly.'}
+ }
+ if($PreviewSourceWarning -eq 'partial-data' -and $PreviewWarningProvider -eq 'codex'){
+  $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete
+  if($actual -cne (Tr 'Список задач Codex может быть неполным')){throw 'The Codex coverage warning is incorrect.'}
  }
  if($PreviewSourceWarning -and $PreviewWarningProvider -eq 'codex' -and $PreviewActiveTasks -eq 1 -and $PreviewUnconfirmed){
   $previewTask=@($script:lastAllTasks|Where-Object Id -eq 'preview-0')
