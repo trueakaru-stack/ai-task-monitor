@@ -25,14 +25,22 @@ coalesces refreshes while one scan is running. Its process-wide lease prevents
 another scan while that worker is active and remains blocked for the process
 lifetime after a reported unconfirmed exit or unexpected worker exception.
 This is conservative and can make cloud monitoring unavailable until restart.
+After cancellation, the lease and token source also remain alive until all
+cancellation callbacks have finished; this can delay a new scan indefinitely
+without blocking the WPF dispatcher if a callback never returns.
 The deadline cannot interrupt a blocked synchronous process launch or guarantee
 the exit of every descendant; a busy WPF dispatcher can delay timeout handling.
 Before any real integration, the future owner must establish the executable's
 trust and lifecycle, handle those limitations and verify actual CLI behavior.
+The current window close only requests asynchronous cancellation and does not
+keep the application process alive until a running child exits. A shutdown
+protocol and isolated process-exit test are required before a real runner is
+enabled.
 
 The synthetic host test exercises two-page and incomplete responses, failure,
 disconnect, late results, timeout, two owners, cancellation and the shared
-process lease. It also checks coexistence with the Claude source, compact count
+process lease, including a delayed cancellation callback. It also checks
+coexistence with the Claude source, compact count
 grammar, the executable owning its window and sampled process/module absence of
 PowerShell. These are test scenarios rather than continuous observation. The
 captured screenshots are synthetic WPF evidence, not final visual acceptance.

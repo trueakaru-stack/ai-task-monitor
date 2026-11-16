@@ -548,6 +548,82 @@ internal static class Program
         }
     }
 
+    private static void CancellationCallbackLifetime()
+    {
+        Mode("pages");
+        var (firstWindow, firstView) = Open("empty", "en", "dark");
+        var (secondWindow, secondView) = Open("empty", "en", "dark");
+        var registered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var callbackEntered = new ManualResetEventSlim();
+        using var callbackRelease = new ManualResetEventSlim();
+        using var callbackFinished = new ManualResetEventSlim();
+        CancellationTokenRegistration registration = default;
+        bool disposedDuringCallback = false, cancellationObserved = false, callbackTimedOut = false;
+        int secondCalls = 0;
+
+        async Task<CommandResult> HeldCallbackRunner(string? cursor, TimeSpan timeout, CancellationToken token)
+        {
+            CommandResult result = await RunFixture(cursor, timeout, CancellationToken.None).ConfigureAwait(false);
+            registration = token.Register(() =>
+            {
+                try
+                {
+                    callbackEntered.Set();
+                    callbackTimedOut = !callbackRelease.Wait(TimeSpan.FromSeconds(25));
+                    try { cancellationObserved = token.WaitHandle.WaitOne(0); }
+                    catch (ObjectDisposedException) { disposedDuringCallback = true; }
+                }
+                finally { callbackFinished.Set(); }
+            });
+            registered.TrySetResult();
+            while (!token.IsCancellationRequested)
+                await Task.Delay(10).ConfigureAwait(false);
+            return result;
+        }
+
+        Task<CommandResult> SecondRunner(string? cursor, TimeSpan timeout, CancellationToken token)
+        {
+            Interlocked.Increment(ref secondCalls);
+            return RunFixture(cursor, timeout, token);
+        }
+
+        using var first = new CloudSourcePump(firstWindow.Dispatcher, firstView.ApplyCloudSource, HeldCallbackRunner,
+            pollInterval: TimeSpan.FromMinutes(1));
+        using var second = new CloudSourcePump(secondWindow.Dispatcher, secondView.ApplyCloudSource, SecondRunner,
+            pollInterval: TimeSpan.FromMinutes(1));
+        try
+        {
+            first.SetEnabled(true);
+            WaitUntil(() => registered.Task.IsCompleted, "cancellation callback registered");
+            first.SetEnabled(false);
+            WaitUntil(() => callbackEntered.IsSet && !first.InFlight, "worker finishes while cancellation callback is held");
+            Check(!callbackFinished.IsSet, "held cancellation callback did not block dispatcher completion");
+            second.SetEnabled(true);
+            Check(secondCalls == 0 && !second.InFlight && HasText(secondWindow, "No data from Codex Cloud"),
+                "pending cancellation callback retains process-wide lease");
+            callbackRelease.Set();
+            WaitUntil(() => callbackFinished.IsSet, "held callback exits");
+            Check(!disposedDuringCallback && cancellationObserved && !callbackTimedOut,
+                "cancellation source remains alive until callback finishes");
+            WaitUntil(() =>
+            {
+                if (!second.InFlight && secondCalls == 0) second.RequestRefresh();
+                return secondCalls > 0;
+            }, "next owner starts after cancellation callbacks finish");
+            WaitUntil(() => !second.InFlight && secondView.CurrentTasks.Count == 2,
+                "next owner completes after cancellation callbacks finish");
+        }
+        finally
+        {
+            callbackRelease.Set();
+            if (callbackEntered.IsSet && !callbackFinished.IsSet)
+                WaitUntil(() => callbackFinished.IsSet, "held callback cleanup");
+            registration.Dispose();
+            firstWindow.Close();
+            secondWindow.Close();
+        }
+    }
+
     private delegate bool EnumWindowsCallback(IntPtr window, IntPtr state);
 
     [DllImport("user32.dll")]
@@ -717,6 +793,7 @@ internal static class Program
             DeadlineAndSlot();
             AnotherOwnerCannotOverlap();
             CancelRunningChild();
+            CancellationCallbackLifetime();
             UnconfirmedExitBlocksNewScans();
             app.Shutdown();
             Console.WriteLine("Synthetic cloud-to-WPF checks passed: " + checks);

@@ -21,7 +21,7 @@ internal sealed class CloudSourcePump : IDisposable
     private readonly TimeSpan pageLimit;
     private bool enabled, disposed, inFlight, workerFinished, rerun, publishingLeaseFailure;
     private object generation = new();
-    private CancellationTokenSource? cancellation;
+    private CancellationLifetime? cancellation;
     private CloudPageRequest? firstRequest;
     private long startedAt;
 
@@ -53,7 +53,7 @@ internal sealed class CloudSourcePump : IDisposable
         dispatcher.VerifyAccess();
         ObjectDisposedException.ThrowIf(disposed, this);
         if (value && runner is null) throw new InvalidOperationException("No cloud runner is configured.");
-        CancellationTokenSource? toCancel;
+        CancellationLifetime? toCancel;
         CloudSnapshot snapshot;
         lock (gate)
         {
@@ -114,19 +114,19 @@ internal sealed class CloudSourcePump : IDisposable
             return;
         }
 
-        cancellation = new CancellationTokenSource();
+        var ownedCancellation = new CancellationLifetime();
+        cancellation = ownedCancellation;
         firstRequest = request;
         startedAt = Stopwatch.GetTimestamp();
         lock (gate) { workerFinished = false; }
         inFlight = true;
         deadlineTimer.Stop();
         deadlineTimer.Start();
-        var ownedCancellation = cancellation;
         long started = startedAt;
         Task<CloudSnapshot?> work;
         try
         {
-            work = Task.Run(() => ScanAsync(request, currentGeneration, started, ownedCancellation.Token));
+            work = Task.Run(() => ScanAsync(request, currentGeneration, started, ownedCancellation));
         }
         catch
         {
@@ -134,7 +134,7 @@ internal sealed class CloudSourcePump : IDisposable
             lock (gate) { source.ReportFailure(request); workerFinished = true; }
             inFlight = false;
             deadlineTimer.Stop();
-            ownedCancellation.Dispose();
+            ownedCancellation.CompleteWorker();
             cancellation = null;
             firstRequest = null;
             present(source.GetSnapshot());
@@ -145,18 +145,19 @@ internal sealed class CloudSourcePump : IDisposable
             if (completed.IsFaulted) _ = completed.Exception;
             if (dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
             {
-                ownedCancellation.Dispose();
+                ownedCancellation.CompleteWorker();
                 return;
             }
             try { dispatcher.BeginInvoke(() => CompleteScan(completed, currentGeneration, ownedCancellation)); }
-            catch (InvalidOperationException) { ownedCancellation.Dispose(); }
+            catch (InvalidOperationException) { ownedCancellation.CompleteWorker(); }
         }, TaskScheduler.Default);
     }
 
     private async Task<CloudSnapshot?> ScanAsync(CloudPageRequest initial, object currentGeneration,
-        long started, CancellationToken token)
+        long started, CancellationLifetime lifetime)
     {
         CloudPageRequest request = initial;
+        CancellationToken token = lifetime.Token;
         bool releaseLease = true;
         try
         {
@@ -217,8 +218,7 @@ internal sealed class CloudSourcePump : IDisposable
         }
         finally
         {
-            if (releaseLease) Interlocked.CompareExchange(ref processLease, 0, 1);
-            else Interlocked.Exchange(ref processLease, 2);
+            if (!releaseLease) lifetime.MarkUncertain();
             lock (gate) { workerFinished = true; }
         }
     }
@@ -228,7 +228,7 @@ internal sealed class CloudSourcePump : IDisposable
         dispatcher.VerifyAccess();
         deadlineTimer.Stop();
         CloudSnapshot? snapshot = null;
-        CancellationTokenSource? toCancel = null;
+        CancellationLifetime? toCancel = null;
         lock (gate)
         {
             if (!disposed && enabled && inFlight && !workerFinished && firstRequest is not null)
@@ -244,7 +244,7 @@ internal sealed class CloudSourcePump : IDisposable
     }
 
     private void CompleteScan(Task<CloudSnapshot?> result, object currentGeneration,
-        CancellationTokenSource ownedCancellation)
+        CancellationLifetime ownedCancellation)
     {
         dispatcher.VerifyAccess();
         deadlineTimer.Stop();
@@ -265,26 +265,21 @@ internal sealed class CloudSourcePump : IDisposable
             startAgain = !disposed && enabled && rerun;
             rerun = false;
         }
-        ownedCancellation.Dispose();
+        ownedCancellation.CompleteWorker();
         if (snapshot is not null) present(snapshot);
         if (startAgain) StartScan();
     }
 
-    private static void RequestCancellation(CancellationTokenSource? target)
+    private static void RequestCancellation(CancellationLifetime? target)
     {
         if (target is null) return;
-        try
-        {
-            _ = target.CancelAsync().ContinueWith(task => { if (task.IsFaulted) _ = task.Exception; },
-                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-        }
-        catch (ObjectDisposedException) { }
+        target.Request();
     }
 
     public void Dispose()
     {
         dispatcher.VerifyAccess();
-        CancellationTokenSource? toCancel;
+        CancellationLifetime? toCancel;
         lock (gate)
         {
             if (disposed) return;
@@ -300,6 +295,69 @@ internal sealed class CloudSourcePump : IDisposable
         pollTimer.Tick -= OnPoll;
         deadlineTimer.Tick -= OnDeadline;
         RequestCancellation(toCancel);
+    }
+
+    // The worker can finish while CancelAsync callbacks still run. Keep the
+    // token source alive until both have completed, without waiting on WPF.
+    private sealed class CancellationLifetime
+    {
+        private readonly object sync = new();
+        private readonly CancellationTokenSource source = new();
+        private int pending;
+        private bool workerComplete;
+
+        internal CancellationLifetime() => Token = source.Token;
+        internal CancellationToken Token { get; }
+
+        internal void MarkUncertain() => Interlocked.Exchange(ref processLease, 2);
+
+        internal void Request()
+        {
+            lock (sync)
+            {
+                if (workerComplete) return;
+                pending++;
+            }
+            Task work;
+            try { work = source.CancelAsync(); }
+            catch { CompleteCancellation(); throw; }
+            _ = work.ContinueWith(completed =>
+            {
+                if (completed.IsFaulted) _ = completed.Exception;
+                CompleteCancellation();
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+
+        internal void CompleteWorker()
+        {
+            bool dispose;
+            lock (sync)
+            {
+                if (workerComplete) return;
+                workerComplete = true;
+                dispose = pending == 0;
+            }
+            if (dispose) Release();
+        }
+
+        private void CompleteCancellation()
+        {
+            bool dispose;
+            lock (sync)
+            {
+                pending--;
+                dispose = workerComplete && pending == 0;
+            }
+            if (dispose) Release();
+        }
+
+        private void Release()
+        {
+            source.Dispose();
+            // A pending cancellation callback keeps the process-wide lease held.
+            // Never release an explicitly unconfirmed process termination.
+            Interlocked.CompareExchange(ref processLease, 0, 1);
+        }
     }
 }
 
