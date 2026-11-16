@@ -1,0 +1,208 @@
+name: Synthetic endpoint with official macOS Codex CLI
+on:
+  push:
+    branches: [codex/macos-real-codex-20261116]
+    paths: [".github/workflows/macos-real-codex-probe.yml"]
+permissions:
+  contents: read
+jobs:
+  real-codex-exec:
+    if: ${{ github.repository == 'trueakaru-stack/ai-task-monitor' }}
+    runs-on: macos-26
+    timeout-minutes: 8
+    steps:
+      - name: Create disposable, empty fixture directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          test "$GITHUB_REPOSITORY" = trueakaru-stack/ai-task-monitor
+          test "$(uname -m)" = arm64
+          test ! -e /Users/runner/.codex
+          test ! -L /Users/runner/.codex
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-real-codex.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
+          printf 'fixture-only\n' > "$task_marker"
+          mkdir /Users/runner/.codex
+          mkdir -p "$task_root"/{pkg,temp,synthetic-home,out}
+          printf 'AITM_REAL_CLI_ROOT=%s\nAITM_REAL_CLI_DENIED=%s\n' "$task_root" "$task_marker" >> "$GITHUB_ENV"
+      - name: Download and verify the pinned official CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_REAL_CLI_ROOT"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            https://registry.npmjs.org/@openai/codex/-/codex-0.169.0-darwin-arm64.tgz \
+            --output "$task_root/codex.tgz"
+          expected='5WsWFBbVP78D+6FvNo1MMVxLPZdmcoQlqVJFrF4qx/TmvneLnMQKtLyXkUo54XOTDfoYKpNouTJ/F7gTVA8FnQ=='
+          actual="$(/usr/bin/openssl dgst -sha512 -binary "$task_root/codex.tgz" | /usr/bin/openssl base64 -A)"
+          test "$actual" = "$expected"
+          tar -xzf "$task_root/codex.tgz" -C "$task_root/pkg"
+          binary_count="$(find "$task_root/pkg" -type f -name codex -perm -u+x -print | wc -l | tr -d ' ')"
+          test "$binary_count" = 1
+          task_binary="$(find "$task_root/pkg" -type f -name codex -perm -u+x -print)"
+          printf 'AITM_REAL_CODEX_BINARY=%s\n' "$task_binary" >> "$GITHUB_ENV"
+          echo 'Verified official Codex CLI archive: 0.169.0, SHA-512 npm integrity matched.'
+      - name: Check isolation and run official Codex against only the local fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_REAL_CLI_ROOT"
+          case "$task_root" in /Users/runner/work/_temp/aitm-real-codex.*) ;; *) exit 1;; esac
+          cd "$task_root"
+          cat > "$task_root/cli.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")) (subpath "/Users/runner/.codex"))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")) (subpath "/Users/runner/.codex"))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (allow network-outbound (remote ip "127.0.0.1:45231"))
+          (allow mach-lookup)
+          (deny mach-lookup (global-name "com.apple.cfprefsd.agent") (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.bsd.dirhelper"))
+          PROFILE
+          cat > "$task_root/run" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "TMPDIR=$AITM_REAL_CLI_ROOT/temp" "CFFIXED_USER_HOME=$AITM_REAL_CLI_ROOT/synthetic-home" \
+            CI=true NO_COLOR=1 TERM=dumb \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_REAL_CLI_ROOT" -f "$AITM_REAL_CLI_ROOT/cli.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run"
+          task_run="$task_root/run"
+          "$task_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}" && test -z "${OPENAI_API_KEY+x}"'
+          ln -s "$AITM_REAL_CLI_DENIED" "$task_root/denied-link"
+          for marker in "$AITM_REAL_CLI_DENIED" "$task_root/denied-link"; do
+            if "$task_run" /bin/cat "$marker" > /dev/null 2>&1; then echo 'Denied profile read unexpectedly succeeded'; exit 1; fi
+            if "$task_run" /usr/bin/touch "$marker" > /dev/null 2>&1; then echo 'Denied profile write unexpectedly succeeded'; exit 1; fi
+          done
+          cat > "$task_root/security.c" <<'C'
+          #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <errno.h>
+          #include <unistd.h>
+          #include <stdio.h>
+          int main(void) {
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) return (errno == EPERM || errno == EACCES) ? 0 : 1;
+            struct sockaddr_in addr = {0};
+            addr.sin_len = sizeof(addr);
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(443);
+            addr.sin_addr.s_addr = htonl(0x01010101);
+            errno = 0;
+            int r = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+            int e = errno;
+            close(fd);
+            if (r == 0 || (e != EPERM && e != EACCES)) { fprintf(stderr, "External connection was not provably denied: %d\n", e); return 1; }
+            puts("External connection denied");
+            return 0;
+          }
+          C
+          /usr/bin/clang "$task_root/security.c" -o "$task_root/security"
+          "$task_run" "$task_root/security"
+          task_node="$(command -v node)"
+          test -x "$task_node"
+          cat > "$task_root/server.cjs" <<'NODE'
+          const http = require('node:http');
+          const fs = require('node:fs');
+          const root = process.argv[2];
+          const server = http.createServer((req, res) => {
+            req.resume();
+            if (req.url === '/health') { res.writeHead(200); return res.end('ok'); }
+            if (req.method === 'GET' && req.url.startsWith('/v1/models')) {
+              res.writeHead(200, {'content-type':'application/json'});
+              return res.end(JSON.stringify({object:'list',data:[{id:'gpt-5.4',object:'model'}]}));
+            }
+            if (req.method === 'POST' && req.url.startsWith('/v1/responses')) {
+              fs.writeFileSync(root + '/out/request-observed.txt', 'Codex sent a Responses request to the local synthetic endpoint.\n');
+              res.writeHead(200, {'content-type':'text/event-stream','cache-control':'no-cache','connection':'keep-alive'});
+              res.write('event: response.created\ndata: {"type":"response.created","response":{"id":"resp_fixture","object":"response","created_at":1,"status":"in_progress","model":"gpt-5.4","output":[]}}\n\n');
+              return setTimeout(() => res.end(), 90000);
+            }
+            res.writeHead(404); res.end();
+          });
+          server.listen(45231, '127.0.0.1', () => fs.writeFileSync(root + '/server-ready', 'yes'));
+          NODE
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "$task_node" "$task_root/server.cjs" "$task_root" > "$task_root/out/server.log" 2>&1 &
+          server_pid=$!
+          cli_pid=""
+          cleanup() {
+            if test -n "$cli_pid" && kill -0 "$cli_pid" 2>/dev/null; then kill -TERM "$cli_pid" 2>/dev/null || true; wait "$cli_pid" 2>/dev/null || true; fi
+            if kill -0 "$server_pid" 2>/dev/null; then kill -TERM "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
+          }
+          trap cleanup EXIT
+          for i in {1..40}; do test -f "$task_root/server-ready" && break; sleep 0.25; done
+          test -f "$task_root/server-ready"
+          test "$("$task_run" /usr/bin/curl --fail --silent --show-error --max-time 3 http://127.0.0.1:45231/health)" = ok
+          "$task_run" "$AITM_REAL_CODEX_BINARY" --version
+          "$task_run" "$AITM_REAL_CODEX_BINARY" exec --skip-git-repo-check --json -m gpt-5.4 \
+            -c 'model_provider="fixture"' \
+            -c 'model_providers.fixture.name="Local fixture"' \
+            -c 'model_providers.fixture.base_url="http://127.0.0.1:45231/v1"' \
+            -c 'model_providers.fixture.wire_api="responses"' \
+            -c 'model_providers.fixture.requires_openai_auth=false' \
+            'Synthetic test: reply OK.' > "$task_root/out/codex.jsonl" 2> "$task_root/out/codex.stderr" &
+          cli_pid=$!
+          reached=0
+          for i in {1..120}; do
+            if test -s "$task_root/out/request-observed.txt"; then reached=1; break; fi
+            if ! kill -0 "$cli_pid" 2>/dev/null; then break; fi
+            sleep 0.25
+          done
+          if test "$reached" != 1; then
+            echo 'Official CLI did not reach the synthetic endpoint.'
+            cat "$task_root/out/codex.stderr" "$task_root/out/codex.jsonl"
+            exit 1
+          fi
+          sleep 2
+          kill -0 "$cli_pid"
+          cat > "$task_root/inspect.cjs" <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const root = '/Users/runner/.codex';
+          const files = [];
+          function walk(p) {
+            if (!fs.existsSync(p)) return;
+            for (const entry of fs.readdirSync(p, {withFileTypes:true})) {
+              const next = path.join(p, entry.name);
+              if (entry.isDirectory()) walk(next);
+              else if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(next);
+            }
+          }
+          walk(path.join(root, 'sessions'));
+          let ids = new Set(), events = [];
+          for (const file of files) {
+            for (const line of fs.readFileSync(file, 'utf8').split('\n').filter(Boolean)) {
+              try {
+                const row = JSON.parse(line);
+                if (row.type === 'session_meta' && row.payload && typeof row.payload.id === 'string') ids.add(row.payload.id);
+                if (row.type === 'event_msg' && row.payload && typeof row.payload.type === 'string') events.push(row.payload.type);
+              } catch {}
+            }
+          }
+          const indexPath = path.join(root, 'session_index.jsonl');
+          const indexPresent = fs.existsSync(indexPath);
+          const indexEntries = indexPresent ? fs.readFileSync(indexPath, 'utf8').split('\n').filter(Boolean).map(x => JSON.parse(x)) : [];
+          const indexed = indexEntries.filter(x => ids.has(x.id)).length;
+          const report = {cli:'0.169.0', source:'official codex exec', liveEndpoint:'synthetic localhost, response intentionally held open', sessionFiles:files.length, sessionIds:ids.size, eventTypes:[...new Set(events)].sort(), indexPresent, matchingIndexEntries:indexed};
+          fs.writeFileSync(process.argv[2] + '/out/session-report.json', JSON.stringify(report, null, 2) + '\n');
+          console.log(JSON.stringify(report));
+          if (!files.length || !ids.size || !events.includes('task_started')) process.exit(1);
+          NODE
+          "$task_run" "$task_node" "$task_root/inspect.cjs" "$task_root"
+      - name: Save synthetic diagnostics
+        if: ${{ always() && env.AITM_REAL_CLI_ROOT != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: real-codex-exec-local-endpoint
+          path: ${{ env.AITM_REAL_CLI_ROOT }}/out/
+          if-no-files-found: warn
+          retention-days: 7
