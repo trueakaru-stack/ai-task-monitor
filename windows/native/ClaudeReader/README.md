@@ -95,12 +95,13 @@ the prototype; this behavior alone does not establish delivery from a real hook.
 
 Pending snapshots use the session reader's existing retention rules: at most
 256 cards and 128 retained steps per card, with bounded step titles and IDs.
-An incomplete retained plan is flagged. A new retention overflow during a
-pending merge marks the source unavailable and unconfirmed rather than silently
-confirming a partial view. A pre-existing incomplete plan remains a per-task
-uncertainty and does not, by itself, create source-wide loss when a partial
-record is later completed. These bounds also apply to fallback cards after a
-failure during a pending read.
+An incomplete retained plan is flagged and stays unconfirmed for that session
+after the pending record is completed; a bounded probabilistic filter remembers
+this per-session uncertainty. A cut of one plan's retained names does not by
+itself declare the entire source unavailable or downgrade a neighboring task.
+Actual journal loss and exceeding the retained-card limit still affect source
+availability. These bounds also apply to fallback cards after a failure during a
+pending read.
 
 During a poll, Windows `FILE_ID_INFO` is compared across simultaneously open
 metadata handles. A successful read keeps one metadata-only handle, shared for

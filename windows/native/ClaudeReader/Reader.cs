@@ -541,7 +541,7 @@ namespace AITaskMonitor.Claude {
     bool knownEvidence = state.PlanConfirmed && state.PromptSeen && !pendingCreate && !unresolved && !state.SessionUncertain && !sourceUncertain && !unconfirmed && !planUncertain.Contains(state.Id);
     int known = knownEvidence ? state.StepOrder.Count(id => state.Trust[id].Confirmed && state.Trust[id].Created) : 0;
     int done = knownEvidence ? state.StepOrder.Count(id => state.Trust[id].Confirmed && state.Trust[id].Created && state.Steps[id].status == "done") : 0;
-    bool retainNames = sourceUncertain || state.SessionUncertain;
+    bool retainNames = sourceUncertain || sessionEvidenceUncertain;
     bool titlesIncomplete = retainNames && state.TitleHistoryTruncated;
     var displayed = new List<Step>();
     Action<Step> append = delegate(Step candidate) {
@@ -597,6 +597,7 @@ namespace AITaskMonitor.Claude {
    }
   }
   private readonly ConservativeIdSet evictedIds = new ConservativeIdSet();
+  private readonly ConservativeIdSet incompletePlans = new ConservativeIdSet();
   private readonly ConservativeIdSet uncertainSessions = new ConservativeIdSet();
   private readonly ConservativeIdSet uncertainPlans = new ConservativeIdSet();
   private readonly ConservativeIdSet nameHistorySessions = new ConservativeIdSet();
@@ -624,6 +625,12 @@ namespace AITaskMonitor.Claude {
    task = null; return false;
   }
 
+  // A bounded pending snapshot may lose names for just one session.
+  internal void MarkPlanIncomplete(string id) {
+   if(String.IsNullOrEmpty(id)) return;
+   lock(gate) incompletePlans.Add(id);
+  }
+
   // The caller uses this after an externally visible source-read failure.
   public void MarkSourceLoss() { lock(gate) sourceLoss = true; }
 
@@ -637,29 +644,22 @@ namespace AITaskMonitor.Claude {
   }
 
   internal static Task Freeze(Task item, Task previous, bool preserveConflictingNames) {
-   bool ignored;
-   return Freeze(item, previous, preserveConflictingNames, out ignored);
-  }
-
-  internal static Task Freeze(Task item, Task previous, bool preserveConflictingNames, out bool newlyTruncated) {
    bool incomplete = item.RetainedPlanIncomplete || (previous != null && previous.RetainedPlanIncomplete);
-   bool truncated = false;
    var steps = new List<Step>();
    // Earlier titles are useful when the readable suffix contains only part of
    // the last plan. Newer observations replace the same bounded identifier.
    Action<Step> append = delegate(Step input) {
-    if(input == null) { incomplete = true; truncated = true; return; }
+    if(input == null) { incomplete = true; return; }
     string id = input.id ?? "";
     bool generated = input.generated;
     string identity = input.RetainedIdentity;
     if(id.Length > MaximumRetainedStepId) {
      identity = "long:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(id)));
-     id = ""; generated = false; incomplete = true; truncated = true;
+     id = ""; generated = false; incomplete = true;
     }
-    if(input.title != null && input.title.Length > MaximumRetainedTitle) truncated = true;
     string title = BoundTitle(input.title, ref incomplete);
     if(identity == null) {
-     if(id.Length == 0) { identity = "missing:" + title; incomplete = true; truncated = true; }
+     if(id.Length == 0) { identity = "missing:" + title; incomplete = true; }
      else identity = "id:" + id;
     }
     var copy = new Step { id=id, title=title, generated=generated, status="unknown", RetainedIdentity=identity };
@@ -676,12 +676,11 @@ namespace AITaskMonitor.Claude {
       steps[position] = copy; return;
      }
     }
-    if(steps.Count == MaximumRetainedSteps) { steps.RemoveAt(0); incomplete = true; truncated = true; }
+    if(steps.Count == MaximumRetainedSteps) { steps.RemoveAt(0); incomplete = true; }
     steps.Add(copy);
    };
    if(previous != null && previous.Steps != null) foreach(Step step in previous.Steps) append(step);
    if(item.Steps != null) foreach(Step step in item.Steps) append(step);
-   newlyTruncated = truncated;
    return new Task { Id=item.Id, Activity="", Updated=item.Updated, Started=item.Started,
     StartKey=item.StartKey, Steps=steps.ToArray(), Unconfirmed=true, PlanConfirmed=false,
     KnownStepCount=0, KnownDoneCount=0, UnknownStepCount=steps.Count,
@@ -711,7 +710,7 @@ namespace AITaskMonitor.Claude {
     }
     // A bounded hidden-history eviction does not make the entire source
     // unavailable. A matching later task is individually marked uncertain.
-    foreach(Task item in tasks) if(evictedIds.Contains(item.Id)) {
+    foreach(Task item in tasks) if(evictedIds.Contains(item.Id) || incompletePlans.Contains(item.Id)) {
      item.Unconfirmed=true; item.PlanConfirmed=false; item.KnownStepCount=0; item.KnownDoneCount=0;
      item.UnknownStepCount=item.Steps.Length; item.RetainedPlanIncomplete=true;
     }

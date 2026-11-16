@@ -874,8 +874,10 @@ Check(snapshot.Unavailable && snapshot.Tasks.Single().Unconfirmed && snapshot.Ta
     "A pending plan exceeding the title limit must expose incomplete retention");
 File.AppendAllText(bounded, manyEvent[manySplit..], utf8);
 snapshot = boundedSource.Poll(ClaudeConnection.Connected, now);
-Check(snapshot.Unavailable && snapshot.Tasks.Single().Unconfirmed && snapshot.Tasks.Single().RetainedPlanIncomplete,
-    "Title retention overflow must remain visible after the tail completes");
+Check(!snapshot.Unavailable && !boundedSource.HasObservedSourceLoss &&
+    snapshot.Tasks.Single().Unconfirmed && snapshot.Tasks.Single().RetainedPlanIncomplete &&
+    snapshot.Tasks.Single().Steps.Length == 128,
+    "A plan cut during a pending read must remain locally incomplete after the source recovers");
 File.Delete(bounded);
 _ = boundedSource.Poll(ClaudeConnection.Connected, now);
 File.WriteAllText(bounded, "", utf8);
@@ -1032,6 +1034,18 @@ Check(new[] { namesAfterUnclearStop, namesAfterUnclearStopAgain }.All(task => ta
     task.Steps.All(step => step.status == "unknown")),
     "An ambiguous stop must retain both conflicting names across repeated polls.");
 
+
+var firstPollUnclear = new SessionReader();
+var firstPollNames = firstPollUnclear.Read(unclearRenameJournal, "", now.AddSeconds(5),
+    DateTime.MinValue.ToUniversalTime()).Single();
+var repeatPollNames = firstPollUnclear.Read(unclearRenameJournal, "", now.AddSeconds(5),
+    DateTime.MinValue.ToUniversalTime()).Single();
+Check(new[] { firstPollNames, repeatPollNames }.All(task => task.Unconfirmed &&
+    task.Steps.Any(step => step.title == "First step") &&
+    task.Steps.Any(step => step.title == "New step") &&
+    task.Steps.All(step => step.status == "unknown")),
+    "An ambiguous stop before the first poll must preserve both observed names on repeated reads.");
+
 var sameTurnRename = new SessionReader();
 sameTurnRename.Read(complete, "", now, DateTime.MinValue.ToUniversalTime());
 var renamedInTurn = sameTurnRename.Read(complete + renamedAfterPrompt, "", now.AddSeconds(5),
@@ -1039,19 +1053,6 @@ var renamedInTurn = sameTurnRename.Read(complete + renamedAfterPrompt, "", now.A
 Check(renamedInTurn.Steps.Count(step => step.id == "first") == 1 &&
     renamedInTurn.Steps.Single(step => step.id == "first").title == "New step",
     "A same-turn rename without source loss must keep its latest observed title.");
-
-var alreadyIncomplete = new AITaskMonitor.Claude.Task {
-    Id = "freeze-bounded", RetainedPlanIncomplete = true,
-    Steps = Enumerable.Range(0, 128).Select(index => new Step {
-        id = "s" + index, title = "Step " + index, status = "unknown" }).ToArray() };
-var frozenOnce = SessionReader.Freeze(alreadyIncomplete, null!, true, out bool firstCut);
-Check(!firstCut && frozenOnce.RetainedPlanIncomplete,
-    "An inherited incomplete flag must not claim that a new cut occurred.");
-var addedStep = new AITaskMonitor.Claude.Task { Id = "freeze-bounded",
-    Steps = new[] { new Step { id = "extra", title = "Extra", status = "unknown" } } };
-var frozenTwice = SessionReader.Freeze(addedStep, frozenOnce, true, out bool secondCut);
-Check(secondCut && frozenTwice.RetainedPlanIncomplete && frozenTwice.Steps.Length == 128,
-    "An additional cut must be detected even when an earlier snapshot was already incomplete.");
 
 var cappedHistory = new SessionReader();
 string Retarget(string value, string id) => value.Replace("\"observed\"", "\"" + id + "\"", StringComparison.Ordinal);
@@ -1136,10 +1137,12 @@ using (var cappedSource = new ClaudeFileSource(cappedFile, null, DateTime.MinVal
             ["session_id"] = "file-cap-0", ["timestamp"] = resumedClock.AddSeconds(7).AddTicks(index).ToString("O"),
             ["event"] = "TaskCreated", ["active"] = true, ["task_id"] = "extra-" + index,
             ["task_subject"] = "Synthetic extra " + index, ["task_status"] = "pending" })).Append('\n');
-    File.AppendAllText(cappedFile, moreStages.ToString(), utf8);
+    string retainedNeighbor = ShiftFixtureTimes(Retarget(complete, "retained-neighbor"), 20 * 256 + 7);
+    File.AppendAllText(cappedFile, moreStages.ToString() + retainedNeighbor, utf8);
     ClaudeSourceSnapshot previouslyIncomplete = cappedSource.Poll(ClaudeConnection.Connected, resumedClock.AddSeconds(8));
     var fullKnown = previouslyIncomplete.Tasks.Single(x => x.Id == "file-cap-0");
     Check(!previouslyIncomplete.Unavailable && !cappedSource.HasObservedSourceLoss &&
+        previouslyIncomplete.Tasks.Single(x => x.Id == "retained-neighbor").PlanConfirmed &&
         fullKnown.Unconfirmed && fullKnown.RetainedPlanIncomplete && fullKnown.Steps.Length == 128,
         "The setup must have a locally incomplete retained plan with 128 names.");
     string anotherStage = JsonSerializer.Serialize(new Dictionary<string, object> {
@@ -1152,15 +1155,17 @@ using (var cappedSource = new ClaudeFileSource(cappedFile, null, DateTime.MinVal
     int nextPendingCut = secondPending.Length / 2;
     File.AppendAllText(cappedFile, anotherStage + secondPending[..nextPendingCut], utf8);
     ClaudeSourceSnapshot cutWhilePending = cappedSource.Poll(ClaudeConnection.Connected, resumedClock.AddSeconds(10));
-    Check(cutWhilePending.Unavailable && cappedSource.HasObservedSourceLoss &&
+    Check(cutWhilePending.Unavailable && !cappedSource.HasObservedSourceLoss &&
         cutWhilePending.Tasks.Single(x => x.Id == "file-cap-0").RetainedPlanIncomplete &&
         cutWhilePending.Tasks.Single(x => x.Id == "file-cap-0").Steps.All(step => step.status == "unknown"),
-        "A new name discarded during a pending merge must record source loss even if the plan was already incomplete.");
+        "A new name discarded during a pending merge must keep the affected task incomplete without source-wide loss.");
     File.AppendAllText(cappedFile, secondPending[nextPendingCut..], utf8);
     ClaudeSourceSnapshot afterNewCut = cappedSource.Poll(ClaudeConnection.Connected, resumedClock.AddSeconds(11));
-    Check(afterNewCut.Unavailable && cappedSource.HasObservedSourceLoss &&
-        afterNewCut.Tasks.Single(x => x.Id == "file-cap-0").Unconfirmed,
-        "A new cut during a pending merge must remain unconfirmed after the record completes.");
+    Check(!afterNewCut.Unavailable && !cappedSource.HasObservedSourceLoss &&
+        afterNewCut.Tasks.Single(x => x.Id == "file-cap-0").Unconfirmed &&
+        afterNewCut.Tasks.Single(x => x.Id == "file-cap-0").RetainedPlanIncomplete &&
+        afterNewCut.Tasks.Single(x => x.Id == "retained-neighbor").PlanConfirmed,
+        "After the tail completes, only the affected plan must remain incomplete while its neighbor stays confirmed.");
 }
 
 

@@ -257,6 +257,8 @@ public sealed class ClaudeFileSource : IDisposable
                         utcNow, observedSinceUtc, false, out provisionalLoss, null!, null!, null!, null!);
                     if (provisionalLoss) { reader.MarkSourceLoss(); pendingLoss = true; }
                     previous = MergePending(previous, provisional, out bool overflow);
+                    foreach (Task item in previous)
+                        if (item.RetainedPlanIncomplete) reader.MarkPlanIncomplete(item.Id);
                     if (overflow) { reader.MarkSourceLoss(); pendingLoss = true; }
                     pendingRead = true;
                     bool unavailable = previous.Length != 0 || legacy?.Pending == true ||
@@ -457,14 +459,13 @@ public sealed class ClaudeFileSource : IDisposable
         {
             if (positions.TryGetValue(item.Id, out int index))
             {
-                Task merged = SessionReader.Freeze(item, result[index], true, out bool newlyTruncated);
-                if (newlyTruncated) overflow = true;
-                result[index] = merged;
+                // A bounded cut affects this plan only; Freeze records it on
+                // the task and leaves every retained status unconfirmed.
+                result[index] = SessionReader.Freeze(item, result[index], true);
             }
             else if (result.Count < SessionReader.MaximumRetained)
             {
-                Task retained = SessionReader.Freeze(item, null!, true, out bool newlyTruncated);
-                if (newlyTruncated) overflow = true;
+                Task retained = SessionReader.Freeze(item, null!, true);
                 positions.Add(item.Id, result.Count);
                 result.Add(retained);
             }
