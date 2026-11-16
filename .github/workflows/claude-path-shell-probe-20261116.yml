@@ -1,7 +1,6 @@
 name: Synthetic Windows hook shell probe
 on:
-  push:
-    branches: ['codex/legacy-install-release028-20261116']
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:

@@ -488,7 +488,10 @@ try{
         foreach($child in $children){
             if($child.CommandLine -and $child.CommandLine.Contains('Uninstall-CodexProgress.ps1') -and
                 [string]::Equals([string]$child.ExecutablePath,$SystemPowerShell,[StringComparison]::OrdinalIgnoreCase)){
-                $removalChild=[Diagnostics.Process]::GetProcessById([int]$child.ProcessId);break
+                $removalChild=[Diagnostics.Process]::GetProcessById([int]$child.ProcessId)
+                $removalHandle=$removalChild.SafeHandle
+                Check ($null -ne $removalHandle -and -not $removalHandle.IsInvalid -and -not $removalHandle.IsClosed) 'The synthetic removal process handle could not be held.'
+                break
             }
         }
         if($null -eq $removalChild){Start-Sleep -Milliseconds 100}
