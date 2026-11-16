@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace AITaskMonitor.CodexCloud
 {
-    // Runs only the official CLI command. It never reads credentials or logs output.
+    // Runs the CLI without reading credentials or retaining its output in logs.
     public sealed class Command : IDisposable
     {
         private readonly object gate = new object();
@@ -50,13 +50,16 @@ namespace AITaskMonitor.CodexCloud
         private Result Execute(string executable, string cursor, int timeoutMilliseconds)
         {
             Process child = null;
+            CloudWorkingDirectory workspace = null;
             try
             {
+                workspace = CloudWorkingDirectory.Create();
                 string arguments = "cloud list --json --limit 20";
                 if (!String.IsNullOrEmpty(cursor)) arguments += " --cursor " + QuoteArgument(cursor);
                 var start = new ProcessStartInfo(executable, arguments) {
                     UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden,
-                    RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true
+                    RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
+                    WorkingDirectory = workspace.Path
                 };
                 child = new Process { StartInfo = start };
                 lock (gate)
@@ -79,6 +82,7 @@ namespace AITaskMonitor.CodexCloud
             {
                 lock (gate) { process = null; }
                 if (child != null) child.Dispose();
+                if (workspace != null) workspace.Dispose();
             }
         }
 
@@ -122,4 +126,236 @@ namespace AITaskMonitor.CodexCloud
             return result.Append('"').ToString();
         }
     }
+    // A one-use, non-writable working directory for the child CLI. File handles
+    // pin each ancestor, so a path component cannot be renamed after validation.
+    // The directory is removed only by its own handle and only if it is empty.
+    internal sealed class CloudWorkingDirectory : IDisposable
+    {
+        private const uint DeleteAccess = 0x00010000;
+        private const uint ReadAttributes = 0x00000080;
+        private const uint Synchronize = 0x00100000;
+        private const uint ShareReadWrite = 0x00000003;
+        private const uint OpenExisting = 3;
+        private const uint BackupSemantics = 0x02000000;
+        private const uint OpenReparse = 0x00200000;
+        private const int AccessDenied = 5;
+        private readonly System.Collections.Generic.List<Microsoft.Win32.SafeHandles.SafeFileHandle> ancestors =
+            new System.Collections.Generic.List<Microsoft.Win32.SafeHandles.SafeFileHandle>();
+        private Microsoft.Win32.SafeHandles.SafeFileHandle directory;
+        private bool disposed;
+
+        private CloudWorkingDirectory() { }
+        internal string Path { get; private set; }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct UnicodeString
+        {
+            internal ushort Length, MaximumLength;
+            internal IntPtr Buffer;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct ObjectAttributes
+        {
+            internal int Length;
+            internal IntPtr RootDirectory, ObjectName;
+            internal uint Attributes;
+            internal IntPtr SecurityDescriptor, SecurityQualityOfService;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct IoStatusBlock
+        {
+            internal IntPtr Status;
+            internal UIntPtr Information;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct HandleFileInfo
+        {
+            internal uint Attributes;
+            internal System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
+            internal uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+        }
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string path, uint access, uint share,
+            IntPtr security, uint creation, uint flags, IntPtr template);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern uint GetDriveTypeW(string root);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle handle, out HandleFileInfo info);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle handle,
+            int infoClass, ref byte value, uint size);
+
+        [System.Runtime.InteropServices.DllImport("ntdll.dll")]
+        private static extern int NtCreateFile(out Microsoft.Win32.SafeHandles.SafeFileHandle handle, uint access,
+            ref ObjectAttributes attributes, out IoStatusBlock status, IntPtr allocationSize, uint fileAttributes,
+            uint sharing, uint disposition, uint options, IntPtr eaBuffer, uint eaLength);
+
+        [System.Runtime.InteropServices.DllImport("ntdll.dll")]
+        private static extern uint RtlNtStatusToDosError(int status);
+
+        internal static CloudWorkingDirectory Create()
+        {
+            var result = new CloudWorkingDirectory();
+            try
+            {
+                result.Initialize();
+                return result;
+            }
+            catch
+            {
+                result.Dispose();
+                throw;
+            }
+        }
+
+        private void Initialize()
+        {
+            string temp = System.IO.Path.GetFullPath(System.IO.Path.GetTempPath()).TrimEnd('\\');
+            if (temp.Length < 3 || temp[1] != ':' || temp[2] != '\\' ||
+                !((temp[0] >= 'A' && temp[0] <= 'Z') || (temp[0] >= 'a' && temp[0] <= 'z')))
+                throw new IOException("A local temporary directory is required.");
+            string volumeRoot = System.IO.Path.GetPathRoot(temp);
+            if (GetDriveTypeW(volumeRoot) != 3)
+                throw new IOException("The temporary directory must be on a fixed local drive.");
+
+            var pathChain = new System.Collections.Generic.List<string>();
+            for (var item = new DirectoryInfo(temp); item != null; item = item.Parent)
+                pathChain.Add(item.FullName);
+            pathChain.Reverse();
+
+            for (int i = 0; i < pathChain.Count; i++)
+            {
+                uint access = ReadAttributes;
+                if (i == pathChain.Count - 1) access |= 0x4 | Synchronize; // FILE_ADD_SUBDIRECTORY
+                var handle = CreateFileW(pathChain[i], access, ShareReadWrite, IntPtr.Zero,
+                    OpenExisting, BackupSemantics | OpenReparse, IntPtr.Zero);
+                if (handle.IsInvalid)
+                {
+                    int error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                    handle.Dispose();
+                    throw new System.ComponentModel.Win32Exception(error);
+                }
+                ancestors.Add(handle);
+                HandleFileInfo info;
+                if (!GetFileInformationByHandle(handle, out info) || (info.Attributes & 0x10) == 0 ||
+                    (info.Attributes & 0x400) != 0)
+                    throw new IOException("Temporary directory ancestry is not a plain directory.");
+            }
+
+            System.Security.Principal.SecurityIdentifier user;
+            using (var identity = System.Security.Principal.WindowsIdentity.GetCurrent()) { user = identity.User; }
+            if (user == null) throw new IOException("Current user is unavailable.");
+            var security = new System.Security.AccessControl.DirectorySecurity();
+            security.SetAccessRuleProtection(true, false);
+            security.SetOwner(user);
+            security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(user,
+                System.Security.AccessControl.FileSystemRights.CreateFiles | System.Security.AccessControl.FileSystemRights.CreateDirectories,
+                System.Security.AccessControl.InheritanceFlags.None, System.Security.AccessControl.PropagationFlags.None,
+                System.Security.AccessControl.AccessControlType.Deny));
+            security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(user,
+                System.Security.AccessControl.FileSystemRights.ReadAndExecute | System.Security.AccessControl.FileSystemRights.Delete,
+                System.Security.AccessControl.InheritanceFlags.None, System.Security.AccessControl.PropagationFlags.None,
+                System.Security.AccessControl.AccessControlType.Allow));
+
+            string name = "aitm-cloud-" + Guid.NewGuid().ToString("N");
+            Path = System.IO.Path.Combine(temp, name);
+            directory = CreateChild(ancestors[ancestors.Count - 1], name, security);
+            HandleFileInfo childInfo;
+            if (!GetFileInformationByHandle(directory, out childInfo) || (childInfo.Attributes & 0x10) == 0 ||
+                (childInfo.Attributes & 0x400) != 0)
+                throw new IOException("New workspace is not a plain directory.");
+
+            using (var byName = CreateFileW(Path, ReadAttributes, 7, IntPtr.Zero,
+                OpenExisting, BackupSemantics | OpenReparse, IntPtr.Zero))
+            {
+                HandleFileInfo namedInfo;
+                if (byName.IsInvalid || !GetFileInformationByHandle(byName, out namedInfo) ||
+                    namedInfo.Volume != childInfo.Volume || namedInfo.IndexHigh != childInfo.IndexHigh ||
+                    namedInfo.IndexLow != childInfo.IndexLow)
+                    throw new IOException("Workspace path no longer identifies its directory.");
+            }
+            RequireDenied(0x2); // FILE_ADD_FILE
+            RequireDenied(0x4); // FILE_ADD_SUBDIRECTORY
+        }
+
+        private void RequireDenied(uint access)
+        {
+            using (var probe = CreateFileW(Path, access, 7, IntPtr.Zero,
+                OpenExisting, BackupSemantics | OpenReparse, IntPtr.Zero))
+            {
+                if (!probe.IsInvalid)
+                    throw new IOException("Workspace permits file creation.");
+                int error = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                if (error != AccessDenied)
+                    throw new System.ComponentModel.Win32Exception(error);
+            }
+        }
+
+        private static Microsoft.Win32.SafeHandles.SafeFileHandle CreateChild(
+            Microsoft.Win32.SafeHandles.SafeFileHandle parent, string name,
+            System.Security.AccessControl.DirectorySecurity security)
+        {
+            byte[] descriptor = security.GetSecurityDescriptorBinaryForm();
+            var pinned = new System.Runtime.InteropServices.GCHandle();
+            IntPtr text = IntPtr.Zero;
+            IntPtr unicodePtr = IntPtr.Zero;
+            try
+            {
+                pinned = System.Runtime.InteropServices.GCHandle.Alloc(descriptor, System.Runtime.InteropServices.GCHandleType.Pinned);
+                text = System.Runtime.InteropServices.Marshal.StringToHGlobalUni(name);
+                unicodePtr = System.Runtime.InteropServices.Marshal.AllocHGlobal(
+                    System.Runtime.InteropServices.Marshal.SizeOf(typeof(UnicodeString)));
+                var unicode = new UnicodeString {
+                    Length = checked((ushort)(name.Length * 2)),
+                    MaximumLength = checked((ushort)((name.Length + 1) * 2)),
+                    Buffer = text
+                };
+                System.Runtime.InteropServices.Marshal.StructureToPtr(unicode, unicodePtr, false);
+                var attributes = new ObjectAttributes {
+                    Length = System.Runtime.InteropServices.Marshal.SizeOf(typeof(ObjectAttributes)),
+                    RootDirectory = parent.DangerousGetHandle(), ObjectName = unicodePtr,
+                    Attributes = 0x40, SecurityDescriptor = pinned.AddrOfPinnedObject()
+                };
+                Microsoft.Win32.SafeHandles.SafeFileHandle handle;
+                IoStatusBlock status;
+                int code = NtCreateFile(out handle, DeleteAccess | ReadAttributes | 0x20 | Synchronize,
+                    ref attributes, out status, IntPtr.Zero, 0x10, ShareReadWrite, 2, 1 | 0x20 | OpenReparse,
+                    IntPtr.Zero, 0);
+                if (code < 0)
+                {
+                    if (handle != null) handle.Dispose();
+                    throw new System.ComponentModel.Win32Exception(unchecked((int)RtlNtStatusToDosError(code)));
+                }
+                return handle;
+            }
+            finally
+            {
+                System.Runtime.InteropServices.Marshal.FreeHGlobal(unicodePtr);
+                System.Runtime.InteropServices.Marshal.FreeHGlobal(text);
+                if (pinned.IsAllocated) pinned.Free();
+            }
+        }
+
+        public void Dispose()
+        {
+            if (disposed) return;
+            disposed = true;
+            if (directory != null)
+            {
+                byte delete = 1;
+                // The operation fails rather than recursively removing unexpected contents.
+                SetFileInformationByHandle(directory, 4, ref delete, 1);
+                directory.Dispose();
+            }
+            for (int i = ancestors.Count - 1; i >= 0; i--) ancestors[i].Dispose();
+        }
+    }
+
 }

@@ -230,11 +230,38 @@ internal static class Program
         {
             string fixture = RequireFixture(args);
             string root = Path.GetFullPath(args[0]);
+            string original = Path.Combine(root, "original-cwd");
+            Directory.CreateDirectory(original);
+            string sentinel = Path.Combine(original, "error.log");
+            File.WriteAllText(sentinel, "original-synthetic-sentinel");
+            Directory.SetCurrentDirectory(original);
+            string temp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
+            Check(!Directory.EnumerateDirectories(temp, "aitm-cloud-*").Any(), "workspace test starts empty");
             await Basic(fixture, root);
             await Bounds(fixture);
             await StopCase(fixture, true);
             await StopCase(fixture, false);
             await StopFailures();
+            Check(File.ReadAllText(sentinel) == "original-synthetic-sentinel", "original cwd was not modified");
+            Check(!Directory.EnumerateDirectories(temp, "aitm-cloud-*").Any(), "completed workspaces were removed");
+            string? priorTemp = Environment.GetEnvironmentVariable("TEMP");
+            string? priorTmp = Environment.GetEnvironmentVariable("TMP");
+            string missing = Path.Combine(root, "missing-temp");
+            Check(!Directory.Exists(missing), "invalid temp fixture is absent");
+            try
+            {
+                Environment.SetEnvironmentVariable("TEMP", missing);
+                Environment.SetEnvironmentVariable("TMP", missing);
+                using CommandResult failed = await CloudCommand.RunAsync(fixture, null, TimeSpan.FromSeconds(15));
+                Check(failed.Outcome == CommandOutcome.StartFailed && !failed.Started,
+                    "unavailable temp prevents process launch");
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("TEMP", priorTemp);
+                Environment.SetEnvironmentVariable("TMP", priorTmp);
+            }
+            Check(File.ReadAllText(sentinel) == "original-synthetic-sentinel", "failed setup left original cwd intact");
             Console.WriteLine("Codex Cloud command synthetic checks passed: " + checks);
             return 0;
         }

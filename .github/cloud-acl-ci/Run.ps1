@@ -21,7 +21,7 @@ Check ([IO.Path]::IsPathFullyQualified($runnerTemp)) 'Runner temp must be absolu
 for ($dir=[IO.DirectoryInfo]::new($runnerTemp); $null -ne $dir; $dir=$dir.Parent) {
     Check ($dir.Exists -and (($dir.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) 'Runner temp has a redirected ancestor.'
 }
-$root = [IO.Path]::GetFullPath((Join-Path $runnerTemp ('aitm-cloud-acl-' + [Guid]::NewGuid().ToString('N'))))
+$root = [IO.Path]::GetFullPath((Join-Path $runnerTemp ('aitm-cloud-command-' + [Guid]::NewGuid().ToString('N'))))
 Check ([string]::Equals([IO.Directory]::GetParent($root).FullName, $runnerTemp, [StringComparison]::OrdinalIgnoreCase)) 'Synthetic root must be a direct runner-temp child.'
 Check (-not [IO.Directory]::Exists($root) -and -not [IO.File]::Exists($root)) 'Synthetic root already exists.'
 $beforeUser = Read-PathState 'User'
@@ -42,10 +42,10 @@ try {
     $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
     $artifacts = Join-Path $root 'artifacts'
 
-    function Invoke-Isolated([string[]]$arguments) {
+    function Invoke-Isolated([string[]]$arguments, [string]$executable = '', [string]$working = '') {
         $start = [Diagnostics.ProcessStartInfo]::new()
-        $start.FileName = $dotnet
-        $start.WorkingDirectory = $repositoryRoot
+        $start.FileName = if ($executable) { $executable } else { $dotnet }
+        $start.WorkingDirectory = if ($working) { $working } else { $repositoryRoot }
         $start.UseShellExecute = $false
         $start.CreateNoWindow = $true
         $start.RedirectStandardOutput = $true
@@ -82,15 +82,29 @@ try {
 
     $sdkVersion = (Invoke-Isolated @('--version')).Trim()
     Check ($sdkVersion -match '^10\.') 'The hosted SDK is not .NET 10.'
-    $project = Join-Path $repositoryRoot 'windows\native\Tests\CloudWorkspaceExperiment\CloudWorkspaceExperiment.csproj'
+    $project = Join-Path $repositoryRoot 'windows\native\CodexCloudCommand\Tests\CodexCloudCommand.Tests.csproj'
     $build = Invoke-Isolated @('build', $project, '-c', 'Release', '--configfile', $config,
         '--artifacts-path', $artifacts, '-p:NuGetAudit=false', '--nologo')
     Write-Output $build.TrimEnd()
-    $assembly = Join-Path $artifacts 'bin\CloudWorkspaceExperiment\release\AITaskMonitor.CloudWorkspaceExperiment.dll'
+    $assembly = Join-Path $artifacts 'bin\CodexCloudCommand.Tests\release\AITaskMonitor.CodexCloudCommand.Tests.dll'
     Check ([IO.File]::Exists($assembly)) 'The synthetic test assembly is missing.'
     $output = Invoke-Isolated @($assembly, $root)
     Write-Output $output.TrimEnd()
-    Write-Output 'ACL feasibility used only a synthetic child and runner-temp workspace.'
+
+    $oldCwd = Join-Path $root 'original-cwd-legacy'
+    [void][IO.Directory]::CreateDirectory($oldCwd)
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Check ([IO.File]::Exists($powershell)) 'Windows PowerShell is unavailable.'
+    $legacyTest = Join-Path $repositoryRoot '.github\cloud-acl-ci\Legacy-Workspace-Check.ps1'
+    $output = Invoke-Isolated -arguments @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', $legacyTest, '-Root', $root) -executable $powershell -working $oldCwd
+    Write-Output $output.TrimEnd()
+
+    $runtimeTest = Join-Path $repositoryRoot 'windows\tests\Test-CodexCloudRuntime.ps1'
+    $output = Invoke-Isolated -arguments @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', $runtimeTest) -executable $powershell -working $oldCwd
+    Write-Output $output.TrimEnd()
+    Write-Output 'Cloud workspace tests used only synthetic children and runner-temp paths.'
 } finally {
     foreach ($scope in @('User','Machine')) {
         $before = if ($scope -eq 'User') { $beforeUser } else { $beforeMachine }

@@ -35,6 +35,18 @@ internal static class Program
             (args.Length == 6 && !args[5].StartsWith("--cursor=", StringComparison.Ordinal)))
             return 20;
 
+        string temp = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.GetTempPath()));
+        string cwd = Path.TrimEndingDirectorySeparator(Path.GetFullPath(Environment.CurrentDirectory));
+        if (!string.Equals(Directory.GetParent(cwd)?.FullName, temp, StringComparison.OrdinalIgnoreCase) ||
+            !Regex.IsMatch(Path.GetFileName(cwd), "^aitm-cloud-[0-9a-f]{32}$", RegexOptions.CultureInvariant))
+            return 27;
+        try
+        {
+            using var unexpected = new FileStream("error.log", FileMode.Append, FileAccess.Write);
+            return 28;
+        }
+        catch (UnauthorizedAccessException) { }
+
         string? cursor = args.Length == 6 ? args[5]["--cursor=".Length..] : null;
         using Stream stdout = Console.OpenStandardOutput();
         using Stream stderr = Console.OpenStandardError();

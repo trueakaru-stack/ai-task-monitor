@@ -82,9 +82,11 @@ public static class CloudCommand
         byte[]? output = null;
         bool started = false;
         bool exitObserved = false;
+        AITaskMonitor.CodexCloud.CloudWorkingDirectory? workspace = null;
 
         try
         {
+            workspace = AITaskMonitor.CodexCloud.CloudWorkingDirectory.Create();
             var start = new ProcessStartInfo(executable)
             {
                 UseShellExecute = false,
@@ -92,7 +94,8 @@ public static class CloudCommand
                 WindowStyle = ProcessWindowStyle.Hidden,
                 RedirectStandardInput = true,
                 RedirectStandardOutput = true,
-                RedirectStandardError = true
+                RedirectStandardError = true,
+                WorkingDirectory = workspace.Path
             };
             foreach (string argument in new[] { "cloud", "list", "--json", "--limit", "20" })
                 start.ArgumentList.Add(argument);
@@ -179,6 +182,7 @@ public static class CloudCommand
             Observe(stderrTask);
             Observe(allTasks);
             Observe(failure.Task);
+            workspace?.Dispose();
         }
 
         if (started && !exitObserved) outcome = CommandOutcome.TerminationUnconfirmed;
