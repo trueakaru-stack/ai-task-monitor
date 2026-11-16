@@ -54,11 +54,10 @@ try {
         $start=[Diagnostics.ProcessStartInfo]::new()
         $start.FileName=$powershell; $start.WorkingDirectory=$case
         $start.UseShellExecute=$false; $start.CreateNoWindow=$true
-        $start.RedirectStandardOutput=$true; $start.RedirectStandardError=$true
-        $start.Environment.Clear()
+                $start.Environment.Clear()
         $values=@{
             SystemRoot=$env:SystemRoot; windir=$env:SystemRoot
-            PATH=((Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot)
+            PATH=((Split-Path -Parent $powershell) + ';' + (Join-Path $env:SystemRoot 'System32') + ';' + $env:SystemRoot)
             USERPROFILE=$profile; APPDATA=$appdata; LOCALAPPDATA=$local; TEMP=$temp; TMP=$temp
             DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='0'
         }
@@ -70,8 +69,7 @@ try {
         foreach ($arg in @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$uninstaller)) { [void]$start.ArgumentList.Add($arg) }
         $process=[Diagnostics.Process]::Start($start)
         try {
-            $stdout=$process.StandardOutput.ReadToEndAsync(); $stderr=$process.StandardError.ReadToEndAsync()
-            if (-not $process.WaitForExit(20000)) { $process.Kill($true); throw 'Synthetic uninstaller timed out.' }
+            if (-not $process.WaitForExit(30000)) { $process.Kill($true); throw 'Synthetic uninstaller timed out.' }
             $exit=$process.ExitCode
         } finally { $process.Dispose() }
         $deadline=[DateTime]::UtcNow.AddSeconds(15)
