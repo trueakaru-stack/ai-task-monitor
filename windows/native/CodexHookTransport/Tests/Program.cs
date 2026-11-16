@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
@@ -200,14 +201,8 @@ Check(Quiet(await RunHelper(name, oversizedInput)), "Oversized stdin was not dis
 await using (var access = HookPipeController.Start())
 {
     using NamedPipeClientStream client = await RawClient(access.PipeName);
-    string dacl = NativeSecurity.ReadDacl(client.SafePipeHandle);
     using WindowsIdentity identity = WindowsIdentity.GetCurrent();
-    string userSid = identity.User!.Value;
-    string daclShape = System.Text.RegularExpressions.Regex.Replace(
-        dacl.Replace(userSid, "<CURRENT_USER>", StringComparison.Ordinal), @"S-\d+(?:-\d+)+", "<OTHER_SID>");
-    Console.WriteLine("Synthetic pipe DACL shape: " + daclShape);
-    Check(dacl.StartsWith("D:P", StringComparison.Ordinal) &&
-        dacl.Count(c => c == '(') == 1 && dacl.Contains(";;;" + userSid + ")", StringComparison.Ordinal),
+    Check(NativeSecurity.IsCurrentUserOnly(client.SafePipeHandle, identity.User!),
         "The actual pipe DACL was not restricted to the current user.");
     await client.WriteAsync(new byte[] { 0 });
     await access.StopAsync().WaitAsync(TimeSpan.FromSeconds(4));
@@ -223,18 +218,24 @@ Console.WriteLine($"Codex hook transport: {checks} synthetic checks passed.");
 
 static class NativeSecurity
 {
-    internal static string ReadDacl(SafePipeHandle handle)
+    internal static bool IsCurrentUserOnly(SafePipeHandle handle, SecurityIdentifier user)
     {
+        if (!OperatingSystem.IsWindows()) return false;
         const uint SeKernelObject = 6, DaclInformation = 4;
         uint result = GetSecurityInfo(handle, SeKernelObject, DaclInformation,
             out _, out _, out _, out _, out IntPtr descriptor);
         if (result != 0) throw new Win32Exception((int)result);
         try
         {
-            if (!ConvertSecurityDescriptorToStringSecurityDescriptor(descriptor, 1, DaclInformation,
-                    out IntPtr text, out _)) throw new Win32Exception(Marshal.GetLastWin32Error());
-            try { return Marshal.PtrToStringUni(text) ?? string.Empty; }
-            finally { _ = LocalFree(text); }
+            uint length = GetSecurityDescriptorLength(descriptor);
+            if (length == 0 || length > 65_536) return false;
+            byte[] bytes = new byte[length];
+            Marshal.Copy(descriptor, bytes, 0, bytes.Length);
+            var parsed = new RawSecurityDescriptor(bytes, 0);
+            return (parsed.ControlFlags & ControlFlags.DiscretionaryAclProtected) != 0 &&
+                parsed.DiscretionaryAcl is { Count: 1 } acl && acl[0] is CommonAce ace &&
+                ace.AceQualifier == AceQualifier.AccessAllowed && ace.AceFlags == AceFlags.None &&
+                ace.SecurityIdentifier.Equals(user);
         }
         finally { _ = LocalFree(descriptor); }
     }
@@ -243,11 +244,8 @@ static class NativeSecurity
     private static extern uint GetSecurityInfo(SafePipeHandle handle, uint objectType, uint securityInformation,
         out IntPtr owner, out IntPtr group, out IntPtr dacl, out IntPtr sacl, out IntPtr securityDescriptor);
 
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true,
-        EntryPoint = "ConvertSecurityDescriptorToStringSecurityDescriptorW")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ConvertSecurityDescriptorToStringSecurityDescriptor(IntPtr securityDescriptor,
-        uint revision, uint securityInformation, out IntPtr descriptorString, out uint stringLength);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint GetSecurityDescriptorLength(IntPtr securityDescriptor);
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr LocalFree(IntPtr memory);
