@@ -4,10 +4,32 @@ This isolated layer is not connected to the preview window or the installed
 application. It does not discover a user profile or choose the standard or
 Store edition's paths. The caller must supply two distinct absolute paths in
 trusted directories; target and lock paths must also differ from the legacy
-path. The legacy file is opened for reading only. The first successful save
-creates the separate target from the legacy document and updates one display
-field. If a target already exists, it takes precedence and the legacy file is
-not read. Later changes to the old file are not synchronized.
+path. If the separate target does not exist, the concrete file adapter returns
+`MigrationDeferred`: it does not open or copy the old file, infer defaults,
+or create a target. This applies even if the old file may be absent, because
+absence has not been verified against concurrent writers. A host must surface
+the deferred state and must not replace the user's theme or language silently.
+The target read can create the separate lock file even while migration is
+deferred. A caller may explicitly invoke `Initialize(theme, language)` only
+after the user has chosen both values. It does not inspect the legacy source,
+and creates a separate target containing exactly those two choices; `system`
+is accepted only when explicitly selected. Invalid or missing choices fail.
+An existing target causes a conflict; if a competing target appears after the
+snapshot, initialization does not overwrite it. The target lock can still be
+created in this case. No UI calls this operation automatically or otherwise.
+
+Explicit initialization does not migrate other settings from the old file;
+the old file remains untouched. A future application must retain access to
+those settings and must not treat the new display-only target as the complete
+old configuration. The initialization UI, other settings and their migration
+are not implemented.
+
+If a target already exists, it takes precedence and can be read or updated
+without opening the legacy file. Later changes to the old file are not
+synchronized. The read-only source interface also supports a `Confirmed`
+snapshot (including a confirmed absent file) and `Unavailable`; only synthetic
+test sources currently provide `Confirmed`. Implementing a real confirmation
+provider requires separate evidence of a stable non-interfering snapshot.
 
 The supported modes are `theme` = `system`, `dark`, `light` and `language` =
 `system`, `ru`, `en`. Reading accepts case variants as the released PowerShell
@@ -29,7 +51,7 @@ status instead of overwriting the newer target. The lock is advisory to other
 programs: a writer that ignores it can race between the comparison and the
 replace. A concurrent in-place update of the legacy file can produce a stale or
 mixed snapshot even when its length is unchanged; a mixed snapshot can still be
-valid JSON. The length checks do not establish a consistent read. Opening the
+valid JSON. Length checks do not establish a consistent read. Opening the
 legacy file without write/delete sharing would also block the released version's
 `File.Replace` while the read is open; its theme handler ignores save failure.
 That alternative has therefore not been adopted. Changes to the legacy file
@@ -41,11 +63,12 @@ power-loss recovery and uncooperative writers have not been verified. Failed
 temporary-file cleanup is best effort, so an I/O failure may leave that file in
 the trusted target directory.
 
-Unknown properties may contain sensitive data. This experiment copies them
-into the new target and may temporarily copy them into a temporary file. The
-effective permissions of the target directory, new file and replaced file have
-not been checked, and no retention or cleanup policy for the migrated copy has
-been established. These are blockers before using real settings.
+An existing target may contain sensitive unknown properties, and an update may
+temporarily copy them into a temporary file. The effective permissions of the
+target directory, new file and replaced file have not been checked, and no
+retention or cleanup policy for such copies has been established. These are
+blockers before using real settings. Deferred migration does not prove that a
+cooperating lock excludes unrelated writers of an existing target.
 
 This does not migrate all application behavior. In particular, the released
 Claude hook reads its retention setting from the old file; that setting must
@@ -88,11 +111,18 @@ The tests create a unique fixture directory under the supplied work directory
 and do not delete it. They reject paths inside the current checkout, current
 profile/application-data directories, and reparse-point ancestors. These are
 not a general filesystem sandbox and depend on environment and path evidence.
-The Windows-only sharing fixture checks both the rejected concurrent writer and
+The deferred-state and explicit-initialization tests keep a synthetic old file
+exclusively open while checking that it is neither opened nor overwritten.
+They also exercise missing choices, a target appearing after a snapshot, an
+already-existing target, distinct synthetic edition roots and unconfirmed and
+unavailable synthetic sources. The Windows-only sharing fixture checks both the rejected concurrent writer and
 the resulting conflict with a legacy-style file replacement. It uses only
 synthetic files and is not part of the adapter's actual reading policy.
 They do not assign `HOME` or `CODEX_HOME`, launch agents, or change persistent
 `PATH`. Tests use only synthetic data and do not establish visual fidelity,
 live interoperability, full migration, or release readiness.
 
-The isolated suite passed 54 checks and the WPF prototype compiled in [Windows CI run 43467142740](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43467142740). Neither test reads real settings or exercises the settings screen.
+The deferred-migration and explicit-initialization candidate passed 74
+synthetic checks and the WPF prototype compiled without warnings in
+[Windows CI run 43831214988](https://github.com/trueakaru-stack/ai-task-monitor/actions/runs/43831214988).
+Neither test reads real settings or exercises the settings screen.
