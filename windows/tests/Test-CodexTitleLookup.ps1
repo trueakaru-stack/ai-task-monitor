@@ -36,6 +36,11 @@ public sealed class SyntheticTitleDb : IDisposable {
 '@
 
 function Require([bool]$condition,[string]$message) { if(-not $condition){throw $message} }
+function SharedHash([string]$path) {
+ $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+ $sha=[Security.Cryptography.SHA256]::Create()
+ try { return [BitConverter]::ToString($sha.ComputeHash($stream)) } finally { $sha.Dispose();$stream.Dispose() }
+}
 $tempRoot=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')+'\'
 $fixture=[IO.Path]::GetFullPath((Join-Path $tempRoot ('codex-title-lookup-'+[Guid]::NewGuid().ToString('N'))))
 if(-not $fixture.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe fixture path.'}
@@ -48,12 +53,12 @@ try {
  $writer=[SyntheticTitleDb]::new($dbPath,'CREATE TABLE threads(id TEXT PRIMARY KEY,name TEXT,title TEXT,history_mode TEXT);')
  $writer.Execute("INSERT INTO threads VALUES('modern','Modern name','Stale title','paginated'),('legacy','Stale name','Legacy title','legacy'),('empty','','Misleading title','paginated'),('future','Unknown name','Unknown title','future'),('unicode',char(1055,1088,1080,1074,1077,1090),'Other','paginated');")
  Require ([IO.File]::Exists($dbPath+'-wal') -and [IO.File]::Exists($dbPath+'-shm')) 'Synthetic WAL sidecars were not created.'
- $mainBefore=(Get-FileHash -LiteralPath $dbPath -Algorithm SHA256).Hash
- $walBefore=(Get-FileHash -LiteralPath ($dbPath+'-wal') -Algorithm SHA256).Hash
+ $mainBefore=SharedHash $dbPath
+ $walBefore=SharedHash ($dbPath+'-wal')
  $ids=[string[]]@('modern','legacy','empty','future','unicode','missing')
  $names=[AITaskMonitor.CodexTitles.Reader]::ReadNow($fixture,$ids)
  Require ($names.Count -eq 3 -and $names['modern'] -ceq 'Modern name' -and $names['legacy'] -ceq 'Legacy title' -and $names['unicode'] -ceq ([string]::Concat([char[]](1055,1088,1080,1074,1077,1090)))) 'Exact-id lookup, history mode or Unicode is incorrect.'
- Require ((Get-FileHash -LiteralPath $dbPath -Algorithm SHA256).Hash -ceq $mainBefore -and (Get-FileHash -LiteralPath ($dbPath+'-wal') -Algorithm SHA256).Hash -ceq $walBefore) 'Read-only lookup changed the database or WAL.'
+ Require ((SharedHash $dbPath) -ceq $mainBefore -and (SharedHash ($dbPath+'-wal')) -ceq $walBefore) 'Read-only lookup changed the database or WAL.'
  $writer.Execute("UPDATE threads SET name='Updated name' WHERE id='modern';")
  $names=[AITaskMonitor.CodexTitles.Reader]::ReadNow($fixture,$ids)
  Require ($names['modern'] -ceq 'Updated name') 'A committed WAL update was not observed.'
