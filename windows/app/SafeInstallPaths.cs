@@ -241,14 +241,14 @@ internal static class SafeShortcut
     [ComImport, Guid("000214F9-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IShellLinkW
     {
-        void GetPath();
+        [PreserveSig] int GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder path, int length, IntPtr data, uint flags);
         void GetIDList();
         void SetIDList();
         void GetDescription();
         void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string value);
         void GetWorkingDirectory();
         void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string value);
-        void GetArguments();
+        [PreserveSig] int GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder arguments, int length);
         void SetArguments();
         void GetHotkey();
         void SetHotkey();
@@ -318,6 +318,44 @@ internal static class SafeShortcut
                 using (FileStream file = guard.CreateNewFile(path)) file.Write(content, 0, content.Length);
             }
             return true;
+        }
+        catch { return false; }
+    }
+
+    internal static bool TargetsCurrentLauncher(string path, string launcher)
+    {
+        try
+        {
+            byte[] bytes;
+            using (SafeInstallPaths guard = SafeInstallPaths.OpenExisting(Path.GetDirectoryName(path)))
+            using (FileStream file = guard.OpenPreparedFile(path))
+            {
+                if (file.Length <= 0 || file.Length > 1024 * 1024) return false;
+                bytes = new byte[(int)file.Length];
+                int total = 0, count;
+                while (total < bytes.Length && (count = file.Read(bytes, total, bytes.Length - total)) > 0) total += count;
+                if (total != bytes.Length) return false;
+            }
+            object instance = new ShellLink();
+            IStream stream = null;
+            try
+            {
+                Marshal.ThrowExceptionForHR(CreateStreamOnHGlobal(IntPtr.Zero, true, out stream));
+                stream.Write(bytes, bytes.Length, IntPtr.Zero);
+                stream.Seek(0, 0, IntPtr.Zero);
+                ((IPersistStream)instance).Load(stream);
+                IShellLinkW link = (IShellLinkW)instance;
+                StringBuilder target = new StringBuilder(32768), arguments = new StringBuilder(32768);
+                if (link.GetPath(target, target.Capacity, IntPtr.Zero, 4) != 0 ||
+                    link.GetArguments(arguments, arguments.Capacity) != 0 || arguments.Length != 0) return false;
+                string value = target.ToString();
+                return Path.IsPathRooted(value) && String.Equals(Path.GetFullPath(value), Path.GetFullPath(launcher), StringComparison.OrdinalIgnoreCase);
+            }
+            finally
+            {
+                if (stream != null) Marshal.FinalReleaseComObject(stream);
+                Marshal.FinalReleaseComObject(instance);
+            }
         }
         catch { return false; }
     }

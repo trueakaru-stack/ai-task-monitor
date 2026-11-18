@@ -16,7 +16,7 @@ internal static class CodexProgressInstaller
             InstallerLanguage.Initialize();
             string localDirectory = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             installDirectory = Path.Combine(localDirectory, "AITaskMonitor");
-            string shortcutName = null;
+            string shortcutStatus = null;
             string launcher = Path.Combine(installDirectory, "AI task monitor.exe");
             string backup = null;
             string journalBackup = null;
@@ -75,18 +75,19 @@ internal static class CodexProgressInstaller
 
             string programs = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
             string shortcut = Path.Combine(programs, "AI task monitor.lnk");
+            string alternateShortcut = Path.Combine(programs, "AI task monitor (new).lnk");
             string installedIcon = Path.Combine(installDirectory, "assets", "app-icon.ico");
-            if (SafeShortcut.TryCreate(shortcut, launcher, installDirectory, installedIcon))
-                shortcutName = "AI task monitor.lnk";
-            else if (SafeShortcut.TryCreate(Path.Combine(programs, "AI task monitor (new).lnk"), launcher, installDirectory, installedIcon))
-                shortcutName = "AI task monitor (new).lnk";
+            if (SafeShortcut.TargetsCurrentLauncher(shortcut, launcher)) shortcutStatus = "existing-main";
+            else if (SafeShortcut.TargetsCurrentLauncher(alternateShortcut, launcher)) shortcutStatus = "existing-alternate";
+            else if (SafeShortcut.TryCreate(shortcut, launcher, installDirectory, installedIcon)) shortcutStatus = "created-main";
+            else if (SafeShortcut.TryCreate(alternateShortcut, launcher, installDirectory, installedIcon)) shortcutStatus = "created-alternate";
 
             bool claudeConnected = false, claudeFailed = false;
             if (backup == null && ClaudeCommandFound())
             {
                 DialogResult answer = MessageBox.Show(
-                    InstallerLanguage.Text("Найдена команда Claude Code. Перед подключением обновите все используемые копии Claude Code, включая Claude Desktop, до версии 2.1.101 или новее. Закройте программы, которые могут изменять настройки Claude Code. Приложение не проверяет версии и закрытие программ автоматически.\n\nПодключить Claude Code? Существующие hooks сохранятся.",
-                    "A Claude Code command was found. Before connecting, update all copies of Claude Code you use, including Claude Desktop, to version 2.1.101 or later. Close programs that may change Claude Code settings. The app does not check versions or whether programs are closed automatically.\n\nConnect Claude Code? Existing hooks will be preserved."),
+                    InstallerLanguage.Text("Найден файл команды с именем claude. Если это Claude Code, перед подключением обновите все используемые копии Claude Code, включая Claude Desktop, до версии 2.1.101 или новее. Закройте программы, которые могут изменять настройки Claude Code. Приложение не проверяет версии и закрытие программ автоматически.\n\nПодключить Claude Code? Существующие hooks сохранятся.",
+                    "A command file named claude was found. If this is Claude Code, update all copies of Claude Code you use, including Claude Desktop, to version 2.1.101 or later before connecting. Close programs that may change Claude Code settings. The app does not check versions or whether programs are closed automatically.\n\nConnect Claude Code? Existing hooks will be preserved."),
                     "AI task monitor", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (answer == DialogResult.Yes)
                 {
@@ -108,9 +109,11 @@ internal static class CodexProgressInstaller
             catch { }
             MessageBox.Show(
                 InstallerLanguage.Text("AI task monitor установлен. ", "AI task monitor is installed. ") +
-                (shortcutName == "AI task monitor.lnk" ? InstallerLanguage.Text("Ярлык добавлен в меню «Пуск».", "A shortcut was added to the Start menu.") :
-                    shortcutName != null ? InstallerLanguage.Text("Существующий ярлык сохранён. Добавлен новый ярлык «AI task monitor (new)».", "The existing shortcut was preserved. A new shortcut, AI task monitor (new), was added.") :
-                    InstallerLanguage.Text("Новый ярлык создать не удалось. Приложение можно открыть из папки ", "A new shortcut could not be created. You can open the app from ") + installDirectory + ".") +
+                (shortcutStatus == "existing-main" ? InstallerLanguage.Text("Существующий ярлык в меню «Пуск» сохранён.", "The existing Start menu shortcut was preserved.") :
+                    shortcutStatus == "existing-alternate" ? InstallerLanguage.Text("Существующий ярлык «AI task monitor (new)» сохранён.", "The existing AI task monitor (new) shortcut was preserved.") :
+                    shortcutStatus == "created-main" ? InstallerLanguage.Text("Ярлык добавлен в меню «Пуск».", "A shortcut was added to the Start menu.") :
+                    shortcutStatus == "created-alternate" ? InstallerLanguage.Text("Существующий ярлык сохранён. Добавлен новый ярлык «AI task monitor (new)».", "The existing shortcut was preserved. A new shortcut, AI task monitor (new), was added.") :
+                    InstallerLanguage.Text("Не удалось подтвердить подходящий ярлык или создать новый. Приложение можно открыть из папки ", "An existing shortcut could not be confirmed and a new shortcut could not be created. You can open the app from ") + installDirectory + ".") +
                 (backup != null ? InstallerLanguage.Text(" Прежняя папка сохранена: ", " The previous folder was preserved at: ") + backup + "." : "") +
                 (journalBackup != null ? InstallerLanguage.Text(" Исходный служебный файл сохранён: ", " The original update file was preserved at: ") + journalBackup + "." : "") +
                 (claudeConnected ? InstallerLanguage.Text(" Claude Code подключён. Перезапустите Claude Code.", " Claude Code is connected. Restart Claude Code.") : "") +

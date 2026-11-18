@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Security.AccessControl;
+using System.Security.Principal;
 
 internal static class TestSafeInstallSwap
 {
@@ -139,6 +141,16 @@ internal static class TestSafeInstallSwap
             finally { child.StandardInput.Close(); if (!child.WaitForExit(5000)) { child.Kill(); child.WaitForExit(); } }
         }
     }
+    private static void OtherProcessInspection()
+    {
+        string script = @"C:\synthetic\AITaskMonitor\CodexProgress.ps1";
+        string hook = @"C:\synthetic\AITaskMonitor\ClaudeTaskHook.ps1";
+        Check(!MonitorProcessCheck.RelevantOwner("S-1-5-18", "S-1-5-21-42"), "Another user's process was treated as current-user process.");
+        Check(!MonitorProcessCheck.MatchesPowerShell(null, script, hook), "An inaccessible unrelated command was treated as a running monitor.");
+        Check(MonitorProcessCheck.MatchesPowerShell("powershell.exe -NoProfile -File \"" + script + "\"", script, hook), "The monitor command was not recognized.");
+        string encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes("& '" + hook + "'"));
+        Check(MonitorProcessCheck.MatchesPowerShell("powershell.exe -EncodedCommand " + encoded, script, hook), "The encoded hook was not recognized.");
+    }
     private static void Rollback()
     {
         string local = NewCase("rollback"), target = Install(local); SetupOld(local);
@@ -226,6 +238,25 @@ internal static class TestSafeInstallSwap
         }
         CheckOld(local);
     }
+    private static void PartialJournalBackupDenied()
+    {
+        string local = NewCase("partial-journal-backup-denied"), target = Install(local); SetupOld(local);
+        string journal = Path.Combine(local, "AITaskMonitor.update-journal");
+        byte[] original = System.Text.Encoding.UTF8.GetBytes("AITM-UPGRADE-1\nOP|"); File.WriteAllBytes(journal, original);
+        DirectorySecurity previous = Directory.GetAccessControl(local);
+        DirectorySecurity restricted = Directory.GetAccessControl(local);
+        SecurityIdentifier sid = WindowsIdentity.GetCurrent().User;
+        restricted.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.CreateFiles, AccessControlType.Deny));
+        try
+        {
+            Directory.SetAccessControl(local, restricted);
+            bool blocked = false;
+            try { using (SafeInstallSwap swap = new SafeInstallSwap(local, target)) { } } catch (IOException) { blocked = true; }
+            Check(blocked && Convert.ToBase64String(File.ReadAllBytes(journal)) == Convert.ToBase64String(original), "A journal was changed when its backup could not be created.");
+            CheckOld(local);
+        }
+        finally { Directory.SetAccessControl(local, previous); }
+    }
     private static void ChangedStage()
     {
         string local = NewCase("changed-stage"), target = Install(local); SetupOld(local);
@@ -307,6 +338,56 @@ internal static class TestSafeInstallSwap
                 TextAt(outside, "sentinel.txt") == "outside", "A nested junction or its external target was changed.");
         }
     }
+    private static void PreparedFileLinks()
+    {
+        string local = NewCase("prepared-file-links"), stage = Path.Combine(local, "stage"), outside = Path.Combine(local, "outside.txt");
+        File.WriteAllText(outside, "outside");
+        using (SafeInstallPaths guard = SafeInstallPaths.OpenExisting(local))
+        {
+            guard.CreateChild(stage);
+            string good = Path.Combine(stage, "good.txt"); File.WriteAllText(good, "prepared");
+            using (StreamReader reader = new StreamReader(guard.OpenPreparedFile(good))) Check(reader.ReadToEnd() == "prepared", "A normal prepared file could not be verified.");
+            string link = Path.Combine(stage, "linked.txt");
+            string cmd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+            ProcessStartInfo start = new ProcessStartInfo(cmd, "/d /q /c mklink /H \"" + link + "\" \"" + outside + "\"");
+            start.UseShellExecute = false; start.CreateNoWindow = true; start.RedirectStandardOutput = true; start.RedirectStandardError = true;
+            using (Process process = Process.Start(start))
+            {
+                string output = process.StandardOutput.ReadToEnd(), errors = process.StandardError.ReadToEnd();
+                Check(process.WaitForExit(10000) && process.ExitCode == 0, "Could not create a fixture hard link: " + output + errors);
+            }
+            bool blocked = false;
+            try { using (FileStream file = guard.OpenPreparedFile(link)) { } } catch (IOException) { blocked = true; }
+            Check(blocked && File.ReadAllText(outside) == "outside", "A linked prepared file was accepted or its target changed.");
+        }
+    }
+    private static void Shortcuts()
+    {
+        string local = NewCase("shortcuts"), programs = Path.Combine(local, "programs"), install = Path.Combine(local, "app");
+        Directory.CreateDirectory(programs); Directory.CreateDirectory(install);
+        string launcher = Path.Combine(install, "AI task monitor.exe"), icon = Path.Combine(install, "icon.ico");
+        File.WriteAllText(launcher, "fixture"); File.WriteAllText(icon, "fixture");
+        string shortcut = Path.Combine(programs, "AI task monitor.lnk"), alternate = Path.Combine(programs, "AI task monitor (new).lnk");
+        Check(SafeShortcut.TryCreate(shortcut, launcher, install, icon), "Could not create a fixture shortcut.");
+        byte[] original = File.ReadAllBytes(shortcut);
+        Check(SafeShortcut.TargetsCurrentLauncher(shortcut, launcher), "An existing matching shortcut was not recognized.");
+        Check(!SafeShortcut.TargetsCurrentLauncher(shortcut, Path.Combine(install, "different.exe")), "A foreign shortcut was incorrectly accepted.");
+        Check(!SafeShortcut.TryCreate(shortcut, launcher, install, icon), "A pre-existing shortcut was overwritten.");
+        Check(Convert.ToBase64String(original) == Convert.ToBase64String(File.ReadAllBytes(shortcut)), "A pre-existing shortcut changed.");
+        Check(SafeShortcut.TryCreate(alternate, launcher, install, icon) && SafeShortcut.TargetsCurrentLauncher(alternate, launcher), "The alternate shortcut was not recognized.");
+        string withArguments = Path.Combine(programs, "shortcut-with-arguments.lnk");
+        Type shellType = Type.GetTypeFromProgID("WScript.Shell"); object shell = Activator.CreateInstance(shellType);
+        object link = shellType.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { withArguments });
+        try
+        {
+            Type linkType = link.GetType();
+            linkType.InvokeMember("TargetPath", System.Reflection.BindingFlags.SetProperty, null, link, new object[] { launcher });
+            linkType.InvokeMember("Arguments", System.Reflection.BindingFlags.SetProperty, null, link, new object[] { "--foreign" });
+            linkType.InvokeMember("Save", System.Reflection.BindingFlags.InvokeMethod, null, link, null);
+        }
+        finally { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(link); System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell); }
+        Check(!SafeShortcut.TargetsCurrentLauncher(withArguments, launcher), "A shortcut with foreign arguments was accepted.");
+    }
     private static int Main(string[] args)
     {
         try
@@ -314,12 +395,12 @@ internal static class TestSafeInstallSwap
             if (args.Length == 3 && args[0] == "--crash") { CrashChild(args[1], args[2]); return 2; }
             root = Path.Combine(Path.GetTempPath(), "aitm-swap-regression-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
-            Fresh(); ExistingAndRepeated(); Busy(); RunningProcess(); RunningPowerShellMonitor(); Rollback();
-            CrashDuringJournalCreation(); UnknownJournal(); PartialJournalPreserved();
+            Fresh(); ExistingAndRepeated(); Busy(); RunningProcess(); RunningPowerShellMonitor(); OtherProcessInspection(); Rollback();
+            CrashDuringJournalCreation(); UnknownJournal(); PartialJournalPreserved(); PartialJournalBackupDenied();
             CrashRecovery("crash-before-switch", "after-backup", false);
             CrashRecovery("crash-after-switch", "after-stage", true);
-            ChangedStage(); Collision(); ConcurrentAndFile(); Junctions();
-            Console.WriteLine("PASS: fresh, repeated, busy process/file, rollback, interrupted recovery, changed stage, collision, concurrent install and foreign file.");
+            ChangedStage(); Collision(); ConcurrentAndFile(); Junctions(); PreparedFileLinks(); Shortcuts();
+            Console.WriteLine("PASS: installation, update, busy processes/files, recovery and journal preservation, collisions, links and shortcuts.");
             Console.WriteLine("Fixture root: " + root);
             return 0;
         }

@@ -258,7 +258,7 @@ try{
     $upgradeDialog=Find-Window $legacySetup 30
     Save-DialogScreenshot $upgradeDialog $legacySetup 'legacy-upgrade-success-en'
     $upgradeNames=Get-Names $upgradeDialog
-    Check (@($upgradeNames|Where-Object {$_.Contains('AI task monitor is installed.')}).Count -gt 0 -and
+    Check (@($upgradeNames|Where-Object {$_.Contains('AI task monitor is installed.') -and $_.Contains('The existing Start menu shortcut was preserved.')}).Count -gt 0 -and
         @($upgradeNames|Where-Object {$_.Contains('Connect Claude Code?')}).Count -eq 0) 'The upgrade from 0.2.7 did not report success or asked to reconnect Claude.'
     $createdBackups=@([IO.Directory]::EnumerateDirectories($knownLocal,'AITaskMonitor.backup-*') | Where-Object {-not $backupsBefore.Contains([IO.Path]::GetFullPath($_))})
     Check ($createdBackups.Count -eq 1 -and [IO.Path]::GetFileName($createdBackups[0]) -cmatch '^AITaskMonitor\.backup-[a-f0-9]{32}$') 'The upgrade from 0.2.7 did not preserve one backup.'
@@ -275,6 +275,7 @@ try{
         [IO.File]::ReadAllText((Join-Path $legacyBackup 'legacy-foreign.txt')) -ceq 'legacy synthetic foreign file' -and
         -not [IO.File]::Exists($legacyForeign) -and
         (Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash -ceq $legacyShortcutHash -and
+        -not [IO.File]::Exists($shortcut) -and
         [IO.File]::ReadAllText($legacySentinel) -ceq 'legacy synthetic data' -and
         [IO.File]::ReadAllText($legacyPreferences) -ceq $legacySettings -and [IO.File]::Exists($hookPath) -and
         (Get-FileHash -LiteralPath $legacyScript -Algorithm SHA256).Hash -ceq $payloadHash -and
@@ -589,8 +590,8 @@ try{
     foreach($key in $values.Keys){$upgradeValues[$key]=$values[$key]}
     $upgradeValues.PATH=(Join-Path $env:SystemRoot 'System32')+';'+$env:SystemRoot
     foreach($case in @(
-        @{Language='ru'; Needle='AI task monitor установлен.'; Screenshot='reinstallation-success-ru'},
-        @{Language='en'; Needle='AI task monitor is installed.'; Screenshot='reinstallation-success-en'}
+        @{Language='ru'; Needle='AI task monitor установлен.'; ShortcutNeedle='Существующий ярлык «AI task monitor (new)» сохранён.'; Screenshot='reinstallation-success-ru'},
+        @{Language='en'; Needle='AI task monitor is installed.'; ShortcutNeedle='The existing AI task monitor (new) shortcut was preserved.'; Screenshot='reinstallation-success-en'}
     )){
         $preferences='{"language":"'+$case.Language+'","fixture":"preserved"}'
         [IO.File]::WriteAllText($appPreferences,$preferences,[Text.UTF8Encoding]::new($false))
@@ -601,6 +602,7 @@ try{
         [IO.File]::WriteAllText($diagnosticScript,$staleValue)
         $claudeHashes=@{}
         foreach($settings in $upgradeClaudeSettings){$claudeHashes[$settings]=(Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash}
+        $shortcutNamesBefore=(@(Get-ChildItem -LiteralPath $knownPrograms -Filter 'AI task monitor*.lnk' -File -Force | Sort-Object Name | ForEach-Object {$_.Name}) -join "`n")
         $existingBackups=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach($directory in [IO.Directory]::EnumerateDirectories($knownLocal,'AITaskMonitor.backup-*')){[void]$existingBackups.Add([IO.Path]::GetFullPath($directory))}
         $start=New-IsolatedStart $Installer $upgradeValues
@@ -609,7 +611,7 @@ try{
         $dialog=Find-Window $setup 30
         Save-DialogScreenshot $dialog $setup $case.Screenshot
         $names=Get-Names $dialog
-        Check (@($names|Where-Object {$_.Contains($case.Needle)}).Count -gt 0) 'The repeated installer did not report a successful installation in the selected language.'
+        Check (@($names|Where-Object {$_.Contains($case.Needle) -and $_.Contains($case.ShortcutNeedle)}).Count -gt 0) 'The repeated installer did not report a successful installation and preserve the matching alternate shortcut in the selected language.'
         Check (@($names|Where-Object {$_.Contains('Connect Claude Code?') -or $_.Contains('Подключить Claude Code?')}).Count -eq 0) 'The upgrade unexpectedly offered to reconnect Claude Code.'
         $newBackups=@([IO.Directory]::EnumerateDirectories($knownLocal,'AITaskMonitor.backup-*') | Where-Object {-not $existingBackups.Contains([IO.Path]::GetFullPath($_))})
         Check ($newBackups.Count -eq 1 -and [IO.Path]::GetFileName($newBackups[0]) -cmatch '^AITaskMonitor\.backup-[a-f0-9]{32}$' -and
@@ -623,6 +625,7 @@ try{
             (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash -ceq $launcherHash -and
             (Get-FileHash -LiteralPath $shortcut -Algorithm SHA256).Hash -ceq $shortcutHash -and
             (Get-FileHash -LiteralPath $oldShortcut -Algorithm SHA256).Hash -ceq $oldShortcutHash -and
+            (@(Get-ChildItem -LiteralPath $knownPrograms -Filter 'AI task monitor*.lnk' -File -Force | Sort-Object Name | ForEach-Object {$_.Name}) -join "`n") -ceq $shortcutNamesBefore -and
             [IO.File]::ReadAllText($oldSentinel) -ceq 'synthetic user data' -and
             [IO.File]::ReadAllText($appPreferences) -ceq $preferences) 'The upgrade did not replace stale files or preserve data, shortcuts and the old installation.'
         foreach($settings in $upgradeClaudeSettings){

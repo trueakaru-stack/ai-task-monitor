@@ -20,8 +20,8 @@ internal static class MonitorProcessCheck
         string launcher = Path.GetFullPath(Path.Combine(directory, "AI task monitor.exe"));
         try
         {
-            int session;
-            using (Process self = Process.GetCurrentProcess()) session = self.SessionId;
+            int session, ownId;
+            using (Process self = Process.GetCurrentProcess()) { session = self.SessionId; ownId = self.Id; }
             string userSid;
             using (WindowsIdentity user = WindowsIdentity.GetCurrent()) userSid = user.User.Value;
             using (ManagementObjectSearcher search = new ManagementObjectSearcher(
@@ -33,9 +33,9 @@ internal static class MonitorProcessCheck
                 using (process)
                 {
                     int id = Convert.ToInt32(process["ProcessId"]);
-                    if (id == Process.GetCurrentProcess().Id) continue;
+                    if (id == ownId) continue;
                     string owner = OwnerSid(process);
-                    if (owner != null && !String.Equals(owner, userSid, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!RelevantOwner(owner, userSid)) continue;
                     string name = process["Name"] as string;
                     string command = process["CommandLine"] as string;
                     string executable = process["ExecutablePath"] as string;
@@ -44,27 +44,33 @@ internal static class MonitorProcessCheck
                         if (SamePath(executable, launcher)) throw Running();
                         continue;
                     }
-                    if (String.IsNullOrEmpty(command))
-                    {
-                        continue;
-                    }
-                    string[] args = Split(command);
-                    for (int i = 1; i + 1 < args.Length; i++)
-                    {
-                        if ((EqualsOption(args[i], "file") || EqualsOption(args[i], "f")) && SamePath(args[i + 1], script))
-                            throw Running();
-                        if (EqualsOption(args[i], "encodedcommand") || EqualsOption(args[i], "enc"))
-                        {
-                            string decoded = Decode(args[i + 1]);
-                            string expectedHook = "& '" + hook.Replace("'", "''") + "'";
-                            if (String.Equals(decoded, expectedHook, StringComparison.OrdinalIgnoreCase)) throw Running();
-                        }
-                    }
+                    if (MatchesPowerShell(command, script, hook)) throw Running();
                 }
             }
         }
         catch (IOException) { throw; }
         catch (Exception error) { throw CannotInspect(error); }
+    }
+
+    internal static bool RelevantOwner(string owner, string currentUser)
+    {
+        return owner == null || String.Equals(owner, currentUser, StringComparison.OrdinalIgnoreCase);
+    }
+    internal static bool MatchesPowerShell(string command, string script, string hook)
+    {
+        if (String.IsNullOrEmpty(command)) return false;
+        string[] args = Split(command);
+        for (int i = 1; i + 1 < args.Length; i++)
+        {
+            if ((EqualsOption(args[i], "file") || EqualsOption(args[i], "f")) && SamePath(args[i + 1], script)) return true;
+            if (EqualsOption(args[i], "encodedcommand") || EqualsOption(args[i], "enc"))
+            {
+                string decoded = Decode(args[i + 1]);
+                string expectedHook = "& '" + hook.Replace("'", "''") + "'";
+                if (String.Equals(decoded, expectedHook, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+        }
+        return false;
     }
 
     private static string OwnerSid(ManagementObject process)
