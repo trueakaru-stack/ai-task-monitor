@@ -128,8 +128,9 @@ enum CursorIntegrationHarness {
         let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 372, height: 200),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        print("MOUSE_MOVED_BEFORE_ATTACH=\(window.acceptsMouseMovedEvents)")
         window.contentView = host
-        window.acceptsMouseMovedEvents = true
+        print("MOUSE_MOVED_AFTER_ATTACH=\(window.acceptsMouseMovedEvents)")
         let evidence = URL(fileURLWithPath: fixture).appendingPathComponent("evidence", isDirectory: true)
         var status: Int32 = 1
         Task { @MainActor in
@@ -240,7 +241,8 @@ enum CursorIntegrationHarness {
             app.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
             await pause(2)
-            print("WINDOW_STATE active=\(app.isActive) key=\(window.isKeyWindow)")
+            print("WINDOW_STATE active=\(app.isActive) key=\(window.isKeyWindow) acceptsMouseMoved=\(window.acceptsMouseMovedEvents)")
+            check(window.acceptsMouseMovedEvents, "Application enables mouse moved tracking")
             guard app.isActive && window.isKeyWindow else {
                 print("BLOCKED: app window could not become active and key")
                 status = 2
