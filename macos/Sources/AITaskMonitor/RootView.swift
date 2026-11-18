@@ -343,9 +343,15 @@ private struct WindowConfigurator: NSViewRepresentable {
             super.updateTrackingAreas()
         }
 
-        override func mouseEntered(with event: NSEvent) { activateForPointer() }
+        override func mouseEntered(with event: NSEvent) {
+            print("WINDOW_HOVER_ENTER point=\(NSEvent.mouseLocation) bounds=\(bounds) visible=\(visibleRect)")
+            activateForPointer()
+        }
 
-        override func mouseMoved(with event: NSEvent) { activateForPointer() }
+        override func mouseMoved(with event: NSEvent) {
+            print("WINDOW_HOVER_MOVED point=\(NSEvent.mouseLocation) bounds=\(bounds) visible=\(visibleRect)")
+            activateForPointer()
+        }
 
         override func mouseExited(with event: NSEvent) {
             if NSEvent.mouseLocation != lastPointerPosition { lastPointerPosition = nil }
@@ -354,6 +360,9 @@ private struct WindowConfigurator: NSViewRepresentable {
         private func activateForPointer() {
             guard let window, window.isVisible, !window.isMiniaturized, !NSApp.isHidden else { return }
             let pointer = NSEvent.mouseLocation
+            let local = convert(window.convertPoint(fromScreen: pointer), from: nil)
+            let front = NSWindow.windowNumber(at: pointer, belowWindowWithWindowNumber: 0)
+            print("WINDOW_HOVER_CHECK pointer=\(pointer) local=\(local) bounds=\(bounds) visible=\(visibleRect) front=\(front) window=\(window.windowNumber) shape=\(RoundedRectangle(cornerRadius: 20, style: .continuous).path(in: bounds).contains(local)) last=\(String(describing: lastPointerPosition)) active=\(NSApp.isActive)")
             // Focus changes can repeat hover events without moving the pointer.
             guard pointer != lastPointerPosition else { return }
             lastPointerPosition = pointer
