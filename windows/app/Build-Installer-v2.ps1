@@ -52,6 +52,7 @@ $arguments = @(
     "/win32icon:$(Join-Path $source 'assets\app-icon.ico')",
     "/reference:System.Windows.Forms.dll",
     "/reference:System.Web.Extensions.dll",
+    "/reference:System.Management.dll",
     "/resource:$(Join-Path $source 'CodexProgress.ps1'),CodexProgress.ps1",
     "/resource:$(Join-Path $source 'Uninstall-CodexProgress.ps1'),Uninstall-CodexProgress.ps1",
     "/resource:$(Join-Path $source 'Uninstall-CodexProgress.cmd'),Uninstall-CodexProgress.cmd",
@@ -111,6 +112,8 @@ $arguments = @(
     "/resource:$launcher,AI task monitor.exe",
     "/resource:$(Join-Path $source 'assets\app-icon.ico'),app-icon.ico",
     (Join-Path $source "SafeInstallPaths.cs"),
+    (Join-Path $source "SafeInstallSwap.cs"),
+    (Join-Path $source "MonitorProcessCheck.cs"),
     (Join-Path $source "CodexProgressInstaller.cs"),
     (Join-Path $source "VersionInfo.cs")
 )

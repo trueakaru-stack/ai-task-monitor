@@ -60,6 +60,7 @@ internal static class InstallerLanguage
 internal sealed class SafeInstallPaths : IDisposable
 {
     private const uint ListDirectory = 0x01;
+    private const uint GenericRead = 0x80000000;
     private const uint ShareRead = 1;
     private const uint ShareWrite = 2;
     private const uint OpenExistingDisposition = 3;
@@ -154,6 +155,28 @@ internal sealed class SafeInstallPaths : IDisposable
         string full = Normalize(path);
         RequireHeldParent(full);
         return new FileStream(full, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+    }
+
+    internal FileStream OpenPreparedFile(string path)
+    {
+        string full = Normalize(path);
+        RequireHeldParent(full);
+        SafeFileHandle handle = CreateFile(full, GenericRead, ShareRead, IntPtr.Zero,
+            OpenExistingDisposition, OpenReparsePoint, IntPtr.Zero);
+        if (handle.IsInvalid)
+        {
+            int error = Marshal.GetLastWin32Error(); handle.Dispose();
+            throw new Win32Exception(error, "Could not verify a prepared installation file.");
+        }
+        try
+        {
+            FileInfo info;
+            if (!GetFileInformationByHandle(handle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            if ((info.Attributes & (DirectoryAttribute | ReparseAttribute)) != 0 || info.Links != 1)
+                throw new IOException("A prepared installation file is linked or is not a regular file.");
+            return new FileStream(handle, FileAccess.Read);
+        }
+        catch { handle.Dispose(); throw; }
     }
 
     private void RequireHeldParent(string full)
