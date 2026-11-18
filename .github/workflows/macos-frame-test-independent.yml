@@ -126,6 +126,12 @@ jobs:
                   }
           """
               source = source.replace(target, change + target)
+          if mode == "safearea-windowgroup":
+              target = "        coordinator.observe(window)\n"
+              if source.count(target) != 1:
+                  raise SystemExit("unexpected window coordinator")
+              change = "        if #available(macOS 13.3, *), let host = window.contentView as? any FrameHostSafeArea, !host.safeAreaRegions.isEmpty { host.safeAreaRegions = [] }\n"
+              source = source.replace(target, change + target)
           if mode == "sizing-none":
               target = "        window.contentView = host"
               if tests.count(target) != 2:
@@ -173,18 +179,27 @@ jobs:
           extension NSHostingView: FrameHostSizing {}
 
           @MainActor
+          protocol FrameHostSafeArea: AnyObject {
+              @available(macOS 13.3, *)
+              var safeAreaRegions: SafeAreaRegions { get set }
+          }
+
+          extension NSHostingView: FrameHostSafeArea {}
+
+          @MainActor
           enum FrameAppProbe {
               static var anchor: NSPoint?
               static var hostConfigured = false
               static var beforeDrag: NSPoint?
               static weak var trackedWindow: NSWindow?
+              static var backdrop: NSWindow?
 
               static func output(_ message: String) {
                   FileHandle.standardError.write(Data(("APP_PROBE " + message + "\n").utf8))
               }
 
               static func appWindow() -> NSWindow? {
-                  NSApplication.shared.windows.first { $0.isVisible && $0.frame.width >= 300 }
+                  NSApplication.shared.windows.first { $0.isVisible && $0 !== backdrop && $0.frame.width >= 300 }
               }
 
               static func describeViews(_ view: NSView, depth: Int) {
@@ -250,63 +265,92 @@ jobs:
                   output("keyboard-sent command-r")
               }
 
+              static func installBackdrop() {
+                  guard let screen = NSScreen.main else { output("backdrop-unverified no-screen"); return }
+                  let background = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                  background.isReleasedWhenClosed = false
+                  background.backgroundColor = NSColor(calibratedRed: 0, green: 0.75, blue: 0.82, alpha: 1)
+                  background.isOpaque = true
+                  background.level = NSWindow.Level(rawValue: -1)
+                  background.orderFrontRegardless()
+                  backdrop = background
+                  output("backdrop-installed frame=\(screen.frame)")
+              }
+
+              static func capture(_ stage: String) {
+                  guard let temporary = ProcessInfo.processInfo.environment["TMPDIR"] else { output("capture-unverified no-temp"); return }
+                  let file = URL(fileURLWithPath: temporary).deletingLastPathComponent().appendingPathComponent("evidence/safearea-\(stage)-screen.png")
+                  let process = Process()
+                  process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                  process.arguments = ["-x", file.path]
+                  do {
+                      try process.run()
+                      process.waitUntilExit()
+                      output("capture stage=\(stage) status=\(process.terminationStatus)")
+                  } catch {
+                      output("capture-unverified stage=\(stage) error=\(error)")
+                  }
+              }
+
               static func makeStore() -> TaskStore {
                   let store = TaskStore.loopPreview(unavailableSources: [.codex, .claude])
                   DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                      snapshot("expanded-before-host")
+                      installBackdrop()
                       if let window = appWindow() {
-                          if let root = window.contentView { describeViews(root, depth: 0) }
                           trackedWindow = window
-                          hostConfigured = window.contentView is any FrameHostSizing
-                          output("typed-host-accessible=\(hostConfigured)")
+                          if let root = window.contentView { describeViews(root, depth: 0) }
+                          hostConfigured = window.contentView is any FrameHostSafeArea
+                          output("safearea-protocol-host=\(hostConfigured)")
                       }
-                  }
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 7) {
                       snapshot("expanded")
+                      capture("expanded")
                       store.isCompact = true
-                  }
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
-                      snapshot("compact-first")
-                      if let window = appWindow() {
-                          window.setFrameOrigin(NSPoint(x: 120, y: 200))
-                          anchor = NSPoint(x: window.frame.maxX, y: window.frame.minY)
-                          output("moved anchor=\(String(describing: anchor))")
+                      DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                          snapshot("compact-first")
+                          capture("compact")
+                          if let window = trackedWindow {
+                              window.setFrameOrigin(NSPoint(x: 120, y: 200))
+                              anchor = NSPoint(x: window.frame.maxX, y: window.frame.minY)
+                              output("moved anchor=\(String(describing: anchor))")
+                          }
+                          DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                              store.compactIndex = 1
+                              DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                                  snapshot("compact-after-switch-1")
+                                  store.compactIndex = 0
+                                  DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                                      snapshot("compact-after-switch-0")
+                                      if let window = trackedWindow {
+                                          NSApplication.shared.activate(ignoringOtherApps: true)
+                                          window.makeKeyAndOrderFront(nil)
+                                          output("focus-request canBecomeKey=\(window.canBecomeKey) isKey=\(window.isKeyWindow)")
+                                          postDrag(window)
+                                      }
+                                      DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                                          if let window = trackedWindow, let beforeDrag {
+                                              let moved = abs(window.frame.origin.x - beforeDrag.x) > 1 || abs(window.frame.origin.y - beforeDrag.y) > 1
+                                              output("drag-observed moved=\(moved) before=\(beforeDrag) after=\(window.frame.origin)")
+                                              output("focus-before-key isKey=\(window.isKeyWindow) appActive=\(NSApplication.shared.isActive)")
+                                              postRefreshKey()
+                                          }
+                                          DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                                              if let window = trackedWindow {
+                                                  output("minimize-before key=\(window.isKeyWindow)")
+                                                  NSApplication.shared.keyWindow?.miniaturize(nil)
+                                              }
+                                              DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                                                  if let window = trackedWindow {
+                                                      output("minimize-observed miniaturized=\(window.isMiniaturized)")
+                                                      if window.isMiniaturized { window.deminiaturize(nil) }
+                                                  }
+                                                  NSApplication.shared.terminate(nil)
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                          }
                       }
-                  }
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 12) { store.compactIndex = 1 }
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
-                      snapshot("compact-after-switch-1")
-                      store.compactIndex = 0
-                  }
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 18) {
-                      snapshot("compact-after-switch-0")
-                      if let window = trackedWindow {
-                          NSApplication.shared.activate(ignoringOtherApps: true)
-                          window.makeKeyAndOrderFront(nil)
-                          output("focus-request canBecomeKey=\(window.canBecomeKey) isKey=\(window.isKeyWindow)")
-                          postDrag(window)
-                      } else { output("drag-unverified no-window") }
-                  }
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 21) {
-                      if let window = trackedWindow, let beforeDrag {
-                          let moved = abs(window.frame.origin.x - beforeDrag.x) > 1 || abs(window.frame.origin.y - beforeDrag.y) > 1
-                          output("drag-observed moved=\(moved) before=\(beforeDrag) after=\(window.frame.origin)")
-                          output("focus-before-key isKey=\(window.isKeyWindow) appActive=\(NSApplication.shared.isActive)")
-                          postRefreshKey()
-                      }
-                  }
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 24) {
-                      if let window = trackedWindow {
-                          output("minimize-before key=\(window.isKeyWindow)")
-                          NSApplication.shared.keyWindow?.miniaturize(nil)
-                      }
-                  }
-                  DispatchQueue.main.asyncAfter(deadline: .now() + 27) {
-                      if let window = trackedWindow {
-                          output("minimize-observed miniaturized=\(window.isMiniaturized)")
-                          if window.isMiniaturized { window.deminiaturize(nil) }
-                      }
-                      NSApplication.shared.terminate(nil)
                   }
                   return store
               }
@@ -328,7 +372,7 @@ jobs:
           path.write_text(text)
           PY
           /usr/bin/python3 -V
-          for mode in negative-inset; do
+          for mode in safearea-windowgroup; do
             /usr/bin/python3 -I -S -B "$root/instrument.py" "$root" "$mode"
             set +e
             /usr/bin/python3 -I -S -B - "$root/run-test" /usr/bin/xcrun swift build --disable-sandbox --scratch-path "$root/build" \
@@ -364,16 +408,8 @@ jobs:
           PLIST
             "$root/run-test" "$app/Contents/MacOS/AITaskMonitor" > "$root/evidence/windowgroup.log" 2>&1 &
             app_pid=$!
-            for i in {1..38}; do
+            for i in {1..100}; do
               kill -0 "$app_pid" 2>/dev/null || break
-              for capture_stage in expanded compact-first; do
-                if ! test -f "$root/evidence/negative-inset-$capture_stage.png"; then
-                  number="$(sed -n "s/.*APP_PROBE stage=$capture_stage windowNumber=\\([0-9]*\\).*/\\1/p" "$root/evidence/windowgroup.log" | tail -1)"
-                  if test -n "$number"; then
-                    "$root/run-test" /usr/sbin/screencapture -x -l "$number" "$root/evidence/borderless-$capture_stage.png" || true
-                  fi
-                fi
-              done
               sleep 1
             done
             if kill -0 "$app_pid" 2>/dev/null; then
