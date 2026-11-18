@@ -1,0 +1,41 @@
+name: macOS compact task cursor verification
+on:
+  push:
+    branches: [codex/macos-task-dot-cursor-ci-20261118]
+    paths: [".github/workflows/macos-task-dot-cursor-ci-20261118.yml"]
+permissions:
+  contents: read
+jobs:
+  cursor:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Prepare synthetic runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          fixture="$(mktemp -d "$RUNNER_TEMP/aitm-cursor-XXXXXXXX")"
+          mkdir -p "$fixture/synthetic-home" "$fixture/tmp" "$fixture/evidence"
+          echo "AITM_CURSOR_SYNTHETIC_ROOT=$fixture" >> "$GITHUB_ENV"
+      - name: Check real window, pointer, and task buttons
+        shell: bash
+        env:
+          AITM_CURSOR_SYNTHETIC_CI: "1"
+        run: |
+          set -o pipefail
+          export CFFIXED_USER_HOME="$AITM_CURSOR_SYNTHETIC_ROOT/synthetic-home"
+          export TMPDIR="$AITM_CURSOR_SYNTHETIC_ROOT/tmp"
+          cd macos
+          /usr/bin/xcrun swift test --disable-sandbox --filter CompactTaskCursorTests 2>&1 | /usr/bin/tee "$AITM_CURSOR_SYNTHETIC_ROOT/evidence/test.log"
+      - name: Save evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: compact-cursor-verification
+          path: ${{ env.AITM_CURSOR_SYNTHETIC_ROOT }}/evidence/
+          if-no-files-found: warn
+          retention-days: 7
