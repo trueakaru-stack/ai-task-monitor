@@ -297,14 +297,16 @@ enum CursorIntegrationHarness {
                 check(handBeforeMiniaturize, "Hand shown before minimizing")
                 window.miniaturize(nil)
                 await pause(1)
-                if window.isMiniaturized && handBeforeMiniaturize {
-                    check(cursor(.arrow), "Minimizing restores arrow without moving")
+                if window.isMiniaturized {
+                    if handBeforeMiniaturize {
+                        check(cursor(.arrow), "Minimizing restores arrow without moving")
+                    }
                     window.deminiaturize(nil)
                     app.activate(ignoringOtherApps: true)
                     window.makeKeyAndOrderFront(nil)
                     await pause(1)
                 } else {
-                    print("UNVERIFIED: window did not minimize or hand precondition was absent")
+                    print("UNVERIFIED: window did not minimize")
                 }
             }
             if points().count == 2 {
@@ -314,18 +316,22 @@ enum CursorIntegrationHarness {
                 let down = CGEvent(keyboardEventSource: nil, virtualKey: 4, keyDown: true)
                 let up = CGEvent(keyboardEventSource: nil, virtualKey: 4, keyDown: false)
                 down?.flags = .maskCommand
-                up?.flags = .maskCommand
+                up?.flags = []
                 down?.post(tap: .cghidEventTap)
                 up?.post(tap: .cghidEventTap)
                 await pause(1)
-                if app.isHidden && handBeforeHide {
-                    check(cursor(.arrow), "Cmd+H restores arrow without moving")
+                print("CMD_RELEASE command=\(NSEvent.modifierFlags.contains(.command))")
+                check(!NSEvent.modifierFlags.contains(.command), "Command modifier is released after Cmd+H")
+                if app.isHidden {
+                    if handBeforeHide {
+                        check(cursor(.arrow), "Cmd+H restores arrow without moving")
+                    }
                     app.unhide(nil)
                     app.activate(ignoringOtherApps: true)
                     window.makeKeyAndOrderFront(nil)
                     await pause(1)
                 } else {
-                    print("UNVERIFIED: Cmd+H did not hide the app or hand precondition was absent")
+                    print("UNVERIFIED: Cmd+H did not hide the app")
                 }
             }
             if points().count == 2 {
@@ -379,8 +385,12 @@ enum CursorIntegrationHarness {
                 let focused = (focusedValue as? Bool) ?? false
                 print("AX_FOCUS set=\(focusResult.rawValue) read=\(focusRead.rawValue) focused=\(focused) active=\(app.isActive) key=\(window.isKeyWindow) responder=\(String(describing: window.firstResponder)) index=\(store.compactIndex)")
                 if focusResult == .success && focused {
-                    CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true)?.post(tap: .cghidEventTap)
-                    CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false)?.post(tap: .cghidEventTap)
+                    let spaceDown = CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true)
+                    let spaceUp = CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false)
+                    spaceDown?.flags = []
+                    spaceUp?.flags = []
+                    spaceDown?.post(tap: .cghidEventTap)
+                    spaceUp?.post(tap: .cghidEventTap)
                     await pause()
                     var focusedAfter: CFTypeRef?
                     let readAfter = AXUIElementCopyAttributeValue(target, kAXFocusedAttribute as CFString, &focusedAfter)
@@ -393,6 +403,11 @@ enum CursorIntegrationHarness {
                 await pause()
                 check(pressResult == .success && store.compactIndex == 0, "Accessibility press selects the task")
             } else { print("UNVERIFIED: no accessible Task 1 node available through AX") }
+            if CommandLine.arguments.contains("--stop-after-keyboard") {
+                print("BASELINE_KEYBOARD_SEQUENCE_COMPLETE")
+                status = 0
+                return
+            }
             var activations = 0
             let activationObserver = NotificationCenter.default.addObserver(
                 forName: NSApplication.didBecomeActiveNotification, object: app, queue: .main) { _ in
@@ -412,8 +427,22 @@ enum CursorIntegrationHarness {
                     await move(helperInput)
                     helperApp.activate(options: [.activateIgnoringOtherApps])
                     await pause(1)
+                    guard let visualRoot = descendants(host).first(where: {
+                        String(describing: type(of: $0)).contains("HoverActivationView")
+                    }) else {
+                        check(false, "Visible interface bounds are available")
+                        status = 1
+                        return
+                    }
+                    let rootHeight = visualRoot.bounds.height
+                    let topY = visualRoot.isFlipped ? CGFloat(25) : rootHeight - 25
+                    let cornerY = visualRoot.isFlipped ? CGFloat(1) : rootHeight - 1
+                    let headerLocal = NSPoint(x: 70, y: topY)
+                    let header = visualRoot.convert(headerLocal, to: nil)
+                    let corner = visualRoot.convert(NSPoint(x: 1, y: cornerY), to: nil)
+                    print("VISIBLE_BOUNDS root=\(visualRoot.bounds) windowContent=\(window.contentView!.bounds) headerLocal=\(headerLocal) headerWindow=\(header)")
                     let beforeCorner = activations
-                    await move(NSPoint(x: 1, y: window.contentView!.bounds.height - 1))
+                    await move(corner)
                     await pause(0.4)
                     check(!app.isActive && activations == beforeCorner,
                           "Transparent rounded corner does not activate monitor")
@@ -432,8 +461,8 @@ enum CursorIntegrationHarness {
                         check(cursor(hand ? .pointingHand : .arrow),
                               "\(description): correct cursor")
                     }
-                    await testWindowHover("Header", NSPoint(x: 70, y: window.contentView!.bounds.height - 25))
-                    await testWindowHover("Background", NSPoint(x: 25, y: 25))
+                    await testWindowHover("Header", header)
+                    await testWindowHover("Background", visualRoot.convert(NSPoint(x: 25, y: 25), to: nil))
                     if let title = descendants(host).compactMap({ $0 as? TruncatingTextField }).first {
                         await testWindowHover("Task content", center(title))
                     } else { print("UNVERIFIED: task content unavailable") }
