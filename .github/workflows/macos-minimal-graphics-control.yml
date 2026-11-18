@@ -1,0 +1,393 @@
+name: Minimal SwiftUI graphics control on isolated Intel runner
+on:
+  push:
+    branches: [codex/macos-minimal-graphics-control-20261118]
+    paths: [".github/workflows/macos-minimal-graphics-control.yml"]
+permissions:
+  contents: read
+jobs:
+  control:
+    if: ${{ github.repository == 'trueakaru-stack/ai-task-monitor' }}
+    runs-on: macos-15-intel
+    timeout-minutes: 12
+    steps:
+      - name: Run independent two-card control
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = X64
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-graphics-control.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-graphics-denied.XXXXXXXX")"
+          printf 'synthetic profile marker\n' > "$task_marker"
+          mkdir -p "$task_root"/{temp,synthetic-home,out,Applications}
+          export AITM_TEST_TASK_ROOT="$task_root"
+          export AITM_TEST_DENIED_FILE="$task_marker"
+          printf 'AITM_GRAPHICS_CONTROL_ROOT=%s\n' "$task_root" >> "$GITHUB_ENV"
+          echo "Control runner: $RUNNER_ARCH $(/usr/bin/uname -m)"
+          /usr/bin/sw_vers
+          cat > "$task_root/graphics.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (allow mach-lookup)
+          (deny mach-lookup (global-name "com.apple.cfprefsd.agent") (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.bsd.dirhelper"))
+          PROFILE
+          cat > "$task_root/run-graphics" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "CFFIXED_USER_HOME=$AITM_TEST_TASK_ROOT/synthetic-home" \
+            "LANG=en_US.UTF-8" \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" -f "$AITM_TEST_TASK_ROOT/graphics.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-graphics"
+          task_run="$task_root/run-graphics"
+          "$task_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          cat > "$task_root/home-probe.m" <<'OBJC'
+          #import <Foundation/Foundation.h>
+          int main(void) {
+              @autoreleasepool {
+                  NSString *fixed = NSProcessInfo.processInfo.environment[@"CFFIXED_USER_HOME"];
+                  NSString *resolved = NSFileManager.defaultManager.homeDirectoryForCurrentUser.path;
+                  BOOL valid = fixed && [resolved isEqualToString:fixed];
+                  printf("SYNTHETIC_HOME_%s: Foundation resolved current home %s\n", valid ? "PASS" : "FAIL", valid ? "inside fixture" : "outside fixture");
+                  return valid ? 0 : 1;
+              }
+          }
+          OBJC
+          /usr/bin/clang "$task_root/home-probe.m" -framework Foundation -o "$task_root/home-probe"
+          "$task_run" "$task_root/home-probe"
+          ln -s "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"
+          for marker in "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"; do
+            if "$task_run" /bin/cat "$marker" > /dev/null 2>&1; then echo 'Profile read unexpectedly allowed'; exit 1; fi
+            if "$task_run" /usr/bin/touch "$marker" > /dev/null 2>&1; then echo 'Profile write unexpectedly allowed'; exit 1; fi
+          done
+          cat > "$task_root/safety.c" <<'C'
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
+          #include <errno.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          int main(void) {
+            const char *blocked[] = {"com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon", "com.apple.bsd.dirhelper"};
+            for (unsigned i = 0; i < sizeof(blocked)/sizeof(blocked[0]); i++) {
+              mach_port_t port = MACH_PORT_NULL;
+              kern_return_t r = bootstrap_look_up(bootstrap_port, blocked[i], &port);
+              if (r == KERN_SUCCESS) mach_port_deallocate(mach_task_self(), port);
+              if (r != BOOTSTRAP_NOT_PRIVILEGED) { fprintf(stderr, "Profile service block not verified: %d\n", r); return 1; }
+            }
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) {
+              if (errno != EPERM && errno != EACCES) return 2;
+            } else {
+              struct sockaddr_in addr = {0};
+              addr.sin_len = sizeof(addr);
+              addr.sin_family = AF_INET;
+              addr.sin_port = htons(9);
+              addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+              errno = 0;
+              if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || (errno != EPERM && errno != EACCES)) {
+                close(fd); fprintf(stderr, "Loopback network was not provably denied.\n"); return 3;
+              }
+              close(fd);
+            }
+            puts("Profile services and loopback network are denied");
+            return 0;
+          }
+          C
+          cat > "$task_root/window.c" <<'C'
+          #include <CoreGraphics/CoreGraphics.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+            if (argc != 2) return 2;
+            int target = atoi(argv[1]), found = 0;
+            CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+            if (!windows) { fputs("Window list unavailable\n", stderr); return 3; }
+            for (CFIndex i = 0; i < CFArrayGetCount(windows); i++) {
+              CFDictionaryRef row = CFArrayGetValueAtIndex(windows, i);
+              CFNumberRef owner = CFDictionaryGetValue(row, kCGWindowOwnerPID), level = CFDictionaryGetValue(row, kCGWindowLayer);
+              CFDictionaryRef bounds = CFDictionaryGetValue(row, kCGWindowBounds);
+              int ownerID = -1, layer = -1;
+              CGRect rect = CGRectZero;
+              if (!owner || !level || !bounds) continue;
+              if (!CFNumberGetValue(owner, kCFNumberIntType, &ownerID) || !CFNumberGetValue(level, kCFNumberIntType, &layer)) continue;
+              if (!CGRectMakeWithDictionaryRepresentation(bounds, &rect)) continue;
+              if (ownerID == target && (layer == CGWindowLevelForKey(kCGNormalWindowLevelKey) || layer == CGWindowLevelForKey(kCGFloatingWindowLevelKey)) && rect.size.width >= 200 && rect.size.height >= 100) {
+                printf("Visible application window: %.0f x %.0f points at system level %d (%s)\n", rect.size.width, rect.size.height, layer, layer == CGWindowLevelForKey(kCGFloatingWindowLevelKey) ? "floating" : "normal");
+                found++;
+              }
+            }
+            CFRelease(windows);
+            return found ? 0 : 1;
+          }
+          C
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/safety.c" -o "$task_root/safety"
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/window.c" -framework CoreGraphics -framework CoreFoundation -o "$task_root/window"
+          "$task_run" "$task_root/safety"
+          task_pid=""
+          cleanup() {
+            if test -n "$task_pid" && kill -0 "$task_pid" 2>/dev/null; then
+              kill -TERM "$task_pid" 2>/dev/null || true
+              wait "$task_pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          cat > "$task_root/window-control.m" <<'OBJC'
+          #import <AppKit/AppKit.h>
+          int main(void) {
+            @autoreleasepool {
+              NSApplication *application = [NSApplication sharedApplication];
+              [application setActivationPolicy:NSApplicationActivationPolicyRegular];
+              NSWindow *normal = [[NSWindow alloc] initWithContentRect:NSMakeRect(40,40,300,220)
+                styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+              NSWindow *floating = [[NSWindow alloc] initWithContentRect:NSMakeRect(400,350,300,220)
+                styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+              [normal setReleasedWhenClosed:NO]; [floating setReleasedWhenClosed:NO];
+              [normal setLevel:NSNormalWindowLevel]; [floating setLevel:NSFloatingWindowLevel];
+              [normal orderFrontRegardless]; [floating orderFrontRegardless];
+              [application activateIgnoringOtherApps:YES];
+              [application run];
+            }
+            return 0;
+          }
+          OBJC
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/window-control.m" -framework AppKit -o "$task_root/window-control"
+          "$task_run" "$task_root/window-control" > "$task_root/out/control-app.log" 2>&1 &
+          task_pid=$!
+          found_control=0
+          for attempt in {1..40}; do
+            if ! kill -0 "$task_pid" 2>/dev/null; then break; fi
+            if "$task_run" "$task_root/window" "$task_pid" > "$task_root/out/control-window.log" 2>&1 &&
+               /usr/bin/grep -F '(normal)' "$task_root/out/control-window.log" >/dev/null &&
+               /usr/bin/grep -F '(floating)' "$task_root/out/control-window.log" >/dev/null; then
+              found_control=1
+              break
+            fi
+            sleep 0.5
+          done
+          if test "$found_control" != 1; then
+            echo 'Normal and floating control windows were not both verified.'
+            cat "$task_root/out/control-app.log" "$task_root/out/control-window.log"
+            exit 1
+          fi
+          echo 'Verified both normal and floating levels with known synthetic windows.'
+          cat "$task_root/out/control-window.log"
+          kill -TERM "$task_pid"
+          wait "$task_pid" || true
+          task_pid=""
+          cat > "$task_root/GraphicsControl.swift" <<'SWIFT'
+          import SwiftUI
+          import AppKit
+          
+          private struct WindowProbe: NSViewRepresentable {
+              func makeNSView(context: Context) -> NSView {
+                  let view = NSView()
+                  DispatchQueue.main.async {
+                      guard let window = view.window else { return }
+                      window.titleVisibility = .hidden
+                      window.titlebarAppearsTransparent = true
+                      window.styleMask.formUnion([.fullSizeContentView, .resizable])
+                      window.isOpaque = false
+                      window.backgroundColor = .clear
+                      window.level = .floating
+                  }
+                  return view
+              }
+              func updateNSView(_ view: NSView, context: Context) {}
+          }
+          
+          struct ControlScreen: View {
+              @State private var showCards = false
+              var body: some View {
+                  VStack(alignment: .leading, spacing: 20) {
+                      Text("Graphics control").font(.system(size: 22, weight: .semibold))
+                      if showCards {
+                          ForEach(["Synthetic card A", "Synthetic card B"], id: \.self) { title in
+                              VStack(alignment: .leading, spacing: 8) {
+                                  Text(title).font(.system(size: 16, weight: .semibold))
+                                  Text("Working on a synthetic task").font(.system(size: 12))
+                                  ProgressView(value: 0.5)
+                              }
+                              .padding(18)
+                              .frame(maxWidth: .infinity, alignment: .leading)
+                              .background(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.gray.opacity(0.3)))
+                          }
+                      } else {
+                          Text("No active tasks").font(.system(size: 13))
+                      }
+                      Spacer()
+                  }
+                  .padding(24)
+                  .frame(width: 560, height: 700, alignment: .top)
+                  .background(Color(nsColor: .windowBackgroundColor))
+                  .background(WindowProbe())
+                  .onAppear { DispatchQueue.main.asyncAfter(deadline: .now() + 6) { showCards = true } }
+              }
+          }
+          
+          @main struct GraphicsControl: App {
+              var body: some Scene {
+                  WindowGroup { ControlScreen() }
+                      .windowStyle(.hiddenTitleBar)
+              }
+          }
+          SWIFT
+          cat > "$task_root/observer.m" <<'OBJC'
+          #import <AppKit/AppKit.h>
+          #import <ApplicationServices/ApplicationServices.h>
+          #include <signal.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+          static BOOL axFind(AXUIElementRef node, NSString *wanted, BOOL buttonOnly, CGRect *frame, int depth) {
+              if (!node || depth > 30) return NO;
+              CFTypeRef role = NULL, title = NULL, description = NULL, value = NULL;
+              AXUIElementCopyAttributeValue(node, kAXRoleAttribute, &role);
+              AXUIElementCopyAttributeValue(node, kAXTitleAttribute, &title);
+              AXUIElementCopyAttributeValue(node, kAXDescriptionAttribute, &description);
+              AXUIElementCopyAttributeValue(node, kAXValueAttribute, &value);
+              BOOL roleOK = !buttonOnly || (role && CFGetTypeID(role) == CFStringGetTypeID() && CFEqual(role, kAXButtonRole));
+              BOOL match = NO;
+              CFTypeRef candidates[] = { title, description, value };
+              for (int i=0; i<3; i++) {
+                  if (candidates[i] && CFGetTypeID(candidates[i]) == CFStringGetTypeID() &&
+                      [(__bridge NSString *)candidates[i] isEqualToString:wanted]) { match = YES; break; }
+              }
+              if (role) CFRelease(role);
+              if (title) CFRelease(title);
+              if (description) CFRelease(description);
+              if (value) CFRelease(value);
+              if (match && roleOK) {
+                  if (!frame) return YES;
+                  CFTypeRef position = NULL, size = NULL;
+                  CGPoint p = CGPointZero;
+                  CGSize z = CGSizeZero;
+                  AXError ep = AXUIElementCopyAttributeValue(node, kAXPositionAttribute, &position);
+                  AXError es = AXUIElementCopyAttributeValue(node, kAXSizeAttribute, &size);
+                  BOOL valid = ep == kAXErrorSuccess && es == kAXErrorSuccess && position && size &&
+                      CFGetTypeID(position) == AXValueGetTypeID() && CFGetTypeID(size) == AXValueGetTypeID() &&
+                      AXValueGetValue((AXValueRef)position, kAXValueCGPointType, &p) &&
+                      AXValueGetValue((AXValueRef)size, kAXValueCGSizeType, &z) && z.width > 0 && z.height > 0;
+                  if (position) CFRelease(position);
+                  if (size) CFRelease(size);
+                  if (valid) { *frame = CGRectMake(p.x, p.y, z.width, z.height); return YES; }
+              }
+              CFTypeRef raw = NULL;
+              if (AXUIElementCopyAttributeValue(node, kAXChildrenAttribute, &raw) != kAXErrorSuccess || !raw) return NO;
+              BOOL found = NO;
+              if (CFGetTypeID(raw) == CFArrayGetTypeID()) {
+                  CFArrayRef children = (CFArrayRef)raw;
+                  for (CFIndex i=0; i<CFArrayGetCount(children); i++) {
+                      CFTypeRef child = CFArrayGetValueAtIndex(children, i);
+                      if (child && CFGetTypeID(child) == AXUIElementGetTypeID() &&
+                          axFind((AXUIElementRef)child, wanted, buttonOnly, frame, depth+1)) { found = YES; break; }
+                  }
+              }
+              CFRelease(raw);
+              return found;
+          }
+          static BOOL appHasText(pid_t pid, NSString *wanted) {
+              AXUIElementRef app = AXUIElementCreateApplication(pid);
+              BOOL result = axFind(app, wanted, NO, NULL, 0);
+              CFRelease(app);
+              return result;
+          }
+          int main(int argc, char **argv) {
+              @autoreleasepool {
+                  if (argc != 2 || !AXIsProcessTrusted()) { puts("CONTROL_UNVERIFIED: Accessibility unavailable"); return 2; }
+                  pid_t pid = (pid_t)atoi(argv[1]);
+                  for (int i=0; i<100; i++) {
+                      if (kill(pid,0) != 0) { puts("CONTROL_UNVERIFIED: control process exited before cards were confirmed"); return 3; }
+                      if (appHasText(pid, @"Synthetic card A") && appHasText(pid, @"Synthetic card B")) {
+                          puts("CONTROL_CARDS_VISIBLE_PASS: both independent SwiftUI cards are visible");
+                          sleep(3);
+                          if (kill(pid,0) != 0) { puts("CONTROL_SURVIVAL_FAIL: process exited with cards visible"); return 4; }
+                          puts("CONTROL_SURVIVAL_PASS: control process survived with both cards visible for 3 seconds");
+                          return 0;
+                      }
+                      usleep(250000);
+                  }
+                  puts("CONTROL_UNVERIFIED: cards were not found");
+                  return 5;
+              }
+          }
+          OBJC
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/observer.m" -framework AppKit -framework ApplicationServices -o "$task_root/observer"
+          task_app="$task_root/Applications/GraphicsControl.app"
+          mkdir -p "$task_app/Contents/MacOS"
+          /usr/bin/xcrun swiftc -parse-as-library -O "$task_root/GraphicsControl.swift" -o "$task_app/Contents/MacOS/GraphicsControl" > "$task_root/out/compile.log" 2>&1
+          cat > "$task_app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleIdentifier</key><string>local.synthetic.graphics-control</string>
+            <key>CFBundleName</key><string>GraphicsControl</string>
+            <key>CFBundleExecutable</key><string>GraphicsControl</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>13.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          /usr/bin/codesign --force --sign - "$task_app"
+          "$task_run" "$task_app/Contents/MacOS/GraphicsControl" > "$task_root/out/control.log" 2>&1 &
+          task_pid=$!
+          found=0
+          for attempt in {1..40}; do
+            if ! kill -0 "$task_pid" 2>/dev/null; then break; fi
+            if "$task_run" "$task_root/window" "$task_pid" > "$task_root/out/window.log" 2>&1; then found=1; break; fi
+            sleep 0.5
+          done
+          if test "$found" = 1; then
+            cat "$task_root/out/window.log"
+            set +e
+            "$task_run" "$task_root/observer" "$task_pid" > "$task_root/out/observer.log" 2>&1
+            observer_status=$?
+            set -e
+            cat "$task_root/out/observer.log"
+          else
+            observer_status=99
+            echo 'CONTROL_UNVERIFIED: no window observed.'
+          fi
+          if ! kill -0 "$task_pid" 2>/dev/null; then
+            set +e
+            wait "$task_pid"
+            app_status=$?
+            set -e
+            printf 'CONTROL_PROCESS_EXITED status=%s\n' "$app_status" | tee "$task_root/out/result.txt"
+            task_pid=""
+          else
+            if test "$observer_status" = 0; then
+              echo 'CONTROL_RESULT: both cards displayed and app stayed alive.' | tee "$task_root/out/result.txt"
+            else
+              printf 'CONTROL_RESULT_UNVERIFIED observer=%s\n' "$observer_status" | tee "$task_root/out/result.txt"
+            fi
+            kill -TERM "$task_pid" 2>/dev/null || true
+            wait "$task_pid" 2>/dev/null || true
+            task_pid=""
+            echo 'Note: surviving control process stopped by cleanup.'
+          fi
+          echo 'Control stderr follows:'
+          cat "$task_root/out/control.log"
+          
+      - name: Save control evidence
+        if: ${{ always() && env.AITM_GRAPHICS_CONTROL_ROOT != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-15-intel-minimal-graphics-control
+          path: ${{ env.AITM_GRAPHICS_CONTROL_ROOT }}/out/
+          if-no-files-found: warn
+          retention-days: 7
