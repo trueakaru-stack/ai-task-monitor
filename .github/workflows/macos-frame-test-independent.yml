@@ -100,6 +100,12 @@ jobs:
               if source.count(target) != 1:
                   raise SystemExit("unexpected window style assignment")
               source = source.replace(target, target + "\n        window.styleMask = [.borderless, .resizable]")
+          if mode == "combo":
+              source = source.replace(frame_line, frame_line + "\n        .ignoresSafeArea(.container, edges: .top)")
+              target = "        window.contentView = host"
+              if tests.count(target) != 2:
+                  raise SystemExit("unexpected hosting view assignments")
+              tests = tests.replace(target, "        host.sizingOptions = []\n" + target)
           if mode == "sizing-none":
               target = "        window.contentView = host"
               if tests.count(target) != 2:
@@ -133,8 +139,104 @@ jobs:
           source_path.write_text(source)
           test_path.write_text(tests)
           PY
+          cat > "$root/source/macos/Sources/AITaskMonitor/FrameAppProbe.swift" <<'SWIFT'
+          import AppKit
+          import SwiftUI
+          import Foundation
+
+          @MainActor
+          enum FrameAppProbe {
+              static var anchor: NSPoint?
+              static var hostConfigured = false
+
+              static func output(_ message: String) {
+                  FileHandle.standardError.write(Data(("APP_PROBE " + message + "\n").utf8))
+              }
+
+              static func appWindow() -> NSWindow? {
+                  NSApplication.shared.windows.first { $0.isVisible && $0.frame.width >= 300 }
+              }
+
+              static func describeViews(_ view: NSView, depth: Int) {
+                  guard depth <= 3 else { return }
+                  output("view depth=\(depth) class=\(String(reflecting: type(of: view))) frame=\(view.frame)")
+                  for child in view.subviews { describeViews(child, depth: depth + 1) }
+              }
+
+              static func configureTypedHost<Content: View>(_ content: Content, window: NSWindow) -> Bool {
+                  func visit(_ view: NSView) -> Bool {
+                      if let host = view as? NSHostingView<Content> {
+                          host.sizingOptions = []
+                          output("typed-host-configured class=\(String(reflecting: type(of: host)))")
+                          return true
+                      }
+                      for child in view.subviews where visit(child) { return true }
+                      return false
+                  }
+                  guard let root = window.contentView else { return false }
+                  return visit(root)
+              }
+
+              static func snapshot(_ stage: String) {
+                  guard let window = appWindow() else {
+                      output("missing-window stage=\(stage)")
+                      return
+                  }
+                  let view = window.contentView
+                  output("stage=\(stage) windowNumber=\(window.windowNumber) frame=\(window.frame) contentFrame=\(String(describing: view?.frame)) fitting=\(String(describing: view?.fittingSize)) safeArea=\(String(describing: view?.safeAreaInsets)) contentMin=\(window.contentMinSize) contentMax=\(window.contentMaxSize) contentLayout=\(window.contentLayoutRect) canBecomeKey=\(window.canBecomeKey) isKey=\(window.isKeyWindow)")
+                  if let anchor, stage.hasPrefix("compact-after-switch") {
+                      let ok = abs(window.frame.maxX - anchor.x) <= 1 && abs(window.frame.minY - anchor.y) <= 1
+                      output("anchor stage=\(stage) matches=\(ok)")
+                  }
+              }
+
+              static func makeStore() -> TaskStore {
+                  let store = TaskStore.loopPreview(unavailableSources: [.codex, .claude])
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                      snapshot("expanded-before-host")
+                      if let window = appWindow() {
+                          if let root = window.contentView { describeViews(root, depth: 0) }
+                          hostConfigured = configureTypedHost(RootView().environmentObject(store), window: window)
+                          output("typed-host-accessible=\(hostConfigured)")
+                      }
+                  }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 7) {
+                      snapshot("expanded")
+                      store.isCompact = true
+                  }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                      snapshot("compact-first")
+                      if let window = appWindow() {
+                          window.setFrameOrigin(NSPoint(x: 120, y: 200))
+                          anchor = NSPoint(x: window.frame.maxX, y: window.frame.minY)
+                          output("moved anchor=\(String(describing: anchor))")
+                      }
+                  }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 12) { store.compactIndex = 1 }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                      snapshot("compact-after-switch-1")
+                      store.compactIndex = 0
+                  }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 18) {
+                      snapshot("compact-after-switch-0")
+                      NSApplication.shared.terminate(nil)
+                  }
+                  return store
+              }
+          }
+          SWIFT
+          /usr/bin/python3 -I -S -B - "$root/source/macos/Sources/AITaskMonitor/AITaskMonitorApp.swift" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          old = 'TaskStore(enableUpdateChecks: true, enableClaudeRetention: true, enableExternalProviders: true, enableExternalV2: true, enableCodexCloud: true)'
+          if text.count(old) != 1:
+              raise SystemExit('unexpected product App initializer')
+          path.write_text(text.replace(old, 'FrameAppProbe.makeStore()'))
+          PY
           /usr/bin/python3 -V
-          for mode in safe-area-none borderless-resizable; do
+          for mode in combo; do
             /usr/bin/python3 -I -S -B "$root/instrument.py" "$root" "$mode"
             set +e
             "$root/run-test" /usr/bin/xcrun swift test --disable-sandbox --scratch-path "$root/build" \
@@ -145,6 +247,35 @@ jobs:
             echo "DIAGNOSTIC_MODE_RESULT: $mode exit=$status" | tee -a "$root/evidence/results.txt"
             grep -E 'TEST_DIAG|testCompactWindowSizesToContentAndKeepsItsBottomEdge.*(passed|failed)|testTitledWindowHasNoExtraTitleBarArea.*(passed|failed)|error:|failed:' "$root/evidence/$mode.log" >> "$root/evidence/results.txt" || true
           done
+          binary="$root/build/debug/AITaskMonitor"
+          if test -x "$binary"; then
+            app="$root/WindowGroupProbe.app"
+            mkdir -p "$app/Contents/MacOS"
+            cp "$binary" "$app/Contents/MacOS/AITaskMonitor"
+            cat > "$app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>CFBundleExecutable</key><string>AITaskMonitor</string><key>CFBundleIdentifier</key><string>local.codex.AITaskMonitor.FrameProbe</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleName</key><string>AI Task Monitor Frame Probe</string></dict></plist>
+          PLIST
+            "$root/run-test" "$app/Contents/MacOS/AITaskMonitor" > "$root/evidence/windowgroup.log" 2>&1 &
+            app_pid=$!
+            for i in {1..25}; do
+              kill -0 "$app_pid" 2>/dev/null || break
+              sleep 1
+            done
+            if kill -0 "$app_pid" 2>/dev/null; then
+              echo "WINDOWGROUP_PROBE_TIMEOUT" | tee -a "$root/evidence/results.txt"
+              kill -TERM "$app_pid" 2>/dev/null || true
+            fi
+            set +e
+            wait "$app_pid"
+            status=$?
+            set -e
+            echo "WINDOWGROUP_PROBE_EXIT=$status" | tee -a "$root/evidence/results.txt"
+            grep -E 'APP_PROBE|ROOT_DIAG|error:|Fatal error' "$root/evidence/windowgroup.log" >> "$root/evidence/results.txt" || true
+          else
+            echo "WINDOWGROUP_PROBE_NOT_BUILT" | tee -a "$root/evidence/results.txt"
+          fi
           cat "$root/evidence/results.txt"
           echo "DIAGNOSTICS_COMPLETE: compare individual test results; successful job does not imply tests passed"
       - name: Save isolated test evidence
