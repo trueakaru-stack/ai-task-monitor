@@ -49,6 +49,7 @@ struct PointingHandCursor: NSViewRepresentable {
                 NotificationCenter.default.removeObserver(self, name: NSApplication.didHideNotification, object: NSApp)
                 NotificationCenter.default.removeObserver(self, name: NSApplication.didUnhideNotification, object: NSApp)
                 NotificationCenter.default.removeObserver(self, name: NSApplication.didResignActiveNotification, object: NSApp)
+                NotificationCenter.default.removeObserver(self, name: UserDefaults.didChangeNotification, object: nil)
                 stopHovering()
             }
             super.viewWillMove(toWindow: newWindow)
@@ -76,6 +77,21 @@ struct PointingHandCursor: NSViewRepresentable {
                                name: NSApplication.didUnhideNotification, object: NSApp)
             center.addObserver(self, selector: #selector(windowDidRestore),
                                name: NSApplication.didResignActiveNotification, object: NSApp)
+            center.addObserver(self, selector: #selector(settingsDidChange),
+                               name: UserDefaults.didChangeNotification, object: nil)
+        }
+
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            scheduleCursorRefresh()
+        }
+
+        @objc private func settingsDidChange(_ notification: Notification) {
+            scheduleCursorRefresh()
+        }
+
+        private func scheduleCursorRefresh() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.synchronizeCursor() }
         }
 
         @objc private func windowWillHide(_ notification: Notification) {
@@ -95,7 +111,6 @@ struct PointingHandCursor: NSViewRepresentable {
             let localPoint = convert(window.convertPoint(fromScreen: pointer), from: nil)
             let inside = bounds.intersection(visibleRect).contains(localPoint) &&
                 NSWindow.windowNumber(at: pointer, belowWindowWithWindowNumber: 0) == window.windowNumber
-            if ProcessInfo.processInfo.environment["AITM_CURSOR_DIAGNOSTICS"] == "1" { print("TRACK inside=\(inside) hovering=\(hovering) active=\(NSApp.isActive) key=\(window.isKeyWindow)") }
             if inside {
                 startHovering()
             } else {
