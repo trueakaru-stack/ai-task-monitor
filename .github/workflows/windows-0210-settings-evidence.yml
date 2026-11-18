@@ -1,0 +1,71 @@
+name: Capture published Windows 0.2.10 settings
+on:
+  push:
+    branches:
+      - codex/windows-0210-settings-evidence-20261118
+permissions:
+  contents: read
+env:
+  DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+jobs:
+  settings:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        theme: [dark, light]
+        language: [ru, en]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+      - name: Verify published source and capture settings
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $revision='4fb0d209befc3bcec732a2fa78cb0c94b75a6f10'
+          if((git rev-parse HEAD^).Trim() -cne $revision){throw 'Unexpected product revision.'}
+          $changed=@(git diff --name-only HEAD^ HEAD)
+          if($changed.Count -ne 1 -or $changed[0] -cne '.github/workflows/windows-0210-settings-evidence.yml'){throw 'Unexpected workflow revision.'}
+          $root=Join-Path $env:RUNNER_TEMP ('aitm-settings-'+[guid]::NewGuid().ToString('N'))
+          $out=Join-Path $root 'shots'
+          [void][IO.Directory]::CreateDirectory($out)
+          [IO.File]::AppendAllText($env:GITHUB_ENV,('SHOTS='+$out+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
+          $setup=Join-Path $root 'published-setup.exe'
+          Invoke-WebRequest -Uri 'https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.10/AITaskMonitorSetup-0.2.10.exe' -OutFile $setup -TimeoutSec 90
+          if((Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash -cne 'ED73FC016B66944D353443556CFB53F09B98D6757C1716C3513ED7DDB72D00D1'){throw 'Published setup hash mismatch.'}
+          $app=(Resolve-Path 'windows/app/CodexProgress.ps1').Path
+          $assembly=[Reflection.Assembly]::LoadFile($setup)
+          $stream=$assembly.GetManifestResourceStream('CodexProgress.ps1')
+          if($null -eq $stream){throw 'Published app resource unavailable.'}
+          $sha=[Security.Cryptography.SHA256]::Create()
+          try{$embedded=([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','')}finally{$sha.Dispose();$stream.Dispose()}
+          if($embedded -cne (Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash){throw 'Source does not match published application resource.'}
+          $env:USERPROFILE=Join-Path $root 'profile'
+          $env:LOCALAPPDATA=Join-Path $root 'local'
+          $env:APPDATA=Join-Path $root 'roaming'
+          $env:CODEX_HOME=Join-Path $root 'codex'
+          $env:TEMP=$root
+          $env:TMP=$root
+          foreach($p in @($env:USERPROFILE,$env:LOCALAPPDATA,$env:APPDATA,$env:CODEX_HOME)){[void][IO.Directory]::CreateDirectory($p)}
+          $systemPowerShell=Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
+          $theme='${{ matrix.theme }}'
+          $language='${{ matrix.language }}'
+          foreach($state in @('top','journal','loop','end')){
+            $base=Join-Path $root ('base-'+$state+'.png')
+            $shot=Join-Path $out ('settings-'+$state+'-'+$theme+'-'+$language+'.png')
+            $arguments=@('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',$app,'-PreviewActiveTasks','0','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-SnapshotFile',$base,'-SettingsSnapshotFile',$shot,'-PreferencesFile',(Join-Path $root ('preferences-'+$state+'.json')),'-DiagnosticDirectory',(Join-Path $root ('diag-'+$state)))
+            if($state -eq 'journal'){$arguments+='-PreviewJournalSettings'}
+            if($state -eq 'loop'){$arguments+='-PreviewLoopSettings'}
+            if($state -eq 'end'){$arguments+='-PreviewSettingsEnd'}
+            & $systemPowerShell @arguments
+            if($LASTEXITCODE -ne 0 -or -not(Test-Path -LiteralPath $shot -PathType Leaf)){throw ('Settings screenshot failed: '+$state)}
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: windows-0210-settings-${{ matrix.theme }}-${{ matrix.language }}
+          path: ${{ env.SHOTS }}
+          if-no-files-found: warn
+          retention-days: 3
