@@ -1,0 +1,791 @@
+name: Inspect exact macOS 0.3.10 compact window frame
+on:
+  push:
+    branches: [codex/macos-0310-compact-frame-proof-20261118]
+    paths: [".github/workflows/macos-0310-compact-frame-proof.yml"]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  exact-dmg-gui:
+    if: ${{ github.repository == 'trueakaru-stack/ai-task-monitor' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - name: Prepare disposable synthetic environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$GITHUB_REPOSITORY" = trueakaru-stack/ai-task-monitor
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-gui-0310.XXXXXXXX")"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-denied-0310.XXXXXXXX")"
+          printf 'synthetic profile marker\n' > "$task_marker"
+          mkdir -p "$task_root"/{input,mount,temp,synthetic-home,out,previews,plan-previews,Applications}
+          printf 'AITM_TEST_TASK_ROOT=%s\nAITM_TEST_DENIED_FILE=%s\n' "$task_root" "$task_marker" >> "$GITHUB_ENV"
+      - name: Download the exact completed candidate artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "14428481166"
+          run-id: "44304568821"
+          github-token: ${{ github.token }}
+          path: ${{ env.AITM_TEST_TASK_ROOT }}/input
+      - name: Validate profile isolation and run the actual application window
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_TEST_TASK_ROOT"
+          case "$task_root" in /Users/runner/work/_temp/aitm-gui-0310.*) ;; *) echo 'Unexpected temporary root'; exit 1;; esac
+          cd "$task_root"
+          image_count="$(find input -type f -name 'AITaskMonitor-macOS-0.3.10.dmg' -print | wc -l | tr -d ' ')"
+          test "$image_count" = 1
+          image_path="$(find input -type f -name 'AITaskMonitor-macOS-0.3.10.dmg' -print)"
+          expected=d711d8e32f62f76347cbd6fb8bc9037f27b6b53bc4394565a735626fea567263
+          test "$(shasum -a 256 "$image_path" | cut -d' ' -f1)" = "$expected"
+          echo "Verified exact final DMG: $expected"
+          test "$(find input -type f | wc -l | tr -d ' ')" = 3
+          test "$(find input -type f -name SOURCE-REVISION.txt | wc -l | tr -d ' ')" = 1
+          test "$(find input -type f -name SHA256SUMS-macOS.txt | wc -l | tr -d ' ')" = 1
+          revision_path="$(find input -type f -name SOURCE-REVISION.txt -print)"
+          checksum_path="$(find input -type f -name SHA256SUMS-macOS.txt -print)"
+          test "$(tr -d '\r\n' < "$revision_path")" = 6f9e11914064052c0bbe5fbc30bfa6c0a23bc860
+          test "$(tr -d '\r\n' < "$checksum_path")" = "$expected  AITaskMonitor-macOS-0.3.10.dmg"
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+            "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil verify "$image_path" > "$task_root/out/dmg-verify.log"
+          echo "Verified artifact revision, checksum manifest and disk-image integrity."
+          cat > "$task_root/graphics.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (allow mach-lookup)
+          (deny mach-lookup (global-name "com.apple.cfprefsd.agent") (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.bsd.dirhelper"))
+          PROFILE
+          cat > "$task_root/run-graphics" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "CFFIXED_USER_HOME=$AITM_TEST_TASK_ROOT/synthetic-home" \
+            "LANG=en_US.UTF-8" \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" -f "$AITM_TEST_TASK_ROOT/graphics.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-graphics"
+          task_run="$task_root/run-graphics"
+          "$task_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          cat > "$task_root/home-probe.m" <<'OBJC'
+          #import <Foundation/Foundation.h>
+          int main(void) {
+              @autoreleasepool {
+                  NSString *fixed = NSProcessInfo.processInfo.environment[@"CFFIXED_USER_HOME"];
+                  NSString *resolved = NSFileManager.defaultManager.homeDirectoryForCurrentUser.path;
+                  BOOL valid = fixed && [resolved isEqualToString:fixed];
+                  printf("SYNTHETIC_HOME_%s: Foundation resolved current home %s\n", valid ? "PASS" : "FAIL", valid ? "inside fixture" : "outside fixture");
+                  return valid ? 0 : 1;
+              }
+          }
+          OBJC
+          /usr/bin/clang "$task_root/home-probe.m" -framework Foundation -o "$task_root/home-probe"
+          "$task_run" "$task_root/home-probe"
+          ln -s "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"
+          for marker in "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"; do
+            if "$task_run" /bin/cat "$marker" > /dev/null 2>&1; then echo 'Profile read unexpectedly allowed'; exit 1; fi
+            if "$task_run" /usr/bin/touch "$marker" > /dev/null 2>&1; then echo 'Profile write unexpectedly allowed'; exit 1; fi
+          done
+          cat > "$task_root/safety.c" <<'C'
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
+          #include <errno.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          int main(void) {
+            const char *blocked[] = {"com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon", "com.apple.bsd.dirhelper"};
+            for (unsigned i = 0; i < sizeof(blocked)/sizeof(blocked[0]); i++) {
+              mach_port_t port = MACH_PORT_NULL;
+              kern_return_t r = bootstrap_look_up(bootstrap_port, blocked[i], &port);
+              if (r == KERN_SUCCESS) mach_port_deallocate(mach_task_self(), port);
+              if (r != BOOTSTRAP_NOT_PRIVILEGED) { fprintf(stderr, "Profile service block not verified: %d\n", r); return 1; }
+            }
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) {
+              if (errno != EPERM && errno != EACCES) return 2;
+            } else {
+              struct sockaddr_in addr = {0};
+              addr.sin_len = sizeof(addr);
+              addr.sin_family = AF_INET;
+              addr.sin_port = htons(9);
+              addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+              errno = 0;
+              if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || (errno != EPERM && errno != EACCES)) {
+                close(fd); fprintf(stderr, "Loopback network was not provably denied.\n"); return 3;
+              }
+              close(fd);
+            }
+            puts("Profile services and loopback network are denied");
+            return 0;
+          }
+          C
+          cat > "$task_root/window.c" <<'C'
+          #include <CoreGraphics/CoreGraphics.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+            if (argc != 2) return 2;
+            int target = atoi(argv[1]), found = 0;
+            CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+            if (!windows) { fputs("Window list unavailable\n", stderr); return 3; }
+            for (CFIndex i = 0; i < CFArrayGetCount(windows); i++) {
+              CFDictionaryRef row = CFArrayGetValueAtIndex(windows, i);
+              CFNumberRef owner = CFDictionaryGetValue(row, kCGWindowOwnerPID), level = CFDictionaryGetValue(row, kCGWindowLayer);
+              CFDictionaryRef bounds = CFDictionaryGetValue(row, kCGWindowBounds);
+              int ownerID = -1, layer = -1;
+              CGRect rect = CGRectZero;
+              if (!owner || !level || !bounds) continue;
+              if (!CFNumberGetValue(owner, kCFNumberIntType, &ownerID) || !CFNumberGetValue(level, kCFNumberIntType, &layer)) continue;
+              if (!CGRectMakeWithDictionaryRepresentation(bounds, &rect)) continue;
+              if (ownerID == target && (layer == CGWindowLevelForKey(kCGNormalWindowLevelKey) || layer == CGWindowLevelForKey(kCGFloatingWindowLevelKey)) && rect.size.width >= 200 && rect.size.height >= 100) {
+                printf("Visible application window: %.0f x %.0f points at system level %d (%s)\n", rect.size.width, rect.size.height, layer, layer == CGWindowLevelForKey(kCGFloatingWindowLevelKey) ? "floating" : "normal");
+                found++;
+              }
+            }
+            CFRelease(windows);
+            return found ? 0 : 1;
+          }
+          C
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/safety.c" -o "$task_root/safety"
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/window.c" -framework CoreGraphics -framework CoreFoundation -o "$task_root/window"
+          "$task_run" "$task_root/safety"
+          task_pid=""
+          task_helper_pid=""
+          cleanup() {
+            if test -n "$task_helper_pid" && kill -0 "$task_helper_pid" 2>/dev/null; then
+              kill -TERM "$task_helper_pid" 2>/dev/null || true
+              wait "$task_helper_pid" 2>/dev/null || true
+            fi
+            if test -n "$task_pid" && kill -0 "$task_pid" 2>/dev/null; then
+              kill -TERM "$task_pid" 2>/dev/null || true
+              wait "$task_pid" 2>/dev/null || true
+            fi
+            if /sbin/mount | /usr/bin/grep -F " on $task_root/mount (" > /dev/null; then
+              /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+                "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil detach "$task_root/mount" >/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          cat > "$task_root/window-control.m" <<'OBJC'
+          #import <AppKit/AppKit.h>
+          int main(void) {
+            @autoreleasepool {
+              NSApplication *application = [NSApplication sharedApplication];
+              [application setActivationPolicy:NSApplicationActivationPolicyRegular];
+              NSWindow *normal = [[NSWindow alloc] initWithContentRect:NSMakeRect(40,40,300,220)
+                styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+              NSWindow *floating = [[NSWindow alloc] initWithContentRect:NSMakeRect(400,350,300,220)
+                styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+              [normal setReleasedWhenClosed:NO]; [floating setReleasedWhenClosed:NO];
+              [normal setLevel:NSNormalWindowLevel]; [floating setLevel:NSFloatingWindowLevel];
+              [normal orderFrontRegardless]; [floating orderFrontRegardless];
+              [application activateIgnoringOtherApps:YES];
+              [application run];
+            }
+            return 0;
+          }
+          OBJC
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/window-control.m" -framework AppKit -o "$task_root/window-control"
+          "$task_run" "$task_root/window-control" > "$task_root/out/control-app.log" 2>&1 &
+          task_pid=$!
+          found_control=0
+          for attempt in {1..40}; do
+            if ! kill -0 "$task_pid" 2>/dev/null; then break; fi
+            if "$task_run" "$task_root/window" "$task_pid" > "$task_root/out/control-window.log" 2>&1 &&
+               /usr/bin/grep -F '(normal)' "$task_root/out/control-window.log" >/dev/null &&
+               /usr/bin/grep -F '(floating)' "$task_root/out/control-window.log" >/dev/null; then
+              found_control=1
+              break
+            fi
+            sleep 0.5
+          done
+          if test "$found_control" != 1; then
+            echo 'Normal and floating control windows were not both verified.'
+            cat "$task_root/out/control-app.log" "$task_root/out/control-window.log"
+            exit 1
+          fi
+          echo 'Verified both normal and floating levels with known synthetic windows.'
+          cat "$task_root/out/control-window.log"
+          kill -TERM "$task_pid"
+          wait "$task_pid" || true
+          task_pid=""
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+            "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil attach "$image_path" \
+            -readonly -nobrowse -noautoopen -mountpoint "$task_root/mount" -plist > "$task_root/out/mount.plist"
+          task_mounted_app="$task_root/mount/AI Task Monitor.app"
+          test -d "$task_mounted_app"
+          test ! -L "$task_mounted_app"
+          task_app="$task_root/Applications/AI Task Monitor.app"
+          test ! -e "$task_app"
+          test ! -L "$task_app"
+          /usr/bin/ditto "$task_mounted_app" "$task_app"
+          /usr/bin/diff -qr "$task_mounted_app" "$task_app"
+          /usr/bin/codesign --verify --deep --strict "$task_app"
+          task_binary="$task_app/Contents/MacOS/AITaskMonitor"
+          test -x "$task_binary"
+          /usr/bin/xcrun lipo "$task_binary" -verify_arch arm64 x86_64
+          test "$(/usr/bin/plutil -extract AITaskMonitorReleaseVersion raw -o - "$task_app/Contents/Info.plist")" = 0.3.10
+          test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = 0.3.10
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$task_app/Contents/Info.plist")" = 14
+          echo "Starting verified installed copy from the exact DMG without preview flags"
+          "$task_run" "$task_binary" > "$task_root/out/app.log" 2>&1 &
+          task_pid=$!
+          found=0
+          for attempt in {1..40}; do
+            if ! kill -0 "$task_pid" 2>/dev/null; then
+              set +e
+              wait "$task_pid"
+              result=$?
+              set -e
+              task_pid=""
+              echo "Application exited before a window was verified (status $result)."
+              cat "$task_root/out/app.log"
+              exit 1
+            fi
+            if "$task_run" "$task_root/window" "$task_pid" > "$task_root/out/window.log" 2>&1; then found=1; break; fi
+            sleep 0.5
+          done
+          if test "$found" != 1; then
+            echo "No visible application window detected."
+            cat "$task_root/out/window.log" "$task_root/out/app.log"
+            exit 1
+          fi
+          cat "$task_root/out/window.log"
+          sleep 3
+          kill -0 "$task_pid"
+          echo 'Installed copy from the exact DMG remained running with its own visible window.'
+          # The reader only recognizes tasks observed after application startup.
+          # All fixture paths belong to this disposable runner profile.
+          fixture_codex="$task_root/synthetic-home/.codex"
+          mkdir -p "$fixture_codex/sessions"
+          cat > "$fixture_codex/session_index.jsonl" <<'JSON'
+          {"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task A"}
+          {"id":"019127f4-35ae-7c73-9e72-a10123456002","thread_name":"Synthetic task B"}
+          JSON
+          stamp="$(/bin/date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          for pair in '019127f4-35ae-7c73-9e72-a10123456001:turn-a' '019127f4-35ae-7c73-9e72-a10123456002:turn-b'; do
+            id="${pair%%:*}"
+            turn="${pair#*:}"
+            printf '{"timestamp":"%s","type":"event_msg","payload":{"type":"task_started","turn_id":"%s"}}\n' "$stamp" "$turn" > "$fixture_codex/sessions/rollout-2026-11-18T12-00-00-$id.jsonl"
+          done
+          echo 'Created two synthetic Codex sessions after actual app startup.'
+          cat > "$task_root/focus-helper.m" <<'OBJC'
+          #import <AppKit/AppKit.h>
+          #import <dispatch/dispatch.h>
+          #include <signal.h>
+          int main(void) {
+              @autoreleasepool {
+                  NSApplication *app = [NSApplication sharedApplication];
+                  [app setActivationPolicy:NSApplicationActivationPolicyRegular];
+                  NSRect screen = NSScreen.mainScreen.frame;
+                  NSWindow *window = [[NSWindow alloc] initWithContentRect:screen
+                      styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
+                  [window setOpaque:YES];
+                  [window setBackgroundColor:[NSColor colorWithCalibratedRed:0.02 green:0.72 blue:0.78 alpha:1.0]];
+                  printf("CONTRAST_BACKGROUND screen=%.0fx%.0f color=cyan\n", screen.size.width, screen.size.height);
+                  [window setReleasedWhenClosed:NO];
+                  [window setLevel:NSNormalWindowLevel];
+                  [window orderFrontRegardless];
+                  signal(SIGUSR1, SIG_IGN);
+                  dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_SIGNAL, SIGUSR1, 0, dispatch_get_main_queue());
+                  dispatch_source_set_event_handler(source, ^{
+                      [app activateIgnoringOtherApps:YES];
+                      [window makeKeyAndOrderFront:nil];
+                  });
+                  dispatch_resume(source);
+                  dispatch_async(dispatch_get_main_queue(), ^{
+                      [app activateIgnoringOtherApps:YES];
+                      [window makeKeyAndOrderFront:nil];
+                  });
+                  [app run];
+              }
+              return 0;
+          }
+          OBJC
+          cat > "$task_root/actual-app-driver.m" <<'OBJC'
+          #import <AppKit/AppKit.h>
+          #import <CoreGraphics/CoreGraphics.h>
+          #import <ApplicationServices/ApplicationServices.h>
+          #include <signal.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+
+          static void spin(double seconds) {
+              NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
+              do {
+                  [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+                  [NSThread sleepForTimeInterval:0.01];
+              } while (deadline.timeIntervalSinceNow > 0);
+          }
+          static BOOL findWindow(pid_t target, CGFloat minimumWidth, CGRect *result, CGWindowID *number) {
+              CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+              if (!list) return NO;
+              BOOL found = NO;
+              for (NSDictionary *row in (__bridge NSArray *)list) {
+                  if ([row[(__bridge id)kCGWindowOwnerPID] intValue] != target) continue;
+                  CGRect rect = CGRectZero;
+                  NSDictionary *bounds = row[(__bridge id)kCGWindowBounds];
+                  if (!bounds || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)bounds, &rect)) continue;
+                  if (rect.size.width < minimumWidth || rect.size.height < 40) continue;
+                  *result = rect;
+                  *number = [row[(__bridge id)kCGWindowNumber] unsignedIntValue];
+                  found = YES;
+                  break;
+              }
+              CFRelease(list);
+              return found;
+          }
+          static BOOL topmostAt(CGPoint point, CGWindowID expected) {
+              NSArray<NSScreen *> *screens = [NSScreen screens];
+              if (screens.count != 1) return NO;
+              NSRect frame = screens.firstObject.frame;
+              if (frame.origin.x != 0 || frame.origin.y != 0) return NO;
+              NSPoint appKitPoint = NSMakePoint(point.x, NSMaxY(frame) - point.y);
+              NSInteger appkit = [NSWindow windowNumberAtPoint:appKitPoint belowWindowWithWindowNumber:0];
+              CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+              if (!list) return NO;
+              CGWindowID top = 0;
+              int owner = -1;
+              for (NSDictionary *row in (__bridge NSArray *)list) {
+                  CGRect rect = CGRectZero;
+                  NSDictionary *box = row[(__bridge id)kCGWindowBounds];
+                  if (!box || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)box, &rect)) continue;
+                  NSNumber *alpha = row[(__bridge id)kCGWindowAlpha];
+                  if (alpha && alpha.doubleValue < 0.02) continue;
+                  if (!CGRectContainsPoint(rect, point)) continue;
+                  top = [row[(__bridge id)kCGWindowNumber] unsignedIntValue];
+                  owner = [row[(__bridge id)kCGWindowOwnerPID] intValue];
+                  break;
+              }
+              CFRelease(list);
+              printf("TOPMOST x=%.0f y=%.0f expected=%u cg=%u owner=%d appkit=%ld\n", point.x, point.y, expected, top, owner, (long)appkit);
+              return appkit == (NSInteger)expected;
+          }
+          static BOOL axFind(AXUIElementRef node, NSString *wanted, BOOL buttonOnly, CGRect *frame, int depth) {
+              if (!node || depth > 30) return NO;
+              CFTypeRef role = NULL, title = NULL, description = NULL, value = NULL;
+              AXUIElementCopyAttributeValue(node, kAXRoleAttribute, &role);
+              AXUIElementCopyAttributeValue(node, kAXTitleAttribute, &title);
+              AXUIElementCopyAttributeValue(node, kAXDescriptionAttribute, &description);
+              AXUIElementCopyAttributeValue(node, kAXValueAttribute, &value);
+              BOOL roleOK = !buttonOnly || (role && CFGetTypeID(role) == CFStringGetTypeID() && CFEqual(role, kAXButtonRole));
+              BOOL match = NO;
+              CFTypeRef candidates[] = { title, description, value };
+              for (int i=0; i<3; i++) {
+                  if (candidates[i] && CFGetTypeID(candidates[i]) == CFStringGetTypeID() &&
+                      [(__bridge NSString *)candidates[i] isEqualToString:wanted]) { match = YES; break; }
+              }
+              if (role) CFRelease(role);
+              if (title) CFRelease(title);
+              if (description) CFRelease(description);
+              if (value) CFRelease(value);
+              if (match && roleOK) {
+                  if (!frame) return YES;
+                  CFTypeRef position = NULL, size = NULL;
+                  CGPoint p = CGPointZero;
+                  CGSize z = CGSizeZero;
+                  AXError ep = AXUIElementCopyAttributeValue(node, kAXPositionAttribute, &position);
+                  AXError es = AXUIElementCopyAttributeValue(node, kAXSizeAttribute, &size);
+                  BOOL valid = ep == kAXErrorSuccess && es == kAXErrorSuccess && position && size &&
+                      CFGetTypeID(position) == AXValueGetTypeID() && CFGetTypeID(size) == AXValueGetTypeID() &&
+                      AXValueGetValue((AXValueRef)position, kAXValueCGPointType, &p) &&
+                      AXValueGetValue((AXValueRef)size, kAXValueCGSizeType, &z) && z.width > 0 && z.height > 0;
+                  if (position) CFRelease(position);
+                  if (size) CFRelease(size);
+                  if (valid) { *frame = CGRectMake(p.x, p.y, z.width, z.height); return YES; }
+              }
+              CFTypeRef raw = NULL;
+              if (AXUIElementCopyAttributeValue(node, kAXChildrenAttribute, &raw) != kAXErrorSuccess || !raw) return NO;
+              BOOL found = NO;
+              if (CFGetTypeID(raw) == CFArrayGetTypeID()) {
+                  CFArrayRef children = (CFArrayRef)raw;
+                  for (CFIndex i=0; i<CFArrayGetCount(children); i++) {
+                      CFTypeRef child = CFArrayGetValueAtIndex(children, i);
+                      if (child && CFGetTypeID(child) == AXUIElementGetTypeID() &&
+                          axFind((AXUIElementRef)child, wanted, buttonOnly, frame, depth+1)) { found = YES; break; }
+                  }
+              }
+              CFRelease(raw);
+              return found;
+          }
+          static BOOL appHasText(pid_t pid, NSString *wanted) {
+              AXUIElementRef app = AXUIElementCreateApplication(pid);
+              BOOL result = axFind(app, wanted, NO, NULL, 0);
+              CFRelease(app);
+              return result;
+          }
+          static BOOL appButton(pid_t pid, NSString *english, NSString *russian, CGRect *frame) {
+              AXUIElementRef app = AXUIElementCreateApplication(pid);
+              BOOL result = axFind(app, english, YES, frame, 0) || (russian && axFind(app, russian, YES, frame, 0));
+              CFRelease(app);
+              return result;
+          }
+          static BOOL cursorMatches(NSCursor *expected) {
+              NSCursor *actual = [NSCursor currentSystemCursor];
+              if (!actual) return NO;
+              if ([actual isEqual:expected]) return YES;
+              NSData *a = actual.image.TIFFRepresentation, *b = expected.image.TIFFRepresentation;
+              return NSEqualPoints(actual.hotSpot, expected.hotSpot) && a && b && [a isEqualToData:b];
+          }
+          static BOOL pointBelongs(pid_t pid, CGPoint point, NSString *english, NSString *russian) {
+              AXUIElementRef system = AXUIElementCreateSystemWide(), element = NULL;
+              AXError error = AXUIElementCopyElementAtPosition(system, point.x, point.y, &element);
+              BOOL matches = NO;
+              if (error == kAXErrorSuccess && element) {
+                  pid_t owner = 0;
+                  AXUIElementGetPid(element, &owner);
+                  matches = owner == pid && (axFind(element, english, YES, NULL, 0) || (russian && axFind(element, russian, YES, NULL, 0)));
+                  CFRelease(element);
+              }
+              CFRelease(system);
+              return matches;
+          }
+          static void captureWindow(CGWindowID window, NSString *directory, NSString *name) {
+              NSTask *capture = [[NSTask alloc] init];
+              capture.executableURL = [NSURL fileURLWithPath:@"/usr/sbin/screencapture"];
+              capture.arguments = @[ @"-x", @"-C", @"-l", [NSString stringWithFormat:@"%u", window],
+                                     [directory stringByAppendingPathComponent:name] ];
+              NSError *error = nil;
+              if (![capture launchAndReturnError:&error]) {
+                  printf("CAPTURE_UNAVAILABLE: %s\n", error.localizedDescription.UTF8String);
+                  return;
+              }
+              [capture waitUntilExit];
+              printf("CAPTURE status=%d file=%s\n", capture.terminationStatus, name.UTF8String);
+          }
+          static void captureScreen(NSString *directory, NSString *name) {
+              NSTask *capture = [[NSTask alloc] init];
+              capture.executableURL = [NSURL fileURLWithPath:@"/usr/sbin/screencapture"];
+              capture.arguments = @[ @"-x", [directory stringByAppendingPathComponent:name] ];
+              NSError *error = nil;
+              if (![capture launchAndReturnError:&error]) { printf("SCREENSHOT_UNAVAILABLE: %s\n", error.localizedDescription.UTF8String); return; }
+              [capture waitUntilExit];
+              printf("FULLSCREEN_CAPTURE status=%d file=%s\n", capture.terminationStatus, name.UTF8String);
+          }
+          static void windowAXGeometry(pid_t pid) {
+              AXUIElementRef app = AXUIElementCreateApplication(pid);
+              CFTypeRef raw = NULL;
+              AXError e = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, &raw);
+              if (e == kAXErrorSuccess && raw && CFGetTypeID(raw) == CFArrayGetTypeID()) {
+                  CFArrayRef windows = (CFArrayRef)raw;
+                  for (CFIndex i=0; i<CFArrayGetCount(windows); i++) {
+                      AXUIElementRef w = (AXUIElementRef)CFArrayGetValueAtIndex(windows,i);
+                      CFTypeRef p = NULL, z = NULL; CGPoint position = CGPointZero; CGSize size = CGSizeZero;
+                      if (w && AXUIElementCopyAttributeValue(w,kAXPositionAttribute,&p)==kAXErrorSuccess &&
+                          AXUIElementCopyAttributeValue(w,kAXSizeAttribute,&z)==kAXErrorSuccess &&
+                          p && z && CFGetTypeID(p)==AXValueGetTypeID() && CFGetTypeID(z)==AXValueGetTypeID() &&
+                          AXValueGetValue((AXValueRef)p,kAXValueCGPointType,&position) &&
+                          AXValueGetValue((AXValueRef)z,kAXValueCGSizeType,&size))
+                          printf("AX_WINDOW_GEOMETRY x=%.1f y=%.1f width=%.1f height=%.1f\n",position.x,position.y,size.width,size.height);
+                      if (p) CFRelease(p);
+                      if (z) CFRelease(z);
+                  }
+              } else printf("AX_WINDOW_UNAVAILABLE error=%d\n",e);
+              if (raw) CFRelease(raw);
+              CFRelease(app);
+          }
+          static void probePoint(CGPoint p, NSString *label) {
+              NSArray<NSScreen *> *screens = NSScreen.screens;
+              NSInteger number = -1;
+              if (screens.count == 1) {
+                  NSRect f = screens.firstObject.frame;
+                  number = [NSWindow windowNumberAtPoint:NSMakePoint(p.x,NSMaxY(f)-p.y) belowWindowWithWindowNumber:0];
+              }
+              AXUIElementRef system = AXUIElementCreateSystemWide(), element = NULL;
+              AXError e = AXUIElementCopyElementAtPosition(system,p.x,p.y,&element);
+              pid_t pid = 0; CFTypeRef role = NULL;
+              if (e==kAXErrorSuccess && element) {
+                  AXUIElementGetPid(element,&pid);
+                  AXUIElementCopyAttributeValue(element,kAXRoleAttribute,&role);
+              }
+              printf("HIT_GEOMETRY %s x=%.1f y=%.1f appkit-window=%ld ax-pid=%d ax-role=%s ax-error=%d\n",
+                  label.UTF8String,p.x,p.y,(long)number,pid,
+                  role && CFGetTypeID(role)==CFStringGetTypeID() ? [(__bridge NSString *)role UTF8String] : "?",e);
+              if(role) CFRelease(role);
+              if(element) CFRelease(element);
+              CFRelease(system);
+          }
+          static BOOL postMouse(CGEventType type, CGPoint point) {
+              CGEventRef event = CGEventCreateMouseEvent(NULL, type, point, kCGMouseButtonLeft);
+              if (!event) return NO;
+              if (type == kCGEventLeftMouseDown || type == kCGEventLeftMouseUp)
+                  CGEventSetIntegerValueField(event, kCGMouseEventClickState, 1);
+              CGEventPost(kCGHIDEventTap, event);
+              CFRelease(event);
+              return YES;
+          }
+          static BOOL moveMouse(CGPoint point) {
+              return CGWarpMouseCursorPosition(point) == kCGErrorSuccess && postMouse(kCGEventMouseMoved, point);
+          }
+          int main(int argc, char **argv) {
+              @autoreleasepool {
+                  if (argc != 4) return 2;
+                  pid_t pid = (pid_t)atoi(argv[1]);
+                  pid_t helperPid = (pid_t)atoi(argv[2]);
+                  [NSApplication sharedApplication];
+                  NSRunningApplication *target = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+                  NSRunningApplication *helper = [NSRunningApplication runningApplicationWithProcessIdentifier:helperPid];
+                  if (!target || target.terminated) { puts("DRIVER_ERROR: target process missing"); return 3; }
+                  CGRect bounds = CGRectZero, helperBounds = CGRectZero;
+                  CGWindowID windowNumber = 0, helperWindow = 0;
+                  if (!findWindow(pid, 200, &bounds, &windowNumber)) { puts("DRIVER_ERROR: target window missing"); return 4; }
+                  BOOL helperFound = helper && !helper.terminated && findWindow(helperPid, 60, &helperBounds, &helperWindow);
+                  printf("TARGET_WINDOW id=%u x=%.0f y=%.0f width=%.0f height=%.0f\n", windowNumber,
+                         bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height);
+                  NSArray<NSScreen *> *screens = [NSScreen screens];
+                  BOOL hoverTested = NO;
+                  BOOL hoverPassed = NO;
+                  BOOL negativeControl = NO;
+                  if (helperFound && screens.count == 1) {
+                      [target activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+                      spin(0.8);
+                      CGPoint helperPoint = CGPointMake(CGRectGetMinX(helperBounds)+15, CGRectGetMidY(helperBounds));
+                      printf("NEGATIVE_PRE targetActive=%d helperActive=%d helperFound=%d\n", target.isActive, helper.isActive, helperFound);
+                      if (target.isActive && !helper.isActive && topmostAt(helperPoint, helperWindow) && moveMouse(helperPoint)) {
+                          spin(0.8);
+                          negativeControl = target.isActive && !helper.isActive;
+                          if (negativeControl) puts("NEGATIVE_CONTROL_PASS: ordinary helper window did not activate on hover");
+                          else puts("NEGATIVE_CONTROL_FAIL: ordinary helper activated on hover");
+                      } else {
+                          puts("NEGATIVE_CONTROL_UNVERIFIED: ordinary helper window is not independently targetable");
+                      }
+                  } else {
+                      puts("NEGATIVE_CONTROL_UNVERIFIED: helper window or single screen unavailable");
+                  }
+                  if (helperFound) {
+                      kill(helperPid, SIGUSR1);
+                      for (int i=0; i<30 && !helper.isActive && !helper.terminated; i++) spin(0.1);
+                  }
+                  if (negativeControl && helperFound && helper.isActive && !target.isActive && screens.count == 1) {
+                      NSRect frame = screens.firstObject.frame;
+                      CGPoint candidates[] = {CGPointMake(2, 2), CGPointMake(NSWidth(frame)-2, 2),
+                                               CGPointMake(2, NSHeight(frame)-2), CGPointMake(NSWidth(frame)-2, NSHeight(frame)-2)};
+                      BOOL foundOutside = NO;
+                      for (unsigned i=0; i<4; i++) {
+                          if (!CGRectContainsPoint(bounds, candidates[i])) {
+                              if (moveMouse(candidates[i])) { foundOutside = YES; spin(0.4); }
+                              break;
+                          }
+                      }
+                      CGPoint header = CGPointMake(CGRectGetMidX(bounds), CGRectGetMinY(bounds)+(CGRectGetHeight(bounds)-700)+29);
+                      if (foundOutside && helper.isActive && !target.isActive && topmostAt(header, windowNumber) && moveMouse(header)) {
+                          hoverTested = YES;
+                          for (int i=0; i<40 && !target.isActive && !target.terminated; i++) spin(0.1);
+                          hoverPassed = target.isActive;
+                      }
+                  }
+                  if (hoverTested && hoverPassed) puts("HOVER_PASS: real app became active after pointer entered visible header");
+                  else if (hoverTested) puts("HOVER_FAIL: real app did not activate after pointer entered visible header");
+                  else puts("HOVER_UNVERIFIED: could not establish focus, negative control, pointer, screen, or unobscured-window preconditions");
+
+                  if (!hoverTested || !hoverPassed) {
+                      puts("CURSOR_UNVERIFIED: activation on actual window hover was not confirmed");
+                      return 10;
+                  }
+                  if (!AXIsProcessTrusted()) { puts("CURSOR_UNVERIFIED: Accessibility is not trusted"); return 11; }
+                  BOOL sawBothTasks = NO;
+                  for (int i=0; i<80; i++) {
+                      if (appHasText(pid, @"Synthetic task A") && appHasText(pid, @"Synthetic task B")) {
+                          sawBothTasks = YES; break;
+                      }
+                      spin(0.25);
+                  }
+                  if (!sawBothTasks) { puts("FIXTURE_UNVERIFIED: both synthetic task titles are not visible in the actual app"); return 12; }
+                  puts("FIXTURE_PASS: actual app displays both freshly observed synthetic Codex tasks");
+                  CGRect compactRect = CGRectZero;
+                  if (!appButton(pid, @"Compact view", @"Компактный вид", &compactRect)) {
+                      puts("COMPACT_UNVERIFIED: compact button missing"); return 13;
+                  }
+                  CGPoint compactPoint = CGPointMake(CGRectGetMidX(compactRect), CGRectGetMidY(compactRect));
+                  if (!topmostAt(compactPoint, windowNumber) || !pointBelongs(pid, compactPoint, @"Compact view", @"Компактный вид") ||
+                      !moveMouse(compactPoint)) {
+                      puts("COMPACT_UNVERIFIED: compact button is not safely targetable"); return 14;
+                  }
+                  spin(0.25);
+                  if (!postMouse(kCGEventLeftMouseDown, compactPoint) || !postMouse(kCGEventLeftMouseUp, compactPoint)) return 15;
+                  CGRect p1 = CGRectZero, p2 = CGRectZero;
+                  BOOL bothDots = NO;
+                  for (int i=0; i<80; i++) {
+                      if (appButton(pid, @"Task 1", @"Задача 1", &p1) && appButton(pid, @"Task 2", @"Задача 2", &p2)) {
+                          bothDots = YES; break;
+                      }
+                      spin(0.25);
+                  }
+                  if (!bothDots) { puts("DOTS_UNVERIFIED: both compact buttons are not visible via accessibility"); return 16; }
+                  if (!findWindow(pid, 200, &bounds, &windowNumber)) return 17;
+                  CGPoint dot1 = CGPointMake(CGRectGetMidX(p1), CGRectGetMidY(p1));
+                  CGPoint dot2 = CGPointMake(CGRectGetMidX(p2), CGRectGetMidY(p2));
+                  if (CGPointEqualToPoint(dot1,dot2) || !topmostAt(dot1, windowNumber) || !topmostAt(dot2, windowNumber) ||
+                      !pointBelongs(pid, dot1, @"Task 1", @"Задача 1") || !pointBelongs(pid, dot2, @"Task 2", @"Задача 2")) {
+                      puts("DOTS_UNVERIFIED: button hit targets do not match the window and labels"); return 18;
+                  }
+                  printf("DOTS_VISIBLE_PASS: two distinct compact buttons %.1f,%.1f and %.1f,%.1f\n", dot1.x, dot1.y, dot2.x, dot2.y);
+                  CGRect stableBounds = bounds;
+                  BOOL stable = YES;
+                  for (int i=0; i<6; i++) {
+                      spin(0.5);
+                      CGRect current = CGRectZero; CGWindowID currentNumber = 0;
+                      if (!findWindow(pid,200,&current,&currentNumber) || currentNumber!=windowNumber || !CGRectEqualToRect(current,stableBounds)) stable = NO;
+                  }
+                  if (!stable) { puts("GEOMETRY_UNVERIFIED: window did not stabilize"); return 32; }
+                  printf("CG_WINDOW_GEOMETRY id=%u x=%.1f y=%.1f width=%.1f height=%.1f stable=3s\n",
+                      windowNumber,stableBounds.origin.x,stableBounds.origin.y,stableBounds.size.width,stableBounds.size.height);
+                  windowAXGeometry(pid);
+                  CGRect closeForGeometry = CGRectZero;
+                  if (appButton(pid,@"Close",@"Закрыть",&closeForGeometry))
+                      printf("AX_CLOSE_GEOMETRY x=%.1f y=%.1f width=%.1f height=%.1f\n",
+                          closeForGeometry.origin.x,closeForGeometry.origin.y,closeForGeometry.size.width,closeForGeometry.size.height);
+                  printf("AX_DOT1_GEOMETRY x=%.1f y=%.1f width=%.1f height=%.1f\n",p1.origin.x,p1.origin.y,p1.size.width,p1.size.height);
+                  probePoint(CGPointMake(CGRectGetMidX(stableBounds),CGRectGetMinY(stableBounds)+14),@"frame-top-plus-14");
+                  probePoint(CGPointMake(CGRectGetMidX(stableBounds),CGRectGetMinY(stableBounds)+42),@"frame-top-plus-42");
+                  NSString *evidence = [NSString stringWithUTF8String:argv[3]];
+                  captureScreen(evidence,@"compact-fullscreen-contrast.png");
+                  captureWindow(windowNumber,evidence,@"compact-window-contrast.png");
+
+                  BOOL beforeA = appHasText(pid, @"Synthetic task A");
+                  BOOL beforeB = appHasText(pid, @"Synthetic task B");
+                  if (beforeA == beforeB) { puts("SWITCH_UNVERIFIED: initial compact task title is ambiguous"); return 19; }
+                  CGRect baselineClose = CGRectZero;
+                  if (!appButton(pid, @"Close", @"Закрыть", &baselineClose)) { puts("CURSOR_UNVERIFIED: compact header missing"); return 31; }
+                  CGPoint outside = CGPointMake(CGRectGetMinX(bounds)+45, CGRectGetMidY(baselineClose));
+                  if (CGRectContainsPoint(p1, outside) || CGRectContainsPoint(p2, outside) ||
+                      !topmostAt(outside, windowNumber) || !moveMouse(outside)) {
+                      puts("CURSOR_UNVERIFIED: baseline point is not safely targetable"); return 20;
+                  }
+                  spin(0.6);
+                  if (!cursorMatches([NSCursor arrowCursor])) {
+                      puts("CURSOR_UNVERIFIED: expected arrow baseline not observed"); return 21;
+                  }
+                  puts("DOT_ARROW_BASELINE_PASS: system cursor is arrow outside the dots");
+                  if (!moveMouse(dot1)) return 22;
+                  spin(0.6);
+                  if (!cursorMatches([NSCursor pointingHandCursor])) {
+                      puts("DOT_HAND_FAIL: task 1 did not show system pointing hand"); return 23;
+                  }
+                  puts("DOT_HAND_PASS: task 1 shows system pointing hand");
+                  captureWindow(windowNumber, [NSString stringWithUTF8String:argv[3]], @"compact-task1-hand.png");
+                  if (!moveMouse(dot2)) return 24;
+                  spin(0.6);
+                  if (!cursorMatches([NSCursor pointingHandCursor])) {
+                      puts("DOT_HAND_FAIL: task 2 did not show system pointing hand"); return 25;
+                  }
+                  puts("DOT_HAND_PASS: task 2 shows system pointing hand");
+                  captureWindow(windowNumber, [NSString stringWithUTF8String:argv[3]], @"compact-task2-hand.png");
+                  if (!postMouse(kCGEventLeftMouseDown, dot2) || !postMouse(kCGEventLeftMouseUp, dot2)) return 26;
+                  BOOL switched = NO;
+                  for (int i=0; i<40; i++) {
+                      BOOL nowA = appHasText(pid, @"Synthetic task A"), nowB = appHasText(pid, @"Synthetic task B");
+                      if (nowA != nowB && nowA != beforeA) { switched = YES; break; }
+                      spin(0.1);
+                  }
+                  if (!switched) { puts("SWITCH_FAIL: second dot did not change visible task title"); return 27; }
+                  puts("SWITCH_PASS: real click on second dot changed the visible task title");
+                  if (!moveMouse(outside)) return 28;
+                  spin(0.6);
+                  if (!cursorMatches([NSCursor arrowCursor])) {
+                      puts("DOT_ARROW_FAIL: cursor did not return to arrow after leaving dots"); return 29;
+                  }
+                  puts("DOT_ARROW_PASS: system cursor returns to arrow after leaving dots");
+
+                  if (target.terminated) { puts("CLOSE_UNVERIFIED: app terminated before close test"); return 5; }
+                  if (!target.isActive) {
+                      [target activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+                      spin(0.8);
+                  }
+                  CGRect closeRect = CGRectZero;
+                  if (!appButton(pid, @"Close", @"Закрыть", &closeRect)) { puts("CLOSE_UNVERIFIED: compact close button missing"); return 30; }
+                  CGPoint close = CGPointMake(CGRectGetMidX(closeRect), CGRectGetMidY(closeRect));
+                  printf("CLOSE_PRE targetActive=%d helperActive=%d trusted=%d\n", target.isActive, helper.isActive, AXIsProcessTrusted());
+                  AXUIElementRef system = AXUIElementCreateSystemWide();
+                  AXUIElementRef element = NULL;
+                  AXError axError = AXUIElementCopyElementAtPosition(system, close.x, close.y, &element);
+                  if (axError == kAXErrorSuccess && element) {
+                      pid_t axPid = 0;
+                      AXUIElementGetPid(element, &axPid);
+                      CFTypeRef role = NULL, label = NULL;
+                      AXUIElementCopyAttributeValue(element, kAXRoleAttribute, &role);
+                      AXUIElementCopyAttributeValue(element, kAXDescriptionAttribute, &label);
+                      printf("AX_CLOSE pid=%d target=%d role=%s label=%s\n", axPid, pid,
+                          role && CFGetTypeID(role)==CFStringGetTypeID() ? [(__bridge NSString *)role UTF8String] : "?",
+                          label && CFGetTypeID(label)==CFStringGetTypeID() ? [(__bridge NSString *)label UTF8String] : "?");
+                      BOOL valid = axPid == pid && role && CFEqual(role, kAXButtonRole);
+                      if (role) CFRelease(role);
+                      if (label) CFRelease(label);
+                      CFRelease(element);
+                      if (!valid) { CFRelease(system); puts("CLOSE_UNVERIFIED: accessibility element is not target button"); return 9; }
+                  } else printf("AX_CLOSE_UNAVAILABLE error=%d\n", axError);
+                  CFRelease(system);
+                  if (!target.isActive || !topmostAt(close, windowNumber) || !moveMouse(close)) {
+                      puts("CLOSE_UNVERIFIED: close button is not safely targetable");
+                      return 6;
+                  }
+                  spin(0.3);
+                  if (!postMouse(kCGEventLeftMouseDown, close) || !postMouse(kCGEventLeftMouseUp, close)) {
+                      puts("CLOSE_UNVERIFIED: mouse events could not be created");
+                      return 7;
+                  }
+                  for (int i=0; i<100 && !target.terminated; i++) spin(0.1);
+                  if (target.terminated) { puts("CLOSE_PASS: target terminated after a real close-button click"); return 0; }
+                  puts("CLOSE_UNVERIFIED: target did not terminate after the close-button event");
+                  return 8;
+              }
+          }
+          OBJC
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/focus-helper.m" -framework AppKit -o "$task_root/focus-helper"
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/actual-app-driver.m" -framework AppKit -framework CoreGraphics -framework ApplicationServices -o "$task_root/actual-app-driver"
+          "$task_run" "$task_root/focus-helper" > "$task_root/out/focus-helper.log" 2>&1 &
+          task_helper_pid=$!
+          sleep 2
+          set +e
+          "$task_run" "$task_root/actual-app-driver" "$task_pid" "$task_helper_pid" "$task_root/out" > "$task_root/out/driver.log" 2>&1
+          driver_status=$?
+          set -e
+          cat "$task_root/out/driver.log"
+          if test "$driver_status" -ne 0; then
+            echo "NORMAL_CLOSE_UNVERIFIED: driver returned $driver_status; cleanup may terminate the app"
+            exit 1
+          fi
+          set +e
+          wait "$task_pid"
+          app_status=$?
+          set -e
+          task_pid=""
+          if test "$app_status" -ne 0; then
+            echo "NORMAL_CLOSE_FAIL: real app exited with status $app_status"
+            exit 1
+          fi
+          echo 'NORMAL_CLOSE_PASS: unmodified app exited with status 0 after the close-button click.'
+          if /usr/bin/grep -q '^HOVER_FAIL:' "$task_root/out/driver.log"; then
+            echo 'HOVER_FAIL: the real application did not activate despite verified hover preconditions.'
+            exit 1
+          fi
+      - name: Save diagnostic evidence
+        if: ${{ always() && env.AITM_TEST_TASK_ROOT != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-0310-compact-frame-proof-${{ matrix.runner }}
+          path: ${{ env.AITM_TEST_TASK_ROOT }}/out/
+          if-no-files-found: warn
+          retention-days: 7
