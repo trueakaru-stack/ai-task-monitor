@@ -74,3 +74,5 @@ jobs:
 # Check actual focus and accessibility activation independently.
 
 # Whole-window hover activation with rounded-corner and focus-cycle checks.
+
+# Diagnose geometry and key events on the hosted runner.
