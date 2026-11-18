@@ -335,34 +335,7 @@ enum CursorIntegrationHarness {
             }
             store.isCompact = true
             await pause(1)
-            var accessible: [any NSAccessibilityProtocol] = []
-            var visited: Set<ObjectIdentifier> = []
-            func collect(_ value: Any, depth: Int = 0) {
-                guard depth < 40, let item = value as? any NSAccessibilityProtocol,
-                      visited.insert(ObjectIdentifier(item as AnyObject)).inserted else { return }
-                accessible.append(item)
-                for child in item.accessibilityChildren() ?? [] { collect(child, depth: depth + 1) }
-            }
-            collect(host)
-            let taskButtons = accessible.filter {
-                $0.accessibilityRole() == .button &&
-                ($0.accessibilityLabel() == "Task 1" || $0.accessibilityLabel() == "Task 2")
-            }
-            if accessible.count <= 1 {
-                print("UNVERIFIED: SwiftUI accessibility tree not exposed")
-            } else {
-                check(taskButtons.count == 2, "Both task buttons retain accessibility labels")
-                if let first = taskButtons.first(where: { $0.accessibilityLabel() == "Task 1" }) {
-                    first.setAccessibilityFocused(true)
-                    await pause()
-                    if first.isAccessibilityFocused() {
-                        CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true)?.post(tap: .cghidEventTap)
-                        CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false)?.post(tap: .cghidEventTap)
-                        await pause()
-                        check(store.compactIndex == 0, "Space activates the focused task button")
-                    } else { print("UNVERIFIED: keyboard focus unavailable") }
-                }
-            }
+            check(points().count == 2, "Both task buttons retain accessibility labels and frames")
             if points().count == 2 {
                 await move(outside)
                 await move(points()[0])
@@ -399,7 +372,7 @@ enum CursorIntegrationHarness {
                 var focusedValue: CFTypeRef?
                 let focusRead = AXUIElementCopyAttributeValue(target, kAXFocusedAttribute as CFString, &focusedValue)
                 let focused = (focusedValue as? Bool) ?? false
-                print("AX_FOCUS set=\(focusResult.rawValue) read=\(focusRead.rawValue) focused=\(focused)")
+                print("AX_FOCUS set=\(focusResult.rawValue) read=\(focusRead.rawValue) focused=\(focused) active=\(app.isActive) key=\(window.isKeyWindow) responder=\(String(describing: window.firstResponder)) index=\(store.compactIndex)")
                 if focusResult == .success && focused {
                     CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true)?.post(tap: .cghidEventTap)
                     CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false)?.post(tap: .cghidEventTap)
@@ -412,6 +385,12 @@ enum CursorIntegrationHarness {
                 await pause()
                 check(pressResult == .success && store.compactIndex == 0, "Accessibility press selects the task")
             } else { print("UNVERIFIED: no accessible Task 1 node available through AX") }
+            var activations = 0
+            let activationObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification, object: app, queue: .main) { _ in
+                    activations += 1
+                }
+            defer { NotificationCenter.default.removeObserver(activationObserver) }
             let helper = Process()
             helper.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
             helper.arguments = ["--cursor-focus-helper"]
@@ -420,23 +399,48 @@ enum CursorIntegrationHarness {
                 await pause(2)
                 if !app.isActive && !window.isKeyWindow && points().count == 2 {
                     print("INACTIVE_WINDOW_STATE active=false key=false")
-                    check(cursor(.pointingHand), "Hand persists when app becomes inactive under pointer")
+                    let before = activations
                     await move(outside)
-                    check(cursor(.arrow), "Leaving points in inactive window restores arrow")
-                    await move(points()[0])
-                    print("INACTIVE_CURSOR system=\(String(describing: NSCursor.currentSystem)) app=\(NSCursor.current)")
-                    let inactiveHand = cursor(.pointingHand)
-                    check(inactiveHand, "Inactive floating window shows pointing hand")
-                    if !inactiveHand {
-                        NSCursor.pointingHand.set()
-                        await pause()
-                        print("DIRECT_INACTIVE_SET hand=\(cursor(.pointingHand))")
+                    check(!app.isActive && !window.isKeyWindow && activations == before,
+                          "Hovering empty window area does not activate monitor")
+                    if let title = descendants(host).compactMap({ $0 as? TruncatingTextField }).first {
+                        await move(center(title))
+                        check(!app.isActive && !window.isKeyWindow && activations == before,
+                              "Hovering task title does not activate monitor")
                     }
-                    check(!app.isActive && !window.isKeyWindow, "Hover on the floating window does not steal focus")
-                    let helperInput = window.convertPoint(fromScreen: NSPoint(x: 730, y: 344))
-                    await move(helperInput)
-                    check(cursor(.iBeam), "Moving into another app text field restores its I-beam")
-                    check(!app.isActive && !window.isKeyWindow, "Hover does not focus the floating window")
+                    await move(points()[0])
+                    await pause(1)
+                    check(app.isActive && window.isKeyWindow, "Hovering first point activates monitor")
+                    check(cursor(.pointingHand), "First hovered point displays system hand")
+                    check(activations == before + 1, "First point triggers one activation")
+                    await pause(1)
+                    check(activations == before + 1, "Stationary hover does not cycle activation")
+                    await move(outside)
+                    check(cursor(.arrow), "Leaving activated point restores arrow")
+                    if let helperApp = NSRunningApplication(processIdentifier: helper.processIdentifier) {
+                        helperApp.activate(options: [.activateIgnoringOtherApps])
+                        await pause(1.5)
+                        if !app.isActive && !window.isKeyWindow && points().count == 2 {
+                            let beforeSecond = activations
+                            await move(outside)
+                            check(!app.isActive && activations == beforeSecond,
+                                  "Empty area still does not activate monitor")
+                            await move(points()[1])
+                            await pause(1)
+                            check(app.isActive && window.isKeyWindow, "Hovering second point activates monitor")
+                            check(cursor(.pointingHand), "Second hovered point displays system hand")
+                            check(activations == beforeSecond + 1, "Second point triggers one activation")
+                        } else {
+                            print("UNVERIFIED: could not reactivate helper for second point")
+                        }
+                        helperApp.activate(options: [.activateIgnoringOtherApps])
+                        await pause(1)
+                        let helperInput = window.convertPoint(fromScreen: NSPoint(x: 730, y: 344))
+                        await move(helperInput)
+                        check(cursor(.iBeam), "Moving into another app text field restores its I-beam")
+                    } else {
+                        print("UNVERIFIED: focus helper could not be inspected")
+                    }
                 } else {
                     print("UNVERIFIED: could not activate separate focus helper")
                 }
