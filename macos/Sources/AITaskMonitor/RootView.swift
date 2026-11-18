@@ -201,7 +201,7 @@ struct RootView: View {
                                 Circle().fill(item == index ? Color.accentColor : MonitorTheme.muted).frame(width: 6, height: 6)
                             }
                             .buttonStyle(.plain)
-                            .background(PointingHandCursor().accessibilityHidden(true))
+                            .modifier(PointingHandCursor())
                             .accessibilityLabel(tr("Задача \(item + 1)", "Task \(item + 1)"))
                         }
                     }
