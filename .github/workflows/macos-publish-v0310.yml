@@ -1,0 +1,152 @@
+name: Publish verified macOS 0.3.10
+on:
+  push:
+    branches: [codex/macos-publish-v0310-20261118]
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify source and upload release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="trueakaru-stack/ai-task-monitor"
+          source="2b6f68bb8a0b7522ee9515f45154ce68acadb0e8"
+          prior="5863d11e9c493a3d361be0a0338e2222b33bbcec"
+          run_id="44324988654"
+          ci_head="c53d28eb6584a1db4d5d6c938bc2a47a6a41155f"
+          behavior_run="44305127142"
+          behavior_head="5c5200f336726079226ae323ba6c82f8781d7c1d"
+          version_run="44304476515"
+          version_head="9fe9067f1b2eb2dcc1435baee1fa43bb1aa6050e"
+          startup_run="44331177764"
+          dark_run="44328932437"
+          startup_head="2e0f6505fa9bc5015207615bb4542e5acb6b19ec"
+          dark_head="a1816645b141a66e613142ecc2e20f10cbc18d36"
+          startup_path=".github/workflows/macos-0310-full-compact-proof.yml"
+          startup_blob="7e4a4c1c3f72f7b2d0ef7a5997ff38ca3df18c5f"
+          dark_blob="fad62125aecb55bf94b4a0112556544294b7ccbc"
+          screenshot_run="44326819539"
+          screenshot_head="fa6bb8c0094c097ce0f5361da95b490fa4061e4a"
+          screenshot_path=".github/workflows/macos-0310-screenshots-20261118.yml"
+          screenshot_blob="2154063ca228a1d5641f005c9b300fb4af0e098b"
+          artifact_id="14437366655"
+          artifact_sha="104274ef65367eb374d51ea65d13376dc7a1ac0e5e8fbd88fb6ed0070a0c3348"
+          dmg_sha="0d0431090f79075b8a3cca74b3249e28ae70f2c5be1b4cf3562888da3fb6a9ad"
+          tag="v0.3.10"
+          test "$GITHUB_REPOSITORY" = "$repo"
+          [[ "$startup_run" =~ ^[0-9]+$ && "$screenshot_run" =~ ^[0-9]+$ ]]
+          [[ "$startup_head" =~ ^[0-9a-f]{40}$ && "$screenshot_head" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$startup_blob" =~ ^[0-9a-f]{40}$ && "$screenshot_blob" =~ ^[0-9a-f]{40}$ ]]
+          test "$startup_run" != "$screenshot_run"
+          test "$startup_run" != "$run_id"
+          test "$screenshot_run" != "$run_id"
+          for run in "$run_id" "$behavior_run" "$version_run" "$startup_run" "$screenshot_run"; do
+            test "$(gh api "repos/$repo/actions/runs/$run" --jq .status)" = "completed"
+            test "$(gh api "repos/$repo/actions/runs/$run" --jq .conclusion)" = "success"
+          done
+          test "$(gh api "repos/$repo/actions/runs/$run_id" --jq .head_sha)" = "$ci_head"
+          test "$(gh api "repos/$repo/actions/runs/$run_id" --jq .path)" = ".github/workflows/macos-0310-candidate-ci.yml"
+          test "$(gh api "repos/$repo/actions/runs/$behavior_run" --jq .head_sha)" = "$behavior_head"
+          test "$(gh api "repos/$repo/actions/runs/$version_run" --jq .head_sha)" = "$version_head"
+          test "$(gh api "repos/$repo/actions/runs/$behavior_run" --jq .path)" = ".github/workflows/macos-task-dot-cursor-ci-20261118.yml"
+          test "$(gh api "repos/$repo/contents/.github/workflows/macos-task-dot-cursor-ci-20261118.yml?ref=$behavior_head" --jq .sha)" = "094effc0a7fcafdc75a41c65a99fd47f7f458844"
+          test "$(gh api "repos/$repo/actions/runs/$version_run" --jq .path)" = ".github/workflows/macos-hover-0310-version-check-20261118.yml"
+          test "$(gh api "repos/$repo/contents/.github/workflows/macos-hover-0310-version-check-20261118.yml?ref=$version_head" --jq .sha)" = "4a7fb9f5cd146dc279732b6391fac53a7fd01e3e"
+          for file in Info.plist Sources/AITaskMonitor/AppVersion.swift Sources/AITaskMonitor/ReleaseUpdates.swift Tests/AITaskMonitorTests/ReleaseUpdate0310Tests.swift; do
+            tested="$(gh api "repos/$repo/contents/macos/$file?ref=$version_head" --jq .sha)"
+            released="$(gh api "repos/$repo/contents/macos/$file?ref=$source" --jq .sha)"
+            test "$tested" = "$released"
+          done
+          test "$(gh api "repos/$repo/actions/runs/$startup_run" --jq .head_sha)" = "$startup_head"
+          test "$(gh api "repos/$repo/actions/runs/$screenshot_run" --jq .head_sha)" = "$screenshot_head"
+          test "$(gh api "repos/$repo/actions/runs/$startup_run" --jq .path)" = "$startup_path"
+          test "$(gh api "repos/$repo/actions/runs/$screenshot_run" --jq .path)" = "$screenshot_path"
+          test "$(gh api "repos/$repo/contents/$startup_path?ref=$startup_head" --jq .sha)" = "$startup_blob"
+          test "$(gh api "repos/$repo/contents/$screenshot_path?ref=$screenshot_head" --jq .sha)" = "$screenshot_blob"
+          test "$(gh api "repos/$repo/actions/runs/$dark_run" --jq .status)" = "completed"
+          test "$(gh api "repos/$repo/actions/runs/$dark_run" --jq .head_sha)" = "$dark_head"
+          test "$(gh api "repos/$repo/actions/runs/$dark_run" --jq .path)" = "$startup_path"
+          test "$(gh api "repos/$repo/contents/$startup_path?ref=$dark_head" --jq .sha)" = "$dark_blob"
+          for appearance in light dark; do
+            selected_run="$startup_run"
+            if test "$appearance" = dark; then selected_run="$dark_run"; fi
+            gh api "repos/$repo/actions/runs/$selected_run/jobs?per_page=100" > "$RUNNER_TEMP/startup-$appearance-jobs.json"
+            job_id="$(jq -er --arg name "exact-dmg-gui (macos-26, $appearance)" '[.jobs[] | select(.name == $name and .conclusion == "success") | .id] | if length == 1 then .[0] else error("Missing successful actual application job") end' "$RUNNER_TEMP/startup-$appearance-jobs.json")"
+            gh api "repos/$repo/actions/jobs/$job_id/logs" > "$RUNNER_TEMP/startup-$appearance.log"
+            for marker in NEGATIVE_CONTROL_PASS HOVER_PASS FIXTURE_PASS FULL_VIEW_GEOMETRY_PASS DOTS_VISIBLE_PASS CONTENT_BOUNDS_PASS DOT_ARROW_BASELINE_PASS SWITCH_PASS SWITCHED_BOUNDS_PASS DOT_ARROW_PASS MINIMIZE_PASS RESTORE_PASS CLOSE_PASS NORMAL_CLOSE_PASS; do
+              grep -Eq "^[0-9]{4}-[^ ]+ $marker:" "$RUNNER_TEMP/startup-$appearance.log"
+            done
+            test "$(grep -Ec '^[0-9]{4}-[^ ]+ DOT_HAND_PASS:' "$RUNNER_TEMP/startup-$appearance.log")" -eq 2
+          done
+          test "$(gh api "repos/$repo/actions/runs/44326159719" --jq .conclusion)" = "success"
+          test "$(gh api "repos/$repo/actions/runs/44326159719" --jq .head_sha)" = "a3289fe0e35a76c065b820737af067edc164bdb0"
+          test "$(gh api "repos/$repo/contents/.github/workflows/macos-frame-test-independent.yml?ref=a3289fe0e35a76c065b820737af067edc164bdb0" --jq .sha)" = "d2a5f731b351e07bec359f3a2c707810553231b7"
+          unit_id="$(gh api "repos/$repo/actions/runs/44326159719/jobs?per_page=100" --jq '[.jobs[] | select(.name == "frame" and .conclusion == "success") | .id] | if length == 1 then .[0] else error("Missing window regression test") end')"
+          gh api "repos/$repo/actions/jobs/$unit_id/logs" > "$RUNNER_TEMP/window-tests.log"
+          grep -Eq '^[0-9]{4}-[^ ]+ CANDIDATE_TEST_PASS:' "$RUNNER_TEMP/window-tests.log"
+          for file in PointingHandCursor.swift; do
+            tested="$(gh api "repos/$repo/contents/macos/Sources/AITaskMonitor/$file?ref=$behavior_head" --jq .sha)"
+            released="$(gh api "repos/$repo/contents/macos/Sources/AITaskMonitor/$file?ref=$source" --jq .sha)"
+            test "$tested" = "$released"
+          done
+          test "$(gh api "repos/$repo/git/commits/$source" --jq '.parents[0].sha')" = "$prior"
+          test "$(gh api "repos/$repo/git/ref/heads/macos" --jq .object.sha)" = "$source"
+          artifact="$(gh api "repos/$repo/actions/artifacts/$artifact_id")"
+          test "$(jq -r .workflow_run.id <<<"$artifact")" = "$run_id"
+          test "$(jq -r .workflow_run.head_sha <<<"$artifact")" = "$ci_head"
+          test "$(jq -r .name <<<"$artifact")" = "macos-0310-candidate-$source"
+          test "$(jq -r .digest <<<"$artifact")" = "sha256:$artifact_sha"
+          test "$(jq -r .expired <<<"$artifact")" = "false"
+          archive="$RUNNER_TEMP/macos-0310-artifact.zip"
+          gh api "repos/$repo/actions/artifacts/$artifact_id/zip" > "$archive"
+          test "$(sha256sum "$archive" | cut -d' ' -f1)" = "$artifact_sha"
+          printf '%s\n' AITaskMonitor-macOS-0.3.10.dmg SHA256SUMS-macOS.txt SOURCE-REVISION.txt | LC_ALL=C sort > "$RUNNER_TEMP/expected-files"
+          unzip -Z1 "$archive" | LC_ALL=C sort > "$RUNNER_TEMP/artifact-files"
+          diff -u "$RUNNER_TEMP/expected-files" "$RUNNER_TEMP/artifact-files"
+          mkdir "$RUNNER_TEMP/macos-release"
+          unzip -q "$archive" -d "$RUNNER_TEMP/macos-release"
+          cd "$RUNNER_TEMP/macos-release"
+          test "$(tr -d '\r\n' < SOURCE-REVISION.txt)" = "$source"
+          test "$(sha256sum AITaskMonitor-macOS-0.3.10.dmg | cut -d' ' -f1)" = "$dmg_sha"
+          test "$(tr -d '\r\n' < SHA256SUMS-macOS.txt)" = "$dmg_sha  AITaskMonitor-macOS-0.3.10.dmg"
+          checksum_sha="$(sha256sum SHA256SUMS-macOS.txt | cut -d' ' -f1)"
+          gh api --paginate "repos/$repo/releases?per_page=100" --jq '.[].tag_name' > "$RUNNER_TEMP/existing-release-tags"
+          if grep -Fxq "$tag" "$RUNNER_TEMP/existing-release-tags"; then echo "Release or draft already exists"; exit 1; fi
+          if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then echo "Tag already exists"; exit 1; fi
+          if gh api "repos/$repo/releases/tags/$tag" >/dev/null 2>&1; then echo "Release already exists"; exit 1; fi
+          gh api --method POST "repos/$repo/git/refs" -f ref="refs/tags/$tag" -f sha="$source" >/dev/null
+          test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "$source"
+          notes="$(printf '%s\n\n%s' 'При наведении на окно монитор становится активным. В компактном режиме над точками переключения задач появляется указатель-рука; лишняя рамка окна устранена.' 'Hovering over the window activates the monitor. In compact mode, the task selector dots show a pointing cursor, and the extra window frame has been removed.')"
+          gh api --method POST "repos/$repo/releases" -f tag_name="$tag" -f name="AI Task Monitor 0.3.10 — macOS" -f body="$notes" -F draft=true -F prerelease=false > "$RUNNER_TEMP/draft-release.json"
+          release_id="$(jq -er .id "$RUNNER_TEMP/draft-release.json")"
+          echo "DRAFT_RELEASE_ID=$release_id"
+          upload_base="https://uploads.github.com/repos/$repo/releases/$release_id/assets"
+          test "$(jq -r .upload_url "$RUNNER_TEMP/draft-release.json")" = "$upload_base{?name,label}"
+          for asset in AITaskMonitor-macOS-0.3.10.dmg SHA256SUMS-macOS.txt; do
+            curl --fail --silent --show-error --proto '=https' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$asset" "$upload_base?name=$asset" > "$RUNNER_TEMP/upload-$asset.json"
+            jq -e --arg name "$asset" '.name == $name and .state == "uploaded"' "$RUNNER_TEMP/upload-$asset.json" >/dev/null
+          done
+          gh api "repos/$repo/releases/$release_id" > "$RUNNER_TEMP/draft-check.json"
+          jq -e --arg tag "$tag" '.tag_name == $tag and .draft == true and .prerelease == false and (.assets | length) == 2' "$RUNNER_TEMP/draft-check.json" >/dev/null
+          jq -e --arg sha "sha256:$dmg_sha" '[.assets[] | select(.name == "AITaskMonitor-macOS-0.3.10.dmg" and .state == "uploaded" and .size == 5884020 and .digest == $sha)] | length == 1' "$RUNNER_TEMP/draft-check.json" >/dev/null
+          jq -e --arg sha "sha256:$checksum_sha" '[.assets[] | select(.name == "SHA256SUMS-macOS.txt" and .state == "uploaded" and .digest == $sha)] | length == 1' "$RUNNER_TEMP/draft-check.json" >/dev/null
+          test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "$source"
+          test "$(gh api "repos/$repo/git/ref/heads/macos" --jq .object.sha)" = "$source"
+          gh api --method PATCH "repos/$repo/releases/$release_id" -F draft=false -f make_latest=true > "$RUNNER_TEMP/published.json"
+          jq -e --arg tag "$tag" '.tag_name == $tag and .draft == false and .prerelease == false and (.assets | length) == 2' "$RUNNER_TEMP/published.json" >/dev/null
+          jq -e --arg sha "sha256:$dmg_sha" '[.assets[] | select(.name == "AITaskMonitor-macOS-0.3.10.dmg" and .state == "uploaded" and .size == 5884020 and .digest == $sha)] | length == 1' "$RUNNER_TEMP/published.json" >/dev/null
+          jq -e --arg sha "sha256:$checksum_sha" '[.assets[] | select(.name == "SHA256SUMS-macOS.txt" and .state == "uploaded" and .digest == $sha)] | length == 1' "$RUNNER_TEMP/published.json" >/dev/null
+          test "$(gh api "repos/$repo/releases/latest" --jq .tag_name)" = "$tag"
+          echo "Published https://github.com/$repo/releases/tag/$tag"
+
