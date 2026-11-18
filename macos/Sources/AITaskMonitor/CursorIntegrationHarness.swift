@@ -24,6 +24,85 @@ enum CursorIntegrationHarness {
         return 0
     }
 
+    static func keyboardBaseline(fixture: String) -> Int32 {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["GITHUB_ACTIONS"] == "true", environment["RUNNER_ENVIRONMENT"] == "github-hosted",
+              let temp = environment["RUNNER_TEMP"], fixture.hasPrefix(temp + "/aitm-cursor-") else { return 2 }
+        let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
+        AppLanguage.previewOverride = .en
+        let store = TaskStore.preview()
+        store.isCompact = true
+        store.compactIndex = 1
+        let host = NSHostingView(rootView: RootView().environmentObject(store))
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 372, height: 200),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        var result: Int32 = 2
+        Task { @MainActor in
+            defer {
+                window.close()
+                app.stop(nil)
+                if let event = NSEvent.otherEvent(with: .applicationDefined, location: .zero,
+                    modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0) {
+                    app.postEvent(event, atStart: false)
+                }
+            }
+            func pause() async { try? await Task.sleep(nanoseconds: 1_000_000_000) }
+            app.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            await pause()
+            print("BASELINE_WINDOW active=\(app.isActive) key=\(window.isKeyWindow)")
+            guard app.isActive && window.isKeyWindow else { return }
+            let axApp = AXUIElementCreateApplication(getpid())
+            var candidates: [AXUIElement] = []
+            func axString(_ element: AXUIElement, _ attribute: CFString) -> String? {
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
+                return value as? String
+            }
+            func collectAX(_ element: AXUIElement, depth: Int = 0) {
+                guard depth < 30 else { return }
+                let role = axString(element, kAXRoleAttribute as CFString)
+                let label = axString(element, kAXTitleAttribute as CFString) ??
+                    axString(element, kAXDescriptionAttribute as CFString)
+                if role == "AXButton" && label == "Task 1" { candidates.append(element) }
+                var children: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &children) == .success,
+                   let values = children as? [AXUIElement] {
+                    for child in values { collectAX(child, depth: depth + 1) }
+                }
+            }
+            collectAX(axApp)
+            guard let target = candidates.first else {
+                print("BASELINE_BLOCKED: no accessible task button")
+                return
+            }
+            let setResult = AXUIElementSetAttributeValue(target, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            await pause()
+            var focusedValue: CFTypeRef?
+            let readResult = AXUIElementCopyAttributeValue(target, kAXFocusedAttribute as CFString, &focusedValue)
+            let focused = (focusedValue as? Bool) ?? false
+            print("BASELINE_FOCUS set=\(setResult.rawValue) read=\(readResult.rawValue) focused=\(focused)")
+            guard setResult == .success && focused else { return }
+            print("BASELINE_INDEX_BEFORE_SPACE=\(store.compactIndex)")
+            CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true)?.post(tap: .cghidEventTap)
+            CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false)?.post(tap: .cghidEventTap)
+            await pause()
+            print("BASELINE_INDEX_AFTER_SPACE=\(store.compactIndex)")
+            store.compactIndex = 1
+            await pause()
+            let press = AXUIElementPerformAction(target, kAXPressAction as CFString)
+            await pause()
+            print("BASELINE_AX_PRESS result=\(press.rawValue) index=\(store.compactIndex)")
+            result = 0
+        }
+        app.run()
+        return result
+    }
+
     static func run(fixture: String) -> Int32 {
         let environment = ProcessInfo.processInfo.environment
         guard environment["GITHUB_ACTIONS"] == "true", environment["RUNNER_ENVIRONMENT"] == "github-hosted",
