@@ -143,11 +143,14 @@ jobs:
           import AppKit
           import SwiftUI
           import Foundation
+          import CoreGraphics
 
           @MainActor
           enum FrameAppProbe {
               static var anchor: NSPoint?
               static var hostConfigured = false
+              static var beforeDrag: NSPoint?
+              static weak var trackedWindow: NSWindow?
 
               static func output(_ message: String) {
                   FileHandle.standardError.write(Data(("APP_PROBE " + message + "\n").utf8))
@@ -190,13 +193,44 @@ jobs:
                   }
               }
 
+              static func postDrag(_ window: NSWindow) {
+                  guard let screen = window.screen else { output("drag-unverified no-screen"); return }
+                  let start = CGPoint(x: window.frame.minX + window.frame.width / 2,
+                                      y: screen.frame.maxY - window.frame.maxY + 28)
+                  let end = CGPoint(x: start.x + 60, y: start.y + 30)
+                  beforeDrag = window.frame.origin
+                  let events: [(CGEventType, CGPoint)] = [(.leftMouseDown, start), (.leftMouseDragged, end), (.leftMouseUp, end)]
+                  let warp = CGWarpMouseCursorPosition(start)
+                  for (kind, point) in events {
+                      guard let event = CGEvent(mouseEventSource: nil, mouseType: kind, mouseCursorPosition: point, mouseButton: .left) else {
+                          output("drag-unverified event-creation")
+                          return
+                      }
+                      event.post(tap: .cghidEventTap)
+                      usleep(150_000)
+                  }
+                  output("drag-sent warp=\(warp.rawValue) start=\(start) end=\(end)")
+              }
+
+              static func postRefreshKey() {
+                  let down = CGEvent(keyboardEventSource: nil, virtualKey: 15, keyDown: true)
+                  let up = CGEvent(keyboardEventSource: nil, virtualKey: 15, keyDown: false)
+                  guard let down, let up else { output("keyboard-unverified event-creation"); return }
+                  down.flags = .maskCommand
+                  up.flags = .maskCommand
+                  down.post(tap: .cghidEventTap)
+                  up.post(tap: .cghidEventTap)
+                  output("keyboard-sent command-r")
+              }
+
               static func makeStore() -> TaskStore {
                   let store = TaskStore.loopPreview(unavailableSources: [.codex, .claude])
                   DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
                       snapshot("expanded-before-host")
                       if let window = appWindow() {
                           if let root = window.contentView { describeViews(root, depth: 0) }
-                          hostConfigured = configureTypedHost(RootView().environmentObject(store), window: window)
+                          trackedWindow = window
+                          hostConfigured = false
                           output("typed-host-accessible=\(hostConfigured)")
                       }
                   }
@@ -219,6 +253,32 @@ jobs:
                   }
                   DispatchQueue.main.asyncAfter(deadline: .now() + 18) {
                       snapshot("compact-after-switch-0")
+                      if let window = trackedWindow {
+                          NSApplication.shared.activate(ignoringOtherApps: true)
+                          window.makeKeyAndOrderFront(nil)
+                          output("focus-request canBecomeKey=\(window.canBecomeKey) isKey=\(window.isKeyWindow)")
+                          postDrag(window)
+                      } else { output("drag-unverified no-window") }
+                  }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 21) {
+                      if let window = trackedWindow, let beforeDrag {
+                          let moved = abs(window.frame.origin.x - beforeDrag.x) > 1 || abs(window.frame.origin.y - beforeDrag.y) > 1
+                          output("drag-observed moved=\(moved) before=\(beforeDrag) after=\(window.frame.origin)")
+                          output("focus-before-key isKey=\(window.isKeyWindow) appActive=\(NSApplication.shared.isActive)")
+                          postRefreshKey()
+                      }
+                  }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 24) {
+                      if let window = trackedWindow {
+                          output("minimize-before key=\(window.isKeyWindow)")
+                          NSApplication.shared.keyWindow?.miniaturize(nil)
+                      }
+                  }
+                  DispatchQueue.main.asyncAfter(deadline: .now() + 27) {
+                      if let window = trackedWindow {
+                          output("minimize-observed miniaturized=\(window.isMiniaturized)")
+                          if window.isMiniaturized { window.deminiaturize(nil) }
+                      }
                       NSApplication.shared.terminate(nil)
                   }
                   return store
@@ -233,15 +293,33 @@ jobs:
           old = 'TaskStore(enableUpdateChecks: true, enableClaudeRetention: true, enableExternalProviders: true, enableExternalV2: true, enableCodexCloud: true)'
           if text.count(old) != 1:
               raise SystemExit('unexpected product App initializer')
-          path.write_text(text.replace(old, 'FrameAppProbe.makeStore()'))
+          text = text.replace(old, 'FrameAppProbe.makeStore()')
+          old_command = '{ store.refresh() }.keyboardShortcut("r")'
+          if text.count(old_command) != 1:
+              raise SystemExit('unexpected refresh command')
+          text = text.replace(old_command, '{ FrameAppProbe.output("keyboard-refresh"); store.refresh() }.keyboardShortcut("r")')
+          path.write_text(text)
           PY
           /usr/bin/python3 -V
-          for mode in combo; do
+          for mode in borderless-resizable; do
             /usr/bin/python3 -I -S -B "$root/instrument.py" "$root" "$mode"
             set +e
-            "$root/run-test" /usr/bin/xcrun swift test --disable-sandbox --scratch-path "$root/build" \
+            /usr/bin/python3 -I -S -B - "$root/run-test" /usr/bin/xcrun swift build --disable-sandbox --scratch-path "$root/build" \
               --cache-path "$root/cache" --config-path "$root/config" --security-path "$root/security" \
-              --filter CompactWindowLayoutTests > "$root/evidence/$mode.log" 2>&1
+              > "$root/evidence/$mode.log" 2>&1 <<'PY'
+          import os
+          import signal
+          import subprocess
+          import sys
+          process = subprocess.Popen(sys.argv[1:], start_new_session=True)
+          try:
+              sys.exit(process.wait(timeout=300))
+          except subprocess.TimeoutExpired:
+              print("BUILD_TIMEOUT: isolated build exceeded 300 seconds", flush=True)
+              os.killpg(process.pid, signal.SIGKILL)
+              process.wait()
+              sys.exit(124)
+          PY
             status=$?
             set -e
             echo "DIAGNOSTIC_MODE_RESULT: $mode exit=$status" | tee -a "$root/evidence/results.txt"
@@ -259,8 +337,16 @@ jobs:
           PLIST
             "$root/run-test" "$app/Contents/MacOS/AITaskMonitor" > "$root/evidence/windowgroup.log" 2>&1 &
             app_pid=$!
-            for i in {1..25}; do
+            for i in {1..38}; do
               kill -0 "$app_pid" 2>/dev/null || break
+              for capture_stage in expanded compact-first; do
+                if ! test -f "$root/evidence/borderless-$capture_stage.png"; then
+                  number="$(sed -n "s/.*APP_PROBE stage=$capture_stage windowNumber=\\([0-9]*\\).*/\\1/p" "$root/evidence/windowgroup.log" | tail -1)"
+                  if test -n "$number"; then
+                    "$root/run-test" /usr/sbin/screencapture -x -l "$number" "$root/evidence/borderless-$capture_stage.png" || true
+                  fi
+                fi
+              done
               sleep 1
             done
             if kill -0 "$app_pid" 2>/dev/null; then
