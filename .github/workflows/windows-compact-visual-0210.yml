@@ -1,0 +1,105 @@
+name: Verify Windows compact padding 0.2.10
+on:
+  push:
+    branches:
+      - codex/windows-compact-visual-0210-a
+permissions:
+  contents: read
+env:
+  DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+jobs:
+  visuals:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        theme: [dark, light]
+        mode: [compact, expanded]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 2
+      - name: Verify exact app source
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $expected='4fb0d209befc3bcec732a2fa78cb0c94b75a6f10'
+          if((git rev-parse HEAD^).Trim() -cne $expected){throw 'Unexpected product revision.'}
+          $changes=@(git diff --name-only HEAD^ HEAD)
+          if($changes.Count -ne 1 -or $changes[0] -cne '.github/workflows/windows-compact-visual-0210.yml'){throw 'Unexpected changes in verification workflow commit.'}
+      - name: Inspect geometry and save previews
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:RUNNER_TEMP ('aitm-compact-visual-'+[guid]::NewGuid().ToString('N'))
+          $out=Join-Path $root 'shots'
+          [void][IO.Directory]::CreateDirectory($out)
+          [IO.File]::AppendAllText($env:GITHUB_ENV,('SHOTS='+$out+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
+          $env:USERPROFILE=Join-Path $root 'profile'
+          $env:LOCALAPPDATA=Join-Path $root 'local'
+          $env:CODEX_HOME=Join-Path $root 'codex'
+          $env:TEMP=$root
+          $env:TMP=$root
+          foreach($p in @($env:USERPROFILE,$env:LOCALAPPDATA,$env:CODEX_HOME)){[void][IO.Directory]::CreateDirectory($p)}
+          $app=(Resolve-Path 'windows/app/CodexProgress.ps1').Path
+          $systemPowerShell=Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
+          $theme='${{ matrix.theme }}'
+          $mode='${{ matrix.mode }}'
+          foreach($language in @('ru','en')){
+            foreach($state in @('planned','unconfirmed-plan','multiple','warning','loop')){
+              $count=if($state -eq 'multiple'){'2'}else{'1'}
+              $shot=Join-Path $out ($state+'-'+$language+'-'+$theme+'-'+$mode+'.png')
+              $arguments=@('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',$app,'-PreviewActiveTasks',$count,'-PreviewProviderLabelsUiTest','-PreviewOffscreen','-PreviewMotion','off','-ThemeOverride',$theme,'-LanguageOverride',$language,'-SnapshotFile',$shot,'-DiagnosticDirectory',(Join-Path $root ('diag-'+$state+'-'+$language)))
+              if($mode -eq 'compact'){$arguments+='-CompactMode'}
+              if($state -in @('planned','unconfirmed-plan')){$arguments+=@('-PreviewScenario','planned','-PreviewPlanUiTest')}
+              if($state -eq 'unconfirmed-plan'){$arguments+='-PreviewPlanUnconfirmed'}
+              if($state -eq 'warning'){$arguments+=@('-PreviewSourceWarning','partial-data','-PreviewWarningProvider','codex')}
+              if($state -eq 'loop'){$arguments+='-PreviewLoopWarning'}
+              & $systemPowerShell @arguments
+              if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $shot -PathType Leaf)){throw ('Visual check failed: '+$state+' '+$language)}
+            }
+            if($mode -eq 'compact'){
+              $shot=Join-Path $out ('tooltip-base-'+$language+'-'+$theme+'.png')
+              $hint=Join-Path $out ('tooltip-'+$language+'-'+$theme+'.png')
+              $raw=Join-Path $out ('tooltip-raw-'+$language+'-'+$theme+'.png')
+              $arguments=@('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',$app,'-PreviewActiveTasks','2','-PreviewProviderLabelsUiTest','-PreviewMotion','off','-CompactMode','-ThemeOverride',$theme,'-LanguageOverride',$language,'-SnapshotFile',$shot,'-HintSnapshotFile',$hint,'-HintRawSnapshotFile',$raw,'-DiagnosticDirectory',(Join-Path $root ('tooltip-diag-'+$language)))
+              & $systemPowerShell @arguments
+              if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $hint -PathType Leaf) -or -not (Test-Path -LiteralPath $raw -PathType Leaf)){throw ('Tooltip preview failed: '+$language)}
+            }
+          }
+          $now=[DateTime]::UtcNow
+          $day=Join-Path (Join-Path (Join-Path (Join-Path $env:CODEX_HOME 'sessions') $now.ToString('yyyy')) $now.ToString('MM')) $now.ToString('dd')
+          $locks=Join-Path $env:CODEX_HOME 'thread-writer-locks'
+          [void][IO.Directory]::CreateDirectory($day)
+          [void][IO.Directory]::CreateDirectory($locks)
+          $id='11111111-1111-4111-8111-111111111111'
+          $rollout=Join-Path $day ('rollout-'+$now.ToString('yyyy-MM-ddTHH-mm-ss')+'-'+$id+'.jsonl')
+          $index=Join-Path $env:CODEX_HOME 'session_index.jsonl'
+          [IO.File]::WriteAllText((Join-Path $locks ($id+'.lock')),'')
+          foreach($language in @('ru','en')){
+            $title=if($language -eq 'ru'){[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('0KHQvtC30LTQsNGC0Ywg0L/QsNC90LXQu9GMINC/0YDQvtC10LrRgtCw'))}else{'Create a project dashboard'}
+            $activity=if($language -eq 'ru'){[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('0JPQvtGC0L7QstC70Y4g0YHRgtGA0YPQutGC0YPRgNGDINC/0YDQvtC10LrRgtCw'))}else{'Preparing the project structure'}
+            $ts=[DateTime]::UtcNow.ToString('o')
+            $metadata=@{type='session_meta';payload=@{id=$id}}|ConvertTo-Json -Compress -Depth 5
+            $started=@{timestamp=$ts;type='event_msg';payload=@{type='task_started';turn_id='turn-1'}}|ConvertTo-Json -Compress -Depth 5
+            $thinking=@{timestamp=$ts;type='event_msg';payload=@{type='agent_reasoning';text=$activity}}|ConvertTo-Json -Compress -Depth 5
+            [IO.File]::WriteAllText($rollout,(($metadata,$started,$thinking -join "`n")+"`n"),[Text.UTF8Encoding]::new($false))
+            $row=@{id=$id;thread_name=$title;updated_at=$ts}|ConvertTo-Json -Compress
+            [IO.File]::WriteAllText($index,($row+"`n"),[Text.UTF8Encoding]::new($false))
+            $shot=Join-Path $out ('demo-'+$language+'-'+$theme+'-'+$mode+'.png')
+            $probe=Join-Path $root ('ready-'+$language)
+            $arguments=@('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',$app,'-ThemeOverride',$theme,'-LanguageOverride',$language,'-SnapshotFile',$shot,'-DiagnosticDirectory',(Join-Path $root ('demo-diag-'+$language)),'-PreviewStartupReadyFile',$probe,'-PreviewStartupDelayMilliseconds','25')
+            if($mode -eq 'compact'){$arguments+='-CompactMode'}
+            & $systemPowerShell @arguments
+            if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $shot -PathType Leaf)){throw 'Synthetic task screenshot failed.'}
+            $details=Get-Content -LiteralPath ($probe+'.result.json') -Raw | ConvertFrom-Json
+            if($details.codexTaskCount -ne 1){throw 'The synthetic task was not rendered.'}
+          }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: windows-compact-0210-${{ matrix.theme }}-${{ matrix.mode }}
+          path: ${{ env.SHOTS }}
+          if-no-files-found: warn
+          retention-days: 3
