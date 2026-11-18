@@ -2896,6 +2896,7 @@ function Codex-Tasks {
  $items = New-Object Collections.Generic.List[object]
  foreach ($session in $sessions) {
   $id = [string]$session.id; $title = [string]$session.thread_name
+  if($title -eq "Guardian review"){continue}
   $titleGenerated=[bool](Prop $session 'titleGenerated' $false)
   if(($titleGenerated -or [string]::IsNullOrWhiteSpace($title)) -and $null -ne $codexTitles -and $codexTitles.ContainsKey($id)){$title=[string]$codexTitles[$id];$titleGenerated=$false}
   if([string]::IsNullOrWhiteSpace($title)){$title='Задача Codex';$titleGenerated=$true}
