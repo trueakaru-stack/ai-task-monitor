@@ -1,0 +1,125 @@
+name: Prepare and verify exact Windows 0.2.11 installer
+on:
+  push:
+    branches: ['codex/windows-installer-0211-ci-20261118']
+permissions:
+  contents: read
+jobs:
+  installer_upgrade_from_0210:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      RELEASE_SOURCE_SHA: '42825705eb131b12102763ad2b3eb120ef9cdcb1'
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+    steps:
+      - name: Check out exact source and run tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sourceRoot = Join-Path $env:RUNNER_TEMP ('aitm-final-source-' + [guid]::NewGuid().ToString('N'))
+          $source = Join-Path $sourceRoot 'source'
+          $template = Join-Path $sourceRoot 'template'
+          $hooks = Join-Path $sourceRoot 'hooks'
+          New-Item -ItemType Directory -Path $source, $template, $hooks | Out-Null
+          $env:GIT_CONFIG_NOSYSTEM = '1'
+          $env:GIT_CONFIG_GLOBAL = Join-Path $sourceRoot 'empty.gitconfig'
+          [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL, '')
+          $env:GIT_TERMINAL_PROMPT = '0'
+          git -c credential.helper= -c core.hooksPath="$hooks" -c init.defaultBranch=fixture init --quiet --template="$template" "$source"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot initialize checkout.' }
+          git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$env:RELEASE_SOURCE_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch the exact release source.' }
+          git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:RELEASE_SOURCE_SHA) { throw 'Unexpected source revision.' }
+          $gui = [IO.File]::ReadAllText((Join-Path $source 'windows/app/CodexProgress.ps1'))
+          $versionInfo = [IO.File]::ReadAllText((Join-Path $source 'windows/app/VersionInfo.cs'))
+          if (-not $gui.Contains('$script:currentVersion=''0.2.11''') -or -not $versionInfo.Contains('[assembly: AssemblyInformationalVersion("0.2.11")]')) { throw 'The 0.2.11 source versions do not agree.' }
+          $interpreters = @(Get-Command python.exe -CommandType Application -All -ErrorAction SilentlyContinue |
+              Where-Object { $_.Source -notmatch '(?i)\\WindowsApps\\' } | ForEach-Object { $_.Source })
+          if ($interpreters.Count -eq 0 -and $env:RUNNER_TOOL_CACHE) {
+              $pythonCache = Join-Path $env:RUNNER_TOOL_CACHE 'Python'
+              if (Test-Path -LiteralPath $pythonCache -PathType Container) {
+                  $interpreters = @(Get-ChildItem -LiteralPath $pythonCache -Filter python.exe -File -Recurse |
+                      Where-Object { $_.FullName -notmatch '(?i)\\WindowsApps\\' } | ForEach-Object { $_.FullName })
+              }
+          }
+          if ($interpreters.Count -eq 0) { throw 'A hosted Python interpreter was not found.' }
+          $interpreter = $interpreters[0]
+          $version = & $interpreter --version 2>&1
+          if ($LASTEXITCODE -ne 0 -or "$version" -notmatch '^Python 3\.') { throw 'A verified Python 3 interpreter is required.' }
+          & $interpreter -B (Join-Path $source 'windows/tests/Test-DotnetPathSafety.py')
+          if ($LASTEXITCODE -ne 0) { throw '.NET PATH safety check failed.' }
+          $published = Join-Path $sourceRoot 'published-0.2.10.exe'
+          Invoke-WebRequest -Uri 'https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.10/AITaskMonitorSetup-0.2.10.exe' -OutFile $published -TimeoutSec 90
+          if ((Get-FileHash -LiteralPath $published -Algorithm SHA256).Hash -cne 'ED73FC016B66944D353443556CFB53F09B98D6757C1716C3513ED7DDB72D00D1') { throw 'Published 0.2.10 installer does not match its expected hash.' }
+          $oldAssembly = [Reflection.Assembly]::LoadFile([IO.Path]::GetFullPath($published))
+          $oldStream = $oldAssembly.GetManifestResourceStream('ReleaseUpdates.ps1')
+          if ($null -eq $oldStream) { throw 'Published installer has no update selector.' }
+          $oldReader = [IO.StreamReader]::new($oldStream, [Text.Encoding]::UTF8, $true)
+          try { $oldUpdateSource = $oldReader.ReadToEnd() } finally { $oldReader.Dispose(); $oldStream.Dispose() }
+          $oldUpdatePath = Join-Path $sourceRoot 'published-ReleaseUpdates.ps1'
+          [IO.File]::WriteAllText($oldUpdatePath, $oldUpdateSource, [Text.UTF8Encoding]::new($true))
+          . $oldUpdatePath
+          $fixture = '[{"tag_name":"v0.3.9","draft":false,"assets":[{"name":"AITaskMonitor-macOS-0.3.9.dmg","browser_download_url":"https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.9/AITaskMonitor-macOS-0.3.9.dmg"}]},{"tag_name":"v0.2.11","draft":false,"assets":[{"name":"AITaskMonitorSetup-0.2.11.exe","browser_download_url":"https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.11/AITaskMonitorSetup-0.2.11.exe"}]}]'
+          $selected = Find-PlatformUpdate $fixture '0.2.10' 'windows'
+          if ($null -eq $selected -or $selected.Version -cne '0.2.11' -or $selected.Url -cne 'https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.11/AITaskMonitorSetup-0.2.11.exe') { throw 'Published 0.2.10 did not select the simulated 0.2.11 update.' }
+          if ($null -ne (Find-PlatformUpdate $fixture '0.2.11' 'windows')) { throw 'The current version was offered as an update.' }
+          Write-Output 'The update selector embedded in the published 0.2.10 installer selected the simulated Windows 0.2.11 release.'
+          & (Join-Path $source 'windows/tests/Test-CodexTitleLookup.ps1')
+          & (Join-Path $source 'windows/tests/Test-ReleaseUpdates.ps1')
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+          $test = Join-Path $sourceRoot 'Test-SafeInstallSwap.exe'
+          & $compiler /nologo /target:exe /main:TestSafeInstallSwap /reference:System.Web.Extensions.dll /reference:System.Management.dll /reference:System.Windows.Forms.dll "/out:$test" `
+              (Join-Path $source 'windows/app/SafeInstallPaths.cs') `
+              (Join-Path $source 'windows/app/SafeInstallSwap.cs') `
+              (Join-Path $source 'windows/app/MonitorProcessCheck.cs') `
+              (Join-Path $source 'windows/app/CodexProgressInstaller.cs') `
+              (Join-Path $source '.github/legacy-uninstall-ci/Test-SafeInstallSwap.cs')
+          if ($LASTEXITCODE -ne 0) { throw 'Installer regression harness did not compile.' }
+          & $test
+          if ($LASTEXITCODE -ne 0) { throw 'Installer regression harness failed.' }
+          $env:GITHUB_SHA = $env:RELEASE_SOURCE_SHA
+          $fixture = Join-Path $source '.github/legacy-uninstall-ci/Test-FullInstaller.ps1'
+          $content = [IO.File]::ReadAllText($fixture)
+          if (-not $content.Contains('0.2.7-alpha') -or -not $content.Contains('5AE065837FFEAAB6D958AB917EA946572AD4DF2412240BD77DEFA086F918C2B2')) { throw 'Unexpected original legacy fixture.' }
+          $content = $content.Replace('0.2.7-alpha','0.2.10').Replace('5AE065837FFEAAB6D958AB917EA946572AD4DF2412240BD77DEFA086F918C2B2','ED73FC016B66944D353443556CFB53F09B98D6757C1716C3513ED7DDB72D00D1')
+          $needle = '$_.Contains(''AI task monitor установлен.'')}).Count -gt 0) ''The published legacy installer did not complete successfully.'''
+          $replacement = '($_.Contains(''AI task monitor установлен.'') -or $_.Contains(''AI task monitor is installed.''))}).Count -gt 0) ''The published legacy installer did not complete successfully.'''
+          if (-not $content.Contains($needle)) { throw 'Legacy completion assertion not found.' }
+          $content = $content.Replace($needle,$replacement)
+          [IO.File]::WriteAllText($fixture,$content,[Text.UTF8Encoding]::new($true))
+          git -C $source diff --exit-code -- windows/app
+          if ($LASTEXITCODE -ne 0) { throw 'Product source was unexpectedly modified.' }
+          Write-Output 'Testing published 0.2.10 to 0.2.11 using an isolated legacy-fixture copy.'
+          & (Join-Path $source '.github/legacy-uninstall-ci/Test-InstallerAndRemoval.ps1')
+          $artifactRoot = Join-Path $env:RUNNER_TEMP ('aitm-verified-setup-' + $env:RELEASE_SOURCE_SHA)
+          $recorded = [IO.File]::ReadAllText((Join-Path $artifactRoot 'SOURCE-REVISION.txt')).Trim()
+          if ($recorded -cne $env:RELEASE_SOURCE_SHA) { throw 'Artifact source revision is incorrect.' }
+          $installer = Join-Path $artifactRoot 'AITaskMonitorSetup.exe'
+          if ([Diagnostics.FileVersionInfo]::GetVersionInfo($installer).ProductVersion -cne '0.2.11') { throw 'Installer version is incorrect.' }
+
+          $named = Join-Path $artifactRoot 'AITaskMonitorSetup-0.2.11.exe'
+          [IO.File]::Copy($installer, $named, $false)
+          $hash = (Get-FileHash -LiteralPath $named -Algorithm SHA256).Hash
+          if ($hash -cne (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash) { throw 'The named setup differs from the verified installer.' }
+          [IO.File]::WriteAllText((Join-Path $artifactRoot 'SHA256SUMS-windows-0.2.11.txt'), ($hash.ToLowerInvariant() + '  AITaskMonitorSetup-0.2.11.exe' + [Environment]::NewLine), [Text.Encoding]::ASCII)
+          Write-Output ('Release candidate SHA-256: ' + $hash)
+      - name: Save exact verified candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-windows-0211-${{ env.RELEASE_SOURCE_SHA }}
+          path: |
+            ${{ runner.temp }}/aitm-verified-setup-${{ env.RELEASE_SOURCE_SHA }}/AITaskMonitorSetup-0.2.11.exe
+            ${{ runner.temp }}/aitm-verified-setup-${{ env.RELEASE_SOURCE_SHA }}/SHA256SUMS-windows-0.2.11.txt
+            ${{ runner.temp }}/aitm-verified-setup-${{ env.RELEASE_SOURCE_SHA }}/SOURCE-REVISION.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Save installer dialog screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-0211-dialogs-${{ env.RELEASE_SOURCE_SHA }}
+          path: ${{ runner.temp }}/aitm-dialogs-${{ env.RELEASE_SOURCE_SHA }}
+          if-no-files-found: warn
+          retention-days: 7
