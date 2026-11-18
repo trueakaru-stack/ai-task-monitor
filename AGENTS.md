@@ -12,3 +12,7 @@
 - A question, diagnosis, or partial fix does not replace the agreed objective. Resume the remaining work unless the user stops it or a user-specified resource limit is reached.
 - Windows source is maintained in `windows`, macOS source in `macos`; `main` holds project documentation. Use a temporary branch when needed for verification, then integrate verified and authorized source changes into the relevant platform branch while preserving unrelated local work.
 - Report source integration, application behavior, installer readiness, and visual verification separately. Do not present an unconnected migration component as a completed application.
+
+# Release screenshots
+
+- For each release that adds functionality or changes the interface, update the relevant, verified screenshots of the affected platform and README links in `main` as part of the same release. Keep screenshots for the other platform current, identify example data, and do not present previews as verified native windows. Verify the published images and links; if a necessary capture or check is unavailable, report the specific limitation.
