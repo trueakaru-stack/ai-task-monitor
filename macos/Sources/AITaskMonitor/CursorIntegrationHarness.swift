@@ -452,6 +452,10 @@ enum CursorIntegrationHarness {
                         await pause(1)
                         check(!app.isActive && !window.isKeyWindow, "\(description): helper becomes active")
                         let before = activations
+                        let targetScreen = window.convertPoint(toScreen: target)
+                        let targetWindow = NSWindow.windowNumber(at: targetScreen, belowWindowWithWindowNumber: 0)
+                        print("HOVER_TARGET \(description) screen=\(targetScreen) front=\(targetWindow) expected=\(window.windowNumber)")
+                        check(targetWindow == window.windowNumber, "\(description): target is visibly in monitor")
                         await move(target)
                         await pause(0.8)
                         check(app.isActive && window.isKeyWindow, "\(description): hover activates monitor")
@@ -493,7 +497,7 @@ enum CursorIntegrationHarness {
                     }) {
                         let top = expandedRoot.isFlipped ? CGFloat(25) : expandedRoot.bounds.height - 25
                         let expandedHeader = expandedRoot.convert(NSPoint(x: 70, y: top), to: nil)
-                        let expandedBackground = expandedRoot.convert(NSPoint(x: 25, y: 25), to: nil)
+                        let expandedBackground = expandedRoot.convert(NSPoint(x: 25, y: 220), to: nil)
                         await testWindowHover("Expanded header", expandedHeader)
                         await testWindowHover("Expanded background", expandedBackground)
                     } else {
