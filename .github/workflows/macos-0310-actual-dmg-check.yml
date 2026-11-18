@@ -300,7 +300,11 @@ jobs:
           #include <unistd.h>
 
           static void spin(double seconds) {
-              [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
+              NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
+              do {
+                  [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+                  [NSThread sleepForTimeInterval:0.01];
+              } while (deadline.timeIntervalSinceNow > 0);
           }
           static BOOL findWindow(pid_t target, CGFloat minimumWidth, CGRect *result, CGWindowID *number) {
               CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
