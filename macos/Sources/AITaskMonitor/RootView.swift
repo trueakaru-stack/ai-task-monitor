@@ -274,6 +274,15 @@ private struct WindowConfigurator: NSViewRepresentable {
 
     private func configure(_ window: NSWindow?, coordinator: Coordinator) {
         guard let window else { return }
+        if let content = window.contentView {
+            var insets = content.additionalSafeAreaInsets
+            let systemTopInset = content.safeAreaInsets.top - insets.top
+            let desiredTopInset = -systemTopInset
+            if abs(insets.top - desiredTopInset) > 0.5 {
+                insets.top = desiredTopInset
+                content.additionalSafeAreaInsets = insets
+            }
+        }
         coordinator.observe(window)
         coordinator.isApplying = true
         defer { coordinator.isApplying = false }
