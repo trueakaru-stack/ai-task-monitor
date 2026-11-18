@@ -28,12 +28,15 @@ jobs:
           export CFFIXED_USER_HOME="$AITM_CURSOR_SYNTHETIC_ROOT/synthetic-home"
           export TMPDIR="$AITM_CURSOR_SYNTHETIC_ROOT/tmp"
           cd macos
+          cp Sources/AITaskMonitor/RootView.swift "$AITM_CURSOR_SYNTHETIC_ROOT/RootView-candidate.swift"
+          test "$(grep -F -c '.background(PointingHandCursor().accessibilityHidden(true))' "$AITM_CURSOR_SYNTHETIC_ROOT/RootView-candidate.swift")" = 1
+          awk '!index($0, ".background(PointingHandCursor().accessibilityHidden(true))")' "$AITM_CURSOR_SYNTHETIC_ROOT/RootView-candidate.swift" > Sources/AITaskMonitor/RootView.swift
           /usr/bin/xcrun swift build --disable-sandbox --scratch-path "$AITM_CURSOR_SYNTHETIC_ROOT/build" 2>&1 | /usr/bin/tee "$AITM_CURSOR_SYNTHETIC_ROOT/evidence/build.log"
           app="$AITM_CURSOR_SYNTHETIC_ROOT/AI Task Monitor.app"
           mkdir -p "$app/Contents/MacOS"
           cp "$AITM_CURSOR_SYNTHETIC_ROOT/build/debug/AITaskMonitor" "$app/Contents/MacOS/AITaskMonitor"
           cp Info.plist "$app/Contents/Info.plist"
-          "$app/Contents/MacOS/AITaskMonitor" --cursor-integration "$AITM_CURSOR_SYNTHETIC_ROOT" > "$AITM_CURSOR_SYNTHETIC_ROOT/evidence/gui.log" 2>&1 &
+          "$app/Contents/MacOS/AITaskMonitor" --cursor-keyboard-baseline "$AITM_CURSOR_SYNTHETIC_ROOT" > "$AITM_CURSOR_SYNTHETIC_ROOT/evidence/gui.log" 2>&1 &
           pid=$!
           for attempt in {1..100}; do
             if ! kill -0 "$pid" 2>/dev/null; then break; fi
