@@ -1,0 +1,86 @@
+name: Windows card and title audit
+on:
+  push:
+    branches:
+      - codex/windows-card-label-audit-20261118-a
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+jobs:
+  titles:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify isolated title lookup
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File windows/tests/Test-CodexTitleLookup.ps1
+          if($LASTEXITCODE -ne 0){throw 'Title lookup verification failed.'}
+  cards:
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        theme: [dark, light]
+        mode: [expanded, compact]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check and capture task cards
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $root=Join-Path $env:RUNNER_TEMP ('card-'+[guid]::NewGuid().ToString('N'))
+          $out=Join-Path $root 'shots'
+          [void][IO.Directory]::CreateDirectory($out)
+          $env:USERPROFILE=Join-Path $root 'profile'
+          $env:LOCALAPPDATA=Join-Path $root 'local'
+          $env:CODEX_HOME=Join-Path $root 'codex'
+          foreach($p in @($env:USERPROFILE,$env:LOCALAPPDATA,$env:CODEX_HOME)){[void][IO.Directory]::CreateDirectory($p)}
+          $app=(Resolve-Path 'windows/app/CodexProgress.ps1').Path
+          $systemPowerShell=Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
+          foreach($state in @('active','unconfirmed')){
+            $shot=Join-Path $out ('verified-'+$state+'-${{ matrix.theme }}-${{ matrix.mode }}.png')
+            $args=@('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',$app,'-PreviewActiveTasks','1','-PreviewMotionUiTest','-PreviewOffscreen','-PreviewMotion','off','-ThemeOverride','${{ matrix.theme }}','-LanguageOverride','ru','-SnapshotFile',$shot,'-DiagnosticDirectory',(Join-Path $root ('diag-'+$state)))
+            if('${{ matrix.mode }}' -eq 'compact'){$args+='-CompactMode'}
+            if($state -eq 'unconfirmed'){$args+='-PreviewUnconfirmed'}
+            & $systemPowerShell @args
+            if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $shot)){throw 'Task card check failed.'}
+          }
+          $now=[DateTime]::UtcNow
+          $day=Join-Path (Join-Path (Join-Path (Join-Path $env:CODEX_HOME 'sessions') $now.ToString('yyyy')) $now.ToString('MM')) $now.ToString('dd')
+          $locks=Join-Path $env:CODEX_HOME 'thread-writer-locks'
+          [void][IO.Directory]::CreateDirectory($day)
+          [void][IO.Directory]::CreateDirectory($locks)
+          $id='11111111-1111-4111-8111-111111111111'
+          $rollout=Join-Path $day ('rollout-'+$now.ToString('yyyy-MM-ddTHH-mm-ss')+'-'+$id+'.jsonl')
+          $index=Join-Path $env:CODEX_HOME 'session_index.jsonl'
+          [IO.File]::WriteAllText((Join-Path $locks ($id+'.lock')),'')
+          foreach($language in @('ru','en')){
+            $title=if($language -eq 'ru'){'Создать панель проекта'}else{'Create a project dashboard'}
+            $activity=if($language -eq 'ru'){'Готовлю структуру проекта'}else{'Preparing the project structure'}
+            $ts=[DateTime]::UtcNow.ToString('o')
+            $metadata=@{type='session_meta';payload=@{id=$id}}|ConvertTo-Json -Compress -Depth 5
+            $started=@{timestamp=$ts;type='event_msg';payload=@{type='task_started';turn_id='turn-1'}}|ConvertTo-Json -Compress -Depth 5
+            $thinking=@{timestamp=$ts;type='event_msg';payload=@{type='agent_reasoning';text=$activity}}|ConvertTo-Json -Compress -Depth 5
+            [IO.File]::WriteAllText($rollout,(($metadata,$started,$thinking -join "`n")+"`n"),[Text.UTF8Encoding]::new($false))
+            $row=@{id=$id;thread_name=$title;updated_at=$ts}|ConvertTo-Json -Compress
+            [IO.File]::WriteAllText($index,($row+"`n"),[Text.UTF8Encoding]::new($false))
+            $shot=Join-Path $out ('demo-'+$language+'-${{ matrix.theme }}-${{ matrix.mode }}.png')
+            $probe=Join-Path $root ('ready-'+$language)
+            $args=@('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',$app,'-ThemeOverride','${{ matrix.theme }}','-LanguageOverride',$language,'-SnapshotFile',$shot,'-DiagnosticDirectory',(Join-Path $root ('demo-diag-'+$language)),'-PreviewStartupReadyFile',$probe,'-PreviewStartupDelayMilliseconds','25')
+            if('${{ matrix.mode }}' -eq 'compact'){$args+='-CompactMode'}
+            & $systemPowerShell @args
+            if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $shot)){throw 'Synthetic task screenshot failed.'}
+            $details=Get-Content -LiteralPath ($probe+'.result.json') -Raw | ConvertFrom-Json
+            if($details.codexTaskCount -ne 1){throw 'The synthetic task was not rendered.'}
+          }
+          "SHOTS=$out" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-cards-${{ matrix.theme }}-${{ matrix.mode }}
+          path: ${{ env.SHOTS }}
+          if-no-files-found: warn
