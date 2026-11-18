@@ -1,7 +1,7 @@
 name: Isolated macOS 0.3.10 stable build
 on:
   push:
-    branches: ['codex/macos-0310-candidate-ci']
+    branches: ['codex/macos-0310-insets-build-20261118']
     paths: ['.github/workflows/macos-0310-candidate-ci.yml']
 permissions:
   contents: read
@@ -26,7 +26,7 @@ jobs:
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$RUNNER_OS" = macOS
           test "$GITHUB_REPOSITORY" = trueakaru-stack/ai-task-monitor
-          task_source_sha='6f9e11914064052c0bbe5fbc30bfa6c0a23bc860'
+          task_source_sha='2b6f68bb8a0b7522ee9515f45154ce68acadb0e8'
           task_expected_build='14'
           [[ "$task_expected_build" =~ ^[0-9]+$ ]]
           (( 10#$task_expected_build > 13 ))
