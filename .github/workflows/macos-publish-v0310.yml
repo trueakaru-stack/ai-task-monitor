@@ -79,7 +79,7 @@ jobs:
             if test "$appearance" = dark; then selected_run="$dark_run"; fi
             gh api "repos/$repo/actions/runs/$selected_run/jobs?per_page=100" > "$RUNNER_TEMP/startup-$appearance-jobs.json"
             job_id="$(jq -er --arg name "exact-dmg-gui (macos-26, $appearance)" '[.jobs[] | select(.name == $name and .conclusion == "success") | .id] | if length == 1 then .[0] else error("Missing successful actual application job") end' "$RUNNER_TEMP/startup-$appearance-jobs.json")"
-            gh api "repos/$repo/actions/jobs/$job_id/logs" > "$RUNNER_TEMP/startup-$appearance.log"
+            gh api --allow-escape-sequences "repos/$repo/actions/jobs/$job_id/logs" > "$RUNNER_TEMP/startup-$appearance.log"
             for marker in NEGATIVE_CONTROL_PASS HOVER_PASS FIXTURE_PASS FULL_VIEW_GEOMETRY_PASS DOTS_VISIBLE_PASS CONTENT_BOUNDS_PASS DOT_ARROW_BASELINE_PASS SWITCH_PASS SWITCHED_BOUNDS_PASS DOT_ARROW_PASS MINIMIZE_PASS RESTORE_PASS CLOSE_PASS NORMAL_CLOSE_PASS; do
               grep -Eq "^[0-9]{4}-[^ ]+ $marker:" "$RUNNER_TEMP/startup-$appearance.log"
             done
@@ -89,7 +89,7 @@ jobs:
           test "$(gh api "repos/$repo/actions/runs/44326159719" --jq .head_sha)" = "a3289fe0e35a76c065b820737af067edc164bdb0"
           test "$(gh api "repos/$repo/contents/.github/workflows/macos-frame-test-independent.yml?ref=a3289fe0e35a76c065b820737af067edc164bdb0" --jq .sha)" = "d2a5f731b351e07bec359f3a2c707810553231b7"
           unit_id="$(gh api "repos/$repo/actions/runs/44326159719/jobs?per_page=100" --jq '[.jobs[] | select(.name == "frame" and .conclusion == "success") | .id] | if length == 1 then .[0] else error("Missing window regression test") end')"
-          gh api "repos/$repo/actions/jobs/$unit_id/logs" > "$RUNNER_TEMP/window-tests.log"
+          gh api --allow-escape-sequences "repos/$repo/actions/jobs/$unit_id/logs" > "$RUNNER_TEMP/window-tests.log"
           grep -Eq '^[0-9]{4}-[^ ]+ CANDIDATE_TEST_PASS:' "$RUNNER_TEMP/window-tests.log"
           for file in PointingHandCursor.swift; do
             tested="$(gh api "repos/$repo/contents/macos/Sources/AITaskMonitor/$file?ref=$behavior_head" --jq .sha)"
@@ -105,7 +105,7 @@ jobs:
           test "$(jq -r .digest <<<"$artifact")" = "sha256:$artifact_sha"
           test "$(jq -r .expired <<<"$artifact")" = "false"
           archive="$RUNNER_TEMP/macos-0310-artifact.zip"
-          gh api "repos/$repo/actions/artifacts/$artifact_id/zip" > "$archive"
+          gh api --allow-escape-sequences "repos/$repo/actions/artifacts/$artifact_id/zip" > "$archive"
           test "$(sha256sum "$archive" | cut -d' ' -f1)" = "$artifact_sha"
           printf '%s\n' AITaskMonitor-macOS-0.3.10.dmg SHA256SUMS-macOS.txt SOURCE-REVISION.txt | LC_ALL=C sort > "$RUNNER_TEMP/expected-files"
           unzip -Z1 "$archive" | LC_ALL=C sort > "$RUNNER_TEMP/artifact-files"
