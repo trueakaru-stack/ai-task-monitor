@@ -1,142 +1,72 @@
 import AppKit
+import Combine
 import SwiftUI
 
-struct PointingHandCursor: NSViewRepresentable {
-    func makeNSView(context: Context) -> CursorArea { CursorArea(frame: .zero) }
+private enum TaskPointCursor {
+    private static var owners: Set<UUID> = []
 
-    func updateNSView(_ view: CursorArea, context: Context) {
-        DispatchQueue.main.async { [weak view] in view?.synchronizeCursor() }
+    static func enter(_ id: UUID) {
+        guard owners.insert(id).inserted else { return }
+        if owners.count == 1 {
+            NSCursor.pointingHand.push()
+        } else {
+            NSCursor.pointingHand.set()
+        }
     }
 
-    final class CursorArea: NSView {
-        // Enter and exit events for neighboring points may arrive out of order.
-        private static var hoveredAreas: Set<ObjectIdentifier> = []
-        private var trackingArea: NSTrackingArea?
-        private var hovering = false
+    static func leave(_ id: UUID) {
+        guard owners.remove(id) != nil else { return }
+        if owners.isEmpty { NSCursor.pop() }
+    }
 
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    static func contains(_ id: UUID) -> Bool { owners.contains(id) }
+}
 
-        override func updateTrackingAreas() {
-            if let trackingArea { removeTrackingArea(trackingArea) }
-            // The SwiftUI hosting view can report a visibleRect larger than these bounds.
-            let trackingRect = bounds.intersection(visibleRect)
-            if trackingRect.isEmpty {
-                trackingArea = nil
-            } else {
-                let area = NSTrackingArea(rect: trackingRect, options: [.mouseEnteredAndExited, .activeAlways],
-                                          owner: self, userInfo: nil)
-                addTrackingArea(area)
-                trackingArea = area
-            }
-            super.updateTrackingAreas()
-            synchronizeCursor()
-        }
+struct PointingHandCursor: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var id = UUID()
+    @State private var ownerWindowNumber: Int?
+    @State private var hovering = false
 
-        override func mouseEntered(with event: NSEvent) { synchronizeCursor() }
-
-        override func mouseExited(with event: NSEvent) { synchronizeCursor() }
-
-        override func viewWillMove(toWindow newWindow: NSWindow?) {
-            if newWindow !== window {
-                if let window {
-                    NotificationCenter.default.removeObserver(self, name: NSWindow.willMiniaturizeNotification, object: window)
-                    NotificationCenter.default.removeObserver(self, name: NSWindow.didMiniaturizeNotification, object: window)
-                    NotificationCenter.default.removeObserver(self, name: NSWindow.didDeminiaturizeNotification, object: window)
-                    NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: window)
-                    NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: window)
+    func body(content: Content) -> some View {
+        content
+            .onHover { inside in
+                if inside {
+                    ownerWindowNumber = NSWindow.windowNumber(at: NSEvent.mouseLocation, belowWindowWithWindowNumber: 0)
+                    hovering = true
+                    TaskPointCursor.enter(id)
+                } else {
+                    releaseCursor()
                 }
-                NotificationCenter.default.removeObserver(self, name: NSApplication.willHideNotification, object: NSApp)
-                NotificationCenter.default.removeObserver(self, name: NSApplication.didHideNotification, object: NSApp)
-                NotificationCenter.default.removeObserver(self, name: NSApplication.didUnhideNotification, object: NSApp)
-                NotificationCenter.default.removeObserver(self, name: NSApplication.didResignActiveNotification, object: NSApp)
-                NotificationCenter.default.removeObserver(self, name: UserDefaults.didChangeNotification, object: nil)
-                stopHovering()
             }
-            super.viewWillMove(toWindow: newWindow)
-        }
+            .onDisappear { releaseCursor() }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.willMiniaturizeNotification)) { releaseForWindow($0) }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.didMiniaturizeNotification)) { releaseForWindow($0) }
+            .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { releaseForWindow($0) }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willHideNotification)) { _ in releaseCursor() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didHideNotification)) { _ in releaseCursor() }
+            .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in scheduleRefresh() }
+            .onChange(of: colorScheme) { _ in scheduleRefresh() }
+    }
 
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            guard let window else { return }
-            let center = NotificationCenter.default
-            center.addObserver(self, selector: #selector(windowWillHide),
-                               name: NSWindow.willMiniaturizeNotification, object: window)
-            center.addObserver(self, selector: #selector(windowWillHide),
-                               name: NSWindow.didMiniaturizeNotification, object: window)
-            center.addObserver(self, selector: #selector(windowWillHide),
-                               name: NSWindow.willCloseNotification, object: window)
-            center.addObserver(self, selector: #selector(windowDidRestore),
-                               name: NSWindow.didDeminiaturizeNotification, object: window)
-            center.addObserver(self, selector: #selector(windowDidRestore),
-                               name: NSWindow.didResignKeyNotification, object: window)
-            center.addObserver(self, selector: #selector(windowWillHide),
-                               name: NSApplication.willHideNotification, object: NSApp)
-            center.addObserver(self, selector: #selector(windowWillHide),
-                               name: NSApplication.didHideNotification, object: NSApp)
-            center.addObserver(self, selector: #selector(windowDidRestore),
-                               name: NSApplication.didUnhideNotification, object: NSApp)
-            center.addObserver(self, selector: #selector(windowDidRestore),
-                               name: NSApplication.didResignActiveNotification, object: NSApp)
-            center.addObserver(self, selector: #selector(settingsDidChange),
-                               name: UserDefaults.didChangeNotification, object: nil)
-        }
+    private func releaseForWindow(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window.windowNumber == ownerWindowNumber else { return }
+        releaseCursor()
+    }
 
-        override func viewDidChangeEffectiveAppearance() {
-            super.viewDidChangeEffectiveAppearance()
-            scheduleCursorRefresh()
-        }
+    private func releaseCursor() {
+        guard hovering else { return }
+        hovering = false
+        ownerWindowNumber = nil
+        TaskPointCursor.leave(id)
+    }
 
-        @objc private func settingsDidChange(_ notification: Notification) {
-            scheduleCursorRefresh()
-        }
-
-        private func scheduleCursorRefresh() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.synchronizeCursor() }
-        }
-
-        @objc private func windowWillHide(_ notification: Notification) {
-            stopHovering()
-        }
-
-        @objc private func windowDidRestore(_ notification: Notification) {
-            DispatchQueue.main.async { [weak self] in self?.synchronizeCursor() }
-        }
-
-        fileprivate func synchronizeCursor() {
-            guard let window, window.isVisible, !window.isMiniaturized, !NSApp.isHidden else {
-                stopHovering()
-                return
-            }
-            let pointer = NSEvent.mouseLocation
-            let localPoint = convert(window.convertPoint(fromScreen: pointer), from: nil)
-            let inside = bounds.intersection(visibleRect).contains(localPoint) &&
-                NSWindow.windowNumber(at: pointer, belowWindowWithWindowNumber: 0) == window.windowNumber
-            if inside {
-                startHovering()
-            } else {
-                stopHovering()
-            }
-        }
-
-        private func startHovering() {
-            if hovering {
-                NSCursor.pointingHand.set()
-                return
-            }
-            hovering = true
-            if Self.hoveredAreas.isEmpty {
-                NSCursor.pointingHand.push()
-            } else {
-                NSCursor.pointingHand.set()
-            }
-            Self.hoveredAreas.insert(ObjectIdentifier(self))
-        }
-
-        private func stopHovering() {
-            guard hovering else { return }
-            hovering = false
-            Self.hoveredAreas.remove(ObjectIdentifier(self))
-            if Self.hoveredAreas.isEmpty { NSCursor.pop() }
+    private func scheduleRefresh() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            guard hovering, TaskPointCursor.contains(id), NSApp.isActive,
+                  let ownerWindowNumber,
+                  NSWindow.windowNumber(at: NSEvent.mouseLocation, belowWindowWithWindowNumber: 0) == ownerWindowNumber else { return }
+            NSCursor.pointingHand.set()
         }
     }
 }
