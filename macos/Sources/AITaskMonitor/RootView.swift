@@ -201,6 +201,7 @@ struct RootView: View {
                                 Circle().fill(item == index ? Color.accentColor : MonitorTheme.muted).frame(width: 6, height: 6)
                             }
                             .buttonStyle(.plain)
+                            .modifier(PointingHandCursor())
                             .accessibilityLabel(tr("Задача \(item + 1)", "Task \(item + 1)"))
                         }
                     }
@@ -259,14 +260,14 @@ private struct WindowConfigurator: NSViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
+    func makeNSView(context: Context) -> HoverActivationView {
+        let view = HoverActivationView()
         let coordinator = context.coordinator
         DispatchQueue.main.async { configure(view.window, coordinator: coordinator) }
         return view
     }
 
-    func updateNSView(_ view: NSView, context: Context) {
+    func updateNSView(_ view: HoverActivationView, context: Context) {
         let coordinator = context.coordinator
         DispatchQueue.main.async { configure(view.window, coordinator: coordinator) }
     }
@@ -302,6 +303,67 @@ private struct WindowConfigurator: NSViewRepresentable {
         coordinator.wasCompact = isCompact
         coordinator.expectedSize = isCompact ? size : nil
         coordinator.anchor = isCompact ? NSPoint(x: window.frame.maxX, y: window.frame.minY) : nil
+    }
+
+    final class HoverActivationView: NSView {
+        private var trackingArea: NSTrackingArea?
+        private var enabledMouseMovedEvents = false
+        private var lastPointerPosition: NSPoint?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if let window, !window.acceptsMouseMovedEvents {
+                window.acceptsMouseMovedEvents = true
+                enabledMouseMovedEvents = true
+            }
+        }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            if newWindow !== window {
+                if enabledMouseMovedEvents { window?.acceptsMouseMovedEvents = false }
+                enabledMouseMovedEvents = false
+                lastPointerPosition = nil
+            }
+            super.viewWillMove(toWindow: newWindow)
+        }
+
+        override func updateTrackingAreas() {
+            if let trackingArea { removeTrackingArea(trackingArea) }
+            let rect = bounds.intersection(visibleRect)
+            if rect.isEmpty {
+                trackingArea = nil
+            } else {
+                let area = NSTrackingArea(rect: rect, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways],
+                                          owner: self, userInfo: nil)
+                addTrackingArea(area)
+                trackingArea = area
+            }
+            super.updateTrackingAreas()
+        }
+
+        override func mouseEntered(with event: NSEvent) { activateForPointer() }
+
+        override func mouseMoved(with event: NSEvent) { activateForPointer() }
+
+        override func mouseExited(with event: NSEvent) {
+            if NSEvent.mouseLocation != lastPointerPosition { lastPointerPosition = nil }
+        }
+
+        private func activateForPointer() {
+            guard let window, window.isVisible, !window.isMiniaturized, !NSApp.isHidden else { return }
+            let pointer = NSEvent.mouseLocation
+            // Focus changes can repeat hover events without moving the pointer.
+            guard pointer != lastPointerPosition else { return }
+            lastPointerPosition = pointer
+            guard NSWindow.windowNumber(at: pointer, belowWindowWithWindowNumber: 0) == window.windowNumber else { return }
+            let localPoint = convert(window.convertPoint(fromScreen: pointer), from: nil)
+            guard visibleRect.intersection(bounds).contains(localPoint),
+                  RoundedRectangle(cornerRadius: 20, style: .continuous).path(in: bounds).contains(localPoint) else { return }
+            if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+            if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
+        }
     }
 
     final class Coordinator {
