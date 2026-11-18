@@ -39,6 +39,8 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ env.AITM_TEST_TASK_ROOT }}/input
       - name: Validate profile isolation and run the actual application window
+        env:
+          AITM_TEST_APPEARANCE: ${{ matrix.appearance }}
         shell: bash
         run: |
           set -euo pipefail
@@ -250,8 +252,8 @@ jobs:
           test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = 0.3.10
           test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$task_app/Contents/Info.plist")" = 14
           echo "Starting verified installed copy from the exact DMG without preview flags"
-          echo "Requested standard appearance: ${{ matrix.appearance }}"
-          "$task_run" "$task_binary" -appearanceMode "${{ matrix.appearance }}" > "$task_root/out/app.log" 2>&1 &
+          echo "Requested standard appearance: $AITM_TEST_APPEARANCE"
+          "$task_run" "$task_binary" -appearanceMode "$AITM_TEST_APPEARANCE" > "$task_root/out/app.log" 2>&1 &
           task_pid=$!
           found=0
           for attempt in {1..40}; do
