@@ -475,8 +475,32 @@ enum CursorIntegrationHarness {
                     await move(helperInput)
                     helperApp.activate(options: [.activateIgnoringOtherApps])
                     await pause(1)
+                    let beforeRapidExit = activations
+                    let rapidInside = visualRoot.convert(NSPoint(x: 30, y: 30), to: nil)
+                    _ = CGWarpMouseCursorPosition(quartz(rapidInside))
+                    post(.mouseMoved, rapidInside)
+                    _ = CGWarpMouseCursorPosition(quartz(helperInput))
+                    post(.mouseMoved, helperInput)
+                    await pause(0.8)
+                    check(!app.isActive && activations == beforeRapidExit,
+                          "Queued hover does not activate monitor after pointer has left")
                     await move(helperInput)
                     check(cursor(.iBeam), "Moving into another app text field restores its I-beam")
+                    store.isCompact = false
+                    await pause(1)
+                    if let expandedRoot = descendants(host).first(where: {
+                        String(describing: type(of: $0)).contains("HoverActivationView")
+                    }) {
+                        let top = expandedRoot.isFlipped ? CGFloat(25) : expandedRoot.bounds.height - 25
+                        let expandedHeader = expandedRoot.convert(NSPoint(x: 70, y: top), to: nil)
+                        let expandedBackground = expandedRoot.convert(NSPoint(x: 25, y: 25), to: nil)
+                        await testWindowHover("Expanded header", expandedHeader)
+                        await testWindowHover("Expanded background", expandedBackground)
+                    } else {
+                        check(false, "Expanded interface bounds are available")
+                    }
+                    store.isCompact = true
+                    await pause(1)
                 } else {
                     print("UNVERIFIED: focus helper could not be inspected")
                 }
