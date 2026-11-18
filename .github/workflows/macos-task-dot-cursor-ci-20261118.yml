@@ -65,3 +65,5 @@ jobs:
 # Tracking-area verification, including minimize.
 
 # Recheck cursor synchronization across themes and app activation.
+
+# Separate visual capture from active theme-transition checks.
