@@ -31,6 +31,15 @@ enum CursorIntegrationHarness {
         }
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
+        let menu = NSMenu()
+        let applicationItem = NSMenuItem()
+        let applicationMenu = NSMenu()
+        let hideItem = NSMenuItem(title: "Hide", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        hideItem.target = app
+        applicationMenu.addItem(hideItem)
+        applicationItem.submenu = applicationMenu
+        menu.addItem(applicationItem)
+        app.mainMenu = menu
         AppLanguage.previewOverride = .en
         let store = TaskStore.preview()
         store.isCompact = true
@@ -165,6 +174,27 @@ enum CursorIntegrationHarness {
             }
             if points().count == 2 {
                 await move(center(points()[1]))
+                let handBeforeHide = cursor(.pointingHand)
+                check(handBeforeHide, "Hand shown before Cmd+H")
+                let down = CGEvent(keyboardEventSource: nil, virtualKey: 4, keyDown: true)
+                let up = CGEvent(keyboardEventSource: nil, virtualKey: 4, keyDown: false)
+                down?.flags = .maskCommand
+                up?.flags = .maskCommand
+                down?.post(tap: .cghidEventTap)
+                up?.post(tap: .cghidEventTap)
+                await pause(1)
+                if app.isHidden && handBeforeHide {
+                    check(cursor(.arrow), "Cmd+H restores arrow without moving")
+                    app.unhide(nil)
+                    app.activate(ignoringOtherApps: true)
+                    window.makeKeyAndOrderFront(nil)
+                    await pause(1)
+                } else {
+                    print("UNVERIFIED: Cmd+H did not hide the app or hand precondition was absent")
+                }
+            }
+            if points().count == 2 {
+                await move(center(points()[1]))
                 let handBeforeRemoval = cursor(.pointingHand)
                 check(handBeforeRemoval, "Hand shown immediately before removing points")
                 store.isCompact = false
@@ -203,6 +233,11 @@ enum CursorIntegrationHarness {
                     } else { print("UNVERIFIED: keyboard focus unavailable") }
                 }
             }
+            if points().count == 2 {
+                await move(outside)
+                await move(center(points()[0]))
+                check(cursor(.pointingHand), "Hand shown before switching to another application")
+            }
             let helper = Process()
             helper.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
             helper.arguments = ["--cursor-focus-helper"]
@@ -211,7 +246,11 @@ enum CursorIntegrationHarness {
                 await pause(2)
                 if !app.isActive && !window.isKeyWindow && points().count == 2 {
                     print("INACTIVE_WINDOW_STATE active=false key=false")
+                    check(cursor(.pointingHand), "Hand persists when app becomes inactive under pointer")
+                    await move(outside)
+                    check(cursor(.arrow), "Leaving points in inactive window restores arrow")
                     await move(center(points()[0]))
+                    print("INACTIVE_CURSOR system=\(String(describing: NSCursor.currentSystem)) app=\(NSCursor.current)")
                     check(cursor(.pointingHand), "Inactive floating window shows pointing hand")
                     check(!app.isActive && !window.isKeyWindow, "Hover on the floating window does not steal focus")
                     let helperInput = window.convertPoint(fromScreen: NSPoint(x: 730, y: 344))
