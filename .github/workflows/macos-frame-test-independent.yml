@@ -90,6 +90,16 @@ jobs:
               raise SystemExit("unexpected root frame")
           if mode == "ignore-top":
               source = source.replace(frame_line, frame_line + "\n        .ignoresSafeArea(.container, edges: .top)")
+          if mode == "safe-area-none":
+              target = "        window.contentView = host"
+              if tests.count(target) != 2:
+                  raise SystemExit("unexpected hosting view assignments")
+              tests = tests.replace(target, "        if #available(macOS 13.3, *) { host.safeAreaRegions = [] }\n" + target)
+          if mode == "borderless-resizable":
+              target = "        window.styleMask.formUnion([.fullSizeContentView, .resizable])"
+              if source.count(target) != 1:
+                  raise SystemExit("unexpected window style assignment")
+              source = source.replace(target, target + "\n        window.styleMask = [.borderless, .resizable]")
           if mode == "sizing-none":
               target = "        window.contentView = host"
               if tests.count(target) != 2:
@@ -109,7 +119,7 @@ jobs:
               raise SystemExit("unexpected setFrame count")
           source = source.replace(target, target + '\n            frameTrace("immediate")')
           snapshot = r'''        func testTrace(_ stage: String) {
-                      print("TEST_DIAG stage=\(stage) frame=\(window.frame) contentFrame=\(String(describing: window.contentView?.frame)) fitting=\(host.fittingSize) contentMin=\(window.contentMinSize) contentMax=\(window.contentMaxSize) frameMin=\(window.minSize) frameMax=\(window.maxSize) contentLayout=\(window.contentLayoutRect) safeArea=\(host.safeAreaInsets) sizing=\(host.sizingOptions)")
+                      print("TEST_DIAG stage=\(stage) frame=\(window.frame) contentFrame=\(String(describing: window.contentView?.frame)) fitting=\(host.fittingSize) contentMin=\(window.contentMinSize) contentMax=\(window.contentMaxSize) frameMin=\(window.minSize) frameMax=\(window.maxSize) contentLayout=\(window.contentLayoutRect) safeArea=\(host.safeAreaInsets) sizing=\(host.sizingOptions) canBecomeKey=\(window.canBecomeKey) isKeyWindow=\(window.isKeyWindow) movableBackground=\(window.isMovableByWindowBackground) styleMask=\(window.styleMask.rawValue)")
                   }
           '''
           target = "        window.orderFrontRegardless()\n        defer { window.close() }\n        RunLoop.current.run(until: Date().addingTimeInterval(1.2))\n\n        XCTAssertEqual(window.frame.width, 560, accuracy: 1)"
@@ -124,7 +134,7 @@ jobs:
           test_path.write_text(tests)
           PY
           /usr/bin/python3 -V
-          for mode in candidate ignore-top sizing-none; do
+          for mode in safe-area-none borderless-resizable; do
             /usr/bin/python3 -I -S -B "$root/instrument.py" "$root" "$mode"
             set +e
             "$root/run-test" /usr/bin/xcrun swift test --disable-sandbox --scratch-path "$root/build" \
