@@ -72,3 +72,5 @@ jobs:
 # Attempt keyboard and accessibility checks without changing permissions.
 
 # Check actual focus and accessibility activation independently.
+
+# Whole-window hover activation with rounded-corner and focus-cycle checks.
