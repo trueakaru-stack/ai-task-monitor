@@ -140,7 +140,11 @@ enum CursorIntegrationHarness {
                 UserDefaults.standard.set(theme, forKey: "appearanceMode")
                 await pause(1)
                 let current = points()
-                if current.count == 2 { await move(center(current[1])); capture(theme) }
+                if current.count == 2 {
+                    await move(center(current[1]))
+                    check(cursor(.pointingHand), "Cursor remains hand in \(theme) theme")
+                    capture(theme)
+                }
             }
             if points().count == 2 {
                 let target = center(points()[1])
@@ -251,7 +255,13 @@ enum CursorIntegrationHarness {
                     check(cursor(.arrow), "Leaving points in inactive window restores arrow")
                     await move(center(points()[0]))
                     print("INACTIVE_CURSOR system=\(String(describing: NSCursor.currentSystem)) app=\(NSCursor.current)")
-                    check(cursor(.pointingHand), "Inactive floating window shows pointing hand")
+                    let inactiveHand = cursor(.pointingHand)
+                    check(inactiveHand, "Inactive floating window shows pointing hand")
+                    if !inactiveHand {
+                        NSCursor.pointingHand.set()
+                        await pause()
+                        print("DIRECT_INACTIVE_SET hand=\(cursor(.pointingHand))")
+                    }
                     check(!app.isActive && !window.isKeyWindow, "Hover on the floating window does not steal focus")
                     let helperInput = window.convertPoint(fromScreen: NSPoint(x: 730, y: 344))
                     await move(helperInput)
