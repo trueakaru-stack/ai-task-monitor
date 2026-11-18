@@ -1,0 +1,41 @@
+name: Publish verified Windows 0.2.9 draft
+on:
+  push:
+    branches:
+      - codex/windows-publish-v029-resume-20261118
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify draft and publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="trueakaru-stack/ai-task-monitor"
+          revision="440392135de66a16214d6294e786855ff6dc22cc"
+          setup_sha="dc1b73125bf4f686f8c42328fb62eba1ced4ec5f1b6b66b3951e09d4522b5a0f"
+          checksum_sha="a9e055fe233c989b5ba692ef5722a20e7387cd0dc63eb5178f44682b7d118500"
+          tag="v0.2.9"
+          release_id="449793719"
+          test "$GITHUB_REPOSITORY" = "$repo"
+          test "$(gh api "repos/$repo/actions/runs/44280041535" --jq .conclusion)" = "success"
+          test "$(gh api "repos/$repo/actions/runs/44280041535" --jq .head_sha)" = "2c8a052821284b248dfe0a5fffbc770d2fc4706b"
+          test "$(gh api "repos/$repo/git/ref/heads/windows" --jq .object.sha)" = "$revision"
+          test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.type)" = "commit"
+          test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "$revision"
+          previous_latest="$(gh api "repos/$repo/releases/latest" --jq .tag_name)"
+          gh api "repos/$repo/releases/$release_id" > "$RUNNER_TEMP/verified-draft.json"
+          jq -e --arg tag "$tag" '.tag_name == $tag and .draft == true and .prerelease == false and (.assets | length) == 2' "$RUNNER_TEMP/verified-draft.json" >/dev/null
+          jq -e --arg sha "sha256:$setup_sha" '[.assets[] | select(.name == "AITaskMonitorSetup-0.2.9.exe" and .state == "uploaded" and .size == 1424896 and .digest == $sha)] | length == 1' "$RUNNER_TEMP/verified-draft.json" >/dev/null
+          jq -e --arg sha "sha256:$checksum_sha" '[.assets[] | select(.name == "SHA256SUMS-windows.txt" and .state == "uploaded" and .digest == $sha)] | length == 1' "$RUNNER_TEMP/verified-draft.json" >/dev/null
+          gh api --method PATCH "repos/$repo/releases/$release_id" -F draft=false -f make_latest=false > "$RUNNER_TEMP/published-release.json"
+          jq -e --arg tag "$tag" '.tag_name == $tag and .draft == false and .prerelease == false and (.assets | length) == 2' "$RUNNER_TEMP/published-release.json" >/dev/null
+          test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "$revision"
+          test "$(gh api "repos/$repo/releases/latest" --jq .tag_name)" = "$previous_latest"
+          echo "Published https://github.com/$repo/releases/tag/$tag"
