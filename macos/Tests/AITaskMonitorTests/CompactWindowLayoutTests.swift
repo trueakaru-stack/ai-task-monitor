@@ -5,6 +5,32 @@ import XCTest
 
 final class CompactWindowLayoutTests: XCTestCase {
     @MainActor
+    func testTitledWindowHasNoExtraTitleBarArea() {
+        _ = NSApplication.shared
+        let store = TaskStore.loopPreview(unavailableSources: [.claude])
+        let host = NSHostingView(rootView: RootView().environmentObject(store))
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 560, height: 700),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: false)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderFrontRegardless()
+        defer { window.close() }
+        RunLoop.current.run(until: Date().addingTimeInterval(1.2))
+
+        XCTAssertEqual(window.frame.width, 560, accuracy: 1)
+        XCTAssertEqual(window.frame.height, 700, accuracy: 1)
+
+        store.isCompact = true
+        RunLoop.current.run(until: Date().addingTimeInterval(1.2))
+        XCTAssertEqual(window.frame.width, 372, accuracy: 1)
+        XCTAssertEqual(window.frame.height, host.fittingSize.height, accuracy: 1,
+                       "The native window must fit the visible compact content")
+    }
+
+    @MainActor
     func testCompactWindowSizesToContentAndKeepsItsBottomEdge() throws {
         _ = NSApplication.shared
         let store = TaskStore.loopPreview(unavailableSources: [.claude])

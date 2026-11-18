@@ -293,7 +293,10 @@ private struct WindowConfigurator: NSViewRepresentable {
         if window.frame.size != size {
             window.minSize = .zero
             window.maxSize = NSSize(width: 10_000, height: 10_000)
-            window.setContentSize(size)
+            var frame = window.frame
+            frame.origin.y = frame.maxY - size.height
+            frame.size = size
+            window.setFrame(frame, display: true)
         }
         if let anchor {
             window.setFrameOrigin(NSPoint(x: anchor.x - window.frame.width, y: anchor.y))
