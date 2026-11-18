@@ -1,0 +1,104 @@
+name: Released Windows clean social previews
+on:
+  push:
+    branches: [codex/windows-social-clean-20261118]
+    paths: ['.github/workflows/windows-social-clean-20261118.yml']
+permissions:
+  contents: read
+jobs:
+  snapshots:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        theme: [dark, light]
+        language: [ru, en]
+    env:
+      AITM_THEME: ${{ matrix.theme }}
+      AITM_LANGUAGE: ${{ matrix.language }}
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - name: Render released source with synthetic data
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          if($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH -cne '0'){throw 'Disposable hosted Windows is required.'}
+          function Read-PathState([string]$scope){
+            $key=if($scope -eq 'User'){[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment',$false)}else{[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment',$false)}
+            try{
+              $value=$key.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+              $kind=if($null -eq $value){'Missing'}else{[string]$key.GetValueKind('Path')}
+              return [PSCustomObject]@{Value=[string]$value;Kind=$kind}
+            }finally{if($null -ne $key){$key.Dispose()}}
+          }
+          $beforeUser=Read-PathState 'User';$beforeMachine=Read-PathState 'Machine'
+          $beforeProcess=[Environment]::GetEnvironmentVariable('Path','Process')
+          try{
+            $runnerTemp=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')+'\'
+            $root=[IO.Path]::GetFullPath((Join-Path $runnerTemp ('aitm-social-preview-'+[Guid]::NewGuid().ToString('N'))))
+            if(-not $root.StartsWith($runnerTemp,[StringComparison]::OrdinalIgnoreCase) -or [IO.Directory]::Exists($root)){throw 'Unsafe synthetic root.'}
+            foreach($name in @('source','template','hooks','temp','profile','appdata','localappdata','screenshots')){[void][IO.Directory]::CreateDirectory((Join-Path $root $name))}
+            $source=Join-Path $root 'source';$hooks=Join-Path $root 'hooks';$template=Join-Path $root 'template'
+            $env:GIT_CONFIG_NOSYSTEM='1';$env:GIT_TERMINAL_PROMPT='0';$env:GIT_CONFIG_GLOBAL=Join-Path $root 'empty.gitconfig'
+            [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL,'')
+            git -c credential.helper= -c core.hooksPath="$hooks" init --quiet --template="$template" "$source"
+            if($LASTEXITCODE -ne 0){throw 'Cannot initialize checkout.'}
+            git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" f136601588af2cfe1994a3574dfd1583929c183e
+            if($LASTEXITCODE -ne 0){throw 'Cannot fetch release revision.'}
+            git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+            if($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne 'f136601588af2cfe1994a3574dfd1583929c183e'){throw 'Release revision mismatch.'}
+            $actualBlob=(git -C "$source" hash-object windows/app/CodexProgress.ps1).Trim()
+            if($actualBlob -cne '988bb559cc93ac737e3f5f204062ab82aae0c417'){throw ('Release app blob mismatch: '+$actualBlob)}
+            function Invoke-Isolated([string]$executable,[string[]]$arguments){
+              foreach($argument in $arguments){if($argument.Contains('"') -or $argument.EndsWith('\')){throw 'Unsupported synthetic argument.'}}
+              $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$executable
+              $info.Arguments=($arguments|ForEach-Object {'"'+$_+'"'}) -join ' '
+              $info.WorkingDirectory=$root;$info.UseShellExecute=$false;$info.CreateNoWindow=$true
+              $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true;$info.EnvironmentVariables.Clear()
+              $values=@{
+                SystemRoot=$env:SystemRoot;windir=$env:SystemRoot;PATH=((Join-Path $env:SystemRoot 'System32')+';'+$env:SystemRoot)
+                DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='0';DOTNET_GENERATE_ASPNET_CERTIFICATE='0';DOTNET_CLI_TELEMETRY_OPTOUT='1'
+                USERPROFILE=(Join-Path $root 'profile');APPDATA=(Join-Path $root 'appdata');LOCALAPPDATA=(Join-Path $root 'localappdata')
+                TEMP=(Join-Path $root 'temp');TMP=(Join-Path $root 'temp');RUNNER_TEMP=$env:RUNNER_TEMP
+                CI=$env:CI;GITHUB_ACTIONS=$env:GITHUB_ACTIONS;RUNNER_ENVIRONMENT=$env:RUNNER_ENVIRONMENT;RUNNER_OS=$env:RUNNER_OS
+              }
+              foreach($name in @('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','SystemDrive','ComSpec','PATHEXT')){$value=[Environment]::GetEnvironmentVariable($name);if(-not [string]::IsNullOrEmpty($value)){$values[$name]=$value}}
+              foreach($key in $values.Keys){$info.EnvironmentVariables[$key]=[string]$values[$key]}
+              $process=[Diagnostics.Process]::Start($info)
+              try{
+                $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+                if(-not $process.WaitForExit(180000)){$process.Kill($true);[void]$process.WaitForExit(5000);throw 'Screenshot timed out.'}
+                if($process.ExitCode -ne 0){throw ('Screenshot failed: '+$stdout.Result+$stderr.Result)}
+                if($stdout.Result){Write-Output $stdout.Result.TrimEnd()};if($stderr.Result){Write-Output $stderr.Result.TrimEnd()}
+              }finally{$process.Dispose()}
+            }
+            $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $app=Join-Path $source 'windows/app/CodexProgress.ps1'
+            $theme=$env:AITM_THEME;$language=$env:AITM_LANGUAGE
+            $stem="$theme-$language"
+            function BaseArgs([string]$name){
+              return @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',$app,'-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$name"),'-PreferencesFile',(Join-Path $root "temp/preferences-$name.json"),'-SnapshotFile',(Join-Path $root "screenshots/$name.png"))
+            }
+            $argsMain=@(BaseArgs "demo-codex-expanded-$stem")+@('-PreviewActiveTasks','1','-PreviewUnconfirmed')
+            Invoke-Isolated $powershell $argsMain
+            $argsCompact=@(BaseArgs "demo-codex-compact-$stem")+@('-PreviewActiveTasks','1','-PreviewUnconfirmed','-CompactMode')
+            Invoke-Isolated $powershell $argsCompact
+            foreach($name in @("demo-codex-expanded-$stem.png","demo-codex-compact-$stem.png")){
+              if(-not [IO.File]::Exists((Join-Path $root "screenshots/$name"))){throw "Missing screenshot: $name"}
+            }
+            Write-Output 'Released source rendered with an unconfirmed synthetic task.'
+          }finally{
+            foreach($scope in @('User','Machine')){$before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine};$after=Read-PathState $scope;if($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind){throw "$scope PATH changed."}}
+            if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}
+          }
+      - name: Preserve screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-release-social-${{ matrix.theme }}-${{ matrix.language }}
+          path: ${{ runner.temp }}/aitm-social-preview-*/screenshots/*.png
+          if-no-files-found: warn
+          retention-days: 7
