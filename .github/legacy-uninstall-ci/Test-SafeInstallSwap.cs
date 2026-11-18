@@ -92,13 +92,14 @@ internal static class TestSafeInstallSwap
     private static void RunningProcess()
     {
         string local = NewCase("running"), target = Install(local); SetupOld(local);
-        ProcessStartInfo start = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"));
-        start.Arguments = "/d /q /c \"set /p _aitm_probe=\""; start.WorkingDirectory = target;
-        start.UseShellExecute = false; start.CreateNoWindow = true; start.RedirectStandardInput = true;
+        ProcessStartInfo start = new ProcessStartInfo(Process.GetCurrentProcess().MainModule.FileName, "--cwd-child");
+        start.WorkingDirectory = target; start.UseShellExecute = false; start.CreateNoWindow = true;
+        start.RedirectStandardInput = true; start.RedirectStandardOutput = true;
         using (Process child = Process.Start(start))
         {
             try
             {
+                Check(child.StandardOutput.ReadLine() == "READY" && !child.HasExited, "The fixture process did not enter its working directory.");
                 using (SafeInstallPaths guard = SafeInstallPaths.OpenExisting(local))
                 using (SafeInstallSwap swap = new SafeInstallSwap(local, target))
                 {
@@ -402,6 +403,7 @@ internal static class TestSafeInstallSwap
     {
         try
         {
+            if (args.Length == 1 && args[0] == "--cwd-child") { Console.WriteLine("READY"); Console.In.ReadLine(); return 0; }
             if (args.Length == 3 && args[0] == "--crash") { CrashChild(args[1], args[2]); return 2; }
             root = Path.Combine(Path.GetTempPath(), "aitm-swap-regression-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
