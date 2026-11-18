@@ -19,14 +19,15 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          fetch-depth: 2
+          fetch-depth: 3
       - name: Verify published source and capture settings
         shell: powershell
         run: |
           $ErrorActionPreference='Stop'
           $revision='4fb0d209befc3bcec732a2fa78cb0c94b75a6f10'
-          if((git rev-parse HEAD^).Trim() -cne $revision){throw 'Unexpected product revision.'}
-          $changed=@(git diff --name-only HEAD^ HEAD)
+          git merge-base --is-ancestor $revision HEAD
+          if($LASTEXITCODE -ne 0){throw 'Unexpected product revision.'}
+          $changed=@(git diff --name-only $revision HEAD)
           if($changed.Count -ne 1 -or $changed[0] -cne '.github/workflows/windows-0210-settings-evidence.yml'){throw 'Unexpected workflow revision.'}
           $root=Join-Path $env:RUNNER_TEMP ('aitm-settings-'+[guid]::NewGuid().ToString('N'))
           $out=Join-Path $root 'shots'
