@@ -293,13 +293,14 @@ jobs:
           cat > "$task_root/actual-app-driver.m" <<'OBJC'
           #import <AppKit/AppKit.h>
           #import <CoreGraphics/CoreGraphics.h>
+          #import <ApplicationServices/ApplicationServices.h>
           #include <signal.h>
           #include <stdio.h>
           #include <stdlib.h>
           #include <unistd.h>
 
           static void spin(double seconds) {
-              [NSThread sleepForTimeInterval:seconds];
+              [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:seconds]];
           }
           static BOOL findWindow(pid_t target, CGFloat minimumWidth, CGRect *result, CGWindowID *number) {
               CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
@@ -325,7 +326,25 @@ jobs:
               NSRect frame = screens.firstObject.frame;
               if (frame.origin.x != 0 || frame.origin.y != 0) return NO;
               NSPoint appKitPoint = NSMakePoint(point.x, NSMaxY(frame) - point.y);
-              return [NSWindow windowNumberAtPoint:appKitPoint belowWindowWithWindowNumber:0] == (NSInteger)expected;
+              NSInteger appkit = [NSWindow windowNumberAtPoint:appKitPoint belowWindowWithWindowNumber:0];
+              CFArrayRef list = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+              if (!list) return NO;
+              CGWindowID top = 0;
+              int owner = -1;
+              for (NSDictionary *row in (__bridge NSArray *)list) {
+                  CGRect rect = CGRectZero;
+                  NSDictionary *box = row[(__bridge id)kCGWindowBounds];
+                  if (!box || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)box, &rect)) continue;
+                  NSNumber *alpha = row[(__bridge id)kCGWindowAlpha];
+                  if (alpha && alpha.doubleValue < 0.02) continue;
+                  if (!CGRectContainsPoint(rect, point)) continue;
+                  top = [row[(__bridge id)kCGWindowNumber] unsignedIntValue];
+                  owner = [row[(__bridge id)kCGWindowOwnerPID] intValue];
+                  break;
+              }
+              CFRelease(list);
+              printf("TOPMOST x=%.0f y=%.0f expected=%u cg=%u owner=%d appkit=%ld\n", point.x, point.y, expected, top, owner, (long)appkit);
+              return top == expected;
           }
           static BOOL postMouse(CGEventType type, CGPoint point) {
               CGEventRef event = CGEventCreateMouseEvent(NULL, type, point, kCGMouseButtonLeft);
@@ -361,7 +380,8 @@ jobs:
                   if (helperFound && screens.count == 1) {
                       [target activateWithOptions:NSApplicationActivateIgnoringOtherApps];
                       spin(0.8);
-                      CGPoint helperPoint = CGPointMake(CGRectGetMidX(helperBounds), CGRectGetMidY(helperBounds));
+                      CGPoint helperPoint = CGPointMake(CGRectGetMinX(helperBounds)+15, CGRectGetMidY(helperBounds));
+                      printf("NEGATIVE_PRE targetActive=%d helperActive=%d helperFound=%d\n", target.isActive, helper.isActive, helperFound);
                       if (target.isActive && !helper.isActive && topmostAt(helperPoint, helperWindow) && moveMouse(helperPoint)) {
                           spin(0.8);
                           negativeControl = target.isActive && !helper.isActive;
@@ -388,7 +408,7 @@ jobs:
                               break;
                           }
                       }
-                      CGPoint header = CGPointMake(CGRectGetMidX(bounds), CGRectGetMinY(bounds)+29);
+                      CGPoint header = CGPointMake(CGRectGetMidX(bounds), CGRectGetMinY(bounds)+(CGRectGetHeight(bounds)-700)+29);
                       if (foundOutside && helper.isActive && !target.isActive && topmostAt(header, windowNumber) && moveMouse(header)) {
                           hoverTested = YES;
                           for (int i=0; i<40 && !target.isActive && !target.terminated; i++) spin(0.1);
@@ -404,7 +424,27 @@ jobs:
                       [target activateWithOptions:NSApplicationActivateIgnoringOtherApps];
                       spin(0.8);
                   }
-                  CGPoint close = CGPointMake(CGRectGetMaxX(bounds)-32, CGRectGetMinY(bounds)+29);
+                  CGPoint close = CGPointMake(CGRectGetMaxX(bounds)-32, CGRectGetMinY(bounds)+(CGRectGetHeight(bounds)-700)+29);
+                  printf("CLOSE_PRE targetActive=%d helperActive=%d trusted=%d\n", target.isActive, helper.isActive, AXIsProcessTrusted());
+                  AXUIElementRef system = AXUIElementCreateSystemWide();
+                  AXUIElementRef element = NULL;
+                  AXError axError = AXUIElementCopyElementAtPosition(system, close.x, close.y, &element);
+                  if (axError == kAXErrorSuccess && element) {
+                      pid_t axPid = 0;
+                      AXUIElementGetPid(element, &axPid);
+                      CFTypeRef role = NULL, label = NULL;
+                      AXUIElementCopyAttributeValue(element, kAXRoleAttribute, &role);
+                      AXUIElementCopyAttributeValue(element, kAXDescriptionAttribute, &label);
+                      printf("AX_CLOSE pid=%d target=%d role=%s label=%s\n", axPid, pid,
+                          role && CFGetTypeID(role)==CFStringGetTypeID() ? [(__bridge NSString *)role UTF8String] : "?",
+                          label && CFGetTypeID(label)==CFStringGetTypeID() ? [(__bridge NSString *)label UTF8String] : "?");
+                      BOOL valid = axPid == pid && role && CFEqual(role, kAXButtonRole);
+                      if (role) CFRelease(role);
+                      if (label) CFRelease(label);
+                      CFRelease(element);
+                      if (!valid) { CFRelease(system); puts("CLOSE_UNVERIFIED: accessibility element is not target button"); return 9; }
+                  } else printf("AX_CLOSE_UNAVAILABLE error=%d\n", axError);
+                  CFRelease(system);
                   if (!target.isActive || !topmostAt(close, windowNumber) || !moveMouse(close)) {
                       puts("CLOSE_UNVERIFIED: close button is not safely targetable");
                       return 6;
@@ -422,7 +462,7 @@ jobs:
           }
           OBJC
           /usr/bin/clang -Wno-deprecated-declarations "$task_root/focus-helper.m" -framework AppKit -o "$task_root/focus-helper"
-          /usr/bin/clang -Wno-deprecated-declarations "$task_root/actual-app-driver.m" -framework AppKit -framework CoreGraphics -o "$task_root/actual-app-driver"
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/actual-app-driver.m" -framework AppKit -framework CoreGraphics -framework ApplicationServices -o "$task_root/actual-app-driver"
           "$task_run" "$task_root/focus-helper" > "$task_root/out/focus-helper.log" 2>&1 &
           task_helper_pid=$!
           sleep 2
