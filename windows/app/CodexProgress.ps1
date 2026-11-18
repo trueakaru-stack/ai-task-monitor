@@ -49,6 +49,7 @@
  [ValidateSet('','partial-data','partial-connection','partial-both','unavailable')][string]$PreviewSourceWarning = '',
  [ValidateSet('deepseek','codex')][string]$PreviewWarningProvider = 'deepseek',
  [switch]$PreviewTabsUiTest,
+ [switch]$PreviewProviderLabelsUiTest,
  [ValidateSet("default","planned","unplanned")][string]$PreviewScenario = "default",
  [switch]$PreviewActivityUiTest,
  [switch]$PreviewFocusUiTest,
@@ -102,6 +103,7 @@ if($PreviewHermesFocus -and (-not $PreviewSources -or $PreviewHermesState -notin
 if($PreviewHermesSelection -and -not $PreviewHermesFocus){throw 'Hermes selection previews require the isolated focus preview.'}
 if($PreviewHermesDisableSelection -and -not $PreviewHermesSelection){throw 'Hermes disable selection requires the isolated selection preview.'}
 if(($PreviewManyProviders -or $PreviewTabsUiTest) -and (-not $SnapshotFile -or -not $PreviewManyProviders -or $PreviewActiveTasks -ne 6)){throw 'Provider tab previews require six synthetic tasks and a snapshot.'}
+if($PreviewProviderLabelsUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw 'Provider label checks require synthetic tasks and a snapshot.'}
 if($PreviewSourceWarning){
  if(-not $SnapshotFile -or $PreviewActiveTasks -lt 0 -or ($PreviewActiveTasks -eq 0 -and $PreviewWarningProvider -ne 'codex') -or -not $DiagnosticDirectory){throw 'Source warning previews require synthetic tasks, a snapshot and an isolated diagnostic directory.'}
  $previewDataPath=[IO.Path]::GetFullPath($DiagnosticDirectory)
@@ -225,8 +227,8 @@ namespace AITaskMonitor.CodexTitles {
    try {
     string root=Path.GetFullPath(home);
     string database=Path.Combine(root,"state_5.sqlite");
-    // Do not cause SQLite to create sidecar files. Existing WAL and SHM also
-    // allow SQLite to observe committed changes that have not been checkpointed.
+    // Skip if sidecars are absent at this check. SQLite may recreate them if
+    // they disappear concurrently; it uses SHM for normal read coordination.
     if (!SafeFile(database) || !SafeFile(database+"-wal") || !SafeFile(database+"-shm") ||
         !SafeParents(root) || !CanShareRead(database) || !CanShareRead(database+"-wal") || !CanShareRead(database+"-shm")) return result;
     using (var sqlite=new Native()) {
@@ -2895,7 +2897,7 @@ function Codex-Tasks {
  foreach ($session in $sessions) {
   $id = [string]$session.id; $title = [string]$session.thread_name
   $titleGenerated=[bool](Prop $session 'titleGenerated' $false)
-  if($null -ne $codexTitles -and $codexTitles.ContainsKey($id)){$title=[string]$codexTitles[$id];$titleGenerated=$false}
+  if(($titleGenerated -or [string]::IsNullOrWhiteSpace($title)) -and $null -ne $codexTitles -and $codexTitles.ContainsKey($id)){$title=[string]$codexTitles[$id];$titleGenerated=$false}
   if([string]::IsNullOrWhiteSpace($title)){$title='Задача Codex';$titleGenerated=$true}
   $unindexed=[bool](Prop $session 'unindexed' $false)
   if($title -eq "Guardian review"){continue}
@@ -4233,7 +4235,7 @@ function Update-ProviderTabSizing {
 
 function Render-ProviderTabs($tasks){
  $providers=@($tasks|ForEach-Object{[string]$_.Provider}|Where-Object{$_}|Sort-Object -Unique)
- $script:showProviderLabels=$providers.Count -ge 1
+ $script:showProviderLabels=$providers.Count -ge 2
  $script:providerTabsEqualWidth=$providers.Count -eq 2
  if($providers.Count -lt 2){$providerTabsHost.Visibility="Collapsed";$script:selectedProvider="all";$script:providerTabsFingerprint="";return}
  if($script:selectedProvider -ne "all" -and $script:selectedProvider -notin $providers){$script:selectedProvider="all"}
@@ -4583,6 +4585,23 @@ if($PreviewUpdate){$script:availableUpdate=[PSCustomObject]@{Version='0.3.0-alph
 if ($SnapshotFile) {
  if($PreviewOffscreen){$window.WindowStartupLocation="Manual";$window.Left=-10000;$window.Top=-10000;$window.ShowActivated=$false;$window.ShowInTaskbar=$false}
  $window.Show(); $window.UpdateLayout()
+ if($PreviewProviderLabelsUiTest){
+  function Find-ProviderLabel($parent,[string]$expected){
+   if($parent -is [Windows.Controls.TextBlock] -and $parent.Text -ceq $expected -and $parent.IsVisible){return $parent}
+   for($index=0;$index -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$index++){
+    $found=Find-ProviderLabel ([Windows.Media.VisualTreeHelper]::GetChild($parent,$index)) $expected
+    if($null -ne $found){return $found}
+   }
+   return $null
+  }
+  $labelsRoot=if($script:isCompact){$compactTasksPanel}else{$tasksPanel}
+  $sample=if($script:isCompact){@($script:lastAllTasks|Where-Object {[string]$_.Id -eq $script:compactTaskId}|Select-Object -First 1)}else{@($script:lastTasks|Select-Object -First 1)}
+  if($sample.Count -ne 1){throw 'The task for the provider-label check is missing.'}
+  $providers=@($script:lastAllTasks|ForEach-Object {[string]$_.Provider}|Where-Object {$_}|Sort-Object -Unique)
+  $providerLabel=Find-ProviderLabel $labelsRoot ([string]$sample[0].ProviderName)
+  if($providers.Count -ge 2 -and ($null -eq $providerLabel -or $providerLabel.Foreground.Color -ne (Brush $script:accentHex).Color)){throw 'A multiple-source label is missing or uses the wrong color.'}
+  if($providers.Count -lt 2 -and $null -ne $providerLabel){throw 'A single-source task must not show a provider label.'}
+ }
  if($PreviewSourceWarning -eq 'partial-both'){
   $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
   $previewWarningName=if($PreviewWarningProvider -eq 'codex'){'Codex'}else{'DeepSeek Harness'}
@@ -4681,20 +4700,12 @@ if ($SnapshotFile) {
   $activity=Find-MotionElement $previewRoot "text" ([string]$script:lastAllTasks[0].Activity)
   $title=Find-MotionElement $previewRoot "text" ([string]$script:lastAllTasks[0].Title)
   if($null -eq $indicator -or $null -eq $activity -or $null -eq $title){throw "The task activity indicator, action or title is missing."}
-  $providerLabel=Find-MotionElement $previewRoot "text" ([string]$script:lastAllTasks[0].ProviderName)
-  if($null -eq $providerLabel -or $providerLabel.Foreground.Color -ne (Brush $script:accentHex).Color){throw "The single-source task label is missing or does not use the system accent."}
-  $providerPosition=$providerLabel.TranslatePoint([Windows.Point]::new(0,0),$previewRoot)
-  $titlePosition=$title.TranslatePoint([Windows.Point]::new(0,0),$previewRoot)
-  if($providerPosition.Y -ge $titlePosition.Y){throw "The source label must appear above the task title."}
   if($script:isCompact){
    if($title.FontSize -ne 16){throw "The compact task title must use a 16 DIP font."}
    $expectedLabel=Progress-Label $script:lastAllTasks[0]
    if($expectedLabel){$label=Find-MotionElement $previewRoot "text" $expectedLabel;if($null -eq $label -or $label.FontSize -ne 16){throw "The compact progress label must match the title font size."}}
   }
-  if($script:isCompact){
-   $compactTask=@($compactTasksPanel.Children | Where-Object {$_ -is [Windows.Controls.Grid]})
-   if($compactTask.Count -ne 1 -or $compactTask[0].Children[0].Children.Count -ne 2){throw "The previous title indicator was not removed."}
-  }
+  if($script:isCompact -and $compactTasksPanel.Children[0].Children[0].Children.Count -ne 2){throw "The previous title indicator was not removed."}
   $mark=$indicator.Children[0];$geometry=$mark.Data
   $expectAnimation=[bool]$script:lastAllTasks[0].Active -and $script:motionEnabled
   if($geometry -isnot [Windows.Media.RectangleGeometry] -or $geometry.RadiusX -ne 2 -or $geometry.RadiusY -ne 2 -or -not $mark.RenderTransform.Value.IsIdentity){throw "The activity indicator must retain circular ends while moving."}
