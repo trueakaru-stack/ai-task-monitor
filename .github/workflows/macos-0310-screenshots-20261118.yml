@@ -1,7 +1,7 @@
 name: macOS 0.3.10 release screenshots
 on:
   push:
-    branches: [codex/macos-0310-screenshots-20261118]
+    branches: [codex/macos-0310-frame-screenshots-20261118]
     paths: [".github/workflows/macos-0310-screenshots-20261118.yml"]
 permissions:
   contents: read
@@ -33,8 +33,8 @@ jobs:
       - name: Download the exact completed candidate artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          artifact-ids: "14428481166"
-          run-id: "44304568821"
+          artifact-ids: "14432222986"
+          run-id: "44315318281"
           github-token: ${{ github.token }}
           path: ${{ env.AITM_TEST_TASK_ROOT }}/input
       - name: Validate profile isolation and run the actual application window
@@ -47,7 +47,7 @@ jobs:
           image_count="$(find input -type f -name 'AITaskMonitor-macOS-0.3.10.dmg' -print | wc -l | tr -d ' ')"
           test "$image_count" = 1
           image_path="$(find input -type f -name 'AITaskMonitor-macOS-0.3.10.dmg' -print)"
-          expected=d711d8e32f62f76347cbd6fb8bc9037f27b6b53bc4394565a735626fea567263
+          expected=6bdd754537aa9adc13276b3b764d51cb91652e12e5ba40af90c970dd0335e0e6
           test "$(shasum -a 256 "$image_path" | cut -d' ' -f1)" = "$expected"
           echo "Verified exact final DMG: $expected"
           cat > "$task_root/graphics.sb" <<'PROFILE'
@@ -278,7 +278,7 @@ jobs:
           done
           cat > "$task_root/out/PROVENANCE.txt" <<EOF
           macOS 0.3.10 candidate UI previews
-          Exact DMG SHA-256: d711d8e32f62f76347cbd6fb8bc9037f27b6b53bc4394565a735626fea567263
+          Exact DMG SHA-256: 6bdd754537aa9adc13276b3b764d51cb91652e12e5ba40af90c970dd0335e0e6
           GitHub Actions run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           The UI is rendered by the verified candidate binary on an isolated GitHub-hosted Mac.
           Tasks and profiles are examples. The images are programmatic UI previews; they do not
