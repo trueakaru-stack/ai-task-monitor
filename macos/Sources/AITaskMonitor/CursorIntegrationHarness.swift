@@ -36,7 +36,7 @@ enum CursorIntegrationHarness {
         store.isCompact = true
         let host = NSHostingView(rootView: RootView().environmentObject(store))
         let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 372, height: 200),
-                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = host
         window.acceptsMouseMovedEvents = true
@@ -149,6 +149,22 @@ enum CursorIntegrationHarness {
             check(cursor(.arrow), "Leaving the task points restores arrow")
             if points().count == 2 {
                 await move(center(points()[1]))
+                let handBeforeMiniaturize = cursor(.pointingHand)
+                check(handBeforeMiniaturize, "Hand shown before minimizing")
+                window.miniaturize(nil)
+                await pause(1)
+                if window.isMiniaturized && handBeforeMiniaturize {
+                    check(cursor(.arrow), "Minimizing restores arrow without moving")
+                    window.deminiaturize(nil)
+                    app.activate(ignoringOtherApps: true)
+                    window.makeKeyAndOrderFront(nil)
+                    await pause(1)
+                } else {
+                    print("UNVERIFIED: window did not minimize or hand precondition was absent")
+                }
+            }
+            if points().count == 2 {
+                await move(center(points()[1]))
                 let handBeforeRemoval = cursor(.pointingHand)
                 check(handBeforeRemoval, "Hand shown immediately before removing points")
                 store.isCompact = false
@@ -197,6 +213,7 @@ enum CursorIntegrationHarness {
                     print("INACTIVE_WINDOW_STATE active=false key=false")
                     await move(center(points()[0]))
                     check(cursor(.pointingHand), "Inactive floating window shows pointing hand")
+                    check(!app.isActive && !window.isKeyWindow, "Hover on the floating window does not steal focus")
                     let helperInput = window.convertPoint(fromScreen: NSPoint(x: 730, y: 344))
                     await move(helperInput)
                     check(cursor(.iBeam), "Moving into another app text field restores its I-beam")
