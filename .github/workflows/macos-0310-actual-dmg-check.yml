@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15-intel, macos-26]
+        runner: [macos-15-intel, macos-15]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
@@ -22,6 +22,8 @@ jobs:
           set -euo pipefail
           test "$GITHUB_ACTIONS" = true
           test "$RUNNER_ENVIRONMENT" = github-hosted
+          echo "Verified runner architecture: $RUNNER_ARCH ($(/usr/bin/uname -m))"
+          case "$RUNNER_ARCH:$(/usr/bin/uname -m)" in X64:x86_64|ARM64:arm64) ;; *) echo 'Unexpected runner architecture'; exit 1;; esac
           test "$RUNNER_OS" = macOS
           test "$GITHUB_REPOSITORY" = trueakaru-stack/ai-task-monitor
           test "$RUNNER_TEMP" = /Users/runner/work/_temp
