@@ -12,6 +12,7 @@ struct PointingHandCursor: NSViewRepresentable {
         override func resetCursorRects() {
             super.resetCursorRects()
             let cursorRect = visibleRect.intersection(bounds)
+            if ProcessInfo.processInfo.environment["AITM_CURSOR_DIAGNOSTICS"] == "1" { print("CURSOR_RECT reset rect=\(cursorRect) key=\(window?.isKeyWindow ?? false)") }
             if !cursorRect.isEmpty {
                 addCursorRect(cursorRect, cursor: .pointingHand)
             }
