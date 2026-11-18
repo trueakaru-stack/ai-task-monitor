@@ -7,6 +7,7 @@ AI Task Monitor processes task information locally on the user's computer. The a
 ## Data read on Windows
 
 - Codex session indexes, task plans, lifecycle state, and local session records stored under the current user's Codex profile.
+- When an indexed task name is unavailable, Windows also reads matching title metadata from the local Codex `state_5.sqlite` database through a read-only SQLite connection. SQLite may create or update its temporary WAL/SHM coordination files. These titles are not added to the diagnostic journal.
 - Claude Code lifecycle events written by the optional local hook after the user connects Claude Code in Settings.
 - Windows application-theme and accent-color settings.
 
