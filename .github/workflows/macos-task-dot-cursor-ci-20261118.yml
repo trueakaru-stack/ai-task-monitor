@@ -70,3 +70,5 @@ jobs:
 # Verify appearance-change synchronization.
 
 # Attempt keyboard and accessibility checks without changing permissions.
+
+# Check actual focus and accessibility activation independently.
