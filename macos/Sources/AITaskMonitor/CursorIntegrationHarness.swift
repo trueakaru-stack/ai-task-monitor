@@ -136,14 +136,22 @@ enum CursorIntegrationHarness {
             check(cursor(.pointingHand), "Inactive task button shows system pointing hand")
             await move(center(initial[0]))
             check(cursor(.pointingHand), "Returning directly to the first point keeps the hand")
+            for theme in ["dark", "light", "dark", "light"] {
+                UserDefaults.standard.set(theme, forKey: "appearanceMode")
+                await pause(1)
+                check(cursor(.pointingHand), "Stationary hand survives change to \(theme) theme")
+            }
             for theme in ["dark", "light"] {
                 UserDefaults.standard.set(theme, forKey: "appearanceMode")
                 await pause(1)
                 let current = points()
                 if current.count == 2 {
+                    await move(NSPoint(x: 20, y: window.contentView!.bounds.height - 25))
                     await move(center(current[1]))
-                    check(cursor(.pointingHand), "Cursor remains hand in \(theme) theme")
+                    check(cursor(.pointingHand), "Cursor is hand before \(theme) capture")
                     capture(theme)
+                    await pause(0.3)
+                    print("CAPTURE_AFTER \(theme) hand=\(cursor(.pointingHand))")
                 }
             }
             if points().count == 2 {
