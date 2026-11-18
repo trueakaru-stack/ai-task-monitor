@@ -4596,7 +4596,7 @@ if ($SnapshotFile) {
    return $null
   }
   $labelsRoot=if($script:isCompact){$compactTasksPanel}else{$tasksPanel}
-  $sample=if($script:isCompact){@($script:lastAllTasks|Where-Object {[string]$_.Id -eq $script:compactTaskId}|Select-Object -First 1)}else{@($script:lastTasks|Select-Object -First 1)}
+  $sample=@(if($script:isCompact){$script:lastAllTasks|Where-Object {[string]$_.Id -eq $script:compactTaskId}|Select-Object -First 1}else{$script:lastTasks|Select-Object -First 1})
   if($sample.Count -ne 1){throw 'The task for the provider-label check is missing.'}
   $providers=@($script:lastAllTasks|ForEach-Object {[string]$_.Provider}|Where-Object {$_}|Sort-Object -Unique)
   $providerLabel=Find-ProviderLabel $labelsRoot ([string]$sample[0].ProviderName)
