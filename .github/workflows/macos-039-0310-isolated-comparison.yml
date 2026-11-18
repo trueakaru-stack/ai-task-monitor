@@ -1,0 +1,780 @@
+name: Compare published and candidate macOS DMG on the same runner
+on:
+  push:
+    branches: [codex/macos-039-0310-isolated-comparison-20261118]
+    paths: [".github/workflows/macos-039-0310-isolated-comparison.yml"]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  compare:
+    if: ${{ github.repository == 'trueakaru-stack/ai-task-monitor' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15-intel, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Prepare disposable runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$GITHUB_REPOSITORY" = trueakaru-stack/ai-task-monitor
+          test "$RUNNER_TEMP" = /Users/runner/work/_temp
+          root="$(mktemp -d "$RUNNER_TEMP/aitm-compare.XXXXXXXX")"
+          marker="$(mktemp "$RUNNER_TEMP/aitm-compare-denied.XXXXXXXX")"
+          printf 'synthetic profile marker\n' > "$marker"
+          mkdir -p "$root/download/candidate" "$root/download/stable"
+          printf 'AITM_COMPARE_ROOT=%s\nAITM_TEST_DENIED_FILE=%s\n' "$root" "$marker" >> "$GITHUB_ENV"
+          echo "Runner $RUNNER_ARCH: $(/usr/bin/uname -m)"
+          /usr/bin/sw_vers
+      - name: Download exact candidate artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: "14428481166"
+          run-id: "44304568821"
+          github-token: ${{ github.token }}
+          path: ${{ env.AITM_COMPARE_ROOT }}/download/candidate
+      - name: Download published stable DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/curl --fail --location --silent --show-error \
+            https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.9/AITaskMonitor-macOS-0.3.9.dmg \
+            --output "$AITM_COMPARE_ROOT/download/stable/AITaskMonitor-macOS-0.3.9.dmg"
+          test "$(shasum -a 256 "$AITM_COMPARE_ROOT/download/stable/AITaskMonitor-macOS-0.3.9.dmg" | cut -d' ' -f1)" = 5ff53fc7c6b4961ad0b647444c88703c6730fd665803483d953b23a2a41c48ee
+          echo 'Published 0.3.9 DMG SHA verified.'
+      - name: Observe 0.3.9 using an isolated home
+        if: ${{ always() && env.AITM_COMPARE_ROOT != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_COMPARE_ROOT/stable"
+          case "$task_root" in /Users/runner/work/_temp/aitm-compare.*/*) ;; *) echo 'Unexpected temporary root'; exit 1;; esac
+          mkdir -p "$task_root"/{mount,temp,synthetic-home,out,Applications}
+          export AITM_TEST_TASK_ROOT="$task_root"
+          image_path="$AITM_COMPARE_ROOT/download/stable/AITaskMonitor-macOS-0.3.9.dmg"
+          expected=5ff53fc7c6b4961ad0b647444c88703c6730fd665803483d953b23a2a41c48ee
+          test "$(shasum -a 256 "$image_path" | cut -d' ' -f1)" = "$expected"
+          echo "CASE 0.3.9: verified DMG SHA256 $expected"
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+            "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil verify "$image_path" > "$task_root/out/dmg-verify.log"
+          cat > "$task_root/graphics.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (allow mach-lookup)
+          (deny mach-lookup (global-name "com.apple.cfprefsd.agent") (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.bsd.dirhelper"))
+          PROFILE
+          cat > "$task_root/run-graphics" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "CFFIXED_USER_HOME=$AITM_TEST_TASK_ROOT/synthetic-home" \
+            "LANG=en_US.UTF-8" \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" -f "$AITM_TEST_TASK_ROOT/graphics.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-graphics"
+          task_run="$task_root/run-graphics"
+          "$task_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          cat > "$task_root/home-probe.m" <<'OBJC'
+          #import <Foundation/Foundation.h>
+          int main(void) {
+              @autoreleasepool {
+                  NSString *fixed = NSProcessInfo.processInfo.environment[@"CFFIXED_USER_HOME"];
+                  NSString *resolved = NSFileManager.defaultManager.homeDirectoryForCurrentUser.path;
+                  BOOL valid = fixed && [resolved isEqualToString:fixed];
+                  printf("SYNTHETIC_HOME_%s: Foundation resolved current home %s\n", valid ? "PASS" : "FAIL", valid ? "inside fixture" : "outside fixture");
+                  return valid ? 0 : 1;
+              }
+          }
+          OBJC
+          /usr/bin/clang "$task_root/home-probe.m" -framework Foundation -o "$task_root/home-probe"
+          "$task_run" "$task_root/home-probe"
+          ln -s "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"
+          for marker in "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"; do
+            if "$task_run" /bin/cat "$marker" > /dev/null 2>&1; then echo 'Profile read unexpectedly allowed'; exit 1; fi
+            if "$task_run" /usr/bin/touch "$marker" > /dev/null 2>&1; then echo 'Profile write unexpectedly allowed'; exit 1; fi
+          done
+          cat > "$task_root/safety.c" <<'C'
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
+          #include <errno.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          int main(void) {
+            const char *blocked[] = {"com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon", "com.apple.bsd.dirhelper"};
+            for (unsigned i = 0; i < sizeof(blocked)/sizeof(blocked[0]); i++) {
+              mach_port_t port = MACH_PORT_NULL;
+              kern_return_t r = bootstrap_look_up(bootstrap_port, blocked[i], &port);
+              if (r == KERN_SUCCESS) mach_port_deallocate(mach_task_self(), port);
+              if (r != BOOTSTRAP_NOT_PRIVILEGED) { fprintf(stderr, "Profile service block not verified: %d\n", r); return 1; }
+            }
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) {
+              if (errno != EPERM && errno != EACCES) return 2;
+            } else {
+              struct sockaddr_in addr = {0};
+              addr.sin_len = sizeof(addr);
+              addr.sin_family = AF_INET;
+              addr.sin_port = htons(9);
+              addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+              errno = 0;
+              if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || (errno != EPERM && errno != EACCES)) {
+                close(fd); fprintf(stderr, "Loopback network was not provably denied.\n"); return 3;
+              }
+              close(fd);
+            }
+            puts("Profile services and loopback network are denied");
+            return 0;
+          }
+          C
+          cat > "$task_root/window.c" <<'C'
+          #include <CoreGraphics/CoreGraphics.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+            if (argc != 2) return 2;
+            int target = atoi(argv[1]), found = 0;
+            CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+            if (!windows) { fputs("Window list unavailable\n", stderr); return 3; }
+            for (CFIndex i = 0; i < CFArrayGetCount(windows); i++) {
+              CFDictionaryRef row = CFArrayGetValueAtIndex(windows, i);
+              CFNumberRef owner = CFDictionaryGetValue(row, kCGWindowOwnerPID), level = CFDictionaryGetValue(row, kCGWindowLayer);
+              CFDictionaryRef bounds = CFDictionaryGetValue(row, kCGWindowBounds);
+              int ownerID = -1, layer = -1;
+              CGRect rect = CGRectZero;
+              if (!owner || !level || !bounds) continue;
+              if (!CFNumberGetValue(owner, kCFNumberIntType, &ownerID) || !CFNumberGetValue(level, kCFNumberIntType, &layer)) continue;
+              if (!CGRectMakeWithDictionaryRepresentation(bounds, &rect)) continue;
+              if (ownerID == target && (layer == CGWindowLevelForKey(kCGNormalWindowLevelKey) || layer == CGWindowLevelForKey(kCGFloatingWindowLevelKey)) && rect.size.width >= 200 && rect.size.height >= 100) {
+                printf("Visible application window: %.0f x %.0f points at system level %d (%s)\n", rect.size.width, rect.size.height, layer, layer == CGWindowLevelForKey(kCGFloatingWindowLevelKey) ? "floating" : "normal");
+                found++;
+              }
+            }
+            CFRelease(windows);
+            return found ? 0 : 1;
+          }
+          C
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/safety.c" -o "$task_root/safety"
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/window.c" -framework CoreGraphics -framework CoreFoundation -o "$task_root/window"
+          "$task_run" "$task_root/safety"
+          task_pid=""
+          cleanup() {
+            if test -n "$task_pid" && kill -0 "$task_pid" 2>/dev/null; then
+              kill -TERM "$task_pid" 2>/dev/null || true
+              wait "$task_pid" 2>/dev/null || true
+            fi
+            if /sbin/mount | /usr/bin/grep -F " on $task_root/mount (" > /dev/null; then
+              /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+                "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil detach "$task_root/mount" >/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          cat > "$task_root/window-control.m" <<'OBJC'
+          #import <AppKit/AppKit.h>
+          int main(void) {
+            @autoreleasepool {
+              NSApplication *application = [NSApplication sharedApplication];
+              [application setActivationPolicy:NSApplicationActivationPolicyRegular];
+              NSWindow *normal = [[NSWindow alloc] initWithContentRect:NSMakeRect(40,40,300,220)
+                styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+              NSWindow *floating = [[NSWindow alloc] initWithContentRect:NSMakeRect(400,350,300,220)
+                styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+              [normal setReleasedWhenClosed:NO]; [floating setReleasedWhenClosed:NO];
+              [normal setLevel:NSNormalWindowLevel]; [floating setLevel:NSFloatingWindowLevel];
+              [normal orderFrontRegardless]; [floating orderFrontRegardless];
+              [application activateIgnoringOtherApps:YES];
+              [application run];
+            }
+            return 0;
+          }
+          OBJC
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/window-control.m" -framework AppKit -o "$task_root/window-control"
+          "$task_run" "$task_root/window-control" > "$task_root/out/control-app.log" 2>&1 &
+          task_pid=$!
+          found_control=0
+          for attempt in {1..40}; do
+            if ! kill -0 "$task_pid" 2>/dev/null; then break; fi
+            if "$task_run" "$task_root/window" "$task_pid" > "$task_root/out/control-window.log" 2>&1 &&
+               /usr/bin/grep -F '(normal)' "$task_root/out/control-window.log" >/dev/null &&
+               /usr/bin/grep -F '(floating)' "$task_root/out/control-window.log" >/dev/null; then
+              found_control=1
+              break
+            fi
+            sleep 0.5
+          done
+          if test "$found_control" != 1; then
+            echo 'Normal and floating control windows were not both verified.'
+            cat "$task_root/out/control-app.log" "$task_root/out/control-window.log"
+            exit 1
+          fi
+          echo 'Verified both normal and floating levels with known synthetic windows.'
+          cat "$task_root/out/control-window.log"
+          kill -TERM "$task_pid"
+          wait "$task_pid" || true
+          task_pid=""
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+            "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil attach "$image_path" \
+            -readonly -nobrowse -noautoopen -mountpoint "$task_root/mount" -plist > "$task_root/out/mount.plist"
+          task_mounted_app="$task_root/mount/AI Task Monitor.app"
+          test -d "$task_mounted_app"
+          test ! -L "$task_mounted_app"
+          task_app="$task_root/Applications/AI Task Monitor.app"
+          test ! -e "$task_app"
+          /usr/bin/ditto "$task_mounted_app" "$task_app"
+          /usr/bin/diff -qr "$task_mounted_app" "$task_app"
+          /usr/bin/codesign --verify --deep --strict "$task_app"
+          task_binary="$task_app/Contents/MacOS/AITaskMonitor"
+          test -x "$task_binary"
+          /usr/bin/xcrun lipo "$task_binary" -verify_arch arm64 x86_64
+          test "$(/usr/bin/plutil -extract AITaskMonitorReleaseVersion raw -o - "$task_app/Contents/Info.plist")" = "0.3.9"
+          test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = "0.3.9"
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$task_app/Contents/Info.plist")" = "13"
+          cat > "$task_root/observer.m" <<'OBJC'
+          #import <AppKit/AppKit.h>
+          #import <ApplicationServices/ApplicationServices.h>
+          #include <signal.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+          static BOOL axFind(AXUIElementRef node, NSString *wanted, BOOL buttonOnly, CGRect *frame, int depth) {
+              if (!node || depth > 30) return NO;
+              CFTypeRef role = NULL, title = NULL, description = NULL, value = NULL;
+              AXUIElementCopyAttributeValue(node, kAXRoleAttribute, &role);
+              AXUIElementCopyAttributeValue(node, kAXTitleAttribute, &title);
+              AXUIElementCopyAttributeValue(node, kAXDescriptionAttribute, &description);
+              AXUIElementCopyAttributeValue(node, kAXValueAttribute, &value);
+              BOOL roleOK = !buttonOnly || (role && CFGetTypeID(role) == CFStringGetTypeID() && CFEqual(role, kAXButtonRole));
+              BOOL match = NO;
+              CFTypeRef candidates[] = { title, description, value };
+              for (int i=0; i<3; i++) {
+                  if (candidates[i] && CFGetTypeID(candidates[i]) == CFStringGetTypeID() &&
+                      [(__bridge NSString *)candidates[i] isEqualToString:wanted]) { match = YES; break; }
+              }
+              if (role) CFRelease(role);
+              if (title) CFRelease(title);
+              if (description) CFRelease(description);
+              if (value) CFRelease(value);
+              if (match && roleOK) {
+                  if (!frame) return YES;
+                  CFTypeRef position = NULL, size = NULL;
+                  CGPoint p = CGPointZero;
+                  CGSize z = CGSizeZero;
+                  AXError ep = AXUIElementCopyAttributeValue(node, kAXPositionAttribute, &position);
+                  AXError es = AXUIElementCopyAttributeValue(node, kAXSizeAttribute, &size);
+                  BOOL valid = ep == kAXErrorSuccess && es == kAXErrorSuccess && position && size &&
+                      CFGetTypeID(position) == AXValueGetTypeID() && CFGetTypeID(size) == AXValueGetTypeID() &&
+                      AXValueGetValue((AXValueRef)position, kAXValueCGPointType, &p) &&
+                      AXValueGetValue((AXValueRef)size, kAXValueCGSizeType, &z) && z.width > 0 && z.height > 0;
+                  if (position) CFRelease(position);
+                  if (size) CFRelease(size);
+                  if (valid) { *frame = CGRectMake(p.x, p.y, z.width, z.height); return YES; }
+              }
+              CFTypeRef raw = NULL;
+              if (AXUIElementCopyAttributeValue(node, kAXChildrenAttribute, &raw) != kAXErrorSuccess || !raw) return NO;
+              BOOL found = NO;
+              if (CFGetTypeID(raw) == CFArrayGetTypeID()) {
+                  CFArrayRef children = (CFArrayRef)raw;
+                  for (CFIndex i=0; i<CFArrayGetCount(children); i++) {
+                      CFTypeRef child = CFArrayGetValueAtIndex(children, i);
+                      if (child && CFGetTypeID(child) == AXUIElementGetTypeID() &&
+                          axFind((AXUIElementRef)child, wanted, buttonOnly, frame, depth+1)) { found = YES; break; }
+                  }
+              }
+              CFRelease(raw);
+              return found;
+          }
+          static BOOL appHasText(pid_t pid, NSString *wanted) {
+              AXUIElementRef app = AXUIElementCreateApplication(pid);
+              BOOL result = axFind(app, wanted, NO, NULL, 0);
+              CFRelease(app);
+              return result;
+          }
+          int main(int argc, char **argv) {
+              @autoreleasepool {
+                  if (argc != 2) return 2;
+                  pid_t pid = (pid_t)atoi(argv[1]);
+                  if (!AXIsProcessTrusted()) { puts("FIXTURE_UNVERIFIED: Accessibility unavailable"); return 3; }
+                  for (int i=0; i<80; i++) {
+                      if (kill(pid, 0) != 0) { puts("FIXTURE_UNVERIFIED: app exited before both tasks appeared"); return 4; }
+                      if (appHasText(pid, @"Synthetic task A") && appHasText(pid, @"Synthetic task B")) {
+                          puts("FIXTURE_PASS: both synthetic titles visible in actual app");
+                          sleep(3);
+                          if (kill(pid, 0) != 0) { puts("SURVIVAL_FAIL: app exited with both tasks visible"); return 5; }
+                          puts("SURVIVAL_PASS: actual app survived with both tasks visible for 3 seconds");
+                          return 0;
+                      }
+                      usleep(250000);
+                  }
+                  puts("FIXTURE_UNVERIFIED: both synthetic titles never observed");
+                  return 6;
+              }
+          }
+          OBJC
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/observer.m" -framework AppKit -framework ApplicationServices -o "$task_root/observer"
+          touch "$task_root/out/crash-start"
+          "$task_run" "$task_binary" > "$task_root/out/app.log" 2>&1 &
+          task_pid=$!
+          app_pid="$task_pid"
+          found=0
+          for attempt in {1..40}; do
+            if ! kill -0 "$task_pid" 2>/dev/null; then break; fi
+            if "$task_run" "$task_root/window" "$task_pid" > "$task_root/out/window.log" 2>&1; then found=1; break; fi
+            sleep 0.5
+          done
+          if test "$found" = 1; then
+            cat "$task_root/out/window.log"
+            sleep 3
+          fi
+          if kill -0 "$task_pid" 2>/dev/null && test "$found" = 1; then
+            fixture_codex="$task_root/synthetic-home/.codex"
+            mkdir -p "$fixture_codex/sessions"
+            cat > "$fixture_codex/session_index.jsonl" <<'JSON'
+          {"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task A"}
+          {"id":"019127f4-35ae-7c73-9e72-a10123456002","thread_name":"Synthetic task B"}
+          JSON
+            stamp="$(/bin/date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            for id in '019127f4-35ae-7c73-9e72-a10123456001' '019127f4-35ae-7c73-9e72-a10123456002'; do
+              printf '{"timestamp":"%s","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-test"}}\n' "$stamp" > "$fixture_codex/sessions/rollout-2026-11-18T12-00-00-$id.jsonl"
+            done
+            echo 'Created the same two synthetic Codex sessions after app startup.'
+            set +e
+            "$task_run" "$task_root/observer" "$task_pid" > "$task_root/out/observer.log" 2>&1
+            observer_status=$?
+            set -e
+            cat "$task_root/out/observer.log"
+          else
+            observer_status=99
+            echo 'FIXTURE_UNVERIFIED: app did not remain alive through startup.'
+          fi
+          if ! kill -0 "$task_pid" 2>/dev/null; then
+            set +e
+            wait "$task_pid"
+            app_status=$?
+            set -e
+            echo "CASE 0.3.9: PROCESS_EXITED status=$app_status"
+            printf 'PROCESS_EXITED status=%s\n' "$app_status" > "$task_root/out/result.txt"
+            task_pid=""
+          else
+            if test "$observer_status" = 0; then
+              echo "CASE 0.3.9: FIXTURE_AND_SURVIVAL_PASS"
+              echo 'FIXTURE_AND_SURVIVAL_PASS' > "$task_root/out/result.txt"
+            else
+              echo "CASE 0.3.9: FIXTURE_UNVERIFIED observer=$observer_status"
+              printf 'FIXTURE_UNVERIFIED observer=%s\n' "$observer_status" > "$task_root/out/result.txt"
+            fi
+            kill -TERM "$task_pid" 2>/dev/null || true
+            wait "$task_pid" 2>/dev/null || true
+            task_pid=""
+            echo 'Note: still-running app was terminated by test cleanup after observation.'
+          fi
+          echo "CASE 0.3.9: application stderr follows"
+          cat "$task_root/out/app.log"
+          report_found=0
+          for delay in 1 2 3 4 5 6 7 8; do
+            for diag_dir in "$task_root/synthetic-home/Library/Logs/DiagnosticReports" "/Users/runner/Library/Logs/DiagnosticReports" "/Library/Logs/DiagnosticReports"; do
+              test -d "$diag_dir" || continue
+              for report in "$diag_dir"/AITaskMonitor*.ips "$diag_dir"/AITaskMonitor*.crash; do
+                test -f "$report" && test ! -L "$report" && test "$report" -nt "$task_root/out/crash-start" || continue
+                if /usr/bin/grep -E "\"pid\"[[:space:]]*:[[:space:]]*$app_pid([,}[:space:]]|$)|Process:.*[[]$app_pid[]]" "$report" >/dev/null &&
+                   /usr/bin/grep -F "$task_binary" "$report" >/dev/null; then
+                  /bin/cp "$report" "$task_root/out/system-crash-report.txt"
+                  report_found=1
+                  break
+                fi
+              done
+              test "$report_found" = 0 || break
+            done
+            test "$report_found" = 0 || break
+            sleep 1
+          done
+          if test "$report_found" = 1; then
+            echo "CASE 0.3.9: SYSTEM_CRASH_REPORT captured for exact app PID and path"
+            cat "$task_root/out/system-crash-report.txt"
+          else
+            echo "CASE 0.3.9: SYSTEM_CRASH_REPORT unavailable for this PID and path"
+          fi
+          
+      - name: Observe 0.3.10 using an isolated home
+        if: ${{ always() && env.AITM_COMPARE_ROOT != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_COMPARE_ROOT/candidate"
+          case "$task_root" in /Users/runner/work/_temp/aitm-compare.*/*) ;; *) echo 'Unexpected temporary root'; exit 1;; esac
+          mkdir -p "$task_root"/{mount,temp,synthetic-home,out,Applications}
+          export AITM_TEST_TASK_ROOT="$task_root"
+          image_path="$(find "$AITM_COMPARE_ROOT/download/candidate" -type f -name 'AITaskMonitor-macOS-0.3.10.dmg' -print -quit)"
+          expected=d711d8e32f62f76347cbd6fb8bc9037f27b6b53bc4394565a735626fea567263
+          test "$(shasum -a 256 "$image_path" | cut -d' ' -f1)" = "$expected"
+          echo "CASE 0.3.10: verified DMG SHA256 $expected"
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+            "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil verify "$image_path" > "$task_root/out/dmg-verify.log"
+          cat > "$task_root/graphics.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (allow mach-lookup)
+          (deny mach-lookup (global-name "com.apple.cfprefsd.agent") (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.bsd.dirhelper"))
+          PROFILE
+          cat > "$task_root/run-graphics" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+            "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "CFFIXED_USER_HOME=$AITM_TEST_TASK_ROOT/synthetic-home" \
+            "LANG=en_US.UTF-8" \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" -f "$AITM_TEST_TASK_ROOT/graphics.sb" "$@"
+          SCRIPT
+          chmod 700 "$task_root/run-graphics"
+          task_run="$task_root/run-graphics"
+          "$task_run" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          cat > "$task_root/home-probe.m" <<'OBJC'
+          #import <Foundation/Foundation.h>
+          int main(void) {
+              @autoreleasepool {
+                  NSString *fixed = NSProcessInfo.processInfo.environment[@"CFFIXED_USER_HOME"];
+                  NSString *resolved = NSFileManager.defaultManager.homeDirectoryForCurrentUser.path;
+                  BOOL valid = fixed && [resolved isEqualToString:fixed];
+                  printf("SYNTHETIC_HOME_%s: Foundation resolved current home %s\n", valid ? "PASS" : "FAIL", valid ? "inside fixture" : "outside fixture");
+                  return valid ? 0 : 1;
+              }
+          }
+          OBJC
+          /usr/bin/clang "$task_root/home-probe.m" -framework Foundation -o "$task_root/home-probe"
+          "$task_run" "$task_root/home-probe"
+          ln -s "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"
+          for marker in "$AITM_TEST_DENIED_FILE" "$task_root/profile-link"; do
+            if "$task_run" /bin/cat "$marker" > /dev/null 2>&1; then echo 'Profile read unexpectedly allowed'; exit 1; fi
+            if "$task_run" /usr/bin/touch "$marker" > /dev/null 2>&1; then echo 'Profile write unexpectedly allowed'; exit 1; fi
+          done
+          cat > "$task_root/safety.c" <<'C'
+          #include <mach/mach.h>
+          #include <servers/bootstrap.h>
+          #include <sys/socket.h>
+          #include <netinet/in.h>
+          #include <arpa/inet.h>
+          #include <errno.h>
+          #include <stdio.h>
+          #include <unistd.h>
+          int main(void) {
+            const char *blocked[] = {"com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon", "com.apple.bsd.dirhelper"};
+            for (unsigned i = 0; i < sizeof(blocked)/sizeof(blocked[0]); i++) {
+              mach_port_t port = MACH_PORT_NULL;
+              kern_return_t r = bootstrap_look_up(bootstrap_port, blocked[i], &port);
+              if (r == KERN_SUCCESS) mach_port_deallocate(mach_task_self(), port);
+              if (r != BOOTSTRAP_NOT_PRIVILEGED) { fprintf(stderr, "Profile service block not verified: %d\n", r); return 1; }
+            }
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd < 0) {
+              if (errno != EPERM && errno != EACCES) return 2;
+            } else {
+              struct sockaddr_in addr = {0};
+              addr.sin_len = sizeof(addr);
+              addr.sin_family = AF_INET;
+              addr.sin_port = htons(9);
+              addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+              errno = 0;
+              if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0 || (errno != EPERM && errno != EACCES)) {
+                close(fd); fprintf(stderr, "Loopback network was not provably denied.\n"); return 3;
+              }
+              close(fd);
+            }
+            puts("Profile services and loopback network are denied");
+            return 0;
+          }
+          C
+          cat > "$task_root/window.c" <<'C'
+          #include <CoreGraphics/CoreGraphics.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          int main(int argc, char **argv) {
+            if (argc != 2) return 2;
+            int target = atoi(argv[1]), found = 0;
+            CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+            if (!windows) { fputs("Window list unavailable\n", stderr); return 3; }
+            for (CFIndex i = 0; i < CFArrayGetCount(windows); i++) {
+              CFDictionaryRef row = CFArrayGetValueAtIndex(windows, i);
+              CFNumberRef owner = CFDictionaryGetValue(row, kCGWindowOwnerPID), level = CFDictionaryGetValue(row, kCGWindowLayer);
+              CFDictionaryRef bounds = CFDictionaryGetValue(row, kCGWindowBounds);
+              int ownerID = -1, layer = -1;
+              CGRect rect = CGRectZero;
+              if (!owner || !level || !bounds) continue;
+              if (!CFNumberGetValue(owner, kCFNumberIntType, &ownerID) || !CFNumberGetValue(level, kCFNumberIntType, &layer)) continue;
+              if (!CGRectMakeWithDictionaryRepresentation(bounds, &rect)) continue;
+              if (ownerID == target && (layer == CGWindowLevelForKey(kCGNormalWindowLevelKey) || layer == CGWindowLevelForKey(kCGFloatingWindowLevelKey)) && rect.size.width >= 200 && rect.size.height >= 100) {
+                printf("Visible application window: %.0f x %.0f points at system level %d (%s)\n", rect.size.width, rect.size.height, layer, layer == CGWindowLevelForKey(kCGFloatingWindowLevelKey) ? "floating" : "normal");
+                found++;
+              }
+            }
+            CFRelease(windows);
+            return found ? 0 : 1;
+          }
+          C
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/safety.c" -o "$task_root/safety"
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/window.c" -framework CoreGraphics -framework CoreFoundation -o "$task_root/window"
+          "$task_run" "$task_root/safety"
+          task_pid=""
+          cleanup() {
+            if test -n "$task_pid" && kill -0 "$task_pid" 2>/dev/null; then
+              kill -TERM "$task_pid" 2>/dev/null || true
+              wait "$task_pid" 2>/dev/null || true
+            fi
+            if /sbin/mount | /usr/bin/grep -F " on $task_root/mount (" > /dev/null; then
+              /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+                "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil detach "$task_root/mount" >/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          cat > "$task_root/window-control.m" <<'OBJC'
+          #import <AppKit/AppKit.h>
+          int main(void) {
+            @autoreleasepool {
+              NSApplication *application = [NSApplication sharedApplication];
+              [application setActivationPolicy:NSApplicationActivationPolicyRegular];
+              NSWindow *normal = [[NSWindow alloc] initWithContentRect:NSMakeRect(40,40,300,220)
+                styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+              NSWindow *floating = [[NSWindow alloc] initWithContentRect:NSMakeRect(400,350,300,220)
+                styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+              [normal setReleasedWhenClosed:NO]; [floating setReleasedWhenClosed:NO];
+              [normal setLevel:NSNormalWindowLevel]; [floating setLevel:NSFloatingWindowLevel];
+              [normal orderFrontRegardless]; [floating orderFrontRegardless];
+              [application activateIgnoringOtherApps:YES];
+              [application run];
+            }
+            return 0;
+          }
+          OBJC
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/window-control.m" -framework AppKit -o "$task_root/window-control"
+          "$task_run" "$task_root/window-control" > "$task_root/out/control-app.log" 2>&1 &
+          task_pid=$!
+          found_control=0
+          for attempt in {1..40}; do
+            if ! kill -0 "$task_pid" 2>/dev/null; then break; fi
+            if "$task_run" "$task_root/window" "$task_pid" > "$task_root/out/control-window.log" 2>&1 &&
+               /usr/bin/grep -F '(normal)' "$task_root/out/control-window.log" >/dev/null &&
+               /usr/bin/grep -F '(floating)' "$task_root/out/control-window.log" >/dev/null; then
+              found_control=1
+              break
+            fi
+            sleep 0.5
+          done
+          if test "$found_control" != 1; then
+            echo 'Normal and floating control windows were not both verified.'
+            cat "$task_root/out/control-app.log" "$task_root/out/control-window.log"
+            exit 1
+          fi
+          echo 'Verified both normal and floating levels with known synthetic windows.'
+          cat "$task_root/out/control-window.log"
+          kill -TERM "$task_pid"
+          wait "$task_pid" || true
+          task_pid=""
+          /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp" \
+            "CFFIXED_USER_HOME=$task_root/synthetic-home" /usr/bin/hdiutil attach "$image_path" \
+            -readonly -nobrowse -noautoopen -mountpoint "$task_root/mount" -plist > "$task_root/out/mount.plist"
+          task_mounted_app="$task_root/mount/AI Task Monitor.app"
+          test -d "$task_mounted_app"
+          test ! -L "$task_mounted_app"
+          task_app="$task_root/Applications/AI Task Monitor.app"
+          test ! -e "$task_app"
+          /usr/bin/ditto "$task_mounted_app" "$task_app"
+          /usr/bin/diff -qr "$task_mounted_app" "$task_app"
+          /usr/bin/codesign --verify --deep --strict "$task_app"
+          task_binary="$task_app/Contents/MacOS/AITaskMonitor"
+          test -x "$task_binary"
+          /usr/bin/xcrun lipo "$task_binary" -verify_arch arm64 x86_64
+          test "$(/usr/bin/plutil -extract AITaskMonitorReleaseVersion raw -o - "$task_app/Contents/Info.plist")" = "0.3.10"
+          test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = "0.3.10"
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$task_app/Contents/Info.plist")" = "14"
+          cat > "$task_root/observer.m" <<'OBJC'
+          #import <AppKit/AppKit.h>
+          #import <ApplicationServices/ApplicationServices.h>
+          #include <signal.h>
+          #include <stdlib.h>
+          #include <unistd.h>
+          static BOOL axFind(AXUIElementRef node, NSString *wanted, BOOL buttonOnly, CGRect *frame, int depth) {
+              if (!node || depth > 30) return NO;
+              CFTypeRef role = NULL, title = NULL, description = NULL, value = NULL;
+              AXUIElementCopyAttributeValue(node, kAXRoleAttribute, &role);
+              AXUIElementCopyAttributeValue(node, kAXTitleAttribute, &title);
+              AXUIElementCopyAttributeValue(node, kAXDescriptionAttribute, &description);
+              AXUIElementCopyAttributeValue(node, kAXValueAttribute, &value);
+              BOOL roleOK = !buttonOnly || (role && CFGetTypeID(role) == CFStringGetTypeID() && CFEqual(role, kAXButtonRole));
+              BOOL match = NO;
+              CFTypeRef candidates[] = { title, description, value };
+              for (int i=0; i<3; i++) {
+                  if (candidates[i] && CFGetTypeID(candidates[i]) == CFStringGetTypeID() &&
+                      [(__bridge NSString *)candidates[i] isEqualToString:wanted]) { match = YES; break; }
+              }
+              if (role) CFRelease(role);
+              if (title) CFRelease(title);
+              if (description) CFRelease(description);
+              if (value) CFRelease(value);
+              if (match && roleOK) {
+                  if (!frame) return YES;
+                  CFTypeRef position = NULL, size = NULL;
+                  CGPoint p = CGPointZero;
+                  CGSize z = CGSizeZero;
+                  AXError ep = AXUIElementCopyAttributeValue(node, kAXPositionAttribute, &position);
+                  AXError es = AXUIElementCopyAttributeValue(node, kAXSizeAttribute, &size);
+                  BOOL valid = ep == kAXErrorSuccess && es == kAXErrorSuccess && position && size &&
+                      CFGetTypeID(position) == AXValueGetTypeID() && CFGetTypeID(size) == AXValueGetTypeID() &&
+                      AXValueGetValue((AXValueRef)position, kAXValueCGPointType, &p) &&
+                      AXValueGetValue((AXValueRef)size, kAXValueCGSizeType, &z) && z.width > 0 && z.height > 0;
+                  if (position) CFRelease(position);
+                  if (size) CFRelease(size);
+                  if (valid) { *frame = CGRectMake(p.x, p.y, z.width, z.height); return YES; }
+              }
+              CFTypeRef raw = NULL;
+              if (AXUIElementCopyAttributeValue(node, kAXChildrenAttribute, &raw) != kAXErrorSuccess || !raw) return NO;
+              BOOL found = NO;
+              if (CFGetTypeID(raw) == CFArrayGetTypeID()) {
+                  CFArrayRef children = (CFArrayRef)raw;
+                  for (CFIndex i=0; i<CFArrayGetCount(children); i++) {
+                      CFTypeRef child = CFArrayGetValueAtIndex(children, i);
+                      if (child && CFGetTypeID(child) == AXUIElementGetTypeID() &&
+                          axFind((AXUIElementRef)child, wanted, buttonOnly, frame, depth+1)) { found = YES; break; }
+                  }
+              }
+              CFRelease(raw);
+              return found;
+          }
+          static BOOL appHasText(pid_t pid, NSString *wanted) {
+              AXUIElementRef app = AXUIElementCreateApplication(pid);
+              BOOL result = axFind(app, wanted, NO, NULL, 0);
+              CFRelease(app);
+              return result;
+          }
+          int main(int argc, char **argv) {
+              @autoreleasepool {
+                  if (argc != 2) return 2;
+                  pid_t pid = (pid_t)atoi(argv[1]);
+                  if (!AXIsProcessTrusted()) { puts("FIXTURE_UNVERIFIED: Accessibility unavailable"); return 3; }
+                  for (int i=0; i<80; i++) {
+                      if (kill(pid, 0) != 0) { puts("FIXTURE_UNVERIFIED: app exited before both tasks appeared"); return 4; }
+                      if (appHasText(pid, @"Synthetic task A") && appHasText(pid, @"Synthetic task B")) {
+                          puts("FIXTURE_PASS: both synthetic titles visible in actual app");
+                          sleep(3);
+                          if (kill(pid, 0) != 0) { puts("SURVIVAL_FAIL: app exited with both tasks visible"); return 5; }
+                          puts("SURVIVAL_PASS: actual app survived with both tasks visible for 3 seconds");
+                          return 0;
+                      }
+                      usleep(250000);
+                  }
+                  puts("FIXTURE_UNVERIFIED: both synthetic titles never observed");
+                  return 6;
+              }
+          }
+          OBJC
+          /usr/bin/clang -Wno-deprecated-declarations "$task_root/observer.m" -framework AppKit -framework ApplicationServices -o "$task_root/observer"
+          touch "$task_root/out/crash-start"
+          "$task_run" "$task_binary" > "$task_root/out/app.log" 2>&1 &
+          task_pid=$!
+          app_pid="$task_pid"
+          found=0
+          for attempt in {1..40}; do
+            if ! kill -0 "$task_pid" 2>/dev/null; then break; fi
+            if "$task_run" "$task_root/window" "$task_pid" > "$task_root/out/window.log" 2>&1; then found=1; break; fi
+            sleep 0.5
+          done
+          if test "$found" = 1; then
+            cat "$task_root/out/window.log"
+            sleep 3
+          fi
+          if kill -0 "$task_pid" 2>/dev/null && test "$found" = 1; then
+            fixture_codex="$task_root/synthetic-home/.codex"
+            mkdir -p "$fixture_codex/sessions"
+            cat > "$fixture_codex/session_index.jsonl" <<'JSON'
+          {"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task A"}
+          {"id":"019127f4-35ae-7c73-9e72-a10123456002","thread_name":"Synthetic task B"}
+          JSON
+            stamp="$(/bin/date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            for id in '019127f4-35ae-7c73-9e72-a10123456001' '019127f4-35ae-7c73-9e72-a10123456002'; do
+              printf '{"timestamp":"%s","type":"event_msg","payload":{"type":"task_started","turn_id":"turn-test"}}\n' "$stamp" > "$fixture_codex/sessions/rollout-2026-11-18T12-00-00-$id.jsonl"
+            done
+            echo 'Created the same two synthetic Codex sessions after app startup.'
+            set +e
+            "$task_run" "$task_root/observer" "$task_pid" > "$task_root/out/observer.log" 2>&1
+            observer_status=$?
+            set -e
+            cat "$task_root/out/observer.log"
+          else
+            observer_status=99
+            echo 'FIXTURE_UNVERIFIED: app did not remain alive through startup.'
+          fi
+          if ! kill -0 "$task_pid" 2>/dev/null; then
+            set +e
+            wait "$task_pid"
+            app_status=$?
+            set -e
+            echo "CASE 0.3.10: PROCESS_EXITED status=$app_status"
+            printf 'PROCESS_EXITED status=%s\n' "$app_status" > "$task_root/out/result.txt"
+            task_pid=""
+          else
+            if test "$observer_status" = 0; then
+              echo "CASE 0.3.10: FIXTURE_AND_SURVIVAL_PASS"
+              echo 'FIXTURE_AND_SURVIVAL_PASS' > "$task_root/out/result.txt"
+            else
+              echo "CASE 0.3.10: FIXTURE_UNVERIFIED observer=$observer_status"
+              printf 'FIXTURE_UNVERIFIED observer=%s\n' "$observer_status" > "$task_root/out/result.txt"
+            fi
+            kill -TERM "$task_pid" 2>/dev/null || true
+            wait "$task_pid" 2>/dev/null || true
+            task_pid=""
+            echo 'Note: still-running app was terminated by test cleanup after observation.'
+          fi
+          echo "CASE 0.3.10: application stderr follows"
+          cat "$task_root/out/app.log"
+          report_found=0
+          for delay in 1 2 3 4 5 6 7 8; do
+            for diag_dir in "$task_root/synthetic-home/Library/Logs/DiagnosticReports" "/Users/runner/Library/Logs/DiagnosticReports" "/Library/Logs/DiagnosticReports"; do
+              test -d "$diag_dir" || continue
+              for report in "$diag_dir"/AITaskMonitor*.ips "$diag_dir"/AITaskMonitor*.crash; do
+                test -f "$report" && test ! -L "$report" && test "$report" -nt "$task_root/out/crash-start" || continue
+                if /usr/bin/grep -E "\"pid\"[[:space:]]*:[[:space:]]*$app_pid([,}[:space:]]|$)|Process:.*[[]$app_pid[]]" "$report" >/dev/null &&
+                   /usr/bin/grep -F "$task_binary" "$report" >/dev/null; then
+                  /bin/cp "$report" "$task_root/out/system-crash-report.txt"
+                  report_found=1
+                  break
+                fi
+              done
+              test "$report_found" = 0 || break
+            done
+            test "$report_found" = 0 || break
+            sleep 1
+          done
+          if test "$report_found" = 1; then
+            echo "CASE 0.3.10: SYSTEM_CRASH_REPORT captured for exact app PID and path"
+            cat "$task_root/out/system-crash-report.txt"
+          else
+            echo "CASE 0.3.10: SYSTEM_CRASH_REPORT unavailable for this PID and path"
+          fi
+          
+      - name: Save comparison evidence
+        if: ${{ always() && env.AITM_COMPARE_ROOT != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-039-0310-comparison-${{ matrix.runner }}
+          path: ${{ env.AITM_COMPARE_ROOT }}/*/out/
+          if-no-files-found: warn
+          retention-days: 7
