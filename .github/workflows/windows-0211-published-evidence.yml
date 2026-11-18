@@ -1,0 +1,109 @@
+name: Capture published Windows 0.2.11 screenshots
+on:
+  push:
+    branches:
+      - codex/windows-0211-published-evidence-20261118
+permissions:
+  contents: read
+env:
+  DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+jobs:
+  settings:
+    runs-on: windows-2025
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        theme: [dark, light]
+        language: [en]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 10
+      - name: Verify published source and capture settings
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $revision='42825705eb131b12102763ad2b3eb120ef9cdcb1'
+          git merge-base --is-ancestor $revision HEAD
+          if($LASTEXITCODE -ne 0){throw 'Unexpected product revision.'}
+          $changed=@(git diff --name-only $revision HEAD)
+          if($changed.Count -ne 1 -or $changed[0] -cne '.github/workflows/windows-0211-published-evidence.yml'){throw 'Unexpected workflow revision.'}
+          $root=Join-Path $env:RUNNER_TEMP ('aitm-settings-'+[guid]::NewGuid().ToString('N'))
+          $out=Join-Path $root 'shots'
+          [void][IO.Directory]::CreateDirectory($out)
+          [IO.File]::AppendAllText($env:GITHUB_ENV,('SHOTS='+$out+[Environment]::NewLine),[Text.UTF8Encoding]::new($false))
+          $setup=Join-Path $root 'published-setup.exe'
+          Invoke-WebRequest -Uri 'https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.11/AITaskMonitorSetup-0.2.11.exe' -OutFile $setup -TimeoutSec 90
+          if((Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash -cne '968930FA2A6EBB2F59389B1905F8F1FEC76686B68150A41D18ACC3DF26617939'){throw 'Published setup hash mismatch.'}
+          $sourceApp=(Resolve-Path 'windows/app/CodexProgress.ps1').Path
+          $publishedApp=Join-Path $root 'published-app'
+          [void][IO.Directory]::CreateDirectory($publishedApp)
+          $assembly=[Reflection.Assembly]::LoadFile($setup)
+          foreach($resource in $assembly.GetManifestResourceNames()){
+            if($resource.StartsWith('integrations.kimi-plugin.')){$relative='integrations\\kimi-plugin\\'+$resource.Substring('integrations.kimi-plugin.'.Length)}
+            elseif($resource.StartsWith('integrations.')){$relative='integrations\\'+$resource.Substring('integrations.'.Length)}
+            elseif($resource -ceq 'app-icon.ico'){$relative='assets\\app-icon.ico'}
+            else{$relative=$resource}
+            $target=Join-Path $publishedApp $relative
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+            $stream=$assembly.GetManifestResourceStream($resource)
+            if($null -eq $stream){throw 'Published application resource unavailable.'}
+            try{$file=[IO.File]::Open($target,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);try{$stream.CopyTo($file)}finally{$file.Dispose()}}finally{$stream.Dispose()}
+          }
+          $app=Join-Path $publishedApp 'CodexProgress.ps1'
+          $utf8=[Text.UTF8Encoding]::new($false,$true)
+          $sourceText=[IO.File]::ReadAllText($sourceApp,$utf8).TrimStart([char]0xFEFF).Replace("`r`n","`n")
+          $embeddedText=[IO.File]::ReadAllText($app,$utf8).TrimStart([char]0xFEFF).Replace("`r`n","`n")
+          if($sourceText -cne $embeddedText){throw 'Source differs from the published application resource.'}
+          $env:USERPROFILE=Join-Path $root 'profile'
+          $env:LOCALAPPDATA=Join-Path $root 'local'
+          $env:APPDATA=Join-Path $root 'roaming'
+          $env:CODEX_HOME=Join-Path $root 'codex'
+          $env:TEMP=$root
+          $env:TMP=$root
+          foreach($p in @($env:USERPROFILE,$env:LOCALAPPDATA,$env:APPDATA,$env:CODEX_HOME)){[void][IO.Directory]::CreateDirectory($p)}
+          $systemPowerShell=Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
+          $theme='${{ matrix.theme }}'
+          $language='${{ matrix.language }}'
+          foreach($mode in @('compact','expanded')){
+            $shot=Join-Path $out ('multiple-en-'+$theme+'-'+$mode+'.png')
+            $arguments=@('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',$app,'-PreviewActiveTasks','2','-PreviewProviderLabelsUiTest','-PreviewOffscreen','-PreviewMotion','off','-ThemeOverride',$theme,'-LanguageOverride','en','-SnapshotFile',$shot,'-DiagnosticDirectory',(Join-Path $root ('diag-'+$mode)))
+            if($mode -eq 'compact'){$arguments+='-CompactMode'}
+            & $systemPowerShell @arguments
+            if($LASTEXITCODE -ne 0 -or -not(Test-Path -LiteralPath $shot -PathType Leaf)){throw ('Screenshot failed: '+$mode)}
+          }
+          foreach($state in @('journal')){
+            $base=Join-Path $root ('base-'+$state+'.png')
+            $shot=Join-Path $out ('settings-'+$state+'-'+$theme+'-'+$language+'.png')
+            $arguments=@('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',$app,'-PreviewActiveTasks','0','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-SnapshotFile',$base,'-SettingsSnapshotFile',$shot,'-PreferencesFile',(Join-Path $root ('preferences-'+$state+'.json')),'-DiagnosticDirectory',(Join-Path $root ('diag-'+$state)))
+            if($state -eq 'journal'){$arguments+='-PreviewJournalSettings'}
+            if($state -eq 'loop'){$arguments+='-PreviewLoopSettings'}
+            if($state -eq 'end'){$arguments+='-PreviewSettingsEnd'}
+            & $systemPowerShell @arguments
+            if($LASTEXITCODE -ne 0 -or -not(Test-Path -LiteralPath $shot -PathType Leaf)){throw ('Settings screenshot failed: '+$state)}
+          }
+          $readmeRevision='bf7f087c57eef1ac82d6d46ca3b349f46540d7cd'
+          $pairs=@(
+            @{name='expanded'; actual=('multiple-en-'+$theme+'-expanded.png'); github=('expanded-'+$theme+'.png')},
+            @{name='compact'; actual=('multiple-en-'+$theme+'-compact.png'); github=('compact-'+$theme+'.png')},
+            @{name='settings'; actual=('settings-journal-'+$theme+'-en.png'); github=('settings-'+$theme+'.png')}
+          )
+          $records=foreach($pair in $pairs){
+            $current=Join-Path $root ('readme-'+$pair.github)
+            $url='https://raw.githubusercontent.com/trueakaru-stack/ai-task-monitor/'+$readmeRevision+'/screenshots/'+$pair.github
+            Invoke-WebRequest -Uri $url -OutFile $current -TimeoutSec 60
+            $actualHash=(Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out $pair.actual)).Hash
+            $readmeHash=(Get-FileHash -Algorithm SHA256 -LiteralPath $current).Hash
+            $result=[ordered]@{view=$pair.name;theme=$theme;actual=$pair.actual;github=$pair.github;actualSha256=$actualHash.ToLowerInvariant();readmeSha256=$readmeHash.ToLowerInvariant();bitwiseEqual=($actualHash -ceq $readmeHash);readmeRevision=$readmeRevision;installerSha256='968930fa2a6ebb2f59389b1905f8f1fec76686b68150a41d18acc3df26617939';productRevision=$revision}
+            Write-Host ($result|ConvertTo-Json -Compress)
+            [pscustomobject]$result
+          }
+          [IO.File]::WriteAllText((Join-Path $out ('comparison-'+$theme+'.json')),($records|ConvertTo-Json -Depth 4),[Text.UTF8Encoding]::new($false))
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: windows-0211-published-${{ matrix.theme }}-${{ matrix.language }}
+          path: ${{ env.SHOTS }}
+          if-no-files-found: warn
+          retention-days: 3
