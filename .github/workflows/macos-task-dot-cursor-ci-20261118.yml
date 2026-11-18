@@ -82,3 +82,5 @@ jobs:
 # Final unobscured targets and clean product sources.
 
 # Verify the keyboard after hover-driven focus activation.
+
+# No test harness configuration of mouse-move events.
