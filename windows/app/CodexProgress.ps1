@@ -4048,7 +4048,7 @@ function Update-ProviderTabSizing {
 
 function Render-ProviderTabs($tasks){
  $providers=@($tasks|ForEach-Object{[string]$_.Provider}|Where-Object{$_}|Sort-Object -Unique)
- $script:showProviderLabels=$providers.Count -ge 2
+ $script:showProviderLabels=$providers.Count -ge 1
  $script:providerTabsEqualWidth=$providers.Count -eq 2
  if($providers.Count -lt 2){$providerTabsHost.Visibility="Collapsed";$script:selectedProvider="all";$script:providerTabsFingerprint="";return}
  if($script:selectedProvider -ne "all" -and $script:selectedProvider -notin $providers){$script:selectedProvider="all"}
@@ -4495,12 +4495,20 @@ if ($SnapshotFile) {
   $activity=Find-MotionElement $previewRoot "text" ([string]$script:lastAllTasks[0].Activity)
   $title=Find-MotionElement $previewRoot "text" ([string]$script:lastAllTasks[0].Title)
   if($null -eq $indicator -or $null -eq $activity -or $null -eq $title){throw "The task activity indicator, action or title is missing."}
+  $providerLabel=Find-MotionElement $previewRoot "text" ([string]$script:lastAllTasks[0].ProviderName)
+  if($null -eq $providerLabel -or $providerLabel.Foreground.Color -ne (Brush $script:accentHex).Color){throw "The single-source task label is missing or does not use the system accent."}
+  $providerPosition=$providerLabel.TranslatePoint([Windows.Point]::new(0,0),$previewRoot)
+  $titlePosition=$title.TranslatePoint([Windows.Point]::new(0,0),$previewRoot)
+  if($providerPosition.Y -ge $titlePosition.Y){throw "The source label must appear above the task title."}
   if($script:isCompact){
    if($title.FontSize -ne 16){throw "The compact task title must use a 16 DIP font."}
    $expectedLabel=Progress-Label $script:lastAllTasks[0]
    if($expectedLabel){$label=Find-MotionElement $previewRoot "text" $expectedLabel;if($null -eq $label -or $label.FontSize -ne 16){throw "The compact progress label must match the title font size."}}
   }
-  if($script:isCompact -and $compactTasksPanel.Children[0].Children[0].Children.Count -ne 2){throw "The previous title indicator was not removed."}
+  if($script:isCompact){
+   $compactTask=@($compactTasksPanel.Children | Where-Object {$_ -is [Windows.Controls.Grid]})
+   if($compactTask.Count -ne 1 -or $compactTask[0].Children[0].Children.Count -ne 2){throw "The previous title indicator was not removed."}
+  }
   $mark=$indicator.Children[0];$geometry=$mark.Data
   $expectAnimation=[bool]$script:lastAllTasks[0].Active -and $script:motionEnabled
   if($geometry -isnot [Windows.Media.RectangleGeometry] -or $geometry.RadiusX -ne 2 -or $geometry.RadiusY -ne 2 -or -not $mark.RenderTransform.Value.IsIdentity){throw "The activity indicator must retain circular ends while moving."}
