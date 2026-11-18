@@ -80,3 +80,5 @@ jobs:
 # Verify real content bounds, released modifiers and expanded window.
 
 # Final unobscured targets and clean product sources.
+
+# Verify the keyboard after hover-driven focus activation.
