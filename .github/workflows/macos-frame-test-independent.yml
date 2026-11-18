@@ -73,26 +73,69 @@ jobs:
           if "$root/run-test" /bin/cat "$marker" > /dev/null 2>&1; then echo 'Outside-profile read was not denied'; exit 1; fi
           if "$root/run-test" /usr/bin/touch "$marker" > /dev/null 2>&1; then echo 'Outside-profile write was not denied'; exit 1; fi
           cd "$root/source/macos"
-          cp "$root/baseline.swift" "$source_root"
-          cmp "$source_root" "$root/baseline.swift"
-          set +e
-          "$root/run-test" /usr/bin/xcrun swift test --disable-sandbox --scratch-path "$root/build" \
-            --cache-path "$root/cache" --config-path "$root/config" --security-path "$root/security" \
-            --filter CompactWindowLayoutTests 2>&1 | tee "$root/evidence/before.log"
-          baseline_status=${PIPESTATUS[0]}
-          set -e
-          test "$baseline_status" -ne 0 || { echo 'The old code unexpectedly passed the regression'; exit 1; }
-          grep -E 'testTitledWindowHasNoExtraTitleBarArea.*failed' "$root/evidence/before.log"
-          awk -F'"' '/CompactWindowLayoutTests.swift:24:.*XCTAssertEqualWithAccuracy failed/ && $2+0 > 701 && $4+0 == 700 { good=1 } END { exit !good }' "$root/evidence/before.log"
-          echo 'BASELINE_EXPECTED_FAILURE: titled frame was taller than 700 points'
-          cp "$root/candidate.swift" "$source_root"
-          cmp "$source_root" "$root/candidate.swift"
-          "$root/run-test" /usr/bin/xcrun swift test --disable-sandbox --scratch-path "$root/build" \
-            --cache-path "$root/cache" --config-path "$root/config" --security-path "$root/security" \
-            --filter CompactWindowLayoutTests 2>&1 | tee "$root/evidence/after.log"
-          grep -E 'testTitledWindowHasNoExtraTitleBarArea.*passed' "$root/evidence/after.log"
-          grep -E 'testCompactWindowSizesToContentAndKeepsItsBottomEdge.*passed' "$root/evidence/after.log"
-          echo 'CANDIDATE_PASS: both compact window layout tests passed'
+          test_file="$root/source/macos/Tests/AITaskMonitorTests/CompactWindowLayoutTests.swift"
+          cp "$test_file" "$root/original-test.swift"
+          cat > "$root/instrument.py" <<'PY'
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          mode = sys.argv[2]
+          source_path = root / "source/macos/Sources/AITaskMonitor/RootView.swift"
+          test_path = root / "source/macos/Tests/AITaskMonitorTests/CompactWindowLayoutTests.swift"
+          source = (root / "candidate.swift").read_text()
+          tests = (root / "original-test.swift").read_text()
+          frame_line = "        .frame(width: store.isCompact ? 372 : 560, height: store.isCompact ? compactHeight : 700, alignment: .top)"
+          if source.count(frame_line) != 1:
+              raise SystemExit("unexpected root frame")
+          if mode == "ignore-top":
+              source = source.replace(frame_line, frame_line + "\n        .ignoresSafeArea(.container, edges: .top)")
+          if mode == "sizing-none":
+              target = "        window.contentView = host"
+              if tests.count(target) != 2:
+                  raise SystemExit("unexpected hosting view assignments")
+              tests = tests.replace(target, "        host.sizingOptions = []\n" + target)
+          inject_at = "        if window.frame.size != size {\n"
+          trace = r'''        func frameTrace(_ stage: String) {
+                      print("ROOT_DIAG stage=\(stage) compact=\(isCompact) target=\(size) frame=\(window.frame) contentFrame=\(String(describing: window.contentView?.frame)) contentFitting=\(String(describing: window.contentView?.fittingSize)) contentMin=\(window.contentMinSize) contentMax=\(window.contentMaxSize) frameMin=\(window.minSize) frameMax=\(window.maxSize) contentLayout=\(window.contentLayoutRect)")
+                  }
+                  frameTrace("before")
+          '''
+          if source.count(inject_at) != 1:
+              raise SystemExit("unexpected configure branch")
+          source = source.replace(inject_at, trace + inject_at)
+          target = "            window.setFrame(frame, display: true)"
+          if source.count(target) != 1:
+              raise SystemExit("unexpected setFrame count")
+          source = source.replace(target, target + '\n            frameTrace("immediate")')
+          snapshot = r'''        func testTrace(_ stage: String) {
+                      print("TEST_DIAG stage=\(stage) frame=\(window.frame) contentFrame=\(String(describing: window.contentView?.frame)) fitting=\(host.fittingSize) contentMin=\(window.contentMinSize) contentMax=\(window.contentMaxSize) frameMin=\(window.minSize) frameMax=\(window.maxSize) contentLayout=\(window.contentLayoutRect) safeArea=\(host.safeAreaInsets) sizing=\(host.sizingOptions)")
+                  }
+          '''
+          target = "        window.orderFrontRegardless()\n        defer { window.close() }\n        RunLoop.current.run(until: Date().addingTimeInterval(1.2))\n\n        XCTAssertEqual(window.frame.width, 560, accuracy: 1)"
+          if tests.count(target) != 1:
+              raise SystemExit("unexpected titled test structure")
+          tests = tests.replace(target, "        window.orderFrontRegardless()\n        defer { window.close() }\n" + snapshot + "        RunLoop.current.run(until: Date().addingTimeInterval(1.2))\n        testTrace(\"expanded-settled\")\n\n        XCTAssertEqual(window.frame.width, 560, accuracy: 1)")
+          target = "        store.isCompact = true\n        RunLoop.current.run(until: Date().addingTimeInterval(1.2))\n        XCTAssertEqual(window.frame.width, 372, accuracy: 1)"
+          if tests.count(target) != 1:
+              raise SystemExit("unexpected titled compact test structure")
+          tests = tests.replace(target, "        store.isCompact = true\n        RunLoop.current.run(until: Date().addingTimeInterval(1.2))\n        testTrace(\"compact-settled\")\n        XCTAssertEqual(window.frame.width, 372, accuracy: 1)")
+          source_path.write_text(source)
+          test_path.write_text(tests)
+          PY
+          /usr/bin/python3 -V
+          for mode in candidate ignore-top sizing-none; do
+            /usr/bin/python3 -I -S -B "$root/instrument.py" "$root" "$mode"
+            set +e
+            "$root/run-test" /usr/bin/xcrun swift test --disable-sandbox --scratch-path "$root/build" \
+              --cache-path "$root/cache" --config-path "$root/config" --security-path "$root/security" \
+              --filter CompactWindowLayoutTests > "$root/evidence/$mode.log" 2>&1
+            status=$?
+            set -e
+            echo "DIAGNOSTIC_MODE_RESULT: $mode exit=$status" | tee -a "$root/evidence/results.txt"
+            grep -E 'TEST_DIAG|testCompactWindowSizesToContentAndKeepsItsBottomEdge.*(passed|failed)|testTitledWindowHasNoExtraTitleBarArea.*(passed|failed)|error:|failed:' "$root/evidence/$mode.log" >> "$root/evidence/results.txt" || true
+          done
+          cat "$root/evidence/results.txt"
+          echo "DIAGNOSTICS_COMPLETE: compare individual test results; successful job does not imply tests passed"
       - name: Save isolated test evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
