@@ -35,13 +35,26 @@ jobs:
           $setup=Join-Path $root 'published-setup.exe'
           Invoke-WebRequest -Uri 'https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.10/AITaskMonitorSetup-0.2.10.exe' -OutFile $setup -TimeoutSec 90
           if((Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash -cne 'ED73FC016B66944D353443556CFB53F09B98D6757C1716C3513ED7DDB72D00D1'){throw 'Published setup hash mismatch.'}
-          $app=(Resolve-Path 'windows/app/CodexProgress.ps1').Path
+          $sourceApp=(Resolve-Path 'windows/app/CodexProgress.ps1').Path
+          $publishedApp=Join-Path $root 'published-app'
+          [void][IO.Directory]::CreateDirectory($publishedApp)
           $assembly=[Reflection.Assembly]::LoadFile($setup)
-          $stream=$assembly.GetManifestResourceStream('CodexProgress.ps1')
-          if($null -eq $stream){throw 'Published app resource unavailable.'}
-          $sha=[Security.Cryptography.SHA256]::Create()
-          try{$embedded=([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','')}finally{$sha.Dispose();$stream.Dispose()}
-          if($embedded -cne (Get-FileHash -LiteralPath $app -Algorithm SHA256).Hash){throw 'Source does not match published application resource.'}
+          foreach($resource in $assembly.GetManifestResourceNames()){
+            if($resource.StartsWith('integrations.kimi-plugin.')){$relative='integrations\\kimi-plugin\\'+$resource.Substring('integrations.kimi-plugin.'.Length)}
+            elseif($resource.StartsWith('integrations.')){$relative='integrations\\'+$resource.Substring('integrations.'.Length)}
+            elseif($resource -ceq 'app-icon.ico'){$relative='assets\\app-icon.ico'}
+            else{$relative=$resource}
+            $target=Join-Path $publishedApp $relative
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+            $stream=$assembly.GetManifestResourceStream($resource)
+            if($null -eq $stream){throw 'Published application resource unavailable.'}
+            try{$file=[IO.File]::Open($target,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);try{$stream.CopyTo($file)}finally{$file.Dispose()}}finally{$stream.Dispose()}
+          }
+          $app=Join-Path $publishedApp 'CodexProgress.ps1'
+          $utf8=[Text.UTF8Encoding]::new($false,$true)
+          $sourceText=[IO.File]::ReadAllText($sourceApp,$utf8).TrimStart([char]0xFEFF).Replace("`r`n","`n")
+          $embeddedText=[IO.File]::ReadAllText($app,$utf8).TrimStart([char]0xFEFF).Replace("`r`n","`n")
+          if($sourceText -cne $embeddedText){throw 'Source differs from the published application resource.'}
           $env:USERPROFILE=Join-Path $root 'profile'
           $env:LOCALAPPDATA=Join-Path $root 'local'
           $env:APPDATA=Join-Path $root 'roaming'
