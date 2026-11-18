@@ -48,6 +48,14 @@ $upgrade=Find-PlatformUpdate $release028 '0.2.7-alpha' 'windows'
 Assert ($null -ne $upgrade -and $upgrade.Version -ceq '0.2.8' -and $upgrade.Url.EndsWith('/v0.2.8/AITaskMonitorSetup-0.2.8.exe')) 'The previous Windows version did not select the stable 0.2.8 installer.'
 Assert ((Find-PlatformUpdate $release028 '0.2.8-alpha' 'windows').Version -ceq '0.2.8') 'The 0.2.8 prerelease did not find the stable release.'
 Assert ($null -eq (Find-PlatformUpdate $release028 '0.2.8' 'windows')) 'The current Windows version offered its own installer.'
+$release0210='[{"tag_name":"v0.3.9","draft":false,"assets":[{"name":"AITaskMonitor-macOS-0.3.9.dmg","browser_download_url":"https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.3.9/AITaskMonitor-macOS-0.3.9.dmg"}]},{"tag_name":"v0.2.9","draft":false,"assets":[{"name":"AITaskMonitorSetup-0.2.9.exe","browser_download_url":"https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.9/AITaskMonitorSetup-0.2.9.exe"}]},{"tag_name":"v0.2.10","draft":false,"assets":[{"name":"AITaskMonitorSetup-0.2.10.exe","browser_download_url":"https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.10/AITaskMonitorSetup-0.2.10.exe"}]}]'
+$upgrade0210=Find-PlatformUpdate $release0210 '0.2.9' 'windows'
+Assert ($null -ne $upgrade0210 -and $upgrade0210.Version -ceq '0.2.10' -and $upgrade0210.Url -ceq 'https://github.com/trueakaru-stack/ai-task-monitor/releases/download/v0.2.10/AITaskMonitorSetup-0.2.10.exe') 'Windows 0.2.9 did not select its 0.2.10 installer.'
+Assert ($null -eq (Find-PlatformUpdate $release0210 '0.2.10' 'windows')) 'Windows 0.2.10 offered its own installer as an update.'
 $versionSource=[IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\app\VersionInfo.cs'))
-Assert ($current -ceq '0.2.8' -and $versionSource.Contains('AssemblyVersion("0.2.8.0")') -and $versionSource.Contains('AssemblyFileVersion("0.2.8.0")') -and $versionSource.Contains('AssemblyInformationalVersion("0.2.8")')) 'The application and installer versions do not agree.'
+$currentParsed=ConvertTo-ReleaseVersion $current
+$minimumVersion=ConvertTo-ReleaseVersion '0.2.10'
+Assert ($null -ne $currentParsed -and (Compare-ReleaseVersions $currentParsed $minimumVersion) -ge 0) 'The application version predates 0.2.10.'
+$assemblyVersion='{0}.{1}.{2}.0' -f $currentParsed.Major,$currentParsed.Minor,$currentParsed.Patch
+Assert ($versionSource.Contains(('AssemblyVersion("{0}")' -f $assemblyVersion)) -and $versionSource.Contains(('AssemblyFileVersion("{0}")' -f $assemblyVersion)) -and $versionSource.Contains(('AssemblyInformationalVersion("{0}")' -f $current))) 'The application and installer versions do not agree.'
 Write-Output 'Release selection: versions, prereleases, platform, drafts, bounds and trusted links verified.'

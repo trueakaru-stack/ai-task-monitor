@@ -429,7 +429,7 @@ try{
  $script:codexCloudController=New-CodexCloudController
  $script:codexCloudModulesAvailable=$true
 }catch{}
-$script:currentVersion='0.2.9'
+$script:currentVersion='0.2.10'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateRequest=$null
@@ -3438,7 +3438,7 @@ function Add-LoopWarning($container,$task,[bool]$compact) {
  $loop=Get-LoopWarning $task
  if($null -eq $loop){return}
  $row=New-Object Windows.Controls.Grid
- $row.Margin=$(if($compact){New-Object Windows.Thickness(12,6,0,0)}else{New-Object Windows.Thickness(0,8,0,0)})
+ $row.Margin=$(if($compact){New-Object Windows.Thickness(0,6,0,0)}else{New-Object Windows.Thickness(0,8,0,0)})
  $messageColumn=New-Object Windows.Controls.ColumnDefinition; $messageColumn.Width=New-Object Windows.GridLength(1,"Star")
  $actionColumn=New-Object Windows.Controls.ColumnDefinition; $actionColumn.Width=[Windows.GridLength]::Auto
  $row.ColumnDefinitions.Add($messageColumn);$row.ColumnDefinitions.Add($actionColumn)
@@ -3579,7 +3579,7 @@ function Add-Card($task) {
 }
 
 function Add-CompactTask($task) {
- if($script:showProviderLabels){$providerLabel=Text ([string]$task.ProviderName) 10.5 $script:accentHex "SemiBold";$providerLabel.Margin=New-Object Windows.Thickness(12,0,0,2);$compactTasksPanel.Children.Add($providerLabel)|Out-Null}
+ if($script:showProviderLabels){$providerLabel=Text ([string]$task.ProviderName) 10.5 $script:accentHex "SemiBold";$providerLabel.Margin=New-Object Windows.Thickness(0,0,0,2);$compactTasksPanel.Children.Add($providerLabel)|Out-Null}
  $container=New-Object Windows.Controls.Grid; $container.Margin=New-Object Windows.Thickness(0,0,0,10)
  $r1=New-Object Windows.Controls.RowDefinition; $r1.Height=[Windows.GridLength]::Auto
  $r2=New-Object Windows.Controls.RowDefinition; $r2.Height=[Windows.GridLength]::Auto
@@ -3588,21 +3588,20 @@ function Add-CompactTask($task) {
  $container.RowDefinitions.Add($r1); $container.RowDefinitions.Add($r2); $container.RowDefinitions.Add($r3); $container.RowDefinitions.Add($r4)
 
  $header=New-Object Windows.Controls.Grid
- $c1=New-Object Windows.Controls.ColumnDefinition; $c1.Width=New-Object Windows.GridLength(12)
- $c2=New-Object Windows.Controls.ColumnDefinition; $c2.Width=New-Object Windows.GridLength(1,"Star")
- $c3=New-Object Windows.Controls.ColumnDefinition; $c3.Width=[Windows.GridLength]::Auto
- $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2); $header.ColumnDefinitions.Add($c3)
+ $c1=New-Object Windows.Controls.ColumnDefinition; $c1.Width=New-Object Windows.GridLength(1,"Star")
+ $c2=New-Object Windows.Controls.ColumnDefinition; $c2.Width=[Windows.GridLength]::Auto
+ $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2)
  $displayTitle=Localized-TaskTitle $task
  $title=Text $displayTitle 16 $script:palette.Primary "SemiBold"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; $title.Margin=New-Object Windows.Thickness(0,0,10,0); Add-ConditionalHint $title $displayTitle "line"; [Windows.Automation.AutomationProperties]::SetName($title,$displayTitle)
  $progressLabel=Progress-Label $task
  $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.VerticalAlignment="Center"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip=Tr "Приблизительная оценка"}
- [Windows.Controls.Grid]::SetColumn($title,1); [Windows.Controls.Grid]::SetColumn($percent,2)
+ [Windows.Controls.Grid]::SetColumn($title,0); [Windows.Controls.Grid]::SetColumn($percent,1)
  $header.Children.Add($title)|Out-Null; $header.Children.Add($percent)|Out-Null
  [Windows.Controls.Grid]::SetRow($header,0); $container.Children.Add($header)|Out-Null
 
  $activityText=Localized-TaskActivity $task; if(-not $activityText){$activityText=Tr "Выполняется"}
  $activity=Text $activityText 11.5 $script:palette.Activity; $activity.TextWrapping="NoWrap"; $activity.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $activity $activityText "line"; [Windows.Automation.AutomationProperties]::SetName($activity,$activityText)
- $activityRow=New-Object Windows.Controls.Grid; $activityRow.Margin=New-Object Windows.Thickness(12,2,0,0)
+ $activityRow=New-Object Windows.Controls.Grid; $activityRow.Margin=New-Object Windows.Thickness(0,2,0,0)
  $activityMarkColumn=New-Object Windows.Controls.ColumnDefinition; $activityMarkColumn.Width=New-Object Windows.GridLength(22); $activityTextColumn=New-Object Windows.Controls.ColumnDefinition; $activityTextColumn.Width=New-Object Windows.GridLength(1,"Star"); $activityRow.ColumnDefinitions.Add($activityMarkColumn); $activityRow.ColumnDefinitions.Add($activityTextColumn)
  $indicator=New-ActivityIndicator ([bool]$task.Active);$indicator.Margin=New-Object Windows.Thickness(0,7,6,0);$indicator.VerticalAlignment="Top";$indicator.HorizontalAlignment="Left";$activityRow.Children.Add($indicator)|Out-Null
  [Windows.Controls.Grid]::SetColumn($activity,1);$activityRow.Children.Add($activity)|Out-Null
@@ -3610,10 +3609,10 @@ function Add-CompactTask($task) {
  [Windows.Controls.Grid]::SetRow($activityRow,1); $container.Children.Add($activityRow)|Out-Null
  $warningPanel=New-Object Windows.Controls.StackPanel
  $planNoteText=Plan-StatusNote $task
- if($planNoteText){$planNote=Text $planNoteText 11.5 $script:palette.Muted;$planNote.Margin=New-Object Windows.Thickness(12,4,0,0);$warningPanel.Children.Add($planNote)|Out-Null}
+ if($planNoteText){$planNote=Text $planNoteText 11.5 $script:palette.Muted;$planNote.Margin=New-Object Windows.Thickness(0,4,0,0);$warningPanel.Children.Add($planNote)|Out-Null}
  Add-LoopWarning $warningPanel $task $true; [Windows.Controls.Grid]::SetRow($warningPanel,2); $container.Children.Add($warningPanel)|Out-Null
  $hideClaudePlanState=([string]$task.Provider -in @('claude','codex') -and (-not [bool](Prop $task 'PlanConfirmed' $true) -or [string](Prop $task 'Status' '') -eq 'Статус не подтверждён'))
- if(-not $hideClaudePlanState -and $task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Height=2; $bar.Margin=New-Object Windows.Thickness(12,7,0,0); [Windows.Controls.Grid]::SetRow($bar,3); $container.Children.Add($bar)|Out-Null}
+ if(-not $hideClaudePlanState -and $task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Height=2; $bar.Margin=New-Object Windows.Thickness(0,7,0,0); [Windows.Controls.Grid]::SetRow($bar,3); $container.Children.Add($bar)|Out-Null}
  $compactTasksPanel.Children.Add($container)|Out-Null
 }
 
@@ -3702,7 +3701,7 @@ function Render-CompactTasks($tasks) {
   Add-CompactTask $selected[0]
   if($warningText){
    $warning=Text $warningText 11.5 $script:palette.Muted
-   $warning.Margin=New-Object Windows.Thickness(12,0,0,6)
+   $warning.Margin=New-Object Windows.Thickness(0,0,0,6)
    $warning.Tag='source-warning'
    $compactTasksPanel.Children.Add($warning)|Out-Null
   }
@@ -4602,6 +4601,27 @@ if ($SnapshotFile) {
   $providerLabel=Find-ProviderLabel $labelsRoot ([string]$sample[0].ProviderName)
   if($providers.Count -ge 2 -and ($null -eq $providerLabel -or $providerLabel.Foreground.Color -ne (Brush $script:accentHex).Color)){throw 'A multiple-source label is missing or uses the wrong color.'}
   if($providers.Count -lt 2 -and $null -ne $providerLabel){throw 'A single-source task must not show a provider label.'}
+  if($script:isCompact){
+   $panelLeft=$compactTasksPanel.TranslatePoint([Windows.Point]::new(0,0),$compactView).X
+   $panelRight=$compactView.ActualWidth-$panelLeft-$compactTasksPanel.ActualWidth
+   if($compactTasksPanel.ActualWidth -le 0 -or [Math]::Abs($panelLeft-$panelRight) -gt 0.5){throw 'The compact panel does not have balanced outer insets.'}
+   $taskGrid=@($compactTasksPanel.Children | Where-Object {$_ -is [Windows.Controls.Grid]} | Select-Object -First 1)
+   if($taskGrid.Count -ne 1){throw 'The compact task container is missing.'}
+   $taskTitle=Find-ProviderLabel $taskGrid[0] (Localized-TaskTitle $sample[0])
+   if($null -eq $taskTitle -or [Math]::Abs($taskTitle.TranslatePoint([Windows.Point]::new(0,0),$compactTasksPanel).X) -gt 0.5){throw 'The compact task title is not aligned with the content edge.'}
+   if($null -ne $providerLabel -and [Math]::Abs($providerLabel.TranslatePoint([Windows.Point]::new(0,0),$compactTasksPanel).X) -gt 0.5){throw 'The compact provider label is not aligned with the content edge.'}
+   $activityRow=@($taskGrid[0].Children | Where-Object {$_ -is [Windows.Controls.Grid] -and [Windows.Controls.Grid]::GetRow($_) -eq 1})
+   if($activityRow.Count -ne 1 -or [Math]::Abs($activityRow[0].TranslatePoint([Windows.Point]::new(0,0),$compactTasksPanel).X) -gt 0.5){throw 'The compact activity row is not aligned with the content edge.'}
+   $bars=@($taskGrid[0].Children | Where-Object {$_ -is [Windows.Controls.ProgressBar]})
+   if($bars.Count -gt 1 -or ($PreviewScenario -eq 'planned' -and -not $PreviewPlanUnconfirmed -and -not $PreviewUnconfirmed -and $bars.Count -ne 1)){throw 'The expected compact progress bar is missing or duplicated.'}
+   if($PreviewPlanUnconfirmed -and $bars.Count -ne 0){throw 'An unconfirmed plan must not show a compact progress bar.'}
+   foreach($bar in $bars){
+    $track=$bar.Template.FindName('PART_Track',$bar)
+    if($null -eq $track -or $track.ActualWidth -le 0){throw 'The compact progress track is missing.'}
+    $left=$track.TranslatePoint([Windows.Point]::new(0,0),$compactTasksPanel).X
+    if([Math]::Abs($left) -gt 0.5 -or [Math]::Abs(($left+$track.ActualWidth)-$compactTasksPanel.ActualWidth) -gt 0.5){throw 'The compact progress track does not have balanced outer insets.'}
+   }
+  }
  }
  if($PreviewSourceWarning -eq 'partial-both'){
   $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
@@ -4624,6 +4644,7 @@ if ($SnapshotFile) {
   $needed=$warning[0].DesiredSize.Height-$warning[0].Margin.Top-$warning[0].Margin.Bottom
   $bounds=$warning[0].TransformToAncestor($compactView).TransformBounds([Windows.Rect]::new(0,0,$warning[0].ActualWidth,$warning[0].ActualHeight))
   if($warning[0].ActualHeight+0.5 -lt $needed -or $bounds.Bottom -gt $compactView.ActualHeight+0.5){throw 'The compact source warning is clipped.'}
+  if($PreviewProviderLabelsUiTest -and [Math]::Abs($warning[0].TranslatePoint([Windows.Point]::new(0,0),$compactTasksPanel).X) -gt 0.5){throw 'The compact source warning is not aligned with the content edge.'}
  }
  if($PreviewTabsUiTest){
   if($providerTabsPanel.Children.Count -ne 7 -or $providerTabsScroll.ScrollableWidth -le 0){throw 'The six-provider tab row must overflow in one scrollable row.'}
