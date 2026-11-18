@@ -277,13 +277,13 @@ jobs:
             task_pid=""
           done
           cat > "$task_root/out/PROVENANCE.txt" <<EOF
-macOS 0.3.10 candidate UI previews
-Exact DMG SHA-256: d711d8e32f62f76347cbd6fb8bc9037f27b6b53bc4394565a735626fea567263
-GitHub Actions run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-The UI is rendered by the verified candidate binary on an isolated GitHub-hosted Mac.
-Tasks and profiles are examples. The images are programmatic UI previews; they do not
-verify a live task session, native window shadow, or system window contour.
-EOF
+          macOS 0.3.10 candidate UI previews
+          Exact DMG SHA-256: d711d8e32f62f76347cbd6fb8bc9037f27b6b53bc4394565a735626fea567263
+          GitHub Actions run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          The UI is rendered by the verified candidate binary on an isolated GitHub-hosted Mac.
+          Tasks and profiles are examples. The images are programmatic UI previews; they do not
+          verify a live task session, native window shadow, or system window contour.
+          EOF
           echo 'All preview tasks are synthetic.'
       - name: Save diagnostic evidence
         if: ${{ always() && env.AITM_TEST_TASK_ROOT != '' }}
