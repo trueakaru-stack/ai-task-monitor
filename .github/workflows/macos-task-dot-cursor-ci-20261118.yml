@@ -68,3 +68,5 @@ jobs:
 # Separate visual capture from active theme-transition checks.
 
 # Verify appearance-change synchronization.
+
+# Attempt keyboard and accessibility checks without changing permissions.
