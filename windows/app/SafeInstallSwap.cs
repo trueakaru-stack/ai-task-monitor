@@ -53,6 +53,7 @@ internal sealed class SafeInstallSwap : IDisposable
     }
 
     internal string BackupDirectory { get; private set; }
+    internal string PreservedJournalPath { get; private set; }
     internal bool Updated { get; private set; }
 
     internal SafeInstallSwap(string local, string install) : this(local, install, null) { }
@@ -199,6 +200,7 @@ internal sealed class SafeInstallSwap : IDisposable
         {
             bool partial = id == null ? ValidPartialOperation(tail) : ("DONE|" + id).StartsWith(tail, StringComparison.Ordinal);
             if (!partial) throw new IOException("The update journal contains unrecognized data.");
+            PreservedJournalPath = PreserveJournal(data);
             // A partial operation record cannot have preceded a filesystem move;
             // a partial DONE record still leaves its complete OP for recovery.
             journal.SetLength(new UTF8Encoding(false, true).GetByteCount(complete));
@@ -226,6 +228,31 @@ internal sealed class SafeInstallSwap : IDisposable
                 throw RecoveryError(backup);
         }
         Append("DONE|" + id);
+    }
+
+    private string PreserveJournal(byte[] contents)
+    {
+        string path = Path.Combine(localDirectory, "AITaskMonitor.journal-preserved-" + NewId());
+        SafeFileHandle handle = CreateFile(path, GenericRead | GenericWrite, 0, IntPtr.Zero, CreateNew, OpenReparsePoint, IntPtr.Zero);
+        if (handle.IsInvalid) { int error = Marshal.GetLastWin32Error(); handle.Dispose(); throw BusyError(error); }
+        try
+        {
+            FileInformation info = Information(handle);
+            if ((info.Attributes & (DirectoryAttribute | ReparseAttribute)) != 0 || info.Links != 1)
+                throw new IOException("Cannot safely preserve the update journal.");
+            using (FileStream saved = new FileStream(handle, FileAccess.ReadWrite, 4096, false))
+            {
+                handle = null;
+                saved.Write(contents, 0, contents.Length); saved.Flush(true); saved.Position = 0;
+                byte[] copy = new byte[contents.Length]; int offset = 0, count;
+                while (offset < copy.Length && (count = saved.Read(copy, offset, copy.Length - offset)) > 0) offset += count;
+                if (offset != contents.Length) throw new IOException("The preserved journal could not be verified.");
+                for (int i = 0; i < contents.Length; i++)
+                    if (contents[i] != copy[i]) throw new IOException("The preserved journal could not be verified.");
+            }
+            return path;
+        }
+        finally { if (handle != null) handle.Dispose(); }
     }
 
     private void Append(string line)

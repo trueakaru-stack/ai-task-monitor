@@ -32,8 +32,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch the requested source.' }
           git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
           if ($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:GITHUB_SHA) { throw 'Unexpected source revision.' }
-          $interpreter = (Get-Command python.exe -CommandType Application -ErrorAction Stop).Source
-          if ($interpreter -match '(?i)\\WindowsApps\\') { throw 'Python installer aliases are not supported.' }
+          $interpreters = @(Get-Command python.exe -CommandType Application -All -ErrorAction SilentlyContinue |
+              Where-Object { $_.Source -notmatch '(?i)\\WindowsApps\\' } | ForEach-Object { $_.Source })
+          if ($interpreters.Count -eq 0 -and $env:RUNNER_TOOL_CACHE) {
+              $pythonCache = Join-Path $env:RUNNER_TOOL_CACHE 'Python'
+              if (Test-Path -LiteralPath $pythonCache -PathType Container) {
+                  $interpreters = @(Get-ChildItem -LiteralPath $pythonCache -Filter python.exe -File -Recurse |
+                      Where-Object { $_.FullName -notmatch '(?i)\\WindowsApps\\' } | ForEach-Object { $_.FullName })
+              }
+          }
+          if ($interpreters.Count -eq 0) { throw 'A hosted Python interpreter was not found.' }
+          $interpreter = $interpreters[0]
           $version = & $interpreter --version 2>&1
           if ($LASTEXITCODE -ne 0 -or "$version" -notmatch '^Python 3\.') { throw 'A verified Python 3 interpreter is required.' }
           & $interpreter -B (Join-Path $source 'windows/tests/Test-DotnetPathSafety.py')

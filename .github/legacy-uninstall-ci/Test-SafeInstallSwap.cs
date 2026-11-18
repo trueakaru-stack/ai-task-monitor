@@ -213,6 +213,19 @@ internal static class TestSafeInstallSwap
             CheckOld(local);
         }
     }
+    private static void PartialJournalPreserved()
+    {
+        string local = NewCase("partial-journal"), target = Install(local); SetupOld(local);
+        string journal = Path.Combine(local, "AITaskMonitor.update-journal");
+        byte[] original = System.Text.Encoding.UTF8.GetBytes("AITM-UPGRADE-1\nOP|");
+        File.WriteAllBytes(journal, original);
+        using (SafeInstallSwap swap = new SafeInstallSwap(local, target))
+        {
+            Check(!String.IsNullOrEmpty(swap.PreservedJournalPath) && File.Exists(swap.PreservedJournalPath), "The original journal was not preserved.");
+            Check(Convert.ToBase64String(File.ReadAllBytes(swap.PreservedJournalPath)) == Convert.ToBase64String(original), "The preserved journal differs from the original bytes.");
+        }
+        CheckOld(local);
+    }
     private static void ChangedStage()
     {
         string local = NewCase("changed-stage"), target = Install(local); SetupOld(local);
@@ -302,7 +315,7 @@ internal static class TestSafeInstallSwap
             root = Path.Combine(Path.GetTempPath(), "aitm-swap-regression-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
             Fresh(); ExistingAndRepeated(); Busy(); RunningProcess(); RunningPowerShellMonitor(); Rollback();
-            CrashDuringJournalCreation(); UnknownJournal();
+            CrashDuringJournalCreation(); UnknownJournal(); PartialJournalPreserved();
             CrashRecovery("crash-before-switch", "after-backup", false);
             CrashRecovery("crash-after-switch", "after-stage", true);
             ChangedStage(); Collision(); ConcurrentAndFile(); Junctions();

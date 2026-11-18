@@ -19,9 +19,11 @@ internal static class CodexProgressInstaller
             string shortcutName = null;
             string launcher = Path.Combine(installDirectory, "AI task monitor.exe");
             string backup = null;
+            string journalBackup = null;
             using (SafeInstallPaths parentGuard = SafeInstallPaths.OpenExisting(localDirectory))
             using (SafeInstallSwap swap = new SafeInstallSwap(localDirectory, installDirectory))
             {
+                journalBackup = swap.PreservedJournalPath;
                 if (Directory.Exists(installDirectory)) MonitorProcessCheck.EnsureNotRunning(installDirectory);
                 string id = SafeInstallSwap.NewId();
                 string stageDirectory = swap.StagePath(id);
@@ -110,6 +112,7 @@ internal static class CodexProgressInstaller
                     shortcutName != null ? InstallerLanguage.Text("Существующий ярлык сохранён. Добавлен новый ярлык «AI task monitor (new)».", "The existing shortcut was preserved. A new shortcut, AI task monitor (new), was added.") :
                     InstallerLanguage.Text("Новый ярлык создать не удалось. Приложение можно открыть из папки ", "A new shortcut could not be created. You can open the app from ") + installDirectory + ".") +
                 (backup != null ? InstallerLanguage.Text(" Прежняя папка сохранена: ", " The previous folder was preserved at: ") + backup + "." : "") +
+                (journalBackup != null ? InstallerLanguage.Text(" Исходный служебный файл сохранён: ", " The original update file was preserved at: ") + journalBackup + "." : "") +
                 (claudeConnected ? InstallerLanguage.Text(" Claude Code подключён. Перезапустите Claude Code.", " Claude Code is connected. Restart Claude Code.") : "") +
                 (claudeFailed ? InstallerLanguage.Text(" Не удалось подключить Claude Code. Проверьте настройки подключения.", " Could not connect Claude Code. Review its connection settings.") : "") +
                 (!launched ? InstallerLanguage.Text(" Приложение не удалось запустить автоматически.", " The app could not be opened automatically.") : ""),
