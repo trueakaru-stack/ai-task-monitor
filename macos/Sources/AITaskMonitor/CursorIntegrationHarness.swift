@@ -473,6 +473,29 @@ enum CursorIntegrationHarness {
                     if points().count == 2 {
                         await testWindowHover("First point", points()[0], hand: true)
                         await testWindowHover("Second point", points()[1], hand: true)
+                        if let target = candidates.first {
+                            store.compactIndex = 1
+                            await pause()
+                            let setFocus = AXUIElementSetAttributeValue(target, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                            await pause()
+                            var focusValue: CFTypeRef?
+                            let readFocus = AXUIElementCopyAttributeValue(target, kAXFocusedAttribute as CFString, &focusValue)
+                            let focused = (focusValue as? Bool) ?? false
+                            check(setFocus == .success && readFocus == .success && focused,
+                                  "Keyboard focus available after hover activation")
+                            if focused {
+                                let down = CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true)
+                                let up = CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false)
+                                down?.flags = []
+                                up?.flags = []
+                                down?.post(tap: .cghidEventTap)
+                                up?.post(tap: .cghidEventTap)
+                                await pause()
+                                check(store.compactIndex == 0, "Keyboard works after hover activation")
+                            }
+                        } else {
+                            check(false, "Accessible button available after hover activation")
+                        }
                     } else {
                         check(false, "Task points remain accessible during activation checks")
                     }
