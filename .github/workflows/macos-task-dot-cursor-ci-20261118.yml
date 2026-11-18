@@ -63,3 +63,5 @@ jobs:
           retention-days: 7
 
 # Tracking-area verification, including minimize.
+
+# Recheck cursor synchronization across themes and app activation.
