@@ -83,7 +83,7 @@ jobs:
           set -e
           test "$baseline_status" -ne 0 || { echo 'The old code unexpectedly passed the regression'; exit 1; }
           grep -E 'testTitledWindowHasNoExtraTitleBarArea.*failed' "$root/evidence/before.log"
-          grep -E 'XCTAssertEqual failed.*728.*700' "$root/evidence/before.log"
+          awk -F'"' '/CompactWindowLayoutTests.swift:24:.*XCTAssertEqualWithAccuracy failed/ && $2+0 > 701 && $4+0 == 700 { good=1 } END { exit !good }' "$root/evidence/before.log"
           echo 'BASELINE_EXPECTED_FAILURE: titled frame was taller than 700 points'
           cp "$root/candidate.swift" "$source_root"
           cmp "$source_root" "$root/candidate.swift"
