@@ -58,6 +58,17 @@ try {
  $ids=[string[]]@('modern','legacy','empty','future','unicode','missing')
  $names=[AITaskMonitor.CodexTitles.Reader]::ReadNow($fixture,$ids)
  Require ($names.Count -eq 3 -and $names['modern'] -ceq 'Modern name' -and $names['legacy'] -ceq 'Legacy title' -and $names['unicode'] -ceq ([string]::Concat([char[]](1055,1088,1080,1074,1077,1090)))) 'Exact-id lookup, history mode or Unicode is incorrect.'
+ $tokens=$null;$errors=$null
+ $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
+ if($errors.Count){throw 'The application did not parse.'}
+ $branches=@($ast.FindAll({param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text.Contains('$codexTitles.ContainsKey($id)')},$true))
+ Require ($branches.Count -eq 1) 'The title selection branch was not found.'
+ $choose=[scriptblock]::Create('param($title,$titleGenerated,$codexTitles,$id)'+$branches[0].Extent.Text+'; [pscustomobject]@{Title=$title;Generated=$titleGenerated}')
+ $indexed=& $choose 'Indexed name' $false $names 'modern'
+ $generated=& $choose 'Fallback task' $true $names 'modern'
+ $blank=& $choose '' $false $names 'modern'
+ $absent=& $choose 'Fallback task' $true $names 'missing'
+ Require ($indexed.Title -ceq 'Indexed name' -and -not $indexed.Generated -and $generated.Title -ceq 'Modern name' -and -not $generated.Generated -and $blank.Title -ceq 'Modern name' -and $absent.Title -ceq 'Fallback task' -and $absent.Generated) 'Indexed title precedence or fallback is incorrect.'
  Require ((SharedHash $dbPath) -ceq $mainBefore -and (SharedHash ($dbPath+'-wal')) -ceq $walBefore) 'Read-only lookup changed the database or WAL.'
  $writer.Execute("UPDATE threads SET name='Updated name' WHERE id='modern';")
  $names=[AITaskMonitor.CodexTitles.Reader]::ReadNow($fixture,$ids)
@@ -75,7 +86,17 @@ try {
 
  $missing=Join-Path $fixture 'missing'
  [void][IO.Directory]::CreateDirectory($missing)
- Require (([AITaskMonitor.CodexTitles.Reader]::ReadNow($missing,$ids)).Count -eq 0 -and -not [IO.File]::Exists((Join-Path $missing 'state_5.sqlite'))) 'A missing database did not use the fallback.'
+ $missingDb=Join-Path $missing 'state_5.sqlite'
+ Require (([AITaskMonitor.CodexTitles.Reader]::ReadNow($missing,$ids)).Count -eq 0 -and -not [IO.File]::Exists($missingDb) -and -not [IO.File]::Exists($missingDb+'-wal') -and -not [IO.File]::Exists($missingDb+'-shm')) 'A missing database did not use the fallback.'
+ $noSidecarRoot=Join-Path $fixture 'closed-database'
+ [void][IO.Directory]::CreateDirectory($noSidecarRoot)
+ $noSidecarDb=Join-Path $noSidecarRoot 'state_5.sqlite'
+ $closedWriter=[SyntheticTitleDb]::new($noSidecarDb,'CREATE TABLE threads(id TEXT PRIMARY KEY,name TEXT,title TEXT,history_mode TEXT);')
+ $closedWriter.Execute("INSERT INTO threads VALUES('modern','Closed name','Closed title','paginated');")
+ $closedWriter.Dispose()
+ Require (-not [IO.File]::Exists($noSidecarDb+'-wal') -and -not [IO.File]::Exists($noSidecarDb+'-shm')) 'Synthetic closed database kept unexpected sidecars.'
+ $closedHash=SharedHash $noSidecarDb
+ Require (([AITaskMonitor.CodexTitles.Reader]::ReadNow($noSidecarRoot,$ids)).Count -eq 0 -and -not [IO.File]::Exists($noSidecarDb+'-wal') -and -not [IO.File]::Exists($noSidecarDb+'-shm') -and (SharedHash $noSidecarDb) -ceq $closedHash) 'A closed database or sidecars changed during fallback.'
  $badRoot=Join-Path $fixture 'different-schema'
  [void][IO.Directory]::CreateDirectory($badRoot)
  $badWriter=[SyntheticTitleDb]::new((Join-Path $badRoot 'state_5.sqlite'),'CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT);')
