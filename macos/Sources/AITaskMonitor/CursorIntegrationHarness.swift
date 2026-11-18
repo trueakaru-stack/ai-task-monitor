@@ -11,6 +11,9 @@ enum CursorIntegrationHarness {
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.title = "Synthetic focus helper"
+        let input = NSTextField(frame: NSRect(x: 10, y: 30, width: 140, height: 28))
+        input.stringValue = "Example"
+        window.contentView?.addSubview(input)
         DispatchQueue.main.async {
             app.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
@@ -122,6 +125,8 @@ enum CursorIntegrationHarness {
             check(cursor(.pointingHand), "Active task button shows system pointing hand")
             await move(center(initial[1]))
             check(cursor(.pointingHand), "Inactive task button shows system pointing hand")
+            await move(center(initial[0]))
+            check(cursor(.pointingHand), "Returning directly to the first point keeps the hand")
             for theme in ["dark", "light"] {
                 UserDefaults.standard.set(theme, forKey: "appearanceMode")
                 await pause(1)
@@ -135,14 +140,22 @@ enum CursorIntegrationHarness {
                 await pause()
                 check(store.compactIndex == 1, "System click selects the other task")
             }
+            if let title = descendants(host).compactMap({ $0 as? TruncatingTextField }).first {
+                await move(center(title))
+                check(cursor(.arrow), "Moving to the neighboring task title restores arrow")
+            } else { print("UNVERIFIED: task title view not found") }
             let outside = NSPoint(x: 20, y: window.contentView!.bounds.height - 25)
             await move(outside)
             check(cursor(.arrow), "Leaving the task points restores arrow")
             if points().count == 2 {
                 await move(center(points()[1]))
+                let handBeforeRemoval = cursor(.pointingHand)
+                check(handBeforeRemoval, "Hand shown immediately before removing points")
                 store.isCompact = false
                 await pause(1)
-                check(cursor(.arrow), "Removing the points restores arrow without moving")
+                if handBeforeRemoval {
+                    check(cursor(.arrow), "Removing the points restores arrow without moving")
+                } else { print("UNVERIFIED: removal restoration requires a prior hand cursor") }
             }
             store.isCompact = true
             await pause(1)
@@ -184,6 +197,10 @@ enum CursorIntegrationHarness {
                     print("INACTIVE_WINDOW_STATE active=false key=false")
                     await move(center(points()[0]))
                     check(cursor(.pointingHand), "Inactive floating window shows pointing hand")
+                    let helperInput = window.convertPoint(fromScreen: NSPoint(x: 730, y: 344))
+                    await move(helperInput)
+                    check(cursor(.iBeam), "Moving into another app text field restores its I-beam")
+                    check(!app.isActive && !window.isKeyWindow, "Hover does not focus the floating window")
                 } else {
                     print("UNVERIFIED: could not activate separate focus helper")
                 }
@@ -194,10 +211,13 @@ enum CursorIntegrationHarness {
             await pause(1)
             if points().count == 2 && app.isActive && window.isKeyWindow {
                 await move(center(points()[0]))
-                check(cursor(.pointingHand), "Task point shows hand immediately before closing")
+                let handBeforeClose = cursor(.pointingHand)
+                check(handBeforeClose, "Task point shows hand immediately before closing")
                 window.close()
                 await pause(1)
-                check(cursor(.arrow), "Closing window releases pointing hand without moving")
+                if handBeforeClose {
+                    check(cursor(.arrow), "Closing window releases pointing hand without moving")
+                } else { print("UNVERIFIED: close restoration requires a prior hand cursor") }
             } else {
                 print("UNVERIFIED: unable to reactivate window for close check")
             }
