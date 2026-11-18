@@ -33,7 +33,7 @@ jobs:
           mkdir -p "$app/Contents/MacOS"
           cp "$AITM_CURSOR_SYNTHETIC_ROOT/build/debug/AITaskMonitor" "$app/Contents/MacOS/AITaskMonitor"
           cp Info.plist "$app/Contents/Info.plist"
-          "$app/Contents/MacOS/AITaskMonitor" --cursor-keyboard-baseline "$AITM_CURSOR_SYNTHETIC_ROOT" > "$AITM_CURSOR_SYNTHETIC_ROOT/evidence/gui.log" 2>&1 &
+          "$app/Contents/MacOS/AITaskMonitor" --cursor-integration "$AITM_CURSOR_SYNTHETIC_ROOT" > "$AITM_CURSOR_SYNTHETIC_ROOT/evidence/gui.log" 2>&1 &
           pid=$!
           for attempt in {1..100}; do
             if ! kill -0 "$pid" 2>/dev/null; then break; fi
