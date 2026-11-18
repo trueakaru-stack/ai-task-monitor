@@ -44,10 +44,12 @@ jobs:
           foreach($p in @($env:USERPROFILE,$env:LOCALAPPDATA,$env:CODEX_HOME)){[void][IO.Directory]::CreateDirectory($p)}
           $app=(Resolve-Path 'windows/app/CodexProgress.ps1').Path
           $systemPowerShell=Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
-          foreach($state in @('active','unconfirmed')){
+          foreach($state in @('active','unconfirmed','multiple')){
             $shot=Join-Path $out ('verified-'+$state+'-${{ matrix.theme }}-${{ matrix.mode }}.png')
-            $args=@('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',$app,'-PreviewActiveTasks','1','-PreviewMotionUiTest','-PreviewOffscreen','-PreviewMotion','off','-ThemeOverride','${{ matrix.theme }}','-LanguageOverride','ru','-SnapshotFile',$shot,'-DiagnosticDirectory',(Join-Path $root ('diag-'+$state)))
+            $taskCount=if($state -eq 'multiple'){'2'}else{'1'}
+            $args=@('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',$app,'-PreviewActiveTasks',$taskCount,'-PreviewProviderLabelsUiTest','-PreviewOffscreen','-PreviewMotion','off','-ThemeOverride','${{ matrix.theme }}','-LanguageOverride','ru','-SnapshotFile',$shot,'-DiagnosticDirectory',(Join-Path $root ('diag-'+$state)))
             if('${{ matrix.mode }}' -eq 'compact'){$args+='-CompactMode'}
+            if($state -ne 'multiple'){$args+='-PreviewMotionUiTest'}
             if($state -eq 'unconfirmed'){$args+='-PreviewUnconfirmed'}
             & $systemPowerShell @args
             if($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $shot)){throw 'Task card check failed.'}
