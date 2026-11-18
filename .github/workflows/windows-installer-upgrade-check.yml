@@ -49,10 +49,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw '.NET PATH safety check failed.' }
           $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
           $test = Join-Path $sourceRoot 'Test-SafeInstallSwap.exe'
-          & $compiler /nologo /target:exe /reference:System.Web.Extensions.dll /reference:System.Management.dll "/out:$test" `
+          & $compiler /nologo /target:exe /main:TestSafeInstallSwap /reference:System.Web.Extensions.dll /reference:System.Management.dll /reference:System.Windows.Forms.dll "/out:$test" `
               (Join-Path $source 'windows/app/SafeInstallPaths.cs') `
               (Join-Path $source 'windows/app/SafeInstallSwap.cs') `
               (Join-Path $source 'windows/app/MonitorProcessCheck.cs') `
+              (Join-Path $source 'windows/app/CodexProgressInstaller.cs') `
               (Join-Path $source '.github/legacy-uninstall-ci/Test-SafeInstallSwap.cs')
           if ($LASTEXITCODE -ne 0) { throw 'Installer regression harness did not compile.' }
           & $test

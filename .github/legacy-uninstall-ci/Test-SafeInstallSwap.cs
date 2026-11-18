@@ -388,6 +388,16 @@ internal static class TestSafeInstallSwap
         finally { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(link); System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell); }
         Check(!SafeShortcut.TargetsCurrentLauncher(withArguments, launcher), "A shortcut with foreign arguments was accepted.");
     }
+    private static void ClaudeDiscovery()
+    {
+        string root = NewCase("claude-discovery"), profile = Path.Combine(root, "profile"), roaming = Path.Combine(root, "roaming"), local = Path.Combine(root, "local");
+        string desktop = Path.Combine(local, @"Programs\Claude"), bin = Path.Combine(root, "custom-bin");
+        Directory.CreateDirectory(Path.Combine(profile, ".claude")); Write(desktop, "Claude.exe", "desktop fixture");
+        Check(!CodexProgressInstaller.ClaudeCommandFound(profile, roaming, local, desktop), "A stale profile or Claude Desktop was incorrectly confirmed as Claude Code.");
+        string marker = Path.Combine(root, "executed.txt");
+        Write(bin, "claude.cmd", "@echo invoked > \"" + marker + "\"\r\n");
+        Check(CodexProgressInstaller.ClaudeCommandFound(profile, roaming, local, bin) && !File.Exists(marker), "Claude discovery failed or executed the candidate command.");
+    }
     private static int Main(string[] args)
     {
         try
@@ -399,7 +409,7 @@ internal static class TestSafeInstallSwap
             CrashDuringJournalCreation(); UnknownJournal(); PartialJournalPreserved(); PartialJournalBackupDenied();
             CrashRecovery("crash-before-switch", "after-backup", false);
             CrashRecovery("crash-after-switch", "after-stage", true);
-            ChangedStage(); Collision(); ConcurrentAndFile(); Junctions(); PreparedFileLinks(); Shortcuts();
+            ChangedStage(); Collision(); ConcurrentAndFile(); Junctions(); PreparedFileLinks(); Shortcuts(); ClaudeDiscovery();
             Console.WriteLine("PASS: installation, update, busy processes/files, recovery and journal preservation, collisions, links and shortcuts.");
             Console.WriteLine("Fixture root: " + root);
             return 0;

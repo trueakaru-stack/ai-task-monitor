@@ -132,11 +132,16 @@ internal static class CodexProgressInstaller
 
     private static bool ClaudeCommandFound()
     {
-        string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        string roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        string desktop = Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), @"Programs\Claude\Claude.exe"));
+        return ClaudeCommandFound(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Environment.GetEnvironmentVariable("PATH"));
+    }
+
+    internal static bool ClaudeCommandFound(string profile, string roaming, string local, string pathValue)
+    {
+        string desktop = Path.GetFullPath(Path.Combine(local, @"Programs\Claude\Claude.exe"));
         string[] paths = (Path.Combine(profile, @".local\bin") + ";" + Path.Combine(roaming, "npm") + ";" +
-            (Environment.GetEnvironmentVariable("PATH") ?? "")).Split(';');
+            (pathValue ?? "")).Split(';');
         foreach (string part in paths)
         {
             try
