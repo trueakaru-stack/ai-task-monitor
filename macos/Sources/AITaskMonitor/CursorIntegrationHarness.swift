@@ -134,6 +134,11 @@ enum CursorIntegrationHarness {
         var status: Int32 = 1
         Task { @MainActor in
             var failures = 0
+            let keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
+                print("KEY_EVENT type=\(event.type.rawValue) code=\(event.keyCode) window=\(event.windowNumber)")
+                return event
+            }
+            defer { if let keyMonitor { NSEvent.removeMonitor(keyMonitor) } }
             func check(_ value: Bool, _ description: String) {
                 print("\(value ? "PASS" : "FAIL"): \(description)")
                 if !value { failures += 1 }
@@ -377,6 +382,9 @@ enum CursorIntegrationHarness {
                     CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true)?.post(tap: .cghidEventTap)
                     CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false)?.post(tap: .cghidEventTap)
                     await pause()
+                    var focusedAfter: CFTypeRef?
+                    let readAfter = AXUIElementCopyAttributeValue(target, kAXFocusedAttribute as CFString, &focusedAfter)
+                    print("KEY_AFTER focusRead=\(readAfter.rawValue) focused=\(String(describing: focusedAfter)) index=\(store.compactIndex) active=\(app.isActive) key=\(window.isKeyWindow)")
                     check(store.compactIndex == 0, "System keyboard activates the focused task button")
                 } else { print("UNVERIFIED: AX focus did not move onto task button") }
                 store.compactIndex = 1
