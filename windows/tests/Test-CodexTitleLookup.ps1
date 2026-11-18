@@ -75,7 +75,7 @@ try {
   $node.Extent.Text
  }
  $checks=@'
-param($root)
+$root=$args[0]
 $codexHome=$root
 $sessionIndex=Join-Path $root 'synthetic-index.jsonl'
 [IO.File]::WriteAllText($sessionIndex,'')
