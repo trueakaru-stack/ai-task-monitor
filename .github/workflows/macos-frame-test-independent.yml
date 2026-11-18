@@ -1,0 +1,124 @@
+name: Independent macOS window frame regression
+on:
+  push:
+    branches: [codex/macos-compact-candidate-tests-2b6]
+permissions:
+  contents: read
+jobs:
+  frame:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 20
+      - name: Run the same regression against old and new window code
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$GITHUB_REPOSITORY" = trueakaru-stack/ai-task-monitor
+          test "$DOTNET_ADD_GLOBAL_TOOLS_TO_PATH" = 0
+          candidate=2b6f68bb8a0b7522ee9515f45154ce68acadb0e8
+          baseline=5863d11e9c493a3d361be0a0338e2222b33bbcec
+          git merge-base --is-ancestor "$candidate" HEAD
+          test "$(git rev-parse "$candidate^")" = "$baseline"
+          changes="$(git diff --name-only "$candidate" HEAD)"
+          test "$changes" = '.github/workflows/macos-frame-test-independent.yml'
+          root="$RUNNER_TEMP/aitm-frame-independent"
+          test ! -e "$root"
+          mkdir -p "$root"/{source,home,tmp,cache,config,security,evidence}
+          cp -R macos "$root/source/macos"
+          test -z "$(find "$root/source/macos" -type l -print)"
+          source_root="$root/source/macos/Sources/AITaskMonitor/RootView.swift"
+          git show "$candidate:macos/Sources/AITaskMonitor/RootView.swift" > "$root/candidate.swift"
+          git show "$baseline:macos/Sources/AITaskMonitor/RootView.swift" > "$root/baseline.swift"
+          cmp "$source_root" "$root/candidate.swift"
+          test "$(git hash-object "$root/source/macos/Tests/AITaskMonitorTests/CompactWindowLayoutTests.swift")" = "$(git rev-parse "$candidate:macos/Tests/AITaskMonitorTests/CompactWindowLayoutTests.swift")"
+          cat > "$root/profile.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath "/Users") (subpath "/private/var/folders"))
+          (allow file-read-metadata (literal "/Users") (literal "/Users/runner") (literal "/Users/runner/work") (literal "/Users/runner/work/_temp"))
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          (allow mach-lookup)
+          (deny mach-lookup (global-name "com.apple.cfprefsd.agent") (global-name "com.apple.cfprefsd.daemon") (global-name "com.apple.bsd.dirhelper"))
+          PROFILE
+          cat > "$root/run-test" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          exec /usr/bin/env -i "PATH=/usr/bin:/bin:/usr/sbin:/sbin" "TMPDIR=$AITM_FRAME_ROOT/tmp" \
+            "CFFIXED_USER_HOME=$AITM_FRAME_ROOT/home" "DEVELOPER_DIR=$DEVELOPER_DIR" \
+            "CLANG_MODULE_CACHE_PATH=$AITM_FRAME_ROOT/cache" XCRUN_NO_CACHE=1 \
+            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS \
+            DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0 \
+            /usr/bin/sandbox-exec -D "TASK_ROOT=$AITM_FRAME_ROOT" -f "$AITM_FRAME_ROOT/profile.sb" "$@"
+          SCRIPT
+          chmod 700 "$root/run-test"
+          export AITM_FRAME_ROOT="$root"
+          DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
+          test -d "$DEVELOPER_DIR"
+          export DEVELOPER_DIR
+          marker="$(mktemp "$RUNNER_TEMP/aitm-frame-denied.XXXXXXXX")"
+          printf 'isolated fixture only\n' > "$marker"
+          "$root/run-test" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
+          if "$root/run-test" /bin/cat "$marker" > /dev/null 2>&1; then echo 'Outside-profile read was not denied'; exit 1; fi
+          if "$root/run-test" /usr/bin/touch "$marker" > /dev/null 2>&1; then echo 'Outside-profile write was not denied'; exit 1; fi
+          cd "$root/source/macos"
+          cp "$root/candidate.swift" "$source_root"
+          cmp "$source_root" "$root/candidate.swift"
+          test_file="$root/source/macos/Tests/AITaskMonitorTests/CompactWindowLayoutTests.swift"
+          /usr/bin/python3 -I -S -B - "$test_file" <<'PY'
+          from pathlib import Path
+          import sys
+          path = Path(sys.argv[1])
+          contents = path.read_text()
+          before = 'TaskStore.loopPreview(unavailableSources: [.claude])'
+          after = 'TaskStore.loopPreview(unavailableSources: [.codex, .claude])'
+          if contents.count(before) != 2:
+              raise SystemExit("Unexpected fixture count")
+          path.write_text(contents.replace(before, after))
+          print("FIXTURE_NOTICE: both synthetic source tasks are inactive on Intel")
+          PY
+          set +e
+          /usr/bin/python3 -I -S -B - "$root/run-test" /usr/bin/xcrun swift test --disable-sandbox --scratch-path "$root/build" \
+            --cache-path "$root/cache" --config-path "$root/config" --security-path "$root/security" --filter CompactWindowLayoutTests \
+            > "$root/evidence/test.log" 2>&1 <<'PY'
+          import os
+          import signal
+          import subprocess
+          import sys
+          process = subprocess.Popen(sys.argv[1:], start_new_session=True)
+          try:
+              sys.exit(process.wait(timeout=360))
+          except subprocess.TimeoutExpired:
+              print("TEST_TIMEOUT: isolated tests exceeded 360 seconds", flush=True)
+              os.killpg(process.pid, signal.SIGKILL)
+              process.wait()
+              sys.exit(124)
+          PY
+          status=$?
+          set -e
+          cat "$root/evidence/test.log"
+          echo "TEST_STATUS=$status"
+          test "$status" = 0
+          grep -E 'testTitledWindowHasNoExtraTitleBarArea.*passed' "$root/evidence/test.log"
+          grep -E 'testCompactWindowSizesToContentAndKeepsItsBottomEdge.*passed' "$root/evidence/test.log"
+          cmp "$source_root" "$root/candidate.swift"
+          echo 'CANDIDATE_TEST_PASS: both tests passed with only fixture activity altered'
+      - name: Save isolated test evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-compact-candidate-2b6-intel-tests
+          path: ${{ runner.temp }}/aitm-frame-independent/evidence/
+          if-no-files-found: warn
+          retention-days: 7
