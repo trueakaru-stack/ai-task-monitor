@@ -1,0 +1,92 @@
+name: Publish verified Windows 0.2.9
+on:
+  push:
+    branches:
+      - codex/windows-publish-v029-20261118-a
+permissions:
+  actions: read
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify CI artifact and publish Windows release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="trueakaru-stack/ai-task-monitor"
+          source_revision="440392135de66a16214d6294e786855ff6dc22cc"
+          ci_head="2c8a052821284b248dfe0a5fffbc770d2fc4706b"
+          run_id="44280041535"
+          artifact_id="14416921761"
+          zip_sha="7f5ad309c7a2b9c48075fc5b28ebc194f2b264e4c58c210797e0b32d7dcbb0f4"
+          setup_sha="dc1b73125bf4f686f8c42328fb62eba1ced4ec5f1b6b66b3951e09d4522b5a0f"
+          tag="v0.2.9"
+          test "$GITHUB_REPOSITORY" = "$repo"
+          run_json="$(gh api "repos/$repo/actions/runs/$run_id")"
+          test "$(jq -r .status <<<"$run_json")" = "completed"
+          test "$(jq -r .conclusion <<<"$run_json")" = "success"
+          test "$(jq -r .head_sha <<<"$run_json")" = "$ci_head"
+          test "$(jq -r .path <<<"$run_json")" = ".github/workflows/windows-final-029-ci.yml"
+          test "$(gh api "repos/$repo/git/ref/heads/windows" --jq .object.sha)" = "$source_revision"
+          artifact_json="$(gh api "repos/$repo/actions/artifacts/$artifact_id")"
+          test "$(jq -r .workflow_run.id <<<"$artifact_json")" = "$run_id"
+          test "$(jq -r .workflow_run.head_sha <<<"$artifact_json")" = "$ci_head"
+          test "$(jq -r .name <<<"$artifact_json")" = "verified-windows-029-$source_revision"
+          test "$(jq -r .digest <<<"$artifact_json")" = "sha256:$zip_sha"
+          test "$(jq -r .expired <<<"$artifact_json")" = "false"
+          archive="$RUNNER_TEMP/windows-029-artifact.zip"
+          gh api "repos/$repo/actions/artifacts/$artifact_id/zip" > "$archive"
+          test "$(sha256sum "$archive" | cut -d' ' -f1)" = "$zip_sha"
+          printf '%s\n' AITaskMonitorSetup.exe SHA256SUMS-windows.txt SOURCE-REVISION.txt | LC_ALL=C sort > "$RUNNER_TEMP/expected-files"
+          unzip -Z1 "$archive" | LC_ALL=C sort > "$RUNNER_TEMP/artifact-files"
+          diff -u "$RUNNER_TEMP/expected-files" "$RUNNER_TEMP/artifact-files"
+          mkdir "$RUNNER_TEMP/verified-windows"
+          unzip -q "$archive" -d "$RUNNER_TEMP/verified-windows"
+          cd "$RUNNER_TEMP/verified-windows"
+          test "$(tr -d '\r\n' < SOURCE-REVISION.txt)" = "$source_revision"
+          test "$(sha256sum AITaskMonitorSetup.exe | cut -d' ' -f1)" = "$setup_sha"
+          test "$(tr -d '\r' < SHA256SUMS-windows.txt)" = "$setup_sha  AITaskMonitorSetup.exe"
+          mkdir "$RUNNER_TEMP/windows-release"
+          cp AITaskMonitorSetup.exe "$RUNNER_TEMP/windows-release/AITaskMonitorSetup-0.2.9.exe"
+          cd "$RUNNER_TEMP/windows-release"
+          sha256sum AITaskMonitorSetup-0.2.9.exe > SHA256SUMS-windows.txt
+          checksum_sha="$(sha256sum SHA256SUMS-windows.txt | cut -d' ' -f1)"
+          if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "Tag already exists; refusing to replace it."
+            exit 1
+          fi
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            echo "Release already exists; refusing to replace it."
+            exit 1
+          fi
+          previous_latest="$(gh api "repos/$repo/releases/latest" --jq .tag_name)"
+          gh api --method POST "repos/$repo/git/refs" -f ref="refs/tags/$tag" -f sha="$source_revision" >/dev/null
+          test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.type)" = "commit"
+          test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "$source_revision"
+          cat > "$RUNNER_TEMP/windows-release-notes.md" <<'NOTES'
+          Обновление Windows-версии:
+          - Установщик обновляет существующую программу, сохраняя настройки и резервную копию прежних файлов.
+          - Рабочие ярлыки сохраняются без создания дубликатов.
+          - Названия задач Codex отображаются, когда они доступны в локальных данных.
+
+          Windows update:
+          - The installer updates an existing installation while preserving settings and a backup of the previous files.
+          - Existing working shortcuts are reused without duplicates.
+          - Codex task names are shown when available in local data.
+          NOTES
+          gh release create "$tag" AITaskMonitorSetup-0.2.9.exe SHA256SUMS-windows.txt --repo "$repo" --verify-tag --draft --latest=false --title "AI Task Monitor 0.2.9 — Windows" --notes-file "$RUNNER_TEMP/windows-release-notes.md"
+          gh api "repos/$repo/releases/tags/$tag" > "$RUNNER_TEMP/windows-release.json"
+          jq -e --arg tag "$tag" '.tag_name == $tag and .draft == true and .prerelease == false and (.assets | length) == 2' "$RUNNER_TEMP/windows-release.json" >/dev/null
+          jq -e --arg name 'AITaskMonitorSetup-0.2.9.exe' --arg sha "sha256:$setup_sha" '[.assets[] | select(.name == $name and .state == "uploaded" and .digest == $sha)] | length == 1' "$RUNNER_TEMP/windows-release.json" >/dev/null
+          jq -e --arg name 'SHA256SUMS-windows.txt' --arg sha "sha256:$checksum_sha" '[.assets[] | select(.name == $name and .state == "uploaded" and .digest == $sha)] | length == 1' "$RUNNER_TEMP/windows-release.json" >/dev/null
+          test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "$source_revision"
+          test "$(gh api "repos/$repo/git/ref/heads/windows" --jq .object.sha)" = "$source_revision"
+          gh release edit "$tag" --repo "$repo" --draft=false --latest=false
+          gh api "repos/$repo/releases/tags/$tag" > "$RUNNER_TEMP/windows-release-published.json"
+          jq -e --arg tag "$tag" '.tag_name == $tag and .draft == false and .prerelease == false and (.assets | length) == 2' "$RUNNER_TEMP/windows-release-published.json" >/dev/null
+          test "$(gh api "repos/$repo/releases/latest" --jq .tag_name)" = "$previous_latest"
+          echo "Published Windows $tag from $source_revision; installer SHA-256 $setup_sha."
