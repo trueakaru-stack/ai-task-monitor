@@ -49,6 +49,7 @@
  [ValidateSet('','partial-data','partial-connection','partial-both','unavailable')][string]$PreviewSourceWarning = '',
  [ValidateSet('deepseek','codex')][string]$PreviewWarningProvider = 'deepseek',
  [switch]$PreviewTabsUiTest,
+ [switch]$PreviewProviderLabelsUiTest,
  [ValidateSet("default","planned","unplanned")][string]$PreviewScenario = "default",
  [switch]$PreviewActivityUiTest,
  [switch]$PreviewFocusUiTest,
@@ -102,6 +103,7 @@ if($PreviewHermesFocus -and (-not $PreviewSources -or $PreviewHermesState -notin
 if($PreviewHermesSelection -and -not $PreviewHermesFocus){throw 'Hermes selection previews require the isolated focus preview.'}
 if($PreviewHermesDisableSelection -and -not $PreviewHermesSelection){throw 'Hermes disable selection requires the isolated selection preview.'}
 if(($PreviewManyProviders -or $PreviewTabsUiTest) -and (-not $SnapshotFile -or -not $PreviewManyProviders -or $PreviewActiveTasks -ne 6)){throw 'Provider tab previews require six synthetic tasks and a snapshot.'}
+if($PreviewProviderLabelsUiTest -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw 'Provider label checks require synthetic tasks and a snapshot.'}
 if($PreviewSourceWarning){
  if(-not $SnapshotFile -or $PreviewActiveTasks -lt 0 -or ($PreviewActiveTasks -eq 0 -and $PreviewWarningProvider -ne 'codex') -or -not $DiagnosticDirectory){throw 'Source warning previews require synthetic tasks, a snapshot and an isolated diagnostic directory.'}
  $previewDataPath=[IO.Path]::GetFullPath($DiagnosticDirectory)
@@ -166,6 +168,181 @@ $script:lastTasks = @()
 $script:lastAllTasks = @()
 $script:lastCodexTasks = @()
 $script:codexSourcePartial = $false
+$script:codexTitleReader = $null
+try {
+ if(-not ('AITaskMonitor.CodexTitles.Reader' -as [type])){
+  Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace AITaskMonitor.CodexTitles {
+ public sealed class Reader : IDisposable {
+  private readonly object gate = new object();
+  private readonly CancellationTokenSource stop = new CancellationTokenSource();
+  private Task<Dictionary<string,string>> pending;
+  private Dictionary<string,string> cache = new Dictionary<string,string>(StringComparer.Ordinal);
+  private string requestedHome = "";
+  private string pendingHome = "";
+  private long nextScan;
+
+  // This method only observes a completed worker and schedules another worker.
+  // SQLite and filesystem operations never run on the UI thread.
+  public Dictionary<string,string> Snapshot(string home, string[] ids) {
+   lock (gate) {
+    if (!String.Equals(requestedHome,home,StringComparison.OrdinalIgnoreCase)) {
+     requestedHome=home; cache.Clear(); nextScan=0;
+    }
+    if (pending != null && pending.IsCompleted) {
+     try {
+      Dictionary<string,string> value=pending.Result;
+      if (String.Equals(pendingHome,requestedHome,StringComparison.OrdinalIgnoreCase)) cache=value;
+     } catch { cache.Clear(); }
+     pending=null;
+    }
+    long now=Stopwatch.GetTimestamp();
+    if (!stop.IsCancellationRequested && pending == null && ids != null && ids.Length > 0 && now >= nextScan) {
+     string capturedHome=home;
+     string[] capturedIds=(string[])ids.Clone();
+     pendingHome=capturedHome;
+     nextScan=now+5*Stopwatch.Frequency;
+     CancellationToken token=stop.Token;
+     pending=Task.Factory.StartNew(() => ReadNow(capturedHome,capturedIds,token),token,TaskCreationOptions.None,TaskScheduler.Default);
+    }
+    return new Dictionary<string,string>(cache,StringComparer.Ordinal);
+   }
+  }
+
+  public static Dictionary<string,string> ReadNow(string home, string[] ids) {
+   return ReadNow(home,ids,CancellationToken.None);
+  }
+  private static Dictionary<string,string> ReadNow(string home, string[] ids, CancellationToken stop) {
+   Dictionary<string,string> result=new Dictionary<string,string>(StringComparer.Ordinal);
+   if (String.IsNullOrWhiteSpace(home) || ids == null || ids.Length == 0 || stop.IsCancellationRequested) return result;
+   try {
+    string root=Path.GetFullPath(home);
+    string database=Path.Combine(root,"state_5.sqlite");
+    // Skip if sidecars are absent at this check. SQLite may recreate them if
+    // they disappear concurrently; it uses SHM for normal read coordination.
+    if (!SafeFile(database) || !SafeFile(database+"-wal") || !SafeFile(database+"-shm") ||
+        !SafeParents(root) || !CanShareRead(database) || !CanShareRead(database+"-wal") || !CanShareRead(database+"-shm")) return result;
+    using (var sqlite=new Native()) {
+     if (sqlite.Version() < 3031000) return result;
+     IntPtr db=IntPtr.Zero, query=IntPtr.Zero;
+     Native.ProgressFn progress=null;
+     try {
+      int rc=sqlite.Open(Utf8(database),out db,0x00000001 | 0x00008000 | 0x01000000,IntPtr.Zero);
+      if (rc != 0 || db == IntPtr.Zero || sqlite.ReadOnly(db,Utf8("main")) != 1) return result;
+      sqlite.BusyTimeout(db,0);
+      sqlite.Limit(db,0,65536);
+      var clock=Stopwatch.StartNew();
+      progress=unused => stop.IsCancellationRequested || clock.ElapsedMilliseconds >= 80 ? 1 : 0;
+      sqlite.SetProgress(db,1000,progress,IntPtr.Zero);
+      // The id is bound, not interpolated. Only name metadata is read.
+      rc=sqlite.Prepare(db,Utf8("SELECT name,title,history_mode FROM main.threads WHERE id=?1 LIMIT 2"),-1,out query,IntPtr.Zero);
+      if (rc != 0 || query == IntPtr.Zero || sqlite.StatementReadOnly(query) != 1) return result;
+      var seen=new HashSet<string>(StringComparer.Ordinal);
+      foreach (string id in ids) {
+       if (stop.IsCancellationRequested || seen.Count >= 256 || clock.ElapsedMilliseconds >= 80) break;
+       if (String.IsNullOrEmpty(id) || id.Length > 128 || !seen.Add(id)) continue;
+       sqlite.Reset(query); sqlite.ClearBindings(query);
+       byte[] key=Utf8(id);
+       if (sqlite.BindText(query,1,key,key.Length-1,new IntPtr(-1)) != 0) { result.Clear(); break; }
+       rc=sqlite.Step(query);
+       if (rc == 101) continue;
+       if (rc != 100) { result.Clear(); break; }
+       string name=sqlite.Column(query,0), title=sqlite.Column(query,1), mode=sqlite.Column(query,2);
+       if (sqlite.Step(query) != 101) { result.Clear(); break; }
+       string display=String.Equals(mode,"paginated",StringComparison.Ordinal) ? name :
+                      String.Equals(mode,"legacy",StringComparison.Ordinal) ? title : null;
+       if (!String.IsNullOrWhiteSpace(display) && display.Length <= 4096 && display.IndexOf('\0') < 0)
+        result[id]=display.Trim();
+      }
+     } finally { if (query != IntPtr.Zero) sqlite.Finalize(query); if (db != IntPtr.Zero) sqlite.Close(db); GC.KeepAlive(progress); }
+    }
+   } catch { result.Clear(); }
+   return result;
+  }
+  private static byte[] Utf8(string value) { return Encoding.UTF8.GetBytes(value+"\0"); }
+  private static bool SafeFile(string path) {
+   try { var a=File.GetAttributes(path); return (a & (FileAttributes.Directory|FileAttributes.ReparsePoint)) == 0; }
+   catch { return false; }
+  }
+  private static bool CanShareRead(string path) {
+   try { using(FileStream stream=File.Open(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete)) return true; }
+   catch { return false; }
+  }
+  private static bool SafeParents(string path) {
+   try { for (DirectoryInfo d=new DirectoryInfo(path); d != null; d=d.Parent) {
+     FileAttributes a=d.Attributes;
+     if ((a & FileAttributes.Directory)==0 || (a & FileAttributes.ReparsePoint)!=0) return false;
+    }
+    return true;
+   } catch { return false; }
+  }
+  public void Dispose() { stop.Cancel(); }
+
+  private sealed class Native : IDisposable {
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int VersionFn();
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int OpenFn(byte[] p,out IntPtr db,int f,IntPtr v);
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int DbFn(IntPtr db);
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int ReadOnlyFn(IntPtr db,byte[] name);
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int TimeoutFn(IntPtr db,int ms);
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int LimitFn(IntPtr db,int id,int value);
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int PrepareFn(IntPtr db,byte[] sql,int bytes,out IntPtr stmt,IntPtr tail);
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int BindFn(IntPtr stmt,int index,byte[] bytes,int length,IntPtr destroy);
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int ProgressFn(IntPtr ignored);
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate void ProgressHandlerFn(IntPtr db,int operations,ProgressFn callback,IntPtr context);
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate IntPtr TextFn(IntPtr stmt,int column);
+   [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int BytesFn(IntPtr stmt,int column);
+   [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern IntPtr LoadLibraryEx(string name,IntPtr file,uint flags);
+   [DllImport("kernel32.dll",CharSet=CharSet.Ansi,SetLastError=true)] static extern IntPtr GetProcAddress(IntPtr module,string name);
+   [DllImport("kernel32.dll",SetLastError=true)] static extern bool FreeLibrary(IntPtr module);
+   private IntPtr library;
+   public VersionFn Version; public OpenFn Open; public DbFn Close; public ReadOnlyFn ReadOnly;
+   public TimeoutFn BusyTimeout; public LimitFn Limit; public PrepareFn Prepare; public DbFn StatementReadOnly;
+   public DbFn Step, Reset, ClearBindings, Finalize; public BindFn BindText; private TextFn text; private BytesFn bytes;
+   public ProgressHandlerFn SetProgress; private BytesFn type;
+   private T Get<T>(string name) where T:class {
+    IntPtr p=GetProcAddress(library,name);
+    if (p == IntPtr.Zero) throw new InvalidOperationException("SQLite function unavailable.");
+    return Marshal.GetDelegateForFunctionPointer(p,typeof(T)) as T;
+   }
+   public Native() {
+    string path=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),"winsqlite3.dll");
+    library=LoadLibraryEx(path,IntPtr.Zero,0x00000800);
+    if (library==IntPtr.Zero) throw new InvalidOperationException("SQLite unavailable.");
+    try {
+     Version=Get<VersionFn>("sqlite3_libversion_number"); Open=Get<OpenFn>("sqlite3_open_v2");
+     Close=Get<DbFn>("sqlite3_close_v2"); ReadOnly=Get<ReadOnlyFn>("sqlite3_db_readonly");
+     BusyTimeout=Get<TimeoutFn>("sqlite3_busy_timeout"); Limit=Get<LimitFn>("sqlite3_limit");
+     Prepare=Get<PrepareFn>("sqlite3_prepare_v2"); StatementReadOnly=Get<DbFn>("sqlite3_stmt_readonly");
+     Step=Get<DbFn>("sqlite3_step"); Reset=Get<DbFn>("sqlite3_reset"); ClearBindings=Get<DbFn>("sqlite3_clear_bindings");
+     Finalize=Get<DbFn>("sqlite3_finalize"); BindText=Get<BindFn>("sqlite3_bind_text");
+     SetProgress=Get<ProgressHandlerFn>("sqlite3_progress_handler"); type=Get<BytesFn>("sqlite3_column_type");
+     text=Get<TextFn>("sqlite3_column_text"); bytes=Get<BytesFn>("sqlite3_column_bytes");
+    } catch { Dispose(); throw; }
+   }
+   public string Column(IntPtr stmt,int column) {
+    if(type(stmt,column)!=3) return null;
+    IntPtr p=text(stmt,column); if(p==IntPtr.Zero) return null;
+    int count=bytes(stmt,column); if(count<0 || count>16384) return null;
+    byte[] buffer=new byte[count]; Marshal.Copy(p,buffer,0,count);
+    return new UTF8Encoding(false,true).GetString(buffer);
+   }
+   public void Dispose() { if(library!=IntPtr.Zero){FreeLibrary(library);library=IntPtr.Zero;} }
+  }
+ }
+}
+'@
+ }
+ $script:codexTitleReader=[AITaskMonitor.CodexTitles.Reader]::new()
+}catch{}
 $script:lastClaudeTasks = @()
 $script:sourceErrors = @()
 $script:sourcePartialConnections = @()
@@ -2681,6 +2858,15 @@ function Codex-Tasks {
   $sessions+=@($candidate)
   $script:unindexedPaths[$id]=[string]$candidate.path
  }
+ $codexTitles=$null
+ $titleReader=Get-Variable -Scope Script -Name codexTitleReader -ErrorAction SilentlyContinue
+ if($null -ne $titleReader -and $null -ne $titleReader.Value -and $sessions.Count -gt 0){
+  try{
+   $titleIds=[string[]]@($sessions | Sort-Object -Property @{Expression={[string](Prop $_ 'updated_at' '')};Descending=$true} |
+    Select-Object -First 256 | ForEach-Object {[string](Prop $_ 'id' '')})
+   $codexTitles=$titleReader.Value.Snapshot($codexHome,$titleIds)
+  }catch{}
+ }
  $discoveryVariable=Get-Variable -Scope Script -Name 'sessionDiscovery' -ErrorAction SilentlyContinue
  if ($null -ne $discoveryVariable -and $null -ne $discoveryVariable.Value) {
   $cache=$discoveryVariable.Value
@@ -2710,7 +2896,9 @@ function Codex-Tasks {
  $items = New-Object Collections.Generic.List[object]
  foreach ($session in $sessions) {
   $id = [string]$session.id; $title = [string]$session.thread_name
+  if($title -eq "Guardian review"){continue}
   $titleGenerated=[bool](Prop $session 'titleGenerated' $false)
+  if(($titleGenerated -or [string]::IsNullOrWhiteSpace($title)) -and $null -ne $codexTitles -and $codexTitles.ContainsKey($id)){$title=[string]$codexTitles[$id];$titleGenerated=$false}
   if([string]::IsNullOrWhiteSpace($title)){$title='Задача Codex';$titleGenerated=$true}
   $unindexed=[bool](Prop $session 'unindexed' $false)
   if($title -eq "Guardian review"){continue}
@@ -4366,6 +4554,7 @@ $windowFrame.Add_SizeChanged({Update-SquircleGeometry})
 $tray=New-Object Windows.Forms.NotifyIcon; $tray.Icon=if($null -ne $script:applicationIcon){$script:applicationIcon}else{[Drawing.SystemIcons]::Application}; $tray.Text="AI task monitor"; $tray.Visible=$true; $tray.Add_DoubleClick({Restore-Window})
 $menu=New-Object Windows.Forms.ContextMenuStrip; $script:trayShowMenu=$menu.Items.Add("Развернуть"); $script:trayExitMenu=$menu.Items.Add("Выход"); $script:trayShowMenu.Add_Click({Restore-Window;Set-CompactMode $false}); $script:trayExitMenu.Add_Click({$window.Close()}); $tray.ContextMenuStrip=$menu
 $timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();$cursorVariable=Get-Variable -Scope Script -Name unindexedCursor -ErrorAction SilentlyContinue;if($null -ne $cursorVariable -and $null -ne $cursorVariable.Value -and $null -ne $cursorVariable.Value.Enumerator){try{$cursorVariable.Value.Enumerator.Dispose()}catch{}};if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};Stop-UpdateCheck;if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:kimiModulesAvailable){Stop-KimiMonitorController $script:kimiController};if($script:hermesModulesAvailable -and -not $PreviewSources){try{Stop-HermesMonitorController $script:hermesController}catch{}};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
+$window.Add_Closed({if($null -ne $script:codexTitleReader){$script:codexTitleReader.Dispose()}})
 if($script:codexCloudModulesAvailable -and -not $SnapshotFile -and $PreviewActiveTasks -lt 0 -and (Load-CodexCloudEnabled)){Set-CodexCloudControllerEnabled $script:codexCloudController $true}
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
@@ -4397,6 +4586,23 @@ if($PreviewUpdate){$script:availableUpdate=[PSCustomObject]@{Version='0.3.0-alph
 if ($SnapshotFile) {
  if($PreviewOffscreen){$window.WindowStartupLocation="Manual";$window.Left=-10000;$window.Top=-10000;$window.ShowActivated=$false;$window.ShowInTaskbar=$false}
  $window.Show(); $window.UpdateLayout()
+ if($PreviewProviderLabelsUiTest){
+  function Find-ProviderLabel($parent,[string]$expected){
+   if($parent -is [Windows.Controls.TextBlock] -and $parent.Text -ceq $expected -and $parent.IsVisible){return $parent}
+   for($index=0;$index -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$index++){
+    $found=Find-ProviderLabel ([Windows.Media.VisualTreeHelper]::GetChild($parent,$index)) $expected
+    if($null -ne $found){return $found}
+   }
+   return $null
+  }
+  $labelsRoot=if($script:isCompact){$compactTasksPanel}else{$tasksPanel}
+  $sample=@(if($script:isCompact){$script:lastAllTasks|Where-Object {[string]$_.Id -eq $script:compactTaskId}|Select-Object -First 1}else{$script:lastTasks|Select-Object -First 1})
+  if($sample.Count -ne 1){throw 'The task for the provider-label check is missing.'}
+  $providers=@($script:lastAllTasks|ForEach-Object {[string]$_.Provider}|Where-Object {$_}|Sort-Object -Unique)
+  $providerLabel=Find-ProviderLabel $labelsRoot ([string]$sample[0].ProviderName)
+  if($providers.Count -ge 2 -and ($null -eq $providerLabel -or $providerLabel.Foreground.Color -ne (Brush $script:accentHex).Color)){throw 'A multiple-source label is missing or uses the wrong color.'}
+  if($providers.Count -lt 2 -and $null -ne $providerLabel){throw 'A single-source task must not show a provider label.'}
+ }
  if($PreviewSourceWarning -eq 'partial-both'){
   $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
   $previewWarningName=if($PreviewWarningProvider -eq 'codex'){'Codex'}else{'DeepSeek Harness'}
