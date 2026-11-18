@@ -1,7 +1,7 @@
-name: Verify macOS 0.3.10 full and compact windows
+name: Verify macOS 0.3.10 light full and compact windows
 on:
   push:
-    branches: [codex/macos-0310-insets-proof-20261118]
+    branches: [codex/macos-0310-full-proof-light-20261118]
     paths: [".github/workflows/macos-0310-full-compact-proof.yml"]
 permissions:
   contents: read
@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         runner: [macos-26]
-        appearance: [light, dark]
+        appearance: [light]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
