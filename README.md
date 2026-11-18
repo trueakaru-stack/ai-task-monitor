@@ -9,7 +9,7 @@ AI Task Monitor — бесплатное приложение для Windows 11 
 - Показывает доступные задачи и сведения о действиях; неподтверждённый статус отмечает отдельно.
 - Если агент опубликовал план, отображает его этапы и долю выполненных этапов. Одновременно в карточке видно до пяти этапов; остальные можно прокрутить.
 - Без плана показывает доступную активность; процент не выводится, если данных для оценки недостаточно. Приблизительная оценка помечается знаком `≈`.
-- Компактное окно можно держать поверх других окон и переключать задачи; настройки доступны в развёрнутом режиме.
+- Компактное окно можно держать поверх других окон и переключать задачи; настройки доступны в развёрнутом режиме. В macOS окно становится активным при наведении.
 - Локальный диагностический журнал и предупреждение о возможном цикле помогают следить за работой. Предупреждение приблизительное и не останавливает задачу.
 
 ### Установка
@@ -35,7 +35,7 @@ AI Task Monitor is a free Windows 11 and macOS app for following local Codex and
 - Shows available tasks and activity, marking unconfirmed status separately.
 - When an agent publishes a plan, shows its steps and the share of completed steps. Up to five steps are visible per card; the rest can be scrolled.
 - Without a plan, shows available activity and omits the percentage when there is not enough information to estimate it. Estimated values use `≈`.
-- A compact window can stay above other windows and switch between tasks; settings are available in the expanded view.
+- A compact window can stay above other windows and switch between tasks; settings are available in the expanded view. On macOS, hovering over the window activates it.
 - A local diagnostic journal and a possible-loop warning help monitor activity. The warning is heuristic and does not stop a task.
 
 ### Installation
