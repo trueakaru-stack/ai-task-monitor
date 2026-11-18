@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          fetch-depth: 3
+          fetch-depth: 20
       - name: Run the same regression against old and new window code
         shell: bash
         run: |
@@ -25,9 +25,9 @@ jobs:
           test "$DOTNET_ADD_GLOBAL_TOOLS_TO_PATH" = 0
           candidate=5863d11e9c493a3d361be0a0338e2222b33bbcec
           baseline=6f9e11914064052c0bbe5fbc30bfa6c0a23bc860
-          test "$(git rev-parse HEAD^)" = "$candidate"
+          git merge-base --is-ancestor "$candidate" HEAD
           test "$(git rev-parse "$candidate^")" = "$baseline"
-          changes="$(git diff --name-only HEAD^ HEAD)"
+          changes="$(git diff --name-only "$candidate" HEAD)"
           test "$changes" = '.github/workflows/macos-frame-test-independent.yml'
           root="$RUNNER_TEMP/aitm-frame-independent"
           test ! -e "$root"
@@ -64,6 +64,9 @@ jobs:
           SCRIPT
           chmod 700 "$root/run-test"
           export AITM_FRAME_ROOT="$root"
+          DEVELOPER_DIR="$(/usr/bin/xcode-select -p)"
+          test -d "$DEVELOPER_DIR"
+          export DEVELOPER_DIR
           marker="$(mktemp "$RUNNER_TEMP/aitm-frame-denied.XXXXXXXX")"
           printf 'isolated fixture only\n' > "$marker"
           "$root/run-test" /bin/bash -c 'test -z "${HOME+x}" && test -z "${CODEX_HOME+x}"'
