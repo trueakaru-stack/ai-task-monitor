@@ -1,0 +1,33 @@
+name: macOS 0.3.10 version checks
+on:
+  push:
+    branches: [codex/macos-hover-0310-version-check-20261118]
+    paths: [".github/workflows/macos-hover-0310-version-check-20261118.yml"]
+permissions:
+  contents: read
+jobs:
+  version:
+    runs-on: macos-26
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Check release metadata and upgrade selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          fixture="$(mktemp -d "$RUNNER_TEMP/aitm-version-XXXXXXXX")"
+          mkdir -p "$fixture/synthetic-home" "$fixture/tmp" "$fixture/evidence"
+          export CFFIXED_USER_HOME="$fixture/synthetic-home"
+          export TMPDIR="$fixture/tmp"
+          cd macos
+          /usr/bin/plutil -lint Info.plist
+          test "$(/usr/bin/plutil -extract AITaskMonitorReleaseVersion raw -o - Info.plist)" = "0.3.10"
+          test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - Info.plist)" = "0.3.10"
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - Info.plist)" = "14"
+          for suite in ReleaseUpdate0310Tests ReleaseUpdate039Tests ReleaseUpdatesTests; do
+            echo "Checking $suite"
+            /usr/bin/xcrun swift test --disable-sandbox --scratch-path "$fixture/build" --filter "$suite"
+          done
