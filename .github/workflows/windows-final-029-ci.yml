@@ -48,11 +48,11 @@ jobs:
           if ($interpreters.Count -eq 0) { throw 'A hosted Python interpreter was not found.' }
           $interpreter = $interpreters[0]
           $version = & $interpreter --version 2>&1
-          if ($LASTEXITCODE -ne 0 -or "$version" -notmatch '^Python 3\\.') { throw 'A verified Python 3 interpreter is required.' }
+          if ($LASTEXITCODE -ne 0 -or "$version" -notmatch '^Python 3\.') { throw 'A verified Python 3 interpreter is required.' }
           & $interpreter -B (Join-Path $source 'windows/tests/Test-DotnetPathSafety.py')
           if ($LASTEXITCODE -ne 0) { throw '.NET PATH safety check failed.' }
           & (Join-Path $source 'windows/tests/Test-CodexTitleLookup.ps1')
-          $compiler = Join-Path $env:WINDIR 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
           $test = Join-Path $sourceRoot 'Test-SafeInstallSwap.exe'
           & $compiler /nologo /target:exe /main:TestSafeInstallSwap /reference:System.Web.Extensions.dll /reference:System.Management.dll /reference:System.Windows.Forms.dll "/out:$test" `
               (Join-Path $source 'windows/app/SafeInstallPaths.cs') `
