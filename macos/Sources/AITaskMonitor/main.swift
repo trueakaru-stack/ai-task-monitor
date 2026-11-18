@@ -1,7 +1,9 @@
 import Foundation
 import SwiftUI
 
-if CommandLine.arguments.contains("--cursor-focus-helper") {
+if let index = CommandLine.arguments.firstIndex(of: "--cursor-keyboard-baseline"), CommandLine.arguments.indices.contains(index + 1) {
+    exit(MainActor.assumeIsolated { CursorIntegrationHarness.keyboardBaseline(fixture: CommandLine.arguments[index + 1]) })
+} else if CommandLine.arguments.contains("--cursor-focus-helper") {
     exit(MainActor.assumeIsolated { CursorIntegrationHarness.focusHelper() })
 } else if let index = CommandLine.arguments.firstIndex(of: "--cursor-integration"), CommandLine.arguments.indices.contains(index + 1) {
     exit(MainActor.assumeIsolated { CursorIntegrationHarness.run(fixture: CommandLine.arguments[index + 1]) })
