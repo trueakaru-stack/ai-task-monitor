@@ -1,4 +1,6 @@
 import AppKit
+import ApplicationServices
+import Darwin
 import CoreGraphics
 import SwiftUI
 
@@ -250,6 +252,40 @@ enum CursorIntegrationHarness {
                 await move(center(points()[0]))
                 check(cursor(.pointingHand), "Hand shown before switching to another application")
             }
+            let axApp = AXUIElementCreateApplication(getpid())
+            var axRootChildren: CFTypeRef?
+            let axResult = AXUIElementCopyAttributeValue(axApp, kAXChildrenAttribute as CFString, &axRootChildren)
+            print("AX_SELF_RESULT \(axResult.rawValue), trusted=\(AXIsProcessTrusted())")
+            var candidates: [AXUIElement] = []
+            func axString(_ element: AXUIElement, _ attribute: CFString) -> String? {
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
+                return value as? String
+            }
+            func collectAX(_ element: AXUIElement, depth: Int = 0) {
+                guard depth < 30 else { return }
+                let role = axString(element, kAXRoleAttribute as CFString)
+                let label = axString(element, kAXTitleAttribute as CFString) ??
+                    axString(element, kAXDescriptionAttribute as CFString)
+                if role == "AXButton" && label == "Task 1" { candidates.append(element) }
+                var childValue: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childValue) == .success,
+                   let children = childValue as? [AXUIElement] {
+                    for child in children { collectAX(child, depth: depth + 1) }
+                }
+            }
+            if axResult == .success, let children = axRootChildren as? [AXUIElement] {
+                for child in children { collectAX(child) }
+            }
+            if let target = candidates.first {
+                let focusResult = AXUIElementSetAttributeValue(target, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+                if focusResult == .success {
+                    CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true)?.post(tap: .cghidEventTap)
+                    CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false)?.post(tap: .cghidEventTap)
+                    await pause()
+                    check(store.compactIndex == 0, "System keyboard activates the focused task button")
+                } else { print("UNVERIFIED: AX focus result \(focusResult.rawValue)") }
+            } else { print("UNVERIFIED: no accessible Task 1 node available through AX") }
             let helper = Process()
             helper.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
             helper.arguments = ["--cursor-focus-helper"]
