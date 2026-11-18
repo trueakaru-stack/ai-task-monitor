@@ -1,0 +1,42 @@
+name: Compact task cursor isolated verification
+
+on:
+  push:
+    branches: [codex/windows-compact-dot-cursor-ci-20261118]
+
+permissions:
+  contents: read
+
+jobs:
+  interaction:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        theme: [dark, light]
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Test desktop pointer and keyboard in the isolated preview
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows') { throw 'An isolated GitHub-hosted Windows runner is required.' }
+          $env:AITM_CURSOR_THEME = '${{ matrix.theme }}'
+          $env:AITM_CURSOR_ROOT = Join-Path $env:RUNNER_TEMP ('aitm-cursor-' + $env:AITM_CURSOR_THEME)
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -STA -ExecutionPolicy Bypass -File '.github/compact-cursor-ci/Test.ps1'
+          if ($LASTEXITCODE -ne 0) { throw 'The interaction verification failed.' }
+      - name: Keep interaction results and frames
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compact-cursor-${{ matrix.theme }}
+          path: ${{ runner.temp }}/aitm-cursor-${{ matrix.theme }}/evidence/
+          if-no-files-found: warn
+          retention-days: 7
