@@ -25,6 +25,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export AITM_CURSOR_DIAGNOSTICS=1
           export CFFIXED_USER_HOME="$AITM_CURSOR_SYNTHETIC_ROOT/synthetic-home"
           export TMPDIR="$AITM_CURSOR_SYNTHETIC_ROOT/tmp"
           cd macos
