@@ -7,6 +7,7 @@ struct PointingHandCursor: NSViewRepresentable {
     func updateNSView(_ view: CursorArea, context: Context) {}
 
     final class CursorArea: NSView {
+        // Enter and exit events for neighboring points may arrive out of order.
         private static var hoveredAreas: Set<ObjectIdentifier> = []
         private var trackingArea: NSTrackingArea?
         private var hovering = false
@@ -15,6 +16,7 @@ struct PointingHandCursor: NSViewRepresentable {
 
         override func updateTrackingAreas() {
             if let trackingArea { removeTrackingArea(trackingArea) }
+            // The SwiftUI hosting view can report a visibleRect larger than these bounds.
             let trackingRect = bounds.intersection(visibleRect)
             if trackingRect.isEmpty {
                 trackingArea = nil
@@ -33,12 +35,42 @@ struct PointingHandCursor: NSViewRepresentable {
         override func mouseExited(with event: NSEvent) { synchronizeCursor() }
 
         override func viewWillMove(toWindow newWindow: NSWindow?) {
-            if newWindow !== window { stopHovering() }
+            if newWindow !== window {
+                if let window {
+                    NotificationCenter.default.removeObserver(self, name: NSWindow.willMiniaturizeNotification, object: window)
+                    NotificationCenter.default.removeObserver(self, name: NSWindow.didMiniaturizeNotification, object: window)
+                    NotificationCenter.default.removeObserver(self, name: NSWindow.didDeminiaturizeNotification, object: window)
+                    NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: window)
+                }
+                stopHovering()
+            }
             super.viewWillMove(toWindow: newWindow)
         }
 
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window else { return }
+            let center = NotificationCenter.default
+            center.addObserver(self, selector: #selector(windowWillHide),
+                               name: NSWindow.willMiniaturizeNotification, object: window)
+            center.addObserver(self, selector: #selector(windowWillHide),
+                               name: NSWindow.didMiniaturizeNotification, object: window)
+            center.addObserver(self, selector: #selector(windowWillHide),
+                               name: NSWindow.willCloseNotification, object: window)
+            center.addObserver(self, selector: #selector(windowDidRestore),
+                               name: NSWindow.didDeminiaturizeNotification, object: window)
+        }
+
+        @objc private func windowWillHide(_ notification: Notification) {
+            stopHovering()
+        }
+
+        @objc private func windowDidRestore(_ notification: Notification) {
+            DispatchQueue.main.async { [weak self] in self?.synchronizeCursor() }
+        }
+
         private func synchronizeCursor() {
-            guard let window, window.isVisible else {
+            guard let window, window.isVisible, !window.isMiniaturized else {
                 stopHovering()
                 return
             }
