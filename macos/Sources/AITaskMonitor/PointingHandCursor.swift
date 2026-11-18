@@ -31,10 +31,17 @@ struct PointingHandCursor: ViewModifier {
     func body(content: Content) -> some View {
         content
             .onHover { inside in
+                print("HOVER_EVENT inside=\(inside) appActive=\(NSApp.isActive)")
                 if inside {
-                    ownerWindowNumber = NSWindow.windowNumber(at: NSEvent.mouseLocation, belowWindowWithWindowNumber: 0)
+                    let number = NSWindow.windowNumber(at: NSEvent.mouseLocation, belowWindowWithWindowNumber: 0)
+                    guard let window = NSApp.windows.first(where: { $0.windowNumber == number }),
+                          window.isVisible, !window.isMiniaturized else { return }
+                    ownerWindowNumber = number
                     hovering = true
+                    if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+                    if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
                     TaskPointCursor.enter(id)
+                    scheduleRefresh()
                 } else {
                     releaseCursor()
                 }
