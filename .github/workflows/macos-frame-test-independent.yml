@@ -111,6 +111,21 @@ jobs:
               if source.count(target) != 1:
                   raise SystemExit("unexpected window coordinator")
               source = source.replace(target, "        if let host = window.contentView as? any FrameHostSizing, !host.sizingOptions.isEmpty { host.sizingOptions = [] }\n" + target)
+          if mode == "negative-inset":
+              target = "        coordinator.observe(window)\n"
+              if source.count(target) != 1:
+                  raise SystemExit("unexpected window coordinator")
+              change = """        if let content = window.contentView {
+                      var insets = content.additionalSafeAreaInsets
+                      let observedSystemTop = content.safeAreaInsets.top - insets.top
+                      let desiredTop = -observedSystemTop
+                      if abs(insets.top - desiredTop) > 0.5 {
+                          insets.top = desiredTop
+                          content.additionalSafeAreaInsets = insets
+                      }
+                  }
+          """
+              source = source.replace(target, change + target)
           if mode == "sizing-none":
               target = "        window.contentView = host"
               if tests.count(target) != 2:
@@ -313,7 +328,7 @@ jobs:
           path.write_text(text)
           PY
           /usr/bin/python3 -V
-          for mode in combo; do
+          for mode in negative-inset; do
             /usr/bin/python3 -I -S -B "$root/instrument.py" "$root" "$mode"
             set +e
             /usr/bin/python3 -I -S -B - "$root/run-test" /usr/bin/xcrun swift build --disable-sandbox --scratch-path "$root/build" \
@@ -352,7 +367,7 @@ jobs:
             for i in {1..38}; do
               kill -0 "$app_pid" 2>/dev/null || break
               for capture_stage in expanded compact-first; do
-                if ! test -f "$root/evidence/combo-$capture_stage.png"; then
+                if ! test -f "$root/evidence/negative-inset-$capture_stage.png"; then
                   number="$(sed -n "s/.*APP_PROBE stage=$capture_stage windowNumber=\\([0-9]*\\).*/\\1/p" "$root/evidence/windowgroup.log" | tail -1)"
                   if test -n "$number"; then
                     "$root/run-test" /usr/sbin/screencapture -x -l "$number" "$root/evidence/borderless-$capture_stage.png" || true
