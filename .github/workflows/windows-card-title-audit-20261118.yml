@@ -39,6 +39,8 @@ jobs:
           $env:USERPROFILE=Join-Path $root 'profile'
           $env:LOCALAPPDATA=Join-Path $root 'local'
           $env:CODEX_HOME=Join-Path $root 'codex'
+          $env:TEMP=$root
+          $env:TMP=$root
           foreach($p in @($env:USERPROFILE,$env:LOCALAPPDATA,$env:CODEX_HOME)){[void][IO.Directory]::CreateDirectory($p)}
           $app=(Resolve-Path 'windows/app/CodexProgress.ps1').Path
           $systemPowerShell=Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe'
