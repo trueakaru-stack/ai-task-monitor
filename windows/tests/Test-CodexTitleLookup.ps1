@@ -69,6 +69,41 @@ try {
  $blank=& $choose '' $false $names 'modern'
  $absent=& $choose 'Fallback task' $true $names 'missing'
  Require ($indexed.Title -ceq 'Indexed name' -and -not $indexed.Generated -and $generated.Title -ceq 'Modern name' -and -not $generated.Generated -and $blank.Title -ceq 'Modern name' -and $absent.Title -ceq 'Fallback task' -and $absent.Generated) 'Indexed title precedence or fallback is incorrect.'
+ $definitions=foreach($functionName in @('Prop','Codex-Tasks')){
+  $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $functionName},$true)
+  if($null -eq $node){throw 'A source function is missing.'}
+  $node.Extent.Text
+ }
+ $checks=@'
+param($root)
+$codexHome=$root
+$sessionIndex=Join-Path $root 'synthetic-index.jsonl'
+[IO.File]::WriteAllText($sessionIndex,'')
+$script:unindexedPaths=@{}
+$script:lastCodexTasks=@()
+$script:stubTitles=@{guardian='Database title';normal='Conflicting database title';fallback='Database fallback'}
+$script:codexTitleReader=[PSCustomObject]@{}
+$script:codexTitleReader|Add-Member -MemberType ScriptMethod -Name Snapshot -Value {param($path,$ids) return $script:stubTitles}
+function Codex-IndexCandidates {
+ return @(
+  [PSCustomObject]@{id='guardian';thread_name='Guardian review';titleGenerated=$true;updated_at='2026-01-01'},
+  [PSCustomObject]@{id='normal';thread_name='Indexed title';titleGenerated=$false;updated_at='2026-01-01'},
+  [PSCustomObject]@{id='fallback';thread_name='Generated title';titleGenerated=$true;updated_at='2026-01-01'}
+ )
+}
+function Codex-UnindexedCandidates([bool]$HasIndexedHistory) { return @() }
+function Manual-Tasks($sessions) { return @{} }
+function Thread-State($id,$unindexed) { return [PSCustomObject]@{State='unknown';UpdatedUtc=[DateTime]::UtcNow;StartKey='turn';StartedUtc=[DateTime]::UtcNow} }
+function Codex-Uncertain($id,$state) { return $true }
+function Codex-Plan($id) { return @() }
+function Codex-ObservedActivity($id,$startKey) { return 'Synthetic activity' }
+$tasks=@(Codex-Tasks)
+if(@($tasks|Where-Object Id -eq 'guardian').Count -ne 0){throw 'An internal guardian task became visible.'}
+$normal=@($tasks|Where-Object Id -eq 'normal')
+$fallback=@($tasks|Where-Object Id -eq 'fallback')
+if($normal.Count -ne 1 -or $normal[0].Title -cne 'Indexed title' -or $fallback.Count -ne 1 -or $fallback[0].Title -cne 'Database fallback'){throw 'Conflicting title sources were resolved incorrectly.'}
+'@
+ & ([scriptblock]::Create(($definitions -join "`n")+"`n"+$checks)) $fixture
  Require ((SharedHash $dbPath) -ceq $mainBefore -and (SharedHash ($dbPath+'-wal')) -ceq $walBefore) 'Read-only lookup changed the database or WAL.'
  $writer.Execute("UPDATE threads SET name='Updated name' WHERE id='modern';")
  $names=[AITaskMonitor.CodexTitles.Reader]::ReadNow($fixture,$ids)
