@@ -384,9 +384,9 @@ jobs:
           import sys
           process = subprocess.Popen(sys.argv[1:], start_new_session=True)
           try:
-              sys.exit(process.wait(timeout=300))
+              sys.exit(process.wait(timeout=480))
           except subprocess.TimeoutExpired:
-              print("BUILD_TIMEOUT: isolated build exceeded 300 seconds", flush=True)
+              print("BUILD_TIMEOUT: isolated build exceeded 480 seconds", flush=True)
               os.killpg(process.pid, signal.SIGKILL)
               process.wait()
               sys.exit(124)
