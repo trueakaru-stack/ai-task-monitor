@@ -42,6 +42,9 @@ struct PointingHandCursor: NSViewRepresentable {
                     NotificationCenter.default.removeObserver(self, name: NSWindow.didDeminiaturizeNotification, object: window)
                     NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: window)
                 }
+                NotificationCenter.default.removeObserver(self, name: NSApplication.willHideNotification, object: NSApp)
+                NotificationCenter.default.removeObserver(self, name: NSApplication.didHideNotification, object: NSApp)
+                NotificationCenter.default.removeObserver(self, name: NSApplication.didUnhideNotification, object: NSApp)
                 stopHovering()
             }
             super.viewWillMove(toWindow: newWindow)
@@ -59,6 +62,12 @@ struct PointingHandCursor: NSViewRepresentable {
                                name: NSWindow.willCloseNotification, object: window)
             center.addObserver(self, selector: #selector(windowDidRestore),
                                name: NSWindow.didDeminiaturizeNotification, object: window)
+            center.addObserver(self, selector: #selector(windowWillHide),
+                               name: NSApplication.willHideNotification, object: NSApp)
+            center.addObserver(self, selector: #selector(windowWillHide),
+                               name: NSApplication.didHideNotification, object: NSApp)
+            center.addObserver(self, selector: #selector(windowDidRestore),
+                               name: NSApplication.didUnhideNotification, object: NSApp)
         }
 
         @objc private func windowWillHide(_ notification: Notification) {
@@ -70,7 +79,7 @@ struct PointingHandCursor: NSViewRepresentable {
         }
 
         private func synchronizeCursor() {
-            guard let window, window.isVisible, !window.isMiniaturized else {
+            guard let window, window.isVisible, !window.isMiniaturized, !NSApp.isHidden else {
                 stopHovering()
                 return
             }
@@ -78,6 +87,7 @@ struct PointingHandCursor: NSViewRepresentable {
             let localPoint = convert(window.convertPoint(fromScreen: pointer), from: nil)
             let inside = bounds.intersection(visibleRect).contains(localPoint) &&
                 NSWindow.windowNumber(at: pointer, belowWindowWithWindowNumber: 0) == window.windowNumber
+            if ProcessInfo.processInfo.environment["AITM_CURSOR_DIAGNOSTICS"] == "1" { print("TRACK inside=\(inside) hovering=\(hovering) active=\(NSApp.isActive) key=\(window.isKeyWindow)") }
             if inside {
                 startHovering()
             } else {
