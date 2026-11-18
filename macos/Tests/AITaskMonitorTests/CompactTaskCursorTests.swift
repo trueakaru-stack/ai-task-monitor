@@ -35,6 +35,7 @@ final class CompactTaskCursorTests: XCTestCase {
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = host
+        window.acceptsMouseMovedEvents = true
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         defer { window.close() }
@@ -70,6 +71,7 @@ final class CompactTaskCursorTests: XCTestCase {
             XCTAssertEqual(CGWarpMouseCursorPosition(position), .success)
             try post(.mouseMoved, at: point)
             settle(0.5)
+            print("MOVE point=\(point) expected=\(position) actual=\(NSEvent.mouseLocation) key=\(window.isKeyWindow) active=\(NSApp.isActive)")
         }
         func cursorMatches(_ expected: NSCursor) -> Bool {
             guard let actual = NSCursor.currentSystem else { return false }
@@ -82,6 +84,16 @@ final class CompactTaskCursorTests: XCTestCase {
             XCTAssertTrue(cursorMatches(expected), message)
         }
 
+        print("WINDOW_STATE active=\(NSApp.isActive) key=\(window.isKeyWindow) main=\(window.isMainWindow) frame=\(window.frame)")
+        for (index, area) in points.enumerated() {
+            print("CURSOR_AREA \(index) frame=\(area.frame) bounds=\(area.bounds) visible=\(area.visibleRect) center=\(center(area))")
+            window.invalidateCursorRects(for: area)
+        }
+        settle(0.4)
+        NSCursor.pointingHand.set()
+        settle(0.2)
+        checkCursor(.pointingHand, "Direct cursor positive control")
+        NSCursor.arrow.set()
         try move(NSPoint(x: 20, y: window.contentView!.bounds.height - 25))
         checkCursor(.arrow, "Pointer outside task buttons returns to arrow")
         try move(center(points[0]))
@@ -116,6 +128,16 @@ final class CompactTaskCursorTests: XCTestCase {
         }
         try post(.leftMouseDown, at: center(regions()[1]))
         try post(.leftMouseUp, at: center(regions()[1]))
+        settle(0.5)
+        print("POSTED_CLICK index=\(store.compactIndex)")
+        let clickPoint = center(regions()[1])
+        for (i, kind) in [NSEvent.EventType.leftMouseDown, .leftMouseUp].enumerated() {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: kind, location: clickPoint,
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime + Double(i) * 0.01,
+                windowNumber: window.windowNumber, context: nil, eventNumber: i + 1, clickCount: 1,
+                pressure: i == 0 ? 1 : 0))
+            window.sendEvent(event)
+        }
         settle(0.5)
         XCTAssertEqual(store.compactIndex, 1, "Clicking the inactive point selects its task")
         try move(NSPoint(x: 20, y: window.contentView!.bounds.height - 25))
