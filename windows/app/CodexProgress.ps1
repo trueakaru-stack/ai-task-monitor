@@ -227,7 +227,8 @@ namespace AITaskMonitor.CodexTitles {
     string database=Path.Combine(root,"state_5.sqlite");
     // Do not cause SQLite to create sidecar files. Existing WAL and SHM also
     // allow SQLite to observe committed changes that have not been checkpointed.
-    if (!SafeFile(database) || !SafeFile(database+"-wal") || !SafeFile(database+"-shm") || !SafeParents(root)) return result;
+    if (!SafeFile(database) || !SafeFile(database+"-wal") || !SafeFile(database+"-shm") ||
+        !SafeParents(root) || !CanShareRead(database) || !CanShareRead(database+"-wal") || !CanShareRead(database+"-shm")) return result;
     using (var sqlite=new Native()) {
      if (sqlite.Version() < 3031000) return result;
      IntPtr db=IntPtr.Zero, query=IntPtr.Zero;
@@ -268,6 +269,10 @@ namespace AITaskMonitor.CodexTitles {
   private static byte[] Utf8(string value) { return Encoding.UTF8.GetBytes(value+"\0"); }
   private static bool SafeFile(string path) {
    try { var a=File.GetAttributes(path); return (a & (FileAttributes.Directory|FileAttributes.ReparsePoint)) == 0; }
+   catch { return false; }
+  }
+  private static bool CanShareRead(string path) {
+   try { using(FileStream stream=File.Open(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete)) return true; }
    catch { return false; }
   }
   private static bool SafeParents(string path) {
