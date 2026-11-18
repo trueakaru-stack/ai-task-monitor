@@ -56,14 +56,14 @@ The [project license](LICENSE) allows free use, including internal business use,
 
 ## Скриншоты / Screenshots
 
-### Windows
+### Windows 0.2.11
 
 | Развёрнуто / Expanded | Компактно / Compact | Настройки / Settings |
 | --- | --- | --- |
 | ![Windows expanded, dark](screenshots/expanded-dark.png) | ![Windows compact, dark](screenshots/compact-dark.png) | ![Windows settings, dark](screenshots/settings-dark.png) |
 | ![Windows expanded, light](screenshots/expanded-light.png) | ![Windows compact, light](screenshots/compact-light.png) | ![Windows settings, light](screenshots/settings-light.png) |
 
-### macOS
+### macOS 0.3.9
 
 | Развёрнуто / Expanded | Компактно / Compact | Настройки / Settings |
 | --- | --- | --- |
