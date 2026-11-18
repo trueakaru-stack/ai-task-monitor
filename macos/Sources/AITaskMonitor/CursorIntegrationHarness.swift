@@ -397,52 +397,51 @@ enum CursorIntegrationHarness {
             do {
                 try helper.run()
                 await pause(2)
-                if !app.isActive && !window.isKeyWindow && points().count == 2 {
-                    print("INACTIVE_WINDOW_STATE active=false key=false")
-                    let before = activations
-                    await move(outside)
-                    check(!app.isActive && !window.isKeyWindow && activations == before,
-                          "Hovering empty window area does not activate monitor")
-                    if let title = descendants(host).compactMap({ $0 as? TruncatingTextField }).first {
-                        await move(center(title))
-                        check(!app.isActive && !window.isKeyWindow && activations == before,
-                              "Hovering task title does not activate monitor")
-                    }
-                    await move(points()[0])
+                if let helperApp = NSRunningApplication(processIdentifier: helper.processIdentifier) {
+                    check(!app.isActive && !window.isKeyWindow,
+                          "Switching apps with a stationary pointer does not cause an activation loop")
+                    let helperInput = window.convertPoint(fromScreen: NSPoint(x: 730, y: 344))
+                    await move(helperInput)
+                    helperApp.activate(options: [.activateIgnoringOtherApps])
                     await pause(1)
-                    check(app.isActive && window.isKeyWindow, "Hovering first point activates monitor")
-                    check(cursor(.pointingHand), "First hovered point displays system hand")
-                    check(activations == before + 1, "First point triggers one activation")
-                    await pause(1)
-                    check(activations == before + 1, "Stationary hover does not cycle activation")
-                    await move(outside)
-                    check(cursor(.arrow), "Leaving activated point restores arrow")
-                    if let helperApp = NSRunningApplication(processIdentifier: helper.processIdentifier) {
-                        helperApp.activate(options: [.activateIgnoringOtherApps])
-                        await pause(1.5)
-                        if !app.isActive && !window.isKeyWindow && points().count == 2 {
-                            let beforeSecond = activations
-                            await move(outside)
-                            check(!app.isActive && activations == beforeSecond,
-                                  "Empty area still does not activate monitor")
-                            await move(points()[1])
-                            await pause(1)
-                            check(app.isActive && window.isKeyWindow, "Hovering second point activates monitor")
-                            check(cursor(.pointingHand), "Second hovered point displays system hand")
-                            check(activations == beforeSecond + 1, "Second point triggers one activation")
-                        } else {
-                            print("UNVERIFIED: could not reactivate helper for second point")
-                        }
+                    let beforeCorner = activations
+                    await move(NSPoint(x: 1, y: window.contentView!.bounds.height - 1))
+                    await pause(0.4)
+                    check(!app.isActive && activations == beforeCorner,
+                          "Transparent rounded corner does not activate monitor")
+                    func testWindowHover(_ description: String, _ target: NSPoint, hand: Bool = false) async {
+                        await move(helperInput)
                         helperApp.activate(options: [.activateIgnoringOtherApps])
                         await pause(1)
-                        let helperInput = window.convertPoint(fromScreen: NSPoint(x: 730, y: 344))
-                        await move(helperInput)
-                        check(cursor(.iBeam), "Moving into another app text field restores its I-beam")
-                    } else {
-                        print("UNVERIFIED: focus helper could not be inspected")
+                        check(!app.isActive && !window.isKeyWindow, "\(description): helper becomes active")
+                        let before = activations
+                        await move(target)
+                        await pause(0.8)
+                        check(app.isActive && window.isKeyWindow, "\(description): hover activates monitor")
+                        check(activations == before + 1, "\(description): one activation")
+                        await pause(0.6)
+                        check(activations == before + 1, "\(description): no activation cycle")
+                        check(cursor(hand ? .pointingHand : .arrow),
+                              "\(description): correct cursor")
                     }
+                    await testWindowHover("Header", NSPoint(x: 70, y: window.contentView!.bounds.height - 25))
+                    await testWindowHover("Background", NSPoint(x: 25, y: 25))
+                    if let title = descendants(host).compactMap({ $0 as? TruncatingTextField }).first {
+                        await testWindowHover("Task content", center(title))
+                    } else { print("UNVERIFIED: task content unavailable") }
+                    if points().count == 2 {
+                        await testWindowHover("First point", points()[0], hand: true)
+                        await testWindowHover("Second point", points()[1], hand: true)
+                    } else {
+                        check(false, "Task points remain accessible during activation checks")
+                    }
+                    await move(helperInput)
+                    helperApp.activate(options: [.activateIgnoringOtherApps])
+                    await pause(1)
+                    await move(helperInput)
+                    check(cursor(.iBeam), "Moving into another app text field restores its I-beam")
                 } else {
-                    print("UNVERIFIED: could not activate separate focus helper")
+                    print("UNVERIFIED: focus helper could not be inspected")
                 }
             } catch { print("UNVERIFIED: could not launch focus helper: \(error)") }
             if helper.isRunning { helper.terminate() }
