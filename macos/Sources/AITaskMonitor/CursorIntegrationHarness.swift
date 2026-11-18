@@ -144,9 +144,46 @@ enum CursorIntegrationHarness {
             func descendants(_ view: NSView) -> [NSView] {
                 [view] + view.subviews.flatMap(descendants)
             }
-            func points() -> [PointingHandCursor.CursorArea] {
-                descendants(host).compactMap { $0 as? PointingHandCursor.CursorArea }
-                    .sorted { $0.convert($0.bounds, to: nil).midX < $1.convert($1.bounds, to: nil).midX }
+            func points() -> [NSPoint] {
+                let application = AXUIElementCreateApplication(getpid())
+                var found: [String: NSPoint] = [:]
+                func axText(_ element: AXUIElement, _ attribute: CFString) -> String? {
+                    var value: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else { return nil }
+                    return value as? String
+                }
+                func visit(_ element: AXUIElement, depth: Int = 0) {
+                    guard depth < 30 else { return }
+                    let role = axText(element, kAXRoleAttribute as CFString)
+                    let label = axText(element, kAXTitleAttribute as CFString) ??
+                        axText(element, kAXDescriptionAttribute as CFString)
+                    if role == "AXButton", let label, label == "Task 1" || label == "Task 2" {
+                        var rawPosition: CFTypeRef?
+                        var rawSize: CFTypeRef?
+                        if AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &rawPosition) == .success,
+                           AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &rawSize) == .success,
+                           let rawPosition, let rawSize,
+                           CFGetTypeID(rawPosition) == AXValueGetTypeID(), CFGetTypeID(rawSize) == AXValueGetTypeID() {
+                            let posValue = unsafeBitCast(rawPosition, to: AXValue.self)
+                            let sizeValue = unsafeBitCast(rawSize, to: AXValue.self)
+                            var position = CGPoint.zero
+                            var size = CGSize.zero
+                            if AXValueGetValue(posValue, .cgPoint, &position),
+                               AXValueGetValue(sizeValue, .cgSize, &size), size.width > 0, size.height > 0 {
+                                let screen = NSPoint(x: position.x + size.width / 2,
+                                    y: NSScreen.screens[0].frame.maxY - position.y - size.height / 2)
+                                found[label] = window.convertPoint(fromScreen: screen)
+                            }
+                        }
+                    }
+                    var childrenValue: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue) == .success,
+                       let children = childrenValue as? [AXUIElement] {
+                        for child in children { visit(child, depth: depth + 1) }
+                    }
+                }
+                visit(application)
+                return ["Task 1", "Task 2"].compactMap { found[$0] }
             }
             func center(_ view: NSView) -> NSPoint {
                 view.convert(NSPoint(x: view.bounds.midX, y: view.bounds.midY), to: nil)
@@ -211,11 +248,11 @@ enum CursorIntegrationHarness {
             await pause(0.2)
             check(cursor(.pointingHand), "System cursor positive control")
             NSCursor.arrow.set()
-            await move(center(initial[0]))
+            await move(initial[0])
             check(cursor(.pointingHand), "Active task button shows system pointing hand")
-            await move(center(initial[1]))
+            await move(initial[1])
             check(cursor(.pointingHand), "Inactive task button shows system pointing hand")
-            await move(center(initial[0]))
+            await move(initial[0])
             check(cursor(.pointingHand), "Returning directly to the first point keeps the hand")
             for theme in ["dark", "light", "dark", "light"] {
                 UserDefaults.standard.set(theme, forKey: "appearanceMode")
@@ -228,7 +265,7 @@ enum CursorIntegrationHarness {
                 let current = points()
                 if current.count == 2 {
                     await move(NSPoint(x: 20, y: window.contentView!.bounds.height - 25))
-                    await move(center(current[1]))
+                    await move(current[1])
                     check(cursor(.pointingHand), "Cursor is hand before \(theme) capture")
                     capture(theme)
                     await pause(0.3)
@@ -236,7 +273,7 @@ enum CursorIntegrationHarness {
                 }
             }
             if points().count == 2 {
-                let target = center(points()[1])
+                let target = points()[1]
                 post(.leftMouseDown, target)
                 post(.leftMouseUp, target)
                 await pause()
@@ -250,7 +287,7 @@ enum CursorIntegrationHarness {
             await move(outside)
             check(cursor(.arrow), "Leaving the task points restores arrow")
             if points().count == 2 {
-                await move(center(points()[1]))
+                await move(points()[1])
                 let handBeforeMiniaturize = cursor(.pointingHand)
                 check(handBeforeMiniaturize, "Hand shown before minimizing")
                 window.miniaturize(nil)
@@ -266,7 +303,7 @@ enum CursorIntegrationHarness {
                 }
             }
             if points().count == 2 {
-                await move(center(points()[1]))
+                await move(points()[1])
                 let handBeforeHide = cursor(.pointingHand)
                 check(handBeforeHide, "Hand shown before Cmd+H")
                 let down = CGEvent(keyboardEventSource: nil, virtualKey: 4, keyDown: true)
@@ -287,7 +324,7 @@ enum CursorIntegrationHarness {
                 }
             }
             if points().count == 2 {
-                await move(center(points()[1]))
+                await move(points()[1])
                 let handBeforeRemoval = cursor(.pointingHand)
                 check(handBeforeRemoval, "Hand shown immediately before removing points")
                 store.isCompact = false
@@ -328,7 +365,7 @@ enum CursorIntegrationHarness {
             }
             if points().count == 2 {
                 await move(outside)
-                await move(center(points()[0]))
+                await move(points()[0])
                 check(cursor(.pointingHand), "Hand shown before switching to another application")
             }
             let axApp = AXUIElementCreateApplication(getpid())
@@ -386,7 +423,7 @@ enum CursorIntegrationHarness {
                     check(cursor(.pointingHand), "Hand persists when app becomes inactive under pointer")
                     await move(outside)
                     check(cursor(.arrow), "Leaving points in inactive window restores arrow")
-                    await move(center(points()[0]))
+                    await move(points()[0])
                     print("INACTIVE_CURSOR system=\(String(describing: NSCursor.currentSystem)) app=\(NSCursor.current)")
                     let inactiveHand = cursor(.pointingHand)
                     check(inactiveHand, "Inactive floating window shows pointing hand")
@@ -409,7 +446,7 @@ enum CursorIntegrationHarness {
             window.makeKeyAndOrderFront(nil)
             await pause(1)
             if points().count == 2 && app.isActive && window.isKeyWindow {
-                await move(center(points()[0]))
+                await move(points()[0])
                 let handBeforeClose = cursor(.pointingHand)
                 check(handBeforeClose, "Task point shows hand immediately before closing")
                 window.close()
