@@ -429,7 +429,7 @@ try{
  $script:codexCloudController=New-CodexCloudController
  $script:codexCloudModulesAvailable=$true
 }catch{}
-$script:currentVersion='0.2.10'
+$script:currentVersion='0.2.11'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateRequest=$null
