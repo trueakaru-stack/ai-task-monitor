@@ -4,7 +4,9 @@ import SwiftUI
 struct PointingHandCursor: NSViewRepresentable {
     func makeNSView(context: Context) -> CursorArea { CursorArea(frame: .zero) }
 
-    func updateNSView(_ view: CursorArea, context: Context) {}
+    func updateNSView(_ view: CursorArea, context: Context) {
+        DispatchQueue.main.async { [weak view] in view?.synchronizeCursor() }
+    }
 
     final class CursorArea: NSView {
         // Enter and exit events for neighboring points may arrive out of order.
@@ -40,11 +42,13 @@ struct PointingHandCursor: NSViewRepresentable {
                     NotificationCenter.default.removeObserver(self, name: NSWindow.willMiniaturizeNotification, object: window)
                     NotificationCenter.default.removeObserver(self, name: NSWindow.didMiniaturizeNotification, object: window)
                     NotificationCenter.default.removeObserver(self, name: NSWindow.didDeminiaturizeNotification, object: window)
+                    NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: window)
                     NotificationCenter.default.removeObserver(self, name: NSWindow.willCloseNotification, object: window)
                 }
                 NotificationCenter.default.removeObserver(self, name: NSApplication.willHideNotification, object: NSApp)
                 NotificationCenter.default.removeObserver(self, name: NSApplication.didHideNotification, object: NSApp)
                 NotificationCenter.default.removeObserver(self, name: NSApplication.didUnhideNotification, object: NSApp)
+                NotificationCenter.default.removeObserver(self, name: NSApplication.didResignActiveNotification, object: NSApp)
                 stopHovering()
             }
             super.viewWillMove(toWindow: newWindow)
@@ -62,12 +66,16 @@ struct PointingHandCursor: NSViewRepresentable {
                                name: NSWindow.willCloseNotification, object: window)
             center.addObserver(self, selector: #selector(windowDidRestore),
                                name: NSWindow.didDeminiaturizeNotification, object: window)
+            center.addObserver(self, selector: #selector(windowDidRestore),
+                               name: NSWindow.didResignKeyNotification, object: window)
             center.addObserver(self, selector: #selector(windowWillHide),
                                name: NSApplication.willHideNotification, object: NSApp)
             center.addObserver(self, selector: #selector(windowWillHide),
                                name: NSApplication.didHideNotification, object: NSApp)
             center.addObserver(self, selector: #selector(windowDidRestore),
                                name: NSApplication.didUnhideNotification, object: NSApp)
+            center.addObserver(self, selector: #selector(windowDidRestore),
+                               name: NSApplication.didResignActiveNotification, object: NSApp)
         }
 
         @objc private func windowWillHide(_ notification: Notification) {
@@ -78,7 +86,7 @@ struct PointingHandCursor: NSViewRepresentable {
             DispatchQueue.main.async { [weak self] in self?.synchronizeCursor() }
         }
 
-        private func synchronizeCursor() {
+        fileprivate func synchronizeCursor() {
             guard let window, window.isVisible, !window.isMiniaturized, !NSApp.isHidden else {
                 stopHovering()
                 return
@@ -96,9 +104,16 @@ struct PointingHandCursor: NSViewRepresentable {
         }
 
         private func startHovering() {
-            guard !hovering else { return }
+            if hovering {
+                NSCursor.pointingHand.set()
+                return
+            }
             hovering = true
-            if Self.hoveredAreas.isEmpty { NSCursor.pointingHand.push() }
+            if Self.hoveredAreas.isEmpty {
+                NSCursor.pointingHand.push()
+            } else {
+                NSCursor.pointingHand.set()
+            }
             Self.hoveredAreas.insert(ObjectIdentifier(self))
         }
 
