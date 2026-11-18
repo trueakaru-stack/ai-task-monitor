@@ -279,12 +279,22 @@ enum CursorIntegrationHarness {
             }
             if let target = candidates.first {
                 let focusResult = AXUIElementSetAttributeValue(target, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-                if focusResult == .success {
+                await pause()
+                var focusedValue: CFTypeRef?
+                let focusRead = AXUIElementCopyAttributeValue(target, kAXFocusedAttribute as CFString, &focusedValue)
+                let focused = (focusedValue as? Bool) ?? false
+                print("AX_FOCUS set=\(focusResult.rawValue) read=\(focusRead.rawValue) focused=\(focused)")
+                if focusResult == .success && focused {
                     CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: true)?.post(tap: .cghidEventTap)
                     CGEvent(keyboardEventSource: nil, virtualKey: 49, keyDown: false)?.post(tap: .cghidEventTap)
                     await pause()
                     check(store.compactIndex == 0, "System keyboard activates the focused task button")
-                } else { print("UNVERIFIED: AX focus result \(focusResult.rawValue)") }
+                } else { print("UNVERIFIED: AX focus did not move onto task button") }
+                store.compactIndex = 1
+                await pause()
+                let pressResult = AXUIElementPerformAction(target, kAXPressAction as CFString)
+                await pause()
+                check(pressResult == .success && store.compactIndex == 0, "Accessibility press selects the task")
             } else { print("UNVERIFIED: no accessible Task 1 node available through AX") }
             let helper = Process()
             helper.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
