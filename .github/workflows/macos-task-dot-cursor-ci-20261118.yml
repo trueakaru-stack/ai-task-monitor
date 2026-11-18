@@ -25,6 +25,7 @@ jobs:
         shell: bash
         env:
           AITM_CURSOR_SYNTHETIC_CI: "1"
+          AITM_CURSOR_DIAGNOSTICS: "1"
         run: |
           set -o pipefail
           export CFFIXED_USER_HOME="$AITM_CURSOR_SYNTHETIC_ROOT/synthetic-home"
