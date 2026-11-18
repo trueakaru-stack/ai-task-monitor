@@ -31,15 +31,12 @@ struct PointingHandCursor: ViewModifier {
     func body(content: Content) -> some View {
         content
             .onHover { inside in
-                print("HOVER_EVENT inside=\(inside) appActive=\(NSApp.isActive)")
                 if inside {
                     let number = NSWindow.windowNumber(at: NSEvent.mouseLocation, belowWindowWithWindowNumber: 0)
                     guard let window = NSApp.windows.first(where: { $0.windowNumber == number }),
                           window.isVisible, !window.isMiniaturized else { return }
                     ownerWindowNumber = number
                     hovering = true
-                    if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
-                    if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
                     TaskPointCursor.enter(id)
                     scheduleRefresh()
                 } else {
@@ -52,6 +49,8 @@ struct PointingHandCursor: ViewModifier {
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { releaseForWindow($0) }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.willHideNotification)) { _ in releaseCursor() }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didHideNotification)) { _ in releaseCursor() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in releaseCursor() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in scheduleRefresh() }
             .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in scheduleRefresh() }
             .onChange(of: colorScheme) { _ in scheduleRefresh() }
     }
