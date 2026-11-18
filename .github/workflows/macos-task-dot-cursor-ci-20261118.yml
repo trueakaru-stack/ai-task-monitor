@@ -84,3 +84,5 @@ jobs:
 # Verify the keyboard after hover-driven focus activation.
 
 # No test harness configuration of mouse-move events.
+
+# Use byte-identical source blobs from the clean source commit.
