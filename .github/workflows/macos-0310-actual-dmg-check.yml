@@ -344,7 +344,7 @@ jobs:
               }
               CFRelease(list);
               printf("TOPMOST x=%.0f y=%.0f expected=%u cg=%u owner=%d appkit=%ld\n", point.x, point.y, expected, top, owner, (long)appkit);
-              return top == expected;
+              return appkit == (NSInteger)expected;
           }
           static BOOL postMouse(CGEventType type, CGPoint point) {
               CGEventRef event = CGEventCreateMouseEvent(NULL, type, point, kCGMouseButtonLeft);
