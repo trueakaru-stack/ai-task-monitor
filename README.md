@@ -56,10 +56,23 @@ The [project license](LICENSE) allows free use, including internal business use,
 
 ## Скриншоты / Screenshots
 
+### Windows
+
 | Развёрнуто / Expanded | Компактно / Compact | Настройки / Settings |
 | --- | --- | --- |
-| ![Expanded dark](screenshots/expanded-dark.png) | ![Compact dark](screenshots/compact-dark.png) | ![Settings dark](screenshots/settings-dark.png) |
-| ![Expanded light](screenshots/expanded-light.png) | ![Compact light](screenshots/compact-light.png) | ![Settings light](screenshots/settings-light.png) |
+| ![Windows expanded, dark](screenshots/expanded-dark.png) | ![Windows compact, dark](screenshots/compact-dark.png) | ![Windows settings, dark](screenshots/settings-dark.png) |
+| ![Windows expanded, light](screenshots/expanded-light.png) | ![Windows compact, light](screenshots/compact-light.png) | ![Windows settings, light](screenshots/settings-light.png) |
+
+### macOS
+
+| Развёрнуто / Expanded | Компактно / Compact | Настройки / Settings |
+| --- | --- | --- |
+| ![macOS expanded, dark](screenshots/macos-expanded-dark.png) | ![macOS compact, dark](screenshots/macos-compact-dark.png) | ![macOS settings, dark](screenshots/macos-settings-dark.png) |
+| ![macOS expanded, light](screenshots/macos-expanded-light.png) | ![macOS compact, light](screenshots/macos-compact-light.png) | ![macOS settings, light](screenshots/macos-settings-light.png) |
+
+Задачи показаны для примера. Снимки macOS — превью интерфейса; системное оформление окна может отличаться.
+
+The tasks shown are examples. The macOS images are interface previews; the system window appearance may differ.
 
 AI Task Monitor is an independent project and is not affiliated with or endorsed by OpenAI or Anthropic.
 AI Task Monitor — независимый проект, не связанный с OpenAI или Anthropic и не поддерживаемый ими.
