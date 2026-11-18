@@ -60,3 +60,5 @@ jobs:
           path: ${{ env.AITM_CURSOR_SYNTHETIC_ROOT }}/evidence/
           if-no-files-found: warn
           retention-days: 7
+
+# Tracking-area verification, including minimize.
