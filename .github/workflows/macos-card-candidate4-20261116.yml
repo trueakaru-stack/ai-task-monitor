@@ -2,7 +2,7 @@ name: Synthetic macOS capacity regressions
 on:
   push:
     branches: ['macos', 'codex/macos-kimi-scope-fix-20261116', 'codex/macos-activity-ci-20261123']
-    paths: ['.github/workflows/macos-card-candidate4-20261116.yml', 'macos/**']
+    paths: ['.github/workflows/macos-build.yml', '.github/workflows/macos-card-candidate4-20261116.yml', 'macos/**']
 permissions:
   contents: read
 jobs:
