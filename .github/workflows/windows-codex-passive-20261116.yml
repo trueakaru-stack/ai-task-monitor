@@ -7,6 +7,7 @@ on:
       - 'windows/app/CodexProgress.ps1'
       - 'windows/app/VersionInfo.cs'
       - 'windows/tests/Test-Codex*.ps1'
+      - 'windows/tests/Test-CompactDotReuse.ps1'
       - 'windows/tests/Test-ReleaseUpdates.ps1'
       - 'windows/tests/Test-SourceAvailability.ps1'
       - 'windows/tests/Test-DotnetPathSafety.py'
@@ -104,21 +105,21 @@ jobs:
             }
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if($env:AITM_TEST_PART -eq 'checks'){
-              $tests=if($env:AITM_REMAINING_ONLY -eq '1'){@('Test-CodexPassive.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}else{@('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}
+              $tests=if($env:AITM_REMAINING_ONLY -eq '1'){@('Test-CodexPassive.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}else{@('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexTitleLookup.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CompactDotReuse.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}
               foreach($test in $tests){
                 Write-Output ('Running '+$test)
-                Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
+                Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
               }
             }else{
               $counts=if($env:AITM_TEST_PART -eq 'screenshots-active'){@(1)}else{@(0)}
-              foreach($count in $counts){foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){
-                $stem="codex-$count-$theme-$language-$mode"
-                $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks',[string]$count,'-PreviewSourceWarning','partial-data','-PreviewWarningProvider','codex','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
+              foreach($count in $counts){foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){foreach($warningCase in @('partial-data','partial-both')){
+                $stem="codex-$count-$theme-$language-$mode-$warningCase"
+                $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks',[string]$count,'-PreviewSourceWarning',$warningCase,'-PreviewWarningProvider','codex','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
                 if($count -eq 1){$arguments+=@('-PreviewUnconfirmed','-PreviewPlanUnconfirmed','-PreviewScenario','planned')}
                 if($mode -eq 'compact'){$arguments+='-CompactMode'}
                 Invoke-Isolated $powershell $arguments
                 if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Synthetic screenshot is missing.'}
-              }}}}
+              }}}}}
             }
           }finally{
             foreach($scope in @('User','Machine')){$before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine};$after=Read-PathState $scope;if($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind){throw "$scope PATH changed."}}

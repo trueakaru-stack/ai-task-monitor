@@ -13,9 +13,9 @@ $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'The monitor source failed to parse.'}
-$names=@('Prop','Tr','Localized-TaskTitle','Localized-TaskActivity','Source-WarningText','Lock-State','Find-PriorLifecycle','Thread-State','Codex-Uncertain','Session-File',
- 'Session-Workspace','Progress-Files','Manual-Tasks','Read-TailText','Codex-Plan','Codex-Activity','Read-ObservedCodexTail','Codex-ObservedActivity',
- 'Plan-Progress','Codex-IndexCandidates','Codex-UnindexedCandidates','Codex-Tasks','Unconfirmed-Tasks','Source-Snapshot')
+$names=@('Prop','Tr','Localized-TaskTitle','Localized-TaskActivity','Localized-CompactTaskActivity','Source-WarningText','Lock-State','Find-PriorLifecycle','Thread-State','Codex-Uncertain','Session-File',
+ 'Session-Workspace','Progress-Files','Manual-Tasks','Read-TailText','Codex-Plan','Codex-CurrentToolActivity','Codex-Activity','Read-ObservedCodexTail','Codex-ObservedActivity',
+ 'Plan-Progress','Codex-IndexCandidates','Codex-SubagentMetadata','Codex-ReadSubagentMetadata','Codex-UnindexedCandidates','Codex-Tasks','Unconfirmed-Tasks','Source-Snapshot')
 $definitions=foreach($name in $names){
  $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true)
  if($null -eq $node){throw "Missing monitor function: $name"}
@@ -61,6 +61,47 @@ function New-Session([string]$id,[string]$turn){
  Write-Event $path 'task_started' $turn
  [IO.File]::WriteAllText((Join-Path $lockDirectory ($id+'.lock')),'',[Text.UTF8Encoding]::new($false))
  return $path
+}
+
+$parentId='10000000-0000-0000-0000-000000000001';$childId='10000000-0000-0000-0000-000000000002'
+$spawn=[PSCustomObject]@{parent_thread_id=$parentId;agent_nickname='reader';agent_path='/root/reader'}
+$child=[PSCustomObject]@{id=$childId;parent_thread_id=$parentId;agent_nickname='reader';agent_path='/root/reader';source=[PSCustomObject]@{subagent=[PSCustomObject]@{thread_spawn=$spawn}}}
+$subagent=Codex-SubagentMetadata $child
+Require ($null -ne $subagent -and $subagent.ParentThreadId -ceq $parentId -and $subagent.AgentNickname -ceq 'reader') 'Matching subagent metadata was lost.'
+$spawn.parent_thread_id='20000000-0000-0000-0000-000000000001'
+Require ($null -eq (Codex-SubagentMetadata $child)) 'A mismatched parent was accepted.'
+$spawn.parent_thread_id=$parentId;$spawn.agent_path='/root/different'
+Require ($null -eq (Codex-SubagentMetadata $child)) 'A mismatched agent path was accepted.'
+$spawn.agent_path='/root/reader';$spawn.agent_nickname='different'
+Require ($null -eq (Codex-SubagentMetadata $child)) 'A mismatched agent name was accepted.'
+
+# Workspace metadata is normally on the first line. Exercise the fast path
+# and the original bounded fallback without accessing a real Codex profile.
+& {
+ $workspaceFiles=@{}
+ function Session-File([string]$id){return [string]$workspaceFiles[$id]}
+ function Set-WorkspaceFixture([string]$id,[string]$contents,[bool]$bom=$false){
+  $path=Join-Path $fixture ('workspace-'+$id+'.jsonl')
+  [IO.File]::WriteAllText($path,$contents,[Text.UTF8Encoding]::new($bom))
+  $workspaceFiles[$id]=$path
+ }
+ $expected='C:\Тестовая папка\Проект'
+ $short=@{type='session_meta';payload=@{cwd=$expected;padding=('x'*23000)}}|ConvertTo-Json -Compress
+ Set-WorkspaceFixture 'head' ($short+"`r`n"+('x'*1100000)) $true
+ Require ((Session-Workspace 'head') -ceq $expected) 'The first-line workspace or its Unicode/BOM was lost.'
+ Set-WorkspaceFixture 'later' ('{"type":"other"}'+"`n"+$short+"`n")
+ Require ((Session-Workspace 'later') -ceq $expected) 'The later-line workspace fallback was lost.'
+ $long=@{type='session_meta';payload=@{cwd=$expected;padding=('x'*80000)}}|ConvertTo-Json -Compress
+ Set-WorkspaceFixture 'long' ($long+"`n")
+ Require ((Session-Workspace 'long') -ceq $expected) 'A long first-line workspace was lost.'
+ Set-WorkspaceFixture 'unterminated' $short
+ Require ((Session-Workspace 'unterminated') -ceq $expected) 'An unterminated first line changed behavior.'
+ Set-WorkspaceFixture 'carriage-return' ($short+"`r"+'{"type":"other"}'+"`n")
+ Require ((Session-Workspace 'carriage-return') -ceq $expected) 'A carriage-return line ending changed behavior.'
+ Set-WorkspaceFixture 'malformed' '{"type":"session_meta",'
+ Require ((Session-Workspace 'malformed') -ceq '') 'Malformed workspace metadata must not create a path.'
+ Set-WorkspaceFixture 'too-late' ((('{"type":"other"}'+"`n")*12)+$short+"`n")
+ Require ((Session-Workspace 'too-late') -ceq '') 'Workspace scanning passed its twelve-line limit.'
 }
 
 # A new profile can have no sessions directory. Losing a directory after a
@@ -285,11 +326,22 @@ try{
  Require ((Localized-TaskTitle $userTitle) -ceq 'Задача Codex') 'A user-provided Codex title was translated.'
  $script:resolvedLanguage='ru'
  Require ((Localized-TaskTitle $card[0]) -ceq 'Задача Codex') 'The generated Russian Codex title was changed.'
+ $observed=[PSCustomObject]@{Provider='codex';Status='Статус не подтверждён';ActivityObserved=$true;Activity='Проверяю окно'}
+ Require ((Localized-CompactTaskActivity $observed) -ceq 'Статус не подтверждён: Проверяю окно' -and
+  (Localized-TaskActivity $observed) -ceq 'Статус не подтверждён. Из журнала: Проверяю окно') 'Compact activity lost uncertainty or changed the expanded text.'
  Require ((Source-WarningText @('Codex') @() @() $true) -ceq 'Список задач Codex может быть неполным' -and
   (Source-WarningText @('Codex') @() @('Codex') $false) -ceq 'Часть данных недоступна: Codex') 'Codex coverage and read failures were conflated in Russian.'
+ Require ((Source-WarningText @('Codex') @() @('Codex') $false $true) -ceq '' -and
+  (Source-WarningText @('Codex') @() @() $true $true) -ceq 'Список задач Codex может быть неполным' -and
+  (Source-WarningText @('Codex') @() @() $false $true) -ceq 'Нет данных от Codex') 'Compact mode hid a different Codex warning or retained its partial-data warning.'
+ Require ((Source-WarningText @('Codex','DeepSeek Harness') @() @('Codex','DeepSeek Harness') $false $true) -ceq 'Часть данных недоступна: DeepSeek Harness' -and
+  (Source-WarningText @('Codex','DeepSeek Harness') @() @('Codex','DeepSeek Harness') $false) -ceq 'Часть данных недоступна: Codex, DeepSeek Harness') 'Compact filtering changed another source or the expanded warning.'
  $script:resolvedLanguage='en'
+ Require ((Localized-CompactTaskActivity $observed) -ceq 'Status unconfirmed: Проверяю окно') 'Compact activity did not preserve the source language or uncertainty.'
  Require ((Source-WarningText @('Codex') @() @() $true) -ceq 'The Codex task list may be incomplete' -and
   (Source-WarningText @('Codex') @() @('Codex') $false) -ceq 'Some data is unavailable: Codex') 'Codex coverage and read failures were conflated in English.'
+ Require ((Source-WarningText @('Codex') @() @('Codex') $false $true) -ceq '' -and
+  (Source-WarningText @('Codex','DeepSeek Harness') @() @('Codex','DeepSeek Harness') $false $true) -ceq 'Some data is unavailable: DeepSeek Harness') 'Compact source filtering differs in English.'
  $script:resolvedLanguage='ru'
  $originalHome=$codexHome;$originalIndex=$sessionIndex
  try{

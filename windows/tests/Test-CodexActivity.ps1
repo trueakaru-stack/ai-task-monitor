@@ -3,7 +3,7 @@ $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Application source could not be parsed.' }
-$definitions = foreach ($name in @('Prop', 'Codex-Activity', 'Codex-ObservedActivity')) {
+$definitions = foreach ($name in @('Prop', 'Codex-CurrentToolActivity', 'Codex-Activity', 'Codex-ObservedActivity')) {
     $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if ($null -eq $function) { throw "Missing function: $name" }
     $function.Extent.Text
@@ -21,6 +21,47 @@ $response = '{"type":"response_item","payload":{"type":"reasoning","summary":[{"
 $completed = '{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","summary_text":["**Check build**"]}}}'
 $comment = '{"type":"response_item","payload":{"type":"message","phase":"commentary","content":[{"type":"output_text","text":"Preparing check"}]}}'
 $start = '{"type":"event_msg","payload":{"type":"task_started","turn_id":"new-turn"}}'
+function Tool-Start([string]$id,[string]$title,[string]$namespace='mcp__cua_repl') {
+    $arguments=@{title=$title;code='PRIVATE_TOOL_INPUT'}|ConvertTo-Json -Compress
+    return @{type='response_item';payload=@{type='function_call';namespace=$namespace;name='js';call_id=$id;arguments=$arguments}}|ConvertTo-Json -Compress -Depth 8
+}
+function Tool-End([string]$id) { return @{type='response_item';payload=@{type='function_call_output';call_id=$id;output='PRIVATE_TOOL_OUTPUT'}}|ConvertTo-Json -Compress }
+$firstTool=Tool-Start 'call-1' 'Checking the window'
+$secondTool=Tool-Start 'call-2' 'Inspecting the current operation'
+$firstEnd=Tool-End 'call-1';$secondEnd=Tool-End 'call-2'
+$script:activityTail=$start+"`n"+$response+"`n"+$firstTool+"`n"+$secondTool
+Assert-Activity 'Inspecting the current operation' 'The latest open titled operation was not shown'
+if ((Codex-ObservedActivity 'fixture' 'turn:new-turn') -cne 'Inspecting the current operation') { throw 'The open operation was not found in observed activity.' }
+$script:activityTail+="`n"+$secondEnd
+Assert-Activity 'Checking the window' 'An earlier still-open operation was not restored'
+$script:activityTail+="`n"+$firstEnd
+Assert-Activity 'Checking screenshot stability' 'A finished operation remained current'
+$script:activityTail=$start+"`n"+$response+"`n"+$firstTool+"`n"+$firstEnd+"`n"+$firstTool
+Assert-Activity 'Checking screenshot stability' 'A duplicate start revived a finished operation'
+$script:activityTail=$start+"`n"+$response+"`n"+$firstTool+"`n"+$secondTool+"`n"+$firstTool
+Assert-Activity 'Inspecting the current operation' 'A duplicate start changed the order of open operations'
+$oversizedEnd=@{type='response_item';payload=@{type='function_call_output';call_id='call-1';output=('x'*1100000)}}|ConvertTo-Json -Compress
+$script:activityTail=$start+"`n"+$response+"`n"+$firstTool+"`n"+$oversizedEnd
+Assert-Activity 'Checking screenshot stability' 'An oversized output left an operation falsely current'
+$unicodeEnd=@{type='response_item';payload=@{type='function_call_output';call_id='call-1';output=([string][char]0x0416*600000)}}|ConvertTo-Json -Compress
+$script:activityTail=$start+"`n"+$response+"`n"+$firstTool+"`n"+$unicodeEnd
+Assert-Activity 'Checking screenshot stability' 'A UTF-8 oversized output left an operation falsely current'
+$script:activityTail=$start+"`n"+$response+"`n"+$firstTool+"`n"+'{"incomplete":'
+Assert-Activity 'Checking screenshot stability' 'Malformed later data left an operation falsely current'
+$script:activityTail=$start+"`n"+$response+"`n"+$firstTool+"`n"+'{"type":"response_item"}'
+Assert-Activity 'Checking screenshot stability' 'A later record without payload left an operation falsely current'
+$foreign=@{type='response_item';payload=@{type='function_call';namespace='mcp__cua_repl';name='js';call_id='foreign';turn_id='other-turn';arguments=(@{title='Other turn'}|ConvertTo-Json -Compress)}}|ConvertTo-Json -Compress -Depth 8
+$script:activityTail=$start+"`n"+$response+"`n"+$foreign
+Assert-Activity 'Checking screenshot stability' 'An operation from a different turn was displayed'
+$script:activityTail=$start+"`n"+$response+"`n"+(Tool-Start 'unknown' 'PRIVATE_TITLE' 'unknown')
+Assert-Activity 'Checking screenshot stability' 'An unknown tool was treated as a current operation'
+$script:activityTail=$start+"`n"+$response+"`n"+(Tool-Start 'unsupported/id' 'Unsupported ID')
+Assert-Activity 'Checking screenshot stability' 'An unverified call ID format was treated as current'
+if (Codex-CurrentToolActivity @($firstTool) 'new-turn') { throw 'An operation without a visible turn boundary was treated as current.' }
+if (Codex-CurrentToolActivity @($start,$firstTool) 'other-turn') { throw 'An operation was attributed to a different turn.' }
+$endTurn='{"type":"event_msg","payload":{"type":"task_complete","turn_id":"new-turn"}}'
+if (Codex-CurrentToolActivity @($start,$firstTool,$endTurn) 'new-turn') { throw 'An operation survived the end of its turn.' }
+if ((Codex-CurrentToolActivity @($start,$firstTool) 'new-turn') -match 'PRIVATE_TOOL') { throw 'Private tool arguments were displayed.' }
 
 $script:activityTail = $old + "`n" + $response
 Assert-Activity 'Checking screenshot stability' 'A newer response summary was ignored'
@@ -71,6 +112,20 @@ $watch = [Diagnostics.Stopwatch]::StartNew()
 Assert-Activity 'Checking screenshot stability' 'A long event tail lost its latest summary'
 $watch.Stop()
 if ($watch.ElapsedMilliseconds -gt 2000) { throw "A 5,000-event activity tail blocked the two-second refresh: $($watch.ElapsedMilliseconds) ms." }
-Write-Output "Codex activity: current and legacy summaries, turn reset, commentary fallback and privacy verified; 5,000 events in $($watch.ElapsedMilliseconds) ms."
+$ordinaryEvents=('{"type":"event_msg","payload":{"type":"token_count","input_tokens":12}}'+"`n")*5000
+$script:activityTail=$start+"`n"+$response+"`n"+$ordinaryEvents+$firstTool
+$watch.Restart()
+Assert-Activity 'Checking the window' 'A long valid turn lost its open operation'
+$watch.Stop()
+if($watch.ElapsedMilliseconds -gt 2000){throw "A 5,000-event open operation blocked the two-second refresh: $($watch.ElapsedMilliseconds) ms."}
+$script:activityTail=$start+"`n"+$response+"`n"+$firstTool+"`n"+$ordinaryEvents
+Assert-Activity 'Checking screenshot stability' 'An operation outside the bounded window was reported as current'
+$script:activityTail=$start+"`n"+$response+"`n"+$firstTool+"`n"+$firstEnd+"`n"+$ordinaryEvents+$firstTool
+Assert-Activity 'Checking screenshot stability' 'An old completed operation was revived across the bounded window'
+$escapedStart=$firstTool.Replace('call-1','call-\u0031')
+$escapedEnd=$firstEnd.Replace('call-1','call-\u0031')
+$script:activityTail=$start+"`n"+$response+"`n"+$escapedStart+"`n"+$escapedEnd+"`n"+$ordinaryEvents+$firstTool
+Assert-Activity 'Checking screenshot stability' 'An escaped old call ID was revived across the bounded window'
+Write-Output "Codex activity: current and legacy summaries, turn reset, commentary fallback and privacy verified; 5,000 events with an open operation in $($watch.ElapsedMilliseconds) ms."
 '@
 & ([scriptblock]::Create(($definitions -join "`n") + "`n" + $checks))

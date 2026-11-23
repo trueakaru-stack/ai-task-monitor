@@ -608,6 +608,7 @@ $script:translations=@{
  'Без названия'='Untitled'
  'Показать задачу: '='Show task: '
  'Активных задач сейчас нет'='No active tasks'
+ 'Нет отображаемых задач'='No tasks to display'
  'Журнал недоступен'='Journal unavailable'
  'Журнал очищен, но недоступен'='Journal was cleared but is unavailable'
  'Не удалось обновить журнал'='Could not update the journal'
@@ -2343,6 +2344,21 @@ function Session-Workspace([string]$id) {
   $sharing=[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
   $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$sharing)
   try{
+   # Codex normally writes session_meta as the first complete line. Avoid
+   # copying the first MiB of every candidate on the UI thread in that case.
+   $headCount=[int][Math]::Min([long]65536,[long]$stream.Length)
+   $head=[byte[]]::new($headCount);$headRead=0
+   while($headRead -lt $headCount){$read=$stream.Read($head,$headRead,$headCount-$headRead);if($read -le 0){throw 'The session changed while reading.'};$headRead+=$read}
+   $lfEnd=[Array]::IndexOf($head,[byte]10);$crEnd=[Array]::IndexOf($head,[byte]13)
+   $lineEnd=if($lfEnd -lt 0){$crEnd}elseif($crEnd -lt 0){$lfEnd}else{[Math]::Min($lfEnd,$crEnd)}
+   if($lineEnd -ge 0){
+    $line=[Text.Encoding]::UTF8.GetString($head,0,$lineEnd).TrimStart([char]0xFEFF)
+    if($line -match '"type":"session_meta"'){
+     $record=$line|ConvertFrom-Json -ErrorAction Stop
+     return [string](Prop $record.payload 'cwd' '')
+    }
+   }
+   [void]$stream.Seek(0,[IO.SeekOrigin]::Begin)
    $count=[int][Math]::Min([long]1048576,[long]$stream.Length);$bytes=[byte[]]::new($count);$offset=0
    while($offset -lt $count){$read=$stream.Read($bytes,$offset,$count-$offset);if($read -le 0){throw 'The session changed while reading.'};$offset+=$read}
   }finally{$stream.Dispose()}
@@ -2510,6 +2526,93 @@ function Codex-Plan([string]$id) {
  return @($latest)
 }
 
+function Codex-CurrentToolActivity([string[]]$lines,[string]$turnId) {
+ if(-not $turnId){return ''}
+ $startIndex=-1
+ for($index=$lines.Count-1;$index -ge 0;$index--){
+  $line=$lines[$index]
+  if($line -notmatch '"(task_started|turn_started)"' -or [Text.Encoding]::UTF8.GetByteCount($line) -gt 1048576){continue}
+  try{$boundary=ConvertFrom-Json -InputObject $line -ErrorAction Stop}catch{continue}
+  $boundaryPayload=Prop $boundary 'payload'
+  if([string](Prop $boundary 'type' '') -ceq 'event_msg' -and [string](Prop $boundaryPayload 'type' '') -in @('task_started','turn_started')){
+   if([string](Prop $boundaryPayload 'turn_id' '') -ceq $turnId){$startIndex=$index}
+   break
+  }
+ }
+ if($startIndex -lt 0){return ''}
+ # Keep this UI-thread check bounded even for a very long current turn.
+ # A call that started outside this window falls back to the observed summary.
+ $windowStart=[Math]::Max($startIndex,$lines.Count-512)
+ $currentLines=@($lines[$windowStart..($lines.Count-1)])
+ if(-not ($currentLines -match '"mcp__cua_repl"')){return ''}
+ $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+ $active=New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+ $order=0;$insideTurn=($windowStart -gt $startIndex);$reliable=$true
+ foreach($line in $currentLines){
+  if([string]::IsNullOrWhiteSpace($line)){continue}
+  if([Text.Encoding]::UTF8.GetByteCount($line) -gt 1048576){if($insideTurn){$active.Clear();$reliable=$false};continue}
+  $relevant=$line -match '"(function_call|function_call_output|task_started|turn_started|task_complete|turn_complete|turn_aborted)"'
+  if(-not $relevant -and (-not $insideTurn -or -not $reliable)){continue}
+  try{$record=ConvertFrom-Json -InputObject $line -ErrorAction Stop}catch{
+   if($insideTurn){$active.Clear();$reliable=$false}
+   continue
+  }
+  $payload=Prop $record 'payload'
+  if($insideTurn -and ($null -eq $payload -or $payload -isnot [PSCustomObject])){$active.Clear();$reliable=$false;continue}
+  $recordType=[string](Prop $record 'type' '');$kind=[string](Prop $payload 'type' '')
+  $eventTurn=[string](Prop $payload 'turn_id' '')
+  if($recordType -eq 'event_msg' -and $kind -in @('task_started','turn_started')){
+   $insideTurn=$eventTurn -ceq $turnId;$active.Clear();$seen.Clear();$order=0;$reliable=$true
+   continue
+  }
+  if(-not $insideTurn -or ($eventTurn -and $eventTurn -cne $turnId)){continue}
+  if($recordType -eq 'event_msg' -and $kind -in @('task_complete','turn_complete','turn_aborted')){
+   $insideTurn=$false;$active.Clear();$seen.Clear()
+   continue
+  }
+  if(-not $reliable -or $recordType -ne 'response_item'){continue}
+  $callId=[string](Prop $payload 'call_id' '')
+  if($kind -eq 'function_call_output'){
+   if(-not $callId -or [Text.Encoding]::UTF8.GetByteCount($callId) -gt 256){$active.Clear();$reliable=$false;continue}
+   [void]$active.Remove($callId);[void]$seen.Add($callId)
+   if($seen.Count -gt 4096){$active.Clear();$reliable=$false}
+   continue
+  }
+  if($kind -ne 'function_call' -or $callId -cnotmatch '^[A-Za-z0-9_-]{1,256}$' -or $seen.Contains($callId) -or
+     [string](Prop $payload 'namespace' '') -cne 'mcp__cua_repl' -or [string](Prop $payload 'name' '') -cne 'js'){continue}
+  [void]$seen.Add($callId)
+  if($seen.Count -gt 4096){$active.Clear();$reliable=$false;continue}
+  $arguments=Prop $payload 'arguments'
+  if($arguments -isnot [string] -or [Text.Encoding]::UTF8.GetByteCount($arguments) -gt 1048576){continue}
+  try{$inputObject=$arguments|ConvertFrom-Json -ErrorAction Stop}catch{continue}
+  $title=Prop $inputObject 'title'
+  if($title -is [string] -and $title.Length -le 4096 -and -not [string]::IsNullOrWhiteSpace($title)){
+   $order++;$active[$callId]=[PSCustomObject]@{Title=[regex]::Replace($title.Trim(),'\s+',' ');Order=$order}
+  }
+ }
+ if($insideTurn -and $reliable -and $active.Count -gt 16){return ''}
+ if($insideTurn -and $reliable -and $windowStart -gt $startIndex -and $active.Count){
+  foreach($id in @($active.Keys)){
+   for($index=$startIndex+1;$index -lt $windowStart;$index++){
+    $earlier=$lines[$index]
+    $matched=$earlier.Contains($id)
+    if(-not $matched -and $earlier.Contains('\u')){
+     $decoded=[regex]::Replace($earlier,'\\u([0-9a-fA-F]{4})',{
+      param($match) return [string][char][Convert]::ToInt32($match.Groups[1].Value,16)
+     })
+     $matched=$decoded.Contains($id)
+    }
+    if($matched){[void]$active.Remove($id);break}
+   }
+  }
+ }
+ if($insideTurn -and $reliable -and $active.Count){
+  $current=@($active.Values|Sort-Object Order -Descending|Select-Object -First 1)
+  if($current.Count){return [string]$current[0].Title}
+ }
+ return ''
+}
+
 function Codex-Activity([string]$id) {
  $path = Session-File $id
  if (-not $path) { return "" }
@@ -2525,6 +2628,8 @@ function Codex-Activity([string]$id) {
     $startIndex=$index;$turnId=[string](Prop $payload "turn_id" "");break
    }
   }
+  $currentTool=Codex-CurrentToolActivity $lines $turnId
+  if($currentTool){return $currentTool}
   for($index=$lines.Count-1;$index -gt $startIndex;$index--){
    $line=$lines[$index]
    if($line.Length -gt 1048576 -or $line -notmatch '"(agent_reasoning|reasoning|Reasoning|commentary)"'){continue}
@@ -2611,6 +2716,8 @@ function Codex-ObservedActivity([string]$id,[string]$startKey) {
   $tail=Read-ObservedCodexTail $path $id
   $lines=$tail -split "`r?`n"
   $turn=if($startKey.StartsWith('turn:',[StringComparison]::Ordinal)){$startKey.Substring(5)}else{''}
+  $currentTool=Codex-CurrentToolActivity $lines $turn
+  if($currentTool){return $currentTool}
   for($index=$lines.Count-1;$index -ge 0;$index--){
    $line=$lines[$index]
    if($line.Length -gt 1048576 -or $line -notmatch '"(item_completed|agent_message|commentary)"'){continue}
@@ -2706,6 +2813,43 @@ function Codex-IndexCandidates {
  return @($sessionMap.Values)
 }
 
+function Codex-SubagentMetadata($payload) {
+ $spawn=Prop (Prop (Prop $payload 'source') 'subagent') 'thread_spawn'
+ if($null -eq $spawn){return $null}
+ $parent=[string](Prop $payload 'parent_thread_id' '')
+ $name=[string](Prop $payload 'agent_nickname' '')
+ $path=[string](Prop $payload 'agent_path' '')
+ $uuid='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+ if($parent -notmatch $uuid -or [string](Prop $payload 'id' '') -notmatch $uuid -or
+    $parent -cne [string](Prop $spawn 'parent_thread_id' '') -or
+    [string]::IsNullOrWhiteSpace($name) -or $name.Length -gt 256 -or $name -match '[\x00-\x1f\x7f]' -or
+    $name -cne [string](Prop $spawn 'agent_nickname' '') -or
+    $path -cnotmatch '^/root/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$' -or [Text.Encoding]::UTF8.GetByteCount($path) -gt 1024 -or
+    $path -cne [string](Prop $spawn 'agent_path' '') -or
+    [string]::Equals($parent,[string](Prop $payload 'id' ''),[StringComparison]::OrdinalIgnoreCase)){return $null}
+ return [PSCustomObject]@{ParentThreadId=$parent;AgentNickname=$name.Trim()}
+}
+
+function Codex-ReadSubagentMetadata([string]$id) {
+ try{
+  $path=Session-File $id
+  if(-not $path){return $null}
+  $attributes=[IO.File]::GetAttributes($path)
+  if(($attributes -band ([IO.FileAttributes]::Directory -bor [IO.FileAttributes]::ReparsePoint)) -ne 0){return $null}
+  $stream=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+  try{
+   $count=[int][Math]::Min([long]65536,[long]$stream.Length);$bytes=[byte[]]::new($count);$offset=0
+   while($offset -lt $count){$read=$stream.Read($bytes,$offset,$count-$offset);if($read -le 0){return $null};$offset+=$read}
+  }finally{$stream.Dispose()}
+  $end=[Array]::IndexOf($bytes,[byte]10);if($end -lt 0){return $null}
+  $line=[Text.UTF8Encoding]::new($false,$true).GetString($bytes,0,$end).TrimStart([char]0xFEFF).TrimEnd([char]13)
+  $record=$line|ConvertFrom-Json -ErrorAction Stop;$payload=Prop $record 'payload'
+  if([string](Prop $record 'type' '') -cne 'session_meta' -or
+     -not [string]::Equals([string](Prop $payload 'id' ''),$id,[StringComparison]::OrdinalIgnoreCase)){return $null}
+  return Codex-SubagentMetadata $payload
+ }catch{return $null}
+}
+
 function Codex-UnindexedCandidates([bool]$HasIndexedHistory=$false) {
  # A rollout is evidence of a session, never evidence that its writer is live.
  # Keep a resumable directory cursor so a full page cannot hide later files.
@@ -2796,7 +2940,8 @@ function Codex-UnindexedCandidates([bool]$HasIndexedHistory=$false) {
     if([string](Prop $record 'type' '') -ne 'session_meta' -or
        -not [string]::Equals([string](Prop (Prop $record 'payload') 'id' ''),$id,[StringComparison]::OrdinalIgnoreCase)){continue}
     if($found.ContainsKey($id)){$found.Remove($id);[void]$ambiguous.Add($id);continue}
-    $found[$id]=[PSCustomObject]@{id=$id;thread_name='Задача Codex';titleGenerated=$true;unindexed=$true;path=$path;updated_at=[IO.File]::GetLastWriteTimeUtc($path).ToString('o')}
+    $subagent=Codex-SubagentMetadata (Prop $record 'payload')
+    $found[$id]=[PSCustomObject]@{id=$id;thread_name='Задача Codex';titleGenerated=$true;unindexed=$true;path=$path;updated_at=[IO.File]::GetLastWriteTimeUtc($path).ToString('o');parentThreadId=[string](Prop $subagent 'ParentThreadId' '');agentNickname=[string](Prop $subagent 'AgentNickname' '')}
    }catch{
     $exception=$_.Exception
     while($null -ne $exception.InnerException){$exception=$exception.InnerException}
@@ -2860,11 +3005,25 @@ function Codex-Tasks {
   $script:unindexedPaths[$id]=[string]$candidate.path
  }
  $codexTitles=$null
+ $parentTitles=@{};$subagentRefs=@{}
+ foreach($session in $sessions){
+  $parentId=[string](Prop $session 'id' '');$parentTitle=[string](Prop $session 'thread_name' '')
+  if($parentId -and -not [string]::IsNullOrWhiteSpace($parentTitle) -and $parentTitle -cne 'Guardian review' -and -not [bool](Prop $session 'titleGenerated' $false)){$parentTitles[$parentId]=$parentTitle}
+  $referenceParent=[string](Prop $session 'parentThreadId' '');$referenceName=[string](Prop $session 'agentNickname' '')
+  if($referenceParent -and $referenceName){$subagentRefs[$parentId]=[PSCustomObject]@{ParentThreadId=$referenceParent;AgentNickname=$referenceName}}
+  elseif($parentId -and -not [bool](Prop $session 'unindexed' $false) -and
+         ([bool](Prop $session 'titleGenerated' $false) -or [string]::IsNullOrWhiteSpace($parentTitle))){
+   $reference=Codex-ReadSubagentMetadata $parentId
+   if($null -ne $reference){$subagentRefs[$parentId]=$reference}
+  }
+ }
  $titleReader=Get-Variable -Scope Script -Name codexTitleReader -ErrorAction SilentlyContinue
  if($null -ne $titleReader -and $null -ne $titleReader.Value -and $sessions.Count -gt 0){
   try{
-   $titleIds=[string[]]@($sessions | Sort-Object -Property @{Expression={[string](Prop $_ 'updated_at' '')};Descending=$true} |
-    Select-Object -First 256 | ForEach-Object {[string](Prop $_ 'id' '')})
+   $parentIds=@($subagentRefs.Values | ForEach-Object {[string]$_.ParentThreadId} | Where-Object {$_})
+   $sessionIds=@($sessions | Sort-Object -Property @{Expression={[string](Prop $_ 'updated_at' '')};Descending=$true} |
+    ForEach-Object {[string](Prop $_ 'id' '')})
+   $titleIds=[string[]]@(($parentIds+$sessionIds) | Select-Object -Unique -First 256)
    $codexTitles=$titleReader.Value.Snapshot($codexHome,$titleIds)
   }catch{}
  }
@@ -2900,6 +3059,11 @@ function Codex-Tasks {
   if($title -eq "Guardian review"){continue}
   $titleGenerated=[bool](Prop $session 'titleGenerated' $false)
   if(($titleGenerated -or [string]::IsNullOrWhiteSpace($title)) -and $null -ne $codexTitles -and $codexTitles.ContainsKey($id)){$title=[string]$codexTitles[$id];$titleGenerated=$false}
+  if(($titleGenerated -or [string]::IsNullOrWhiteSpace($title)) -and $subagentRefs.ContainsKey($id)){
+   $parentId=[string]$subagentRefs[$id].ParentThreadId;$agentName=[string]$subagentRefs[$id].AgentNickname
+   $parentTitle=if($parentTitles.ContainsKey($parentId)){$parentTitles[$parentId]}elseif($null -ne $codexTitles -and $codexTitles.ContainsKey($parentId)){$codexTitles[$parentId]}else{''}
+   if(-not [string]::IsNullOrWhiteSpace($parentTitle) -and $parentTitle -cne 'Guardian review' -and $agentName){$agentWord=if($script:resolvedLanguage -eq 'en'){'agent'}else{'агент'};$title="$parentTitle ($agentWord $agentName)";$titleGenerated=$false}
+  }
   if([string]::IsNullOrWhiteSpace($title)){$title='Задача Codex';$titleGenerated=$true}
   $unindexed=[bool](Prop $session 'unindexed' $false)
   if($title -eq "Guardian review"){continue}
@@ -3412,6 +3576,15 @@ function Localized-TaskActivity($task) {
  return $activity
 }
 
+function Localized-CompactTaskActivity($task) {
+ $activity=[string](Prop $task 'Activity' '')
+ if($activity -and [string](Prop $task 'Provider' '') -eq 'codex' -and
+    [string](Prop $task 'Status' '') -eq 'Статус не подтверждён' -and [bool](Prop $task 'ActivityObserved' $false)){
+  return (Tr 'Статус не подтверждён')+': '+$activity
+ }
+ return Localized-TaskActivity $task
+}
+
 function Get-LoopWarning($task) {
  if(-not $task.Active){return $null}
  $provider=[string]$task.Provider
@@ -3600,7 +3773,7 @@ function Add-CompactTask($task) {
  $header.Children.Add($title)|Out-Null; $header.Children.Add($percent)|Out-Null
  [Windows.Controls.Grid]::SetRow($header,0); $container.Children.Add($header)|Out-Null
 
- $activityText=Localized-TaskActivity $task; if(-not $activityText){$activityText=Tr "Выполняется"}
+ $activityText=Localized-CompactTaskActivity $task; if(-not $activityText){$activityText=Tr "Выполняется"}
  $activity=Text $activityText 11.5 $script:palette.Activity; $activity.TextWrapping="NoWrap"; $activity.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $activity $activityText "line"; [Windows.Automation.AutomationProperties]::SetName($activity,$activityText)
  $activityRow=New-Object Windows.Controls.Grid; $activityRow.Margin=New-Object Windows.Thickness(0,2,0,0)
  $activityMarkColumn=New-Object Windows.Controls.ColumnDefinition; $activityMarkColumn.Width=New-Object Windows.GridLength(22); $activityTextColumn=New-Object Windows.Controls.ColumnDefinition; $activityTextColumn.Width=New-Object Windows.GridLength(1,"Star"); $activityRow.ColumnDefinitions.Add($activityMarkColumn); $activityRow.ColumnDefinitions.Add($activityTextColumn)
@@ -3628,6 +3801,29 @@ function Add-CompactDot($task,[bool]$selected) {
  $button.Content=$dot
  $button.Add_Click({param($sender,$eventArgs) $script:compactTaskId=[string]$sender.Tag; Render-CompactTasks $script:lastAllTasks})
  $compactDotsPanel.Children.Add($button)|Out-Null
+}
+
+function Sync-CompactDots($tasks) {
+ $items=@($tasks)
+ if($items.Count -le 1){$compactDotsPanel.Children.Clear();$compactDotsPanel.Visibility='Collapsed';return}
+ $compactDotsPanel.Visibility='Visible'
+ $wanted=New-Object 'Collections.Generic.Dictionary[string,object]' ([StringComparer]::Ordinal)
+ foreach($task in $items){$id=[string]$task.Id;if($id -and -not $wanted.ContainsKey($id)){$wanted[$id]=$task}}
+ $retained=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+ for($index=$compactDotsPanel.Children.Count-1;$index -ge 0;$index--){
+  $button=$compactDotsPanel.Children[$index];$id=[string]$button.Tag
+  if($button -isnot [Windows.Controls.Button] -or $button.Content -isnot [Windows.Controls.Border] -or
+     -not $wanted.ContainsKey($id) -or -not $retained.Add($id)){$compactDotsPanel.Children.RemoveAt($index)}
+ }
+ foreach($task in $items){
+  $id=[string]$task.Id
+  if($wanted.ContainsKey($id) -and $retained.Add($id)){Add-CompactDot $task ($id -ceq $script:compactTaskId)}
+ }
+ foreach($button in $compactDotsPanel.Children){
+  $task=$wanted[[string]$button.Tag]
+  [Windows.Automation.AutomationProperties]::SetName($button,(Tr 'Показать задачу: ')+(Localized-TaskTitle $task))
+  $button.Content.Background=Brush $(if([string]$task.Id -ceq $script:compactTaskId){$script:accentHex}else{$script:palette.Scroll})
+ }
 }
 
 function Prioritize-Tasks($tasks,$previous,[string]$selectedId) {
@@ -3671,11 +3867,12 @@ function Compact-VisibleTasks($tasks) {
  return @($tasks|Where-Object {$_.Active -or [string](Prop $_ "Status" "") -in @("Статус не подтверждён","Ожидает подтверждения")})
 }
 
-function Source-WarningText([string[]]$Unavailable,[string[]]$PartialConnection,[string[]]$PartialData,[bool]$CodexIncomplete=$false) {
+function Source-WarningText([string[]]$Unavailable,[string[]]$PartialConnection,[string[]]$PartialData,[bool]$CodexIncomplete=$false,[bool]$Compact=$false) {
  $coverage=$CodexIncomplete -and $Unavailable -ccontains 'Codex' -and $PartialData -cnotcontains 'Codex'
  $data=@($Unavailable | Where-Object {$PartialData -ccontains $_})
  $connection=@($Unavailable | Where-Object {$PartialConnection -ccontains $_ -and $data -cnotcontains $_})
  $full=@($Unavailable | Where-Object {$data -cnotcontains $_ -and $connection -cnotcontains $_ -and (-not $coverage -or $_ -cne 'Codex')})
+ if($Compact){$data=@($data | Where-Object {$_ -cne 'Codex'})}
  $parts=New-Object 'Collections.Generic.List[string]'
  if($full.Count){$parts.Add((Tr 'Нет данных от ')+($full -join ', '))}
  if($connection.Count){$parts.Add((Tr 'Подключён частично')+': '+($connection -join ', '))}
@@ -3685,17 +3882,18 @@ function Source-WarningText([string[]]$Unavailable,[string[]]$PartialConnection,
 }
 
 function Render-CompactTasks($tasks) {
- $compactTasksPanel.Children.Clear(); $compactDotsPanel.Children.Clear()
+ $compactTasksPanel.Children.Clear()
  $compactTasks=@(Compact-VisibleTasks $tasks)
  $visibleTasks=@($compactTasks|Select-Object -First 3)
- $warningText=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete
+ $warningText=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete $true
  if($visibleTasks.Count -eq 0){
   $script:compactTaskId=""
-  $compactEmpty=Text $(if($warningText){$warningText}else{Tr "Активных задач сейчас нет"}) 12.5 $script:palette.Activity
+  $hiddenCodexPartial=$script:sourceErrors -ccontains 'Codex' -and $script:sourcePartialData -ccontains 'Codex'
+  $compactEmpty=Text $(if($warningText){$warningText}elseif($hiddenCodexPartial){Tr 'Нет отображаемых задач'}else{Tr 'Активных задач сейчас нет'}) 12.5 $script:palette.Activity
   $compactEmpty.Margin=New-Object Windows.Thickness(0,5,0,5)
   if($warningText){$compactEmpty.Tag='source-warning'}
   $compactTasksPanel.Children.Add($compactEmpty)|Out-Null
-  $compactDotsPanel.Visibility="Collapsed"
+  Sync-CompactDots @()
  } else {
   $selected=@($visibleTasks|Where-Object {[string]$_.Id -eq $script:compactTaskId}|Select-Object -First 1)
   if($selected.Count -eq 0){$selected=@($visibleTasks[0]);$script:compactTaskId=[string]$visibleTasks[0].Id}
@@ -3706,10 +3904,7 @@ function Render-CompactTasks($tasks) {
    $warning.Tag='source-warning'
    $compactTasksPanel.Children.Add($warning)|Out-Null
   }
-  if($visibleTasks.Count -gt 1){
-   $compactDotsPanel.Visibility="Visible"
-   foreach($task in $visibleTasks){Add-CompactDot $task ([string]$task.Id -eq $script:compactTaskId)}
-  }else{$compactDotsPanel.Visibility="Collapsed"}
+  Sync-CompactDots $visibleTasks
  }
  $hiddenCount=[Math]::Max(0,$compactTasks.Count-3)
  $compactMoreText.Visibility=$(if($hiddenCount -gt 0){"Visible"}else{"Collapsed"})
@@ -3748,7 +3943,8 @@ function Set-CompactMode([bool]$compact) {
   $selectedTask=@($script:lastAllTasks|Where-Object {[string]$_.Id -eq $script:compactTaskId}|Select-Object -First 1)
   $hasLoopWarning=$selectedTask.Count -gt 0 -and $null -ne (Get-LoopWarning $selectedTask[0])
   $hasUnconfirmedPlan=$selectedTask.Count -gt 0 -and [bool](Plan-StatusNote $selectedTask[0])
-  $window.Height=Compact-Height $compactCount ($script:sourceErrors.Count -gt 0) $hasLoopWarning $hasUnconfirmedPlan
+  $compactWarning=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete $true
+  $window.Height=Compact-Height $compactCount ([bool]$compactWarning) $hasLoopWarning $hasUnconfirmedPlan
   $windowFrame.Margin=New-Object Windows.Thickness(16)
   $script:isCompact=$true; $window.Topmost=$true; Move-CompactWindow
  }else{
@@ -4628,6 +4824,7 @@ if ($SnapshotFile) {
   $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData
   $previewWarningName=if($PreviewWarningProvider -eq 'codex'){'Codex'}else{'DeepSeek Harness'}
   if($actual -cne ((Tr 'Часть данных недоступна')+': '+$previewWarningName)){throw 'A source warning was duplicated or translated incorrectly.'}
+  if(-not $script:isCompact -and @($tasksPanel.Children|Where-Object {$_ -is [Windows.Controls.TextBlock] -and $_.Text -ceq $actual}).Count -ne 1){throw 'The expanded source warning is missing.'}
  }
  if($PreviewSourceWarning -eq 'partial-data' -and $PreviewWarningProvider -eq 'codex'){
   $actual=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete
@@ -4640,12 +4837,20 @@ if ($SnapshotFile) {
  if($PreviewSourceWarning -in @('partial-data','partial-both') -and $script:isCompact){
   Render-CompactTasks $script:lastAllTasks;$window.UpdateLayout()
   $warning=@($compactTasksPanel.Children | Where-Object {$_ -is [Windows.Controls.TextBlock] -and $_.Tag -ceq 'source-warning'})
-  if($warning.Count -ne 1){throw 'The compact source warning is missing.'}
-  $warning[0].Measure([Windows.Size]::new($compactTasksPanel.ActualWidth,[double]::PositiveInfinity))
-  $needed=$warning[0].DesiredSize.Height-$warning[0].Margin.Top-$warning[0].Margin.Bottom
-  $bounds=$warning[0].TransformToAncestor($compactView).TransformBounds([Windows.Rect]::new(0,0,$warning[0].ActualWidth,$warning[0].ActualHeight))
-  if($warning[0].ActualHeight+0.5 -lt $needed -or $bounds.Bottom -gt $compactView.ActualHeight+0.5){throw 'The compact source warning is clipped.'}
-  if($PreviewProviderLabelsUiTest -and [Math]::Abs($warning[0].TranslatePoint([Windows.Point]::new(0,0),$compactTasksPanel).X) -gt 0.5){throw 'The compact source warning is not aligned with the content edge.'}
+  $expectedWarning=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete $true
+  if(-not $expectedWarning -and $warning.Count -ne 0){throw 'A hidden compact source warning is still visible.'}
+  if(-not $expectedWarning -and $PreviewActiveTasks -eq 0 -and $PreviewWarningProvider -eq 'codex'){
+   $empty=@($compactTasksPanel.Children|Where-Object {$_ -is [Windows.Controls.TextBlock] -and $_.Text -ceq (Tr 'Нет отображаемых задач')})
+   if($empty.Count -ne 1){throw 'The partial Codex empty state must not claim that no tasks are active.'}
+  }
+  if($expectedWarning){
+   if($warning.Count -ne 1 -or $warning[0].Text -cne $expectedWarning){throw 'The compact source warning is missing or incorrect.'}
+   $warning[0].Measure([Windows.Size]::new($compactTasksPanel.ActualWidth,[double]::PositiveInfinity))
+   $needed=$warning[0].DesiredSize.Height-$warning[0].Margin.Top-$warning[0].Margin.Bottom
+   $bounds=$warning[0].TransformToAncestor($compactView).TransformBounds([Windows.Rect]::new(0,0,$warning[0].ActualWidth,$warning[0].ActualHeight))
+   if($warning[0].ActualHeight+0.5 -lt $needed -or $bounds.Bottom -gt $compactView.ActualHeight+0.5){throw 'The compact source warning is clipped.'}
+   if($PreviewProviderLabelsUiTest -and [Math]::Abs($warning[0].TranslatePoint([Windows.Point]::new(0,0),$compactTasksPanel).X) -gt 0.5){throw 'The compact source warning is not aligned with the content edge.'}
+  }
  }
  if($PreviewTabsUiTest){
   if($providerTabsPanel.Children.Count -ne 7 -or $providerTabsScroll.ScrollableWidth -le 0){throw 'The six-provider tab row must overflow in one scrollable row.'}

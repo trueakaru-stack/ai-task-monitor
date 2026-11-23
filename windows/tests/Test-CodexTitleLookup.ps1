@@ -81,17 +81,22 @@ $sessionIndex=Join-Path $root 'synthetic-index.jsonl'
 [IO.File]::WriteAllText($sessionIndex,'')
 $script:unindexedPaths=@{}
 $script:lastCodexTasks=@()
-$script:stubTitles=@{guardian='Database title';normal='Conflicting database title';fallback='Database fallback'}
+$script:resolvedLanguage='en'
+$script:stubTitles=@{guardian='Database title';normal='Conflicting database title';fallback='Database fallback';namedchild='Child own title'}
 $script:codexTitleReader=[PSCustomObject]@{}
 $script:codexTitleReader|Add-Member -MemberType ScriptMethod -Name Snapshot -Value {param($path,$ids) return $script:stubTitles}
 function Codex-IndexCandidates {
  return @(
   [PSCustomObject]@{id='guardian';thread_name='Guardian review';titleGenerated=$true;updated_at='2026-01-01'},
   [PSCustomObject]@{id='normal';thread_name='Indexed title';titleGenerated=$false;updated_at='2026-01-01'},
-  [PSCustomObject]@{id='fallback';thread_name='Generated title';titleGenerated=$true;updated_at='2026-01-01'}
+  [PSCustomObject]@{id='fallback';thread_name='Generated title';titleGenerated=$true;updated_at='2026-01-01'},
+  [PSCustomObject]@{id='child';thread_name='Generated title';titleGenerated=$true;parentThreadId='normal';agentNickname='reader';updated_at='2026-01-01'},
+  [PSCustomObject]@{id='namedchild';thread_name='Generated title';titleGenerated=$true;parentThreadId='normal';agentNickname='other';updated_at='2026-01-01'},
+  [PSCustomObject]@{id='missingparent';thread_name='Generated title';titleGenerated=$true;parentThreadId='unknown';agentNickname='reader';updated_at='2026-01-01'}
  )
 }
 function Codex-UnindexedCandidates([bool]$HasIndexedHistory) { return @() }
+function Codex-ReadSubagentMetadata([string]$id) { return $null }
 function Manual-Tasks($sessions) { return @{} }
 function Thread-State($id,$unindexed) { return [PSCustomObject]@{State='unknown';UpdatedUtc=[DateTime]::UtcNow;StartKey='turn';StartedUtc=[DateTime]::UtcNow} }
 function Codex-Uncertain($id,$state) { return $true }
@@ -102,6 +107,12 @@ if(@($tasks|Where-Object Id -eq 'guardian').Count -ne 0){throw 'An internal guar
 $normal=@($tasks|Where-Object Id -eq 'normal')
 $fallback=@($tasks|Where-Object Id -eq 'fallback')
 if($normal.Count -ne 1 -or $normal[0].Title -cne 'Indexed title' -or $fallback.Count -ne 1 -or $fallback[0].Title -cne 'Database fallback'){throw 'Conflicting title sources were resolved incorrectly.'}
+$child=@($tasks|Where-Object Id -eq 'child')
+$namedChild=@($tasks|Where-Object Id -eq 'namedchild')
+$missingParent=@($tasks|Where-Object Id -eq 'missingparent')
+if($child.Count -ne 1 -or $child[0].Title -cne 'Indexed title (agent reader)' -or $child[0].TitleGenerated -or
+   $namedChild.Count -ne 1 -or $namedChild[0].Title -cne 'Child own title' -or
+   $missingParent.Count -ne 1 -or $missingParent[0].Title -cne 'Generated title'){throw 'Subagent title fallback or own-title precedence is incorrect.'}
 '@
  & ([scriptblock]::Create(($definitions -join "`n")+"`n"+$checks)) $fixture
  Require ((SharedHash $dbPath) -ceq $mainBefore -and (SharedHash ($dbPath+'-wal')) -ceq $walBefore) 'Read-only lookup changed the database or WAL.'
