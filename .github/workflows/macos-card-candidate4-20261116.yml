@@ -11,14 +11,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
-            developer: /Applications/Xcode_16.1.app/Contents/Developer
           - runner: macos-26
             developer: /Applications/Xcode.app/Contents/Developer
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     env:
       DEVELOPER_DIR: ${{ matrix.developer }}
+      AITM_DIAGNOSTIC_SOURCE_SHA: 57a938fc875bbcc5d227058ca30c687c45b7c381
     steps:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -53,9 +52,9 @@ jobs:
           mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" "$task_root/npm-cache" "$task_root/swift-cache" "$task_root/swift-config" "$task_root/swift-security" "$task_root/clang-cache"
           : > "$task_root/npmrc"
           git -c credential.helper= -c core.hooksPath="$task_root/hooks" -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
-          git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$AITM_DIAGNOSTIC_SOURCE_SHA"
           git -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
-          test "$(git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C "$task_root/source" rev-parse HEAD)" = "$AITM_DIAGNOSTIC_SOURCE_SHA"
           cat > "$task_root/profile.sb" <<'PROFILE'
           (version 1)
           (allow default)
@@ -274,14 +273,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Build and inspect isolated macOS candidate
-        if: ${{ success() && matrix.runner == 'macos-15' }}
+        if: ${{ success() && matrix.runner == 'macos-26' }}
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_ACTIONS" = true
           test "$RUNNER_ENVIRONMENT" = github-hosted
           test "$RUNNER_OS" = macOS
-          test "$(git -C "$AITM_TEST_TASK_ROOT/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git -C "$AITM_TEST_TASK_ROOT/source" rev-parse HEAD)" = "$AITM_DIAGNOSTIC_SOURCE_SHA"
           task_root="$AITM_TEST_TASK_ROOT"
           task_source="$task_root/source/macos"
           task_bin="$task_root/release-tools"
@@ -457,12 +456,12 @@ jobs:
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$task_app" "$task_root/release-artifacts/AI Task Monitor.app.zip"
           /bin/cp "$task_dmg" "$task_source/dist/SHA256SUMS-macOS.txt" "$task_root/release-artifacts/"
           (cd "$task_root/release-artifacts" && /usr/bin/shasum -a 256 'AI Task Monitor.app.zip' >> SHA256SUMS-macOS.txt && /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt)
-          printf '%s\n' "$GITHUB_SHA" > "$task_root/release-artifacts/source-commit.txt"
+          printf '%s\n' "$AITM_DIAGNOSTIC_SOURCE_SHA" > "$task_root/release-artifacts/source-commit.txt"
       - name: Save isolated macOS candidate
-        if: ${{ success() && matrix.runner == 'macos-15' }}
+        if: ${{ success() && matrix.runner == 'macos-26' }}
         uses: actions/upload-artifact@v4
         with:
-          name: macos-0.3.12-candidate-${{ github.sha }}
+          name: macos-0.3.12-diagnostic-source-57a938f-run-${{ github.sha }}
           path: ${{ runner.temp }}/aitm-card-tests.*/release-artifacts/*
           if-no-files-found: error
           retention-days: 7
