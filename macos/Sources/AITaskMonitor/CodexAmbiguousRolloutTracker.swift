@@ -12,11 +12,6 @@ struct CodexRolloutHint: Equatable {
     var modifiedNanoseconds: Int64? = nil
 }
 
-struct CodexUncertainEnding {
-    let token: UInt64
-    let provenance: CodexRolloutHint?
-}
-
 /// Observes bounded appends to competing rollouts without selecting a history.
 /// It does not open the Codex database, acquire writer locks, or write files.
 /// An observed event is only a hint: callers must not infer a current turn,
@@ -79,7 +74,6 @@ final class CodexAmbiguousRolloutTracker {
         let newUsefulEvent: Bool
         let usefulTurn: String
         let newStartTurn: String?
-        let terminalTurns: Set<String>
     }
 
     private enum ReadFailure: Error {
@@ -95,12 +89,10 @@ final class CodexAmbiguousRolloutTracker {
     private var uniqueObservations: [String: UniqueObservation] = [:]
     private var uniqueBlocked: Set<String> = []
     private var uniqueLastVisitedID: String?
-    private var observedTerminations: [String: Set<String>] = [:]
 
     /// Observation rotates in bounded batches. New files, replacements, lost
     /// reads, or competing appends block only the affected ID.
-    func observe(_ candidates: [String: [URL]], sessionsDirectory: URL,
-                 previouslyObserved: Set<String> = []) -> [String: CodexRolloutHint] {
+    func observe(_ candidates: [String: [URL]], sessionsDirectory: URL) -> [String: CodexRolloutHint] {
         lock.lock()
         defer { lock.unlock() }
         if candidates.count > Self.maximumRememberedThreads {
@@ -145,11 +137,9 @@ final class CodexAmbiguousRolloutTracker {
             let paths = files.keys.sorted()
             if groups[id] == nil {
                 var initial: [String: Cursor] = [:]
-                var baselineTerminations: Set<String> = []
                 do {
                     for path in paths {
                         let sample = try sampleFile(files[path]!, id: id, sessionsDirectory: sessionsDirectory, previous: nil)
-                        baselineTerminations.formUnion(sample.terminalTurns)
                         var cursor = sample.cursor
                         if historyGap {
                             cursor.unscopedTerminal = true
@@ -167,11 +157,6 @@ final class CodexAmbiguousRolloutTracker {
                     }
                     groups[id] = Group(cursors: initial)
                     groupOrder.append(id)
-                    // If a visible card becomes ambiguous, its ending may
-                    // have arrived just before this first baseline. Old
-                    // records cannot prove completion, but a matching ending
-                    // is enough to require hiding the uncertain card.
-                    if previouslyObserved.contains(id) { recordTerminations(id: id, turns: baselineTerminations) }
                 } catch {
                     // Retry baseline on the next scan. No path has been selected.
                 }
@@ -180,19 +165,6 @@ final class CodexAmbiguousRolloutTracker {
 
             guard var group = groups[id] else { continue }
             if group.blocked {
-                // Even while no history can be selected, newly observed
-                // terminal records may require hiding an existing card.
-                var retained = group.cursors
-                var terminalTurns: Set<String> = []
-                for path in paths {
-                    guard let old = group.cursors[path],
-                          let sample = try? sampleFile(files[path]!, id: id,
-                                                       sessionsDirectory: sessionsDirectory, previous: old) else { continue }
-                    retained[path] = sample.cursor
-                    terminalTurns.formUnion(sample.terminalTurns)
-                }
-                group.cursors = retained
-                recordTerminations(id: id, turns: terminalTurns)
                 // Two identical scans establish only a new observation
                 // baseline. They do not confirm the selected history or the
                 // fate of a card already shown to the user.
@@ -246,14 +218,12 @@ final class CodexAmbiguousRolloutTracker {
             var next = group.cursors
             var pending = false
             var usefulPaths: [String: String] = [:]
-            var terminalTurns: Set<String> = []
             do {
                 for path in paths {
                     let sample = try sampleFile(files[path]!, id: id, sessionsDirectory: sessionsDirectory, previous: group.cursors[path])
                     next[path] = sample.cursor
                     pending = pending || sample.pending
                     if sample.newUsefulEvent { usefulPaths[path] = sample.usefulTurn }
-                    terminalTurns.formUnion(sample.terminalTurns)
                 }
                 guard try paths.allSatisfy({ try currentIdentity(files[$0]!, sessionsDirectory: sessionsDirectory) == next[$0]?.identity }) else {
                     throw ReadFailure.changedDuringRead
@@ -276,7 +246,6 @@ final class CodexAmbiguousRolloutTracker {
                 // cannot establish which of the histories is current.
                 group.blocked = true
             }
-            recordTerminations(id: id, turns: terminalTurns)
             groups[id] = group
         }
         return hints
@@ -344,7 +313,6 @@ final class CodexAmbiguousRolloutTracker {
                 }
                 observation.cursor = sample.cursor
                 uniqueObservations[id] = observation
-                recordTerminations(id: id, turns: sample.terminalTurns)
                 if !sample.pending, let turn = sample.newStartTurn, turn != previous.turnID,
                    sample.cursor.currentTurn == turn, !sample.cursor.closedTurns.contains(turn) {
                     let identity = sample.cursor.identity
@@ -380,7 +348,6 @@ final class CodexAmbiguousRolloutTracker {
         var newUsefulEvent = false
         var usefulTurn = ""
         var newStartTurn: String? = nil
-        var terminalTurns: Set<String> = []
         if var previous {
             guard before.device == previous.identity.device, before.inode == previous.identity.inode,
                   before.size >= previous.offset,
@@ -401,11 +368,11 @@ final class CodexAmbiguousRolloutTracker {
                 try handle.seek(toOffset: previous.offset)
                 let bytes = try handle.read(upToCount: count) ?? Data()
                 guard bytes.count == count else { throw ReadFailure.changedDuringRead }
-                pending = bytes.last != 0x0a
-                if let lastNewline = bytes.lastIndex(of: 0x0a) {
-                    // Process complete records even if the next one is still
-                    // being written. Leave the cursor at that partial record.
-                    var complete = bytes[...lastNewline]
+                if bytes.last != 0x0a {
+                    // Do not parse a partial final record or advance beyond it.
+                    pending = true
+                } else {
+                    var complete = bytes[...]
                     if previous.discardLeadingPartial {
                         guard let end = complete.firstIndex(of: 0x0a) else { throw ReadFailure.unavailable }
                         complete = complete[complete.index(after: end)...]
@@ -415,10 +382,8 @@ final class CodexAmbiguousRolloutTracker {
                     newUsefulEvent = events.useful
                     usefulTurn = events.usefulTurn
                     newStartTurn = events.newStart
-                    terminalTurns = events.terminalTurns
-                    let consumed = bytes.distance(from: bytes.startIndex, to: bytes.index(after: lastNewline))
-                    previous.offset += UInt64(consumed)
-                    previous.anchor = try anchor(handle, at: previous.offset)
+                    previous.offset = before.size
+                    previous.anchor = try anchor(handle, at: before.size)
                 }
             }
             previous.identity = before
@@ -454,7 +419,7 @@ final class CodexAmbiguousRolloutTracker {
                     complete = complete[complete.endIndex...]
                 }
             }
-            terminalTurns = try consumeEvents(in: complete, id: id, cursor: &cursor).terminalTurns
+            _ = try consumeEvents(in: complete, id: id, cursor: &cursor)
             // An incomplete record started before the baseline could itself be
             // a terminal marker. Wait for a new start before using later items.
             if partial { cursor.unscopedTerminal = true; cursor.currentTurn = "" }
@@ -465,15 +430,14 @@ final class CodexAmbiguousRolloutTracker {
             throw ReadFailure.changedDuringRead
         }
         return Sample(cursor: cursor, pending: pending, newUsefulEvent: newUsefulEvent,
-                      usefulTurn: usefulTurn, newStartTurn: newStartTurn, terminalTurns: terminalTurns)
+                      usefulTurn: usefulTurn, newStartTurn: newStartTurn)
     }
 
     private func consumeEvents(in data: Data.SubSequence, id: String, cursor: inout Cursor)
-        throws -> (useful: Bool, usefulTurn: String, newStart: String?, terminalTurns: Set<String>) {
+        throws -> (useful: Bool, usefulTurn: String, newStart: String?) {
         var useful = false
         var usefulTurn = ""
         var newStart: String?
-        var terminalTurns: Set<String> = []
         for line in data.split(separator: 0x0a, omittingEmptySubsequences: true) {
             guard let record = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
                   let payload = record.object("payload"), !record.string("type").isEmpty else {
@@ -486,7 +450,6 @@ final class CodexAmbiguousRolloutTracker {
                 !turn.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
             switch payload.string("type") {
             case "task_complete", "turn_complete", "turn_aborted":
-                terminalTurns.insert(validTurn ? turn : "")
                 let closed = validTurn ? turn : cursor.currentTurn
                 if !closed.isEmpty {
                     guard cursor.closedTurns.contains(closed) || cursor.closedTurns.count < 128 else {
@@ -544,21 +507,7 @@ final class CodexAmbiguousRolloutTracker {
                 break
             }
         }
-        return (useful, usefulTurn, newStart, terminalTurns)
-    }
-
-    private func recordTerminations(id: String, turns: Set<String>) {
-        guard !turns.isEmpty else { return }
-        observedTerminations[id, default: []].formUnion(turns)
-        if observedTerminations[id, default: []].count > 128 { observedTerminations[id] = [""] }
-    }
-
-    func takeTerminations() -> [String: Set<String>] {
-        lock.lock()
-        defer { lock.unlock() }
-        let values = observedTerminations
-        observedTerminations.removeAll()
-        return values
+        return (useful, usefulTurn, newStart)
     }
 
     private func matchesOpenTurn(_ turn: String, valid: Bool, cursor: Cursor) -> Bool {
@@ -623,7 +572,6 @@ final class CodexAmbiguousRolloutWorker {
         let freshStarts: [String: CodexRolloutHint]
         let protectedIDs: Set<String>
         let recovered: [String: CodexRolloutHint]
-        let uncertainEndings: [String: CodexUncertainEnding]
 
         func protects(_ id: String) -> Bool {
             protectedIDs.contains(id)
@@ -633,11 +581,6 @@ final class CodexAmbiguousRolloutWorker {
     private struct PendingHint {
         let hint: CodexRolloutHint
         let paths: Set<String>
-    }
-
-    private struct PendingEnding {
-        var turns: Set<String>
-        var token: UInt64
     }
 
     private let lock = NSLock()
@@ -654,8 +597,6 @@ final class CodexAmbiguousRolloutWorker {
     private var recoveredHistories: [String: CodexRolloutHint] = [:]
     private var uniquePaths: [String: String] = [:]
     private var protectedIDs: Set<String> = []
-    private var pendingEndings: [String: PendingEnding] = [:]
-    private var nextEndingToken: UInt64 = 0
 
     // Accessed only by queue.
     private var tracker = CodexAmbiguousRolloutTracker()
@@ -666,7 +607,6 @@ final class CodexAmbiguousRolloutWorker {
     }
 
     func poll(candidates: [String: [URL]], ambiguousIDs: Set<String>, uniqueFiles: [String: URL] = [:], previouslyObserved: Set<String>,
-              hiddenIDs: Set<String> = [], restoredHistories: [String: CodexRolloutHint] = [:],
               sessionsDirectory: URL, observedSince: Date?) -> Result {
         lock.lock()
         defer { lock.unlock() }
@@ -680,56 +620,31 @@ final class CodexAmbiguousRolloutWorker {
             knownHistories.removeAll()
             recoveredHistories.removeAll()
             protectedIDs.removeAll()
-            pendingEndings.removeAll()
         }
         guard observedSince != nil else {
-            return Result(hints: [:], freshStarts: [:], protectedIDs: [], recovered: [:], uncertainEndings: [:])
+            return Result(hints: [:], freshStarts: [:], protectedIDs: [], recovered: [:])
         }
         // Protection follows currently displayed cards instead of accumulating
         // forever or disabling unrelated cards on a global overflow.
-        let relevantIDs = previouslyObserved.union(hiddenIDs)
-        protectedIDs.formIntersection(relevantIDs)
-        protectedIDs.formUnion(hiddenIDs)
-        knownHistories = knownHistories.filter { relevantIDs.contains($0.key) }
-        recoveredHistories = recoveredHistories.filter { relevantIDs.contains($0.key) }
-        for (id, history) in restoredHistories where hiddenIDs.contains(id) && knownHistories[id] == nil {
-            knownHistories[id] = history
-        }
+        protectedIDs.formIntersection(previouslyObserved)
+        knownHistories = knownHistories.filter { previouslyObserved.contains($0.key) }
+        recoveredHistories = recoveredHistories.filter { previouslyObserved.contains($0.key) }
         signatures = candidates.mapValues { Set($0.map { $0.standardizedFileURL.path }) }
         uniquePaths = uniqueFiles.mapValues { $0.standardizedFileURL.path }
         for id in ambiguousIDs where previouslyObserved.contains(id) { protect(id) }
-        var uncertainEndings: [String: CodexUncertainEnding] = [:]
-        var unrelated: [String] = []
-        for (id, ending) in pendingEndings {
-            let candidate = knownHistories[id] ??
-                ((signatures[id] == pending[id]?.paths) ? pending[id]?.hint : nil)
-            let currentTurn = candidate?.turnID ?? ""
-            if ending.turns.contains("") || currentTurn.isEmpty || ending.turns.contains(currentTurn) {
-                uncertainEndings[id] = CodexUncertainEnding(token: ending.token, provenance: candidate)
-                protect(id)
-            } else {
-                unrelated.append(id)
-            }
-        }
-        for id in unrelated { pendingEndings.removeValue(forKey: id) }
         var hints: [String: CodexRolloutHint] = [:]
-        for (id, hint) in pending where signatures[id] == hint.paths && !relevantIDs.contains(id) && uncertainEndings[id] == nil {
+        for (id, hint) in pending where signatures[id] == hint.paths && !previouslyObserved.contains(id) {
             hints[id] = hint.hint
             knownHistories[id] = hint.hint
             protect(id)
         }
         pending.removeAll()
         var freshStarts: [String: CodexRolloutHint] = [:]
-        var waitingFresh: [String: CodexRolloutHint] = [:]
         for (id, hint) in pendingFresh where protectedIDs.contains(id) && uniquePaths[id] == hint.path {
-            if uncertainEndings[id] != nil {
-                waitingFresh[id] = hint
-            } else {
-                freshStarts[id] = hint
-                offeredFresh[id] = hint
-            }
+            freshStarts[id] = hint
+            offeredFresh[id] = hint
         }
-        pendingFresh = waitingFresh
+        pendingFresh.removeAll()
         offeredFresh = offeredFresh.filter { protectedIDs.contains($0.key) && uniquePaths[$0.key] == $0.value.path }
         let uniqueCandidates = knownHistories.filter {
             protectedIDs.contains($0.key) && uniquePaths[$0.key] == $0.value.path
@@ -747,9 +662,7 @@ final class CodexAmbiguousRolloutWorker {
                 let fresh = tracker.observeUnique(uniqueCandidates, protectedIDs: requestedProtected,
                                                  sessionsDirectory: sessionsDirectory)
                 let observed = observeForTests?(candidates, sessionsDirectory) ??
-                    tracker.observe(candidates, sessionsDirectory: sessionsDirectory,
-                                    previouslyObserved: previouslyObserved)
-                let terminations = tracker.takeTerminations()
+                    tracker.observe(candidates, sessionsDirectory: sessionsDirectory)
                 lock.lock()
                 if generation == requestGeneration {
                     for (id, hint) in observed {
@@ -761,41 +674,12 @@ final class CodexAmbiguousRolloutWorker {
                         protectedIDs.contains(id) && uniquePaths[id] == hint.path {
                         pendingFresh[id] = hint
                     }
-                    for (id, turns) in terminations {
-                        nextEndingToken &+= 1
-                        var merged = pendingEndings[id]?.turns ?? []
-                        merged.formUnion(turns)
-                        if merged.count > 128 { merged = [""] }
-                        pendingEndings[id] = PendingEnding(turns: merged, token: nextEndingToken)
-                    }
                 }
                 running = false
                 lock.unlock()
             }
         }
-        return Result(hints: hints, freshStarts: freshStarts, protectedIDs: protectedIDs,
-                      recovered: recoveredHistories, uncertainEndings: uncertainEndings)
-    }
-
-    func acknowledgeEndings(_ tokens: [String: UInt64]) {
-        lock.lock()
-        defer { lock.unlock() }
-        for (id, token) in tokens where pendingEndings[id]?.token == token {
-            pendingEndings.removeValue(forKey: id)
-        }
-    }
-
-    // A recovered history may itself contain an ending which cannot be
-    // attributed to the recovered turn. Preserve it until the caller has
-    // durably hidden the card; it is not a confirmed terminal result.
-    func markUncertainEnding(_ id: String, provenance: CodexRolloutHint) -> CodexUncertainEnding {
-        lock.lock()
-        defer { lock.unlock() }
-        nextEndingToken &+= 1
-        pendingEndings[id] = PendingEnding(turns: [""], token: nextEndingToken)
-        knownHistories[id] = provenance
-        protect(id)
-        return CodexUncertainEnding(token: nextEndingToken, provenance: provenance)
+        return Result(hints: hints, freshStarts: freshStarts, protectedIDs: protectedIDs, recovered: recoveredHistories)
     }
 
     func noteKnown(_ id: String, hint: CodexRolloutHint) {
@@ -813,16 +697,6 @@ final class CodexAmbiguousRolloutWorker {
         pendingFresh.removeValue(forKey: id)
         knownHistories[id] = hint
         recoveredHistories[id] = hint
-        return true
-    }
-
-    // The caller must first persist removal of the matching hidden record.
-    // A newly observed ending invalidates a pending recovery.
-    func commitRecovered(_ id: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard recoveredHistories[id] != nil, pendingEndings[id] == nil else { return false }
-        protectedIDs.remove(id)
         return true
     }
 

@@ -6,8 +6,6 @@ struct CodexTaskSnapshot {
     var terminalIDs: Set<String> = []
     var interruptedIDs: Set<String> = []
     var toolEvents: [String: [CodexToolEvent]] = [:]
-    var uncertainEndings: [String: CodexUncertainEnding] = [:]
-    var confirmedFreshIDs: Set<String> = []
     var isPartial = false
 }
 
@@ -40,16 +38,7 @@ struct CodexTaskReader {
         ambiguousRollouts.waitUntilIdleForTests()
     }
 
-    func acknowledgeUncertainEndings(_ tokens: [String: UInt64]) {
-        ambiguousRollouts.acknowledgeEndings(tokens)
-    }
-
-    func commitRecovered(_ id: String) -> Bool {
-        ambiguousRollouts.commitRecovered(id)
-    }
-
-    func readSnapshot(now: Date = Date(), observedSince: Date? = nil, previouslyObserved: Set<String> = [],
-                      hiddenIDs: Set<String> = [], hiddenRecords: [String: CodexHiddenRecord] = [:]) throws -> CodexTaskSnapshot {
+    func readSnapshot(now: Date = Date(), observedSince: Date? = nil, previouslyObserved: Set<String> = []) throws -> CodexTaskSnapshot {
         let index = codexHome.appendingPathComponent("session_index.jsonl")
         if !fileManager.fileExists(atPath: codexHome.path) { return CodexTaskSnapshot() }
         let sessions: [String: [String: Any]]
@@ -63,7 +52,6 @@ struct CodexTaskReader {
         }
 
         let indexedIDs = Set(sessions.keys)
-        let hiddenIndexed = Set(indexedIDs.filter { hiddenIDs.contains($0.lowercased()) })
         let extra: (ids: Set<String>, fastFiles: [String: URL], verifiedFiles: [String: URL], isPartial: Bool)
         do {
             extra = try unindexedOwners(excluding: indexedIDs, now: now, observedSince: observedSince,
@@ -73,7 +61,7 @@ struct CodexTaskReader {
             extra = ([], [:], [:], true)
         }
         let discovered = try sessionFiles(for: indexedIDs, now: now, observedSince: observedSince,
-                                          previouslyObserved: previouslyObserved.union(hiddenIndexed))
+                                          previouslyObserved: previouslyObserved)
         let extraFiles: (files: [String: URL], ambiguousCandidates: [String: [URL]], ambiguousIDs: Set<String>, isPartial: Bool, didHitLimit: Bool)
         do {
             extraFiles = try sessionFiles(for: extra.ids, now: now, observedSince: observedSince,
@@ -83,28 +71,14 @@ struct CodexTaskReader {
             extraFiles = ([:], [:], [], true, false)
         }
         let files = discovered.files
-        let hiddenCurrent = Set(indexedIDs.union(extra.ids).filter { hiddenIDs.contains($0.lowercased()) })
-        var restoredHistories: [String: CodexRolloutHint] = [:]
-        for id in hiddenCurrent {
-            guard let record = hiddenRecords[id.lowercased()], let file = files[id],
-                  let digest = record.rolloutPathDigest, let device = record.device,
-                  let inode = record.inode, let turn = record.turnID, !turn.isEmpty,
-                  CodexHiddenKey.rolloutPathIdentifier(for: file) == digest else { continue }
-            restoredHistories[id] = CodexRolloutHint(path: file.standardizedFileURL.path,
-                                                     device: device, inode: inode, size: 0,
-                                                     modified: .distantPast, turnID: turn)
-        }
         var result = CodexTaskSnapshot()
         result.isPartial = indexFailure != nil || discovered.isPartial || extra.isPartial || extraFiles.isPartial
         let uncertain = ambiguousRollouts.poll(
             candidates: discovered.ambiguousCandidates, ambiguousIDs: discovered.ambiguousIDs,
-            uniqueFiles: files, previouslyObserved: previouslyObserved, hiddenIDs: hiddenCurrent,
-            restoredHistories: restoredHistories,
+            uniqueFiles: files, previouslyObserved: previouslyObserved,
             sessionsDirectory: codexHome.appendingPathComponent("sessions", isDirectory: true),
             observedSince: observedSince
         )
-        result.uncertainEndings = uncertain.uncertainEndings
-        let hiddenNow = hiddenCurrent.union(uncertain.uncertainEndings.keys)
         var recognizedUnindexedSource = false
         for session in sessions.values {
             let id = session.string("id")
@@ -112,10 +86,6 @@ struct CodexTaskReader {
             guard !id.isEmpty, title != "Guardian review", let file = files[id] else { continue }
             let fresh = uncertain.freshStarts[id]
             let recovered = fresh == nil ? uncertain.recovered[id] : nil
-            if hiddenNow.contains(id) && fresh == nil {
-                result.isPartial = true
-                continue
-            }
             if uncertain.protects(id) && fresh == nil {
                 result.isPartial = true
                 continue
@@ -177,7 +147,6 @@ struct CodexTaskReader {
                 var interrupted = state.interrupted
                 if let recovered {
                     guard let verified = Self.recoveredTerminal(in: tail, id: id, turn: recovered.turnID) else {
-                        result.uncertainEndings[id] = ambiguousRollouts.markUncertainEnding(id, provenance: recovered)
                         result.isPartial = true
                         continue
                     }
@@ -220,7 +189,6 @@ struct CodexTaskReader {
                 result.isPartial = true
                 continue
             }
-            if fresh != nil { result.confirmedFreshIDs.insert(id) }
             let steps = plan.steps
             let activity = parseActivity(from: tail, sessionID: id)
             let progress = MonitoredTask.progress(for: steps)
@@ -258,7 +226,7 @@ struct CodexTaskReader {
         // complete records are evidence of a write, not proof of the selected
         // history or of a task's current state. Never emit terminal IDs or
         // progress from this fallback.
-        for (id, hint) in uncertain.hints where !previouslyObserved.contains(id) && !hiddenNow.contains(id) {
+        for (id, hint) in uncertain.hints where !previouslyObserved.contains(id) {
             guard let session = sessions[id], session.string("thread_name") != "Guardian review" else { continue }
             let title = session.string("thread_name")
             result.tasks.append(MonitoredTask(
@@ -270,7 +238,6 @@ struct CodexTaskReader {
             ))
         }
         for id in extra.ids {
-            if hiddenNow.contains(id) { result.isPartial = true; continue }
             let available = extraFiles.didHitLimit ? extra.fastFiles : extraFiles.files
             guard let file = available[id] else { continue }
             do {

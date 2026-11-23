@@ -6,77 +6,6 @@ private struct ClaudePhaseChanges {
     var sessions: Set<String> = []
 }
 
-// File locking and fsync must never run on the interface thread.
-private final class CodexHiddenStateWorker {
-    private let queue = DispatchQueue(label: "ai-task-monitor.codex-hidden-state", qos: .utility)
-    private let store: CodexHiddenStateStore
-    private let codexHome: URL
-    private var homeID: String?
-
-    init(store: CodexHiddenStateStore, codexHome: URL) {
-        self.store = store
-        self.codexHome = codexHome
-    }
-
-    private func sourceID() throws -> String {
-        let current = CodexHiddenKey.homeIdentifier(for: codexHome)
-        if let homeID, homeID != current { throw CodexHiddenStateStore.Failure.unsafe }
-        homeID = current
-        return current
-    }
-
-    func load(_ completion: @escaping (Result<[String: CodexHiddenRecord], Error>) -> Void) {
-        queue.async {
-            let result: Result<[String: CodexHiddenRecord], Error> = Result {
-                let source = try self.sourceID()
-                let records = try self.store.load()
-                var matching: [String: CodexHiddenRecord] = [:]
-                for (key, value) in records where key.codexHomeID == source { matching[key.threadID] = value }
-                return matching
-            }
-            DispatchQueue.main.async { completion(result) }
-        }
-    }
-
-    func insert(thread: String, provenance: CodexRolloutHint?,
-                completion: @escaping (Result<CodexHiddenRecord, Error>) -> Void) {
-        queue.async {
-            let result: Result<CodexHiddenRecord, Error> = Result {
-                let key = CodexHiddenKey(codexHomeID: try self.sourceID(), threadID: thread.lowercased())
-                let turn = provenance?.turnID
-                let valid = turn.map { value in
-                    !value.isEmpty && value.utf8.count <= 256 && value.utf8.allSatisfy {
-                        (48...57).contains($0) || (65...90).contains($0) ||
-                            (97...122).contains($0) || $0 == 45 || $0 == 95 || $0 == 58
-                    }
-                } ?? false
-                let record: CodexHiddenRecord
-                if valid, let provenance {
-                    record = CodexHiddenRecord(key: key, turnID: provenance.turnID,
-                        rolloutPathDigest: CodexHiddenKey.rolloutPathIdentifier(for: URL(fileURLWithPath: provenance.path)),
-                        device: provenance.device, inode: provenance.inode)
-                } else {
-                    record = CodexHiddenRecord(key: key)
-                }
-                return try self.store.insert(record)
-            }
-            DispatchQueue.main.async { completion(result) }
-        }
-    }
-
-    func remove(_ record: CodexHiddenRecord, completion: @escaping (Result<Bool, Error>) -> Void) {
-        queue.async {
-            let result: Result<Bool, Error> = Result {
-                guard try self.sourceID() == record.key.codexHomeID else { throw CodexHiddenStateStore.Failure.unsafe }
-                return try self.store.remove(key: record.key, expectedRevision: record.revision)
-            }
-            DispatchQueue.main.async { completion(result) }
-        }
-    }
-
-    func waitUntilIdleForTests() { queue.sync {} }
-}
-
 @MainActor
 final class TaskStore: ObservableObject {
     // Keep titles already displayed when an uncertain replacement snapshot
@@ -162,22 +91,13 @@ final class TaskStore: ObservableObject {
     @Published private(set) var journalTaskNames: [String: String] = [:]
     @Published private(set) var journalError = ""
     @Published private(set) var claudeLoopError = ""
-    @Published private(set) var claudeRetentionPolicy: ClaudeRetentionPolicy?
+    @Published private(set) var claudeRetentionPolicy: ClaudeRetentionPolicy? = ClaudeRetentionPolicy.load()
     @Published private(set) var claudeRetentionFailed = false
     @Published private(set) var availableUpdate: AvailableUpdate?
     @Published private(set) var dismissedUpdateVersion = ""
     @Published var updateOpenError = false
 
     private let codexReader: CodexTaskReader
-    private let codexHiddenWorker: CodexHiddenStateWorker?
-    private var codexHiddenReady: Bool
-    private var codexHiddenLoading = false
-    private var codexHiddenRecords: [String: CodexHiddenRecord] = [:]
-    private var codexHiddenIDs: Set<String> = []
-    private var codexHiddenEvents: [String: (id: String, ending: CodexUncertainEnding)] = [:]
-    private var codexHiddenWriting: Set<String> = []
-    private var codexHiddenRemoving: Set<String> = []
-    private var codexRecoveryHolds: Set<String> = []
     private let claudeReader: ClaudeTaskReader
     private let diagnosticWorker: DiagnosticWorker?
     private let claudeLoopProfile: URL?
@@ -641,13 +561,8 @@ final class TaskStore: ObservableObject {
        enableCodexCloud: Bool = false, codexCloudDefaults: UserDefaults = .standard, codexCloudInterval: TimeInterval = 30, makeCodexCloudClient: @escaping () -> CodexCloudClient? = { CodexCloudClient.discover().map { CodexCloudClient(executable: $0) } },
        updateDefaults: UserDefaults = .standard, updateClock: ReleaseRetryClock? = nil,
        updateFileStore: ReleaseScheduleFileStore? = nil,
-       makeReleaseRequest: @escaping ReleaseRequestFactory = { ReleaseRequest(completion: $0) },
-       codexHiddenStore: CodexHiddenStateStore? = nil,
-       loadClaudeRetentionPolicy: () -> ClaudeRetentionPolicy? = { ClaudeRetentionPolicy.load() }) {
-        self.claudeRetentionPolicy = loadClaudeRetentionPolicy()
+       makeReleaseRequest: @escaping ReleaseRequestFactory = { ReleaseRequest(completion: $0) }) {
         self.codexReader = codexReader
-        self.codexHiddenWorker = codexHiddenStore.map { CodexHiddenStateWorker(store: $0, codexHome: codexReader.codexHome) }
-        self.codexHiddenReady = codexHiddenStore == nil
         self.claudeReader = claudeReader
         self.claudeLoopProfile = claudeLoopProfile
         self.externalProvidersEnabled = enableExternalProviders && previewTasks == nil
@@ -978,90 +893,7 @@ final class TaskStore: ObservableObject {
                              updatedAt: item.updatedAt ?? .distantPast, isUnconfirmed: true, planConfirmed: false)
     }
 
-    private func loadCodexHiddenState() {
-        guard let worker = codexHiddenWorker, !codexHiddenLoading else { return }
-        codexHiddenLoading = true
-        worker.load { [weak self] result in
-            guard let self else { return }
-            self.codexHiddenLoading = false
-            let wasReady = self.codexHiddenReady
-            let oldIDs = self.codexHiddenIDs
-            switch result {
-            case .success(let records):
-                self.codexHiddenRecords = records
-                // Another instance may add a hidden record. Its later removal
-                // is not evidence that this instance observed a new turn.
-                self.codexHiddenIDs.formUnion(records.keys)
-                self.codexHiddenReady = true
-            case .failure:
-                self.codexHiddenReady = false
-            }
-            if wasReady != self.codexHiddenReady || oldIDs != self.codexHiddenIDs { self.refresh() }
-        }
-    }
-
-    func waitForCodexHiddenStateForTests() { codexHiddenWorker?.waitUntilIdleForTests() }
-
-    private func rememberCodexEnding(id: String, ending: CodexUncertainEnding) {
-        let key = id.lowercased()
-        codexHiddenIDs.insert(key)
-        codexRecoveryHolds.remove(id)
-        codexHiddenEvents[key] = (id, ending)
-        guard !codexHiddenWriting.contains(key) else { return }
-        guard let worker = codexHiddenWorker else {
-            codexReader.acknowledgeUncertainEndings([id: ending.token])
-            codexHiddenEvents.removeValue(forKey: key)
-            return
-        }
-        codexHiddenWriting.insert(key)
-        worker.insert(thread: key, provenance: ending.provenance) { [weak self] result in
-            guard let self else { return }
-            self.codexHiddenWriting.remove(key)
-            if case .success(let saved) = result {
-                self.codexHiddenRecords[key] = saved
-                if self.codexHiddenEvents[key]?.ending.token == ending.token {
-                    self.codexReader.acknowledgeUncertainEndings([id: ending.token])
-                    self.codexHiddenEvents.removeValue(forKey: key)
-                }
-                self.refresh()
-            }
-            // On failure the card stays hidden and the next refresh retries.
-        }
-    }
-
-    private func recoverCodexCard(id: String) {
-        let key = id.lowercased()
-        guard codexHiddenIDs.contains(key), codexHiddenEvents[key] == nil,
-              !codexHiddenWriting.contains(key), !codexHiddenRemoving.contains(key) else { return }
-        guard let worker = codexHiddenWorker else {
-            if codexReader.commitRecovered(id) {
-                codexHiddenIDs.remove(key)
-                codexRecoveryHolds.insert(id)
-            }
-            return
-        }
-        guard let record = codexHiddenRecords[key], record.turnID != nil,
-              record.rolloutPathDigest != nil, record.device != nil, record.inode != nil else { return }
-        codexHiddenRemoving.insert(key)
-        worker.remove(record) { [weak self] result in
-            guard let self else { return }
-            self.codexHiddenRemoving.remove(key)
-            guard case .success(true) = result,
-                  self.codexHiddenRecords[key]?.revision == record.revision,
-                  self.codexHiddenEvents[key] == nil,
-                  !self.codexHiddenWriting.contains(key),
-                  self.codexReader.commitRecovered(id) else { return }
-            self.codexHiddenRecords.removeValue(forKey: key)
-            self.codexHiddenIDs.remove(key)
-            // Re-read the new turn after persistence; never present the old
-            // snapshot after an asynchronous operation.
-            self.codexRecoveryHolds.insert(id)
-            self.refresh()
-        }
-    }
-
     func refresh() {
-        loadCodexHiddenState()
         let previousTasks = tasks
         let previousUnavailable = unavailableSources
         var unavailable: [TaskProvider] = []
@@ -1072,32 +904,18 @@ final class TaskStore: ObservableObject {
         var codexToolEvents: [String: [CodexToolEvent]] = [:]
         var claudeConnected = false
         do {
-            guard codexHiddenReady else { throw CocoaError(.fileReadUnknown) }
             let exists = FileManager.default.fileExists(atPath: codexReader.codexHome.path)
             if !exists && sawCodexHome { throw CocoaError(.fileReadNoSuchFile) }
             if exists { sawCodexHome = true }
-            let observed = Set(previousCodex.map(\.id)).union(codexRecoveryHolds)
-            let snapshot = try codexReader.readSnapshot(observedSince: monitoringStartedAt, previouslyObserved: observed,
-                                                        hiddenIDs: codexHiddenIDs, hiddenRecords: codexHiddenRecords)
-            for (id, ending) in snapshot.uncertainEndings { rememberCodexEnding(id: id, ending: ending) }
-            for id in snapshot.confirmedFreshIDs { recoverCodexCard(id: id) }
+            let snapshot = try codexReader.readSnapshot(observedSince: monitoringStartedAt, previouslyObserved: Set(previousCodex.map(\.id)))
             codexPartial = snapshot.isPartial
-            let allowedTerminal = Set(snapshot.terminalIDs.filter { !codexHiddenIDs.contains($0.lowercased()) && !codexRecoveryHolds.contains($0) })
-            terminalIDs.formUnion(allowedTerminal)
-            interruptedIDs.formUnion(snapshot.interruptedIDs.intersection(allowedTerminal))
-            codexToolEvents = snapshot.toolEvents.filter { !codexHiddenIDs.contains($0.key.lowercased()) }
-            previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: snapshot.tasks, terminalIDs: allowedTerminal)
-                .filter { !codexHiddenIDs.contains($0.id.lowercased()) }
-            for task in previousCodex { codexRecoveryHolds.remove(task.id) }
+            terminalIDs.formUnion(snapshot.terminalIDs)
+            interruptedIDs.formUnion(snapshot.interruptedIDs)
+            codexToolEvents = snapshot.toolEvents
+            previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
         } catch {
             unavailable.append(.codex)
-            if codexHiddenReady {
-                previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
-                    .filter { !codexHiddenIDs.contains($0.id.lowercased()) }
-            } else {
-                // A failed checkpoint read cannot prove which local cards are hidden.
-                previousCodex = []
-            }
+            previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
         }
         do {
             let connection: ClaudeIntegration.ConnectionState
