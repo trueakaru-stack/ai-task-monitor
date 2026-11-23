@@ -158,13 +158,15 @@ jobs:
           test ! -L "$rw_mount/.aitm-padding"
           test "$(run_isolated /usr/bin/stat -f %z "$rw_mount/.aitm-padding")" = 16777216
           run_logged free-before /bin/df -Pk "$rw_mount"
-          run_isolated /bin/rm "$rw_mount/.aitm-padding"
-          test ! -e "$rw_mount/.aitm-padding"
+          run_logged truncate-padding /bin/sh -c ': > "$1"' sh "$rw_mount/.aitm-padding"
+          test "$(run_isolated /usr/bin/stat -f %z "$rw_mount/.aitm-padding")" = 0
           run_logged free-after /bin/df -Pk "$rw_mount"
           free_kb="$(/usr/bin/awk 'END {print $4}' "$task_root/logs/free-after.log")"
           [[ "$free_kb" =~ ^[0-9]+$ ]]
           test "$free_kb" -ge 1024
           echo "Freed image space: $free_kb KiB available."
+          run_isolated /bin/rm "$rw_mount/.aitm-padding"
+          test ! -e "$rw_mount/.aitm-padding"
           run_isolated /usr/bin/touch "$rw_mount/.aitm-write-probe"
           run_isolated /bin/rm "$rw_mount/.aitm-write-probe"
           if run_isolated /usr/bin/codesign --verify --deep --strict --verbose=2 "$rw_app" >"$task_root/logs/signature-before.log" 2>&1; then
