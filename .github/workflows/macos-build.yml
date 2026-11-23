@@ -3,7 +3,7 @@ name: macOS build
 on:
   workflow_dispatch:
   push:
-    branches: [macos]
+    branches: [macos, codex/macos-activity-ci-20261123]
     paths:
       - "macos/**"
       - ".github/workflows/macos-build.yml"
