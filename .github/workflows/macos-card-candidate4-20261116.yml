@@ -317,11 +317,13 @@ jobs:
           for attempt in {1..100}; do test -s "$task_root/probe-port" && break; sleep 0.1; done
           test -s "$task_root/probe-port"
           task_port="$(cat "$task_root/probe-port")"
-          /usr/bin/nc -z -G 2 127.0.0.1 "$task_port"
-          if AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/nc -z -G 2 127.0.0.1 "$task_port" >/dev/null 2>&1; then
+          [[ "$task_port" =~ ^[0-9]{1,5}$ ]]
+          /usr/bin/nc -vz -G 2 127.0.0.1 "$task_port"
+          if AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/nc -vz -G 2 127.0.0.1 "$task_port" >"$task_root/network-probe.log" 2>&1; then
             echo 'Release sandbox unexpectedly allowed network access.' >&2
             exit 1
           fi
+          grep -Eiq 'operation not permitted|permission denied' "$task_root/network-probe.log"
           kill "$probe_pid"
           wait "$probe_pid" 2>/dev/null || true
           trap - EXIT

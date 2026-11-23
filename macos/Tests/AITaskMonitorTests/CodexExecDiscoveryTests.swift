@@ -318,6 +318,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertFalse(parent.isActive)
         XCTAssertNil(parent.progress)
         XCTAssertFalse(snapshot.terminalIDs.contains(first))
+        reader.waitForAmbiguousObservationForTests()
 
         let original = try Data(contentsOf: secondRoot)
         let text = try XCTUnwrap(String(data: original, encoding: .utf8))
@@ -336,6 +337,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
                 if snapshot.confirmedSubagentRoots.contains(first) { break }
             }
             XCTAssertTrue(snapshot.confirmedSubagentRoots.contains(first), different)
+            reader.waitForAmbiguousObservationForTests()
         }
         let otherDir = root.appendingPathComponent("sessions/2001/01/01", isDirectory: true)
         try FileManager.default.createDirectory(at: otherDir, withIntermediateDirectories: true)
