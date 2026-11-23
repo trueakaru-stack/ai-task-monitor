@@ -199,9 +199,18 @@ jobs:
           trap 'run_isolated /usr/bin/hdiutil detach "$ro_mount" >/dev/null 2>&1 || true' EXIT
           run_logged attach-ro /usr/bin/hdiutil attach -plist -readonly -nobrowse -noautoopen \
             -mountpoint "$ro_mount" "$task_root/temp/hybrid-verified.dmg"
+          run_logged list-ro-root /bin/ls -la "$ro_mount"
+          cat "$task_root/logs/list-ro-root.log"
+          run_logged read-ro-link /usr/bin/readlink "$ro_mount/Applications"
+          cat "$task_root/logs/read-ro-link.log"
+          echo 'Checking final mount identity and expected entries.'
           check_mount "$task_root/logs/attach-ro.log" "$ro_mount"
           ro_app="$ro_mount/AI Task Monitor.app"
-          test "$(run_isolated /usr/bin/find "$ro_mount" -mindepth 1 -maxdepth 1 | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 2
+          run_logged list-ro-paths /usr/bin/find "$ro_mount" -mindepth 1 -maxdepth 1 -print
+          cat "$task_root/logs/list-ro-paths.log"
+          test "$(/usr/bin/wc -l <"$task_root/logs/list-ro-paths.log" | /usr/bin/tr -d ' ')" = 2
+          run_logged list-ro-executable /bin/ls -l "$ro_app/Contents/MacOS/AITaskMonitor"
+          cat "$task_root/logs/list-ro-executable.log"
           test -x "$ro_app/Contents/MacOS/AITaskMonitor"
           run_logged diff-ro /usr/bin/diff -qr "$task_app" "$ro_app"
           run_logged signature-ro /usr/bin/codesign --verify --deep --strict --verbose=2 "$ro_app"
