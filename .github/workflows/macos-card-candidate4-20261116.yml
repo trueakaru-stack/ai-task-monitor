@@ -338,7 +338,24 @@ jobs:
           "$task_lipo" .build/apple/Products/Release/AITaskMonitor -verify_arch arm64
           "$task_lipo" .build/apple/Products/Release/AITaskMonitor -verify_arch x86_64
           SCRIPT
-          chmod 700 "$task_bin/swift"
+          cat > "$task_bin/mktemp" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          if [[ "$#" -ne 1 || "$1" != -d ]]; then
+            echo 'Only mktemp -d is supported for isolated packaging.' >&2
+            exit 2
+          fi
+          task_base="${AITM_RELEASE_ROOT:?}/temp"
+          test "$task_base" = "${AITM_SYNTHETIC_TEST_ROOT:?}"
+          test -d "$task_base" && test ! -L "$task_base"
+          test "$(cd -P "$task_base" && pwd -P)" = "$task_base"
+          task_directory="$(/usr/bin/mktemp -d "$task_base/aitm-release.XXXXXXXX")"
+          case "$task_directory" in "$task_base"/aitm-release.*) ;; *) exit 1;; esac
+          test -d "$task_directory" && test ! -L "$task_directory"
+          test "$(cd -P "$task_directory" && pwd -P)" = "$task_directory"
+          printf '%s\n' "$task_directory"
+          SCRIPT
+          chmod 700 "$task_bin/swift" "$task_bin/mktemp"
           task_run="$task_root/run-isolated"
           task_path="$task_bin:$AITM_TASK_PATH"
           if AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >/dev/null 2>&1; then
@@ -361,6 +378,16 @@ jobs:
           kill "$probe_pid"
           wait "$probe_pid" 2>/dev/null || true
           trap - EXIT
+          task_tmp_probe="$(AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
+            "AITM_RELEASE_ROOT=$task_root" "$task_bin/mktemp" -d)"
+          case "$task_tmp_probe" in "$task_root"/temp/aitm-release.*) ;; *) exit 1;; esac
+          test -d "$task_tmp_probe"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /bin/rmdir "$task_tmp_probe"
+          if AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
+            "AITM_RELEASE_ROOT=$task_root" "$task_bin/mktemp" -d unexpected >/dev/null 2>&1; then
+            echo 'The isolated mktemp wrapper accepted unexpected arguments.' >&2
+            exit 1
+          fi
           cat > "$task_root/atomic-probe.swift" <<'SWIFT'
           import Foundation
           let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
@@ -408,8 +435,10 @@ jobs:
           /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_app"
           /usr/bin/codesign -dv --verbose=4 "$task_app" 2>&1 | tee "$task_root/release-artifacts/signature.txt"
           grep -q 'Signature=adhoc' "$task_root/release-artifacts/signature.txt"
-          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /bin/bash ./scripts/smoke-test.sh "$task_app"
-          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /bin/bash ./scripts/create-dmg.sh
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
+            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/smoke-test.sh "$task_app"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
+            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/create-dmg.sh
           task_dmg="$task_source/dist/AITaskMonitor-macOS-0.3.12.dmg"
           (cd "$task_source/dist" && /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt)
           /usr/bin/hdiutil verify "$task_dmg"
