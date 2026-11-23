@@ -39,7 +39,7 @@ $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
 $root=[IO.Path]::GetFullPath((Join-Path $temp ('aitm-rollout-fixture-'+[Guid]::NewGuid().ToString('N'))))
 if(-not $root.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe synthetic fixture root.'}
 [void][IO.Directory]::CreateDirectory($root)
-$database=$null;$reader=$null
+$database=$null;$reader=$null;$rootReader=$null;$rootGate=$null
 try{
  $fixtureRoot=Join-Path $root 'profile';$folder=Join-Path $fixtureRoot 'sessions\2026\11\23'
  [void][IO.Directory]::CreateDirectory($folder)
@@ -84,6 +84,61 @@ try{
   $rootId=$rootIds[$case];$rootRef=$rootResult.ParentReferences[$rootId]
   Require ($rootResult.Paths.ContainsKey($rootId) -and $null -ne $rootRef -and [bool]$rootRef.IsRoot -eq [bool]$rootCases[$case].root -and [bool]$rootRef.Conflict -ne [bool]$rootCases[$case].root) 'Root-source classification was not conservative.'
  }
+ $dualRootId='13000000-0000-0000-0000-000000000001'
+ $dualOld=Write-FixtureSession $folder $dualRootId
+ $dualNew=Write-FixtureSession $folder $dualRootId '_20000000-0000-0000-0000-000000000004'
+ $dualHeader=@{type='session_meta';payload=@{id=$dualRootId;source='vscode';thread_source='agent_created_thread'}}|ConvertTo-Json -Compress
+ foreach($dualPath in @($dualOld,$dualNew)){[IO.File]::WriteAllText($dualPath,($dualHeader+"`n"),[Text.UTF8Encoding]::new($false))}
+ $database.Execute(('INSERT INTO threads VALUES('+(@((Quote-Sql $dualRootId),(Quote-Sql $dualOld),"'paginated'",'0') -join ',')+');'))
+ $oldRoot=[AITaskMonitor.CodexTitles.RolloutReader]::ReadNow($fixtureRoot,[string[]]@($dualRootId))
+ $database.Execute(('UPDATE threads SET rollout_path='+(Quote-Sql $dualNew)+' WHERE id='+(Quote-Sql $dualRootId)+';'))
+ $newRoot=[AITaskMonitor.CodexTitles.RolloutReader]::ReadNow($fixtureRoot,[string[]]@($dualRootId))
+ Require ($oldRoot.Paths[$dualRootId] -ceq $dualOld -and $oldRoot.ParentReferences[$dualRootId].IsRoot -and
+  $newRoot.Paths[$dualRootId] -ceq $dualNew -and $newRoot.ParentReferences[$dualRootId].IsRoot) 'Two root rollouts with the same ID were not validated independently.'
+ $dualIdentity=[AITaskMonitor.CodexObservation.CodexRecentEventObserver]::CaptureHeaderIdentity($dualNew,$dualRootId)
+ Require ([bool]$dualIdentity) 'The selected root identity is unavailable.'
+ $cancelGate=[Threading.ManualResetEvent]::new($false)
+ $cancelReader=[AITaskMonitor.CodexObservation.CodexRootEvidenceReader]::new($fixtureRoot,$cancelGate)
+ try{
+  [void]$cancelReader.Snapshot($dualRootId,$dualNew,$dualIdentity)
+  $pendingField=$cancelReader.GetType().GetField('pending',[Reflection.BindingFlags]'Instance,NonPublic')
+  $cancelTask=$pendingField.GetValue($cancelReader)
+  Require ($null -ne $cancelTask -and -not $cancelTask.IsCompleted) 'The cancellation fixture did not hold the worker.'
+  $cancelReader.Dispose();[void]$cancelGate.Set()
+  Require ($cancelTask.Wait(3000) -and -not $cancelReader.Snapshot($dualRootId,$dualNew,$dualIdentity).Complete) 'Closing the reader did not stop its pending work.'
+ }finally{$cancelReader.Dispose();[void]$cancelGate.Set();$cancelGate.Dispose()}
+ $rootGate=[Threading.ManualResetEvent]::new($false)
+ $rootReader=[AITaskMonitor.CodexObservation.CodexRootEvidenceReader]::new($fixtureRoot,$rootGate)
+ $rootClock=[Diagnostics.Stopwatch]::StartNew()
+ for($repeat=0;$repeat -lt 200;$repeat++){$rootProof=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity)}
+ Require ($rootClock.ElapsedMilliseconds -lt 1000 -and -not $rootProof.Complete) 'A pending root scan blocked the caller or invented proof.'
+ [void]$rootGate.Set();$rootClock.Restart()
+ do{$rootProof=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity);if($rootProof.CheckCount -gt 0){break};Start-Sleep -Milliseconds 30}while($rootClock.ElapsedMilliseconds -lt 15000)
+ Require ($rootProof.Complete -and $rootProof.RootsAgree -and $rootProof.VersionCount -eq 2) 'Two verified root rollouts did not produce a complete agreement.'
+ [IO.File]::AppendAllText($dualNew,('{"type":"event_msg","payload":{"type":"fixture"}}'+"`n"),[Text.UTF8Encoding]::new($false))
+ Start-Sleep -Milliseconds 300
+ $afterAppend=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity)
+ Require ($afterAppend.Complete -and $afterAppend.RootsAgree) 'An ordinary selected-root append invalidated the group.'
+ $conflictHeader=@{type='session_meta';payload=@{id=$dualRootId;source='vscode';thread_source='subagent'}}|ConvertTo-Json -Compress
+ $priorChecks=$afterAppend.CheckCount
+ [IO.File]::WriteAllText($dualOld,($conflictHeader+"`n"),[Text.UTF8Encoding]::new($false))
+ $rootClock.Restart()
+ do{$rootProof=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity);if(-not $rootProof.Complete){break};Start-Sleep -Milliseconds 30}while($rootClock.ElapsedMilliseconds -lt 3000)
+ Require (-not $rootProof.Complete) 'A changed competing rollout did not promptly invalidate the previous agreement.'
+ $rootClock.Restart()
+ do{$rootProof=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity);if($rootProof.CheckCount -gt $priorChecks -and $rootProof.Complete){break};Start-Sleep -Milliseconds 30}while($rootClock.ElapsedMilliseconds -lt 15000)
+ Require ($rootProof.Complete -and -not $rootProof.RootsAgree) 'A conflicting second rollout was treated as an agreed root.'
+ $priorChecks=$rootProof.CheckCount
+ [IO.File]::WriteAllText($dualOld,"{invalid}`n",[Text.UTF8Encoding]::new($false))
+ $rootClock.Restart()
+ do{$rootProof=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity);if($rootProof.CheckCount -gt $priorChecks){break};Start-Sleep -Milliseconds 30}while($rootClock.ElapsedMilliseconds -lt 15000)
+ Require ($rootProof.CheckCount -gt $priorChecks -and -not $rootProof.Complete -and -not $rootProof.RootsAgree) 'An unreadable competing root header established agreement.'
+ $priorChecks=$rootProof.CheckCount
+ [IO.File]::WriteAllText($dualOld,($dualHeader+"`n"),[Text.UTF8Encoding]::new($false))
+ $rootClock.Restart()
+ do{$rootProof=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity);if($rootProof.CheckCount -gt $priorChecks -and $rootProof.Complete -and $rootProof.RootsAgree){break};Start-Sleep -Milliseconds 30}while($rootClock.ElapsedMilliseconds -lt 15000)
+ Require ($rootProof.Complete -and $rootProof.RootsAgree) 'The root scan did not recover after valid metadata returned.'
+ $rootReader.Dispose();$rootReader=$null;$rootGate.Dispose();$rootGate=$null
  $childId='10000000-0000-0000-0000-000000000004';$badChild='10000000-0000-0000-0000-000000000005';$partialChild='10000000-0000-0000-0000-000000000006'
  $child=Write-FixtureSession $folder $childId;$bad=Write-FixtureSession $folder $badChild;$partial=Write-FixtureSession $folder $partialChild
  $spawn=@{parent_thread_id=$firstId;agent_nickname='reader';agent_path='/root/reader'}
@@ -179,6 +234,9 @@ try{
  Require ($value.Paths.ContainsKey($lastId) -and $value.Paths[$lastId] -ceq $last) 'A later ID starved when the candidate page changed.'
  Write-Output 'Codex rollout reader: SQLite/WAL, Windows paths, owner validation, changed revisions and fair 257-ID scheduling verified.'
 }finally{
+ if($null -ne $rootGate){[void]$rootGate.Set()}
+ if($null -ne $rootReader){$rootReader.Dispose()}
+ if($null -ne $rootGate){$rootGate.Dispose()}
  if($null -ne $reader){$reader.Dispose()}
  if($null -ne $database){$database.Dispose()}
  if(Test-Path -LiteralPath $root){

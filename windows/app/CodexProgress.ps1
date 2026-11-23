@@ -618,11 +618,13 @@ namespace AITaskMonitor.CodexTitles {
  $script:codexRolloutReader=[AITaskMonitor.CodexTitles.RolloutReader]::new()
 }catch{}
 $script:codexRecentEventObserver=$null
+$script:codexRootEvidenceReader=$null
 try{
  if(-not ('AITaskMonitor.CodexObservation.CodexRecentEventObserver' -as [type])){
   Add-Type -Path (Join-Path $PSScriptRoot 'CodexRecentEventObserver.cs') -ErrorAction Stop
  }
  $script:codexRecentEventObserver=[AITaskMonitor.CodexObservation.CodexRecentEventObserver]::new($sessionsDirectory)
+ $script:codexRootEvidenceReader=[AITaskMonitor.CodexObservation.CodexRootEvidenceReader]::new($codexHome)
 }catch{}
 $script:lastClaudeTasks = @()
 $script:sourceErrors = @()
@@ -3526,6 +3528,25 @@ function Codex-Tasks {
    else{$groupLinks[$parentId]=[PSCustomObject]@{Conflict=$true};[void]$subagentRefs.Remove($parentId)}
   }
  }
+ # Before using a root, verify all matching local rollouts in the background.
+ # An incomplete scan, unavailable reader or contradictory root keeps every
+ # affected task separate until the evidence becomes available.
+ $referencedParents=@{}
+ foreach($reference in @($groupLinks.Values)){
+  if(-not [bool](Prop $reference 'Conflict' $false) -and -not [bool](Prop $reference 'IsRoot' $false)){
+   $candidate=[string](Prop $reference 'ParentThreadId' '');if($candidate){$referencedParents[$candidate]=$true}
+  }
+ }
+ $rootReader=Get-Variable -Scope Script -Name codexRootEvidenceReader -ErrorAction SilentlyContinue
+ foreach($candidate in @($referencedParents.Keys)){
+  if(-not $groupLinks.ContainsKey($candidate) -or -not [bool](Prop $groupLinks[$candidate] 'IsRoot' $false)){continue}
+  $agreed=$false
+  if($null -ne $rootReader -and $null -ne $rootReader.Value -and $null -ne $verifiedPaths -and
+     $verifiedPaths.ContainsKey($candidate) -and $activityIdentities.ContainsKey($candidate)){
+   try{$proof=$rootReader.Value.Snapshot($candidate,[string]$verifiedPaths[$candidate],[string]$activityIdentities[$candidate]);$agreed=[bool]$proof.Complete -and [bool]$proof.RootsAgree}catch{}
+  }
+  if(-not $agreed){$groupLinks[$candidate]=[PSCustomObject]@{Conflict=$true}}
+ }
  $titleReader=Get-Variable -Scope Script -Name codexTitleReader -ErrorAction SilentlyContinue
  if($null -ne $titleReader -and $null -ne $titleReader.Value -and $sessions.Count -gt 0){
   try{
@@ -5501,6 +5522,7 @@ $timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]:
 $window.Add_Closed({if($null -ne $script:codexTitleReader){$script:codexTitleReader.Dispose()}})
 $window.Add_Closed({if($null -ne $script:codexRolloutReader){$script:codexRolloutReader.Dispose()}})
 $window.Add_Closed({if($null -ne $script:codexRecentEventObserver){$script:codexRecentEventObserver.Dispose()}})
+$window.Add_Closed({if($null -ne $script:codexRootEvidenceReader){$script:codexRootEvidenceReader.Dispose()}})
 if($script:codexCloudModulesAvailable -and -not $SnapshotFile -and $PreviewActiveTasks -lt 0 -and (Load-CodexCloudEnabled)){Set-CodexCloudControllerEnabled $script:codexCloudController $true}
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false

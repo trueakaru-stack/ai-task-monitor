@@ -1,5 +1,9 @@
 $ErrorActionPreference='Stop'
 $source=Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
+$sourceText=[IO.File]::ReadAllText((Resolve-Path -LiteralPath $source))
+$readerSource=[regex]::Match($sourceText,"(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@")
+if(-not $readerSource.Success){throw 'The rollout reader source was not found.'}
+Add-Type -TypeDefinition $readerSource.Groups[1].Value -ErrorAction Stop
 Add-Type -Path (Join-Path $PSScriptRoot '..\app\CodexRecentEventObserver.cs') -ErrorAction Stop
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'The application source did not parse.'}
@@ -197,6 +201,8 @@ $references[$secondId]=[PSCustomObject]@{ParentThreadId=$parentId;AgentNickname=
 $references[$nestedId]=[PSCustomObject]@{ParentThreadId=$firstId;AgentNickname='nested';IdentityToken='fixture-'+$nestedId}
 $script:codexRecentEventObserver=[PSCustomObject]@{}
 $script:codexRecentEventObserver|Add-Member ScriptMethod Snapshot {param($id,$path) return [PSCustomObject]@{BaselineReady=$true;IdentityToken='fixture-'+$id;HasEvent=$false}}
+$script:codexRootEvidenceReader=[PSCustomObject]@{}
+$script:codexRootEvidenceReader|Add-Member ScriptMethod Snapshot {param($id,$path,$identity) return [PSCustomObject]@{Complete=$true;RootsAgree=$true}}
 $script:fixtureSnapshot=[PSCustomObject]@{Paths=$paths;CheckedTicks=$ticks;ParentReferences=$references}
 $script:fixtureOldManual=$false;$script:lastCodexTasks=@();$script:codexObservedStarts=@{};$script:observedCodex=@{};$script:lifecycleState=@{};$script:codexRolloutPaths=@{}
 $grouped=Source-Snapshot
@@ -264,13 +270,17 @@ $makeHeader={param($parent)
 $identity=[AITaskMonitor.CodexObservation.CodexRecentEventObserver]::CaptureHeaderIdentity($identityPath,$firstId)
 Require ([bool]$identity) 'The synthetic child identity could not be captured.'
 $parentPath=$paths[$parentId]
-[IO.File]::WriteAllText($parentPath,('{"type":"session_meta","payload":{"id":"'+$parentId+'"}}'+"`n"),[Text.UTF8Encoding]::new($false));Write-Event $parentPath 'task_started' 'parent-start'
+$parentHeader='{"type":"session_meta","payload":{"id":"'+$parentId+'","source":"vscode","thread_source":"agent_created_thread"}}'
+$otherRootPath=Join-Path $dated ('rollout-2026-11-23T12-30-00-'+$parentId+'_20000000-0000-0000-0000-000000000004.jsonl')
+foreach($rootFile in @($parentPath,$otherRootPath)){[IO.File]::WriteAllText($rootFile,($parentHeader+"`n"),[Text.UTF8Encoding]::new($false))}
+Write-Event $parentPath 'task_started' 'parent-start'
 $parentIdentity=[AITaskMonitor.CodexObservation.CodexRecentEventObserver]::CaptureHeaderIdentity($parentPath,$parentId)
 Require ([bool]$parentIdentity) 'The synthetic parent identity could not be captured.'
 $script:fixtureUnindexed=@([PSCustomObject]@{id=$firstId;thread_name='';titleGenerated=$true;unindexed=$true;path=$identityPath;parentThreadId=$parentId;agentNickname='reader';updated_at='revision'})
 $script:fixtureSnapshot=[PSCustomObject]@{Paths=@{$parentId=$parentPath;$firstId=$identityPath};CheckedTicks=@{};ParentReferences=@{$parentId=[PSCustomObject]@{IsRoot=$true;IdentityToken=$parentIdentity};$firstId=[PSCustomObject]@{ParentThreadId=$parentId;AgentNickname='reader';IdentityToken=$identity}}}
 $script:lastCodexTasks=@();$script:codexObservedStarts=@{};$script:observedCodex=@{};$script:lifecycleState=@{};$script:unindexedPaths=@{};$script:codexRolloutPaths=@{}
 $script:codexRecentEventObserver=[AITaskMonitor.CodexObservation.CodexRecentEventObserver]::new($sessionsDirectory)
+$script:codexRootEvidenceReader=[AITaskMonitor.CodexObservation.CodexRootEvidenceReader]::new($fixture)
 try{
  $initial=Source-Snapshot
  Require (@($initial.Tasks).Count -eq 2) 'A child was grouped before identity confirmation.'
@@ -280,6 +290,9 @@ try{
  $watch.Restart()
  do{$parentState=$script:codexRecentEventObserver.Snapshot($parentId,$parentPath);if($parentState.BaselineReady){break};Start-Sleep -Milliseconds 40}while($watch.ElapsedMilliseconds -lt 10000)
  Require ($parentState.BaselineReady -and $parentState.IdentityToken -ceq $parentIdentity) 'The synthetic parent baseline did not match.'
+ $watch.Restart()
+ do{$rootProof=$script:codexRootEvidenceReader.Snapshot($parentId,$parentPath,$parentIdentity);if($rootProof.CheckCount -gt 0){break};Start-Sleep -Milliseconds 40}while($watch.ElapsedMilliseconds -lt 15000)
+ Require ($rootProof.Complete -and $rootProof.RootsAgree -and $rootProof.VersionCount -eq 2) 'Both selected-parent root versions were not verified.'
  $verifiedGroup=Source-Snapshot
  Require (@($verifiedGroup.Tasks).Count -eq 1 -and $verifiedGroup.Tasks[0].Id -ceq $parentId -and $verifiedGroup.Tasks[0].RelatedAgentCount -eq 1) 'A verified unindexed child with a start was not grouped.'
  $verifiedChild=@($script:lastCodexTasks|Where-Object Id -eq $firstId)
@@ -291,6 +304,26 @@ try{
   $appendGroup=Source-Snapshot
   Require ($identityState.IdentityToken -ceq $identity -and @($appendGroup.Tasks).Count -eq 1 -and $appendGroup.Tasks[0].RelatedAgentCount -eq 1) 'A normal append caused a verified group to disappear.'
  }
+ $script:codexRootEvidenceReader.Dispose()
+ $conflictingParent='{"type":"session_meta","payload":{"id":"'+$parentId+'","source":"vscode","thread_source":"subagent"}}'
+ [IO.File]::WriteAllText($otherRootPath,($conflictingParent+"`n"),[Text.UTF8Encoding]::new($false))
+ $script:codexRootEvidenceReader=[AITaskMonitor.CodexObservation.CodexRootEvidenceReader]::new($fixture);$watch.Restart()
+ do{$rootProof=$script:codexRootEvidenceReader.Snapshot($parentId,$parentPath,$parentIdentity);if($rootProof.CheckCount -gt 0){break};Start-Sleep -Milliseconds 40}while($watch.ElapsedMilliseconds -lt 15000)
+ Require ($rootProof.Complete -and -not $rootProof.RootsAgree) 'A conflicting root version was not detected.'
+ $conflictingGroup=Source-Snapshot
+ Require (@($conflictingGroup.Tasks).Count -eq 2 -and @($conflictingGroup.Tasks|Where-Object Id -eq $firstId).Count -eq 1) 'A conflicting root version grouped separate tasks.'
+ $script:codexRootEvidenceReader.Dispose()
+ [IO.File]::WriteAllText($otherRootPath,"{invalid}`n",[Text.UTF8Encoding]::new($false))
+ $script:codexRootEvidenceReader=[AITaskMonitor.CodexObservation.CodexRootEvidenceReader]::new($fixture);$watch.Restart()
+ do{$rootProof=$script:codexRootEvidenceReader.Snapshot($parentId,$parentPath,$parentIdentity);if($rootProof.CheckCount -gt 0){break};Start-Sleep -Milliseconds 40}while($watch.ElapsedMilliseconds -lt 15000)
+ Require (-not $rootProof.Complete -and -not $rootProof.RootsAgree) 'An incomplete root scan reported agreement.'
+ $incompleteGroup=Source-Snapshot
+ Require (@($incompleteGroup.Tasks).Count -eq 2 -and @($incompleteGroup.Tasks|Where-Object Id -eq $firstId).Count -eq 1) 'An incomplete root scan grouped separate tasks.'
+ $script:codexRootEvidenceReader.Dispose()
+ [IO.File]::WriteAllText($otherRootPath,($parentHeader+"`n"),[Text.UTF8Encoding]::new($false))
+ $script:codexRootEvidenceReader=[AITaskMonitor.CodexObservation.CodexRootEvidenceReader]::new($fixture);$watch.Restart()
+ do{$rootProof=$script:codexRootEvidenceReader.Snapshot($parentId,$parentPath,$parentIdentity);if($rootProof.CheckCount -gt 0){break};Start-Sleep -Milliseconds 40}while($watch.ElapsedMilliseconds -lt 15000)
+ Require ($rootProof.Complete -and $rootProof.RootsAgree) 'The root check did not recover after valid metadata returned.'
  $priorStamp=[IO.File]::GetLastWriteTimeUtc($identityPath);$priorLength=([IO.FileInfo]::new($identityPath)).Length
  $replacementPath=Join-Path $dated 'synthetic-replacement.jsonl'
  $replacementHeader=(& $makeHeader $otherParent)+"`n"
@@ -311,7 +344,7 @@ try{
  Require ($replacementChild.Count -eq 1 -and -not [bool](Prop $replacementChild[0] 'ActivityIsLast' $false) -and
   [string]$replacementChild[0].Activity -ceq $unconfirmed) 'The last action was carried across a same-path file replacement.'
  $script:fixtureNoActivity=$false
-}finally{$script:codexRecentEventObserver.Dispose();$script:codexRecentEventObserver=$null}
+}finally{$script:codexRecentEventObserver.Dispose();$script:codexRecentEventObserver=$null;$script:codexRootEvidenceReader.Dispose();$script:codexRootEvidenceReader=$null}
 Write-Output 'Codex rollout resolution: unconfirmed endings, long-task observation and verified source grouping passed.'
 '@
 try{& ([scriptblock]::Create(($definitions -join "`n")+"`n"+$checks)) $root}

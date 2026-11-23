@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks, screenshots-active, screenshots-empty]
+        part: [checks, screenshots-active, screenshots-empty, screenshots-related, screenshots-showcase]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
@@ -128,7 +128,7 @@ jobs:
                 [IO.File]::WriteAllText((Join-Path $installerOutput 'source-commit.txt'),($verifiedCommit+"`n"),[Text.UTF8Encoding]::new($false))
               }
             }else{
-              $counts=if($env:AITM_TEST_PART -eq 'screenshots-active'){@(1)}else{@(0)}
+              $counts=if($env:AITM_TEST_PART -eq 'screenshots-active'){@(1)}elseif($env:AITM_TEST_PART -eq 'screenshots-empty'){@(0)}else{@()}
               foreach($count in $counts){foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){foreach($warningCase in @('partial-data','partial-both')){
                 $stem="codex-$count-$theme-$language-$mode-$warningCase"
                 $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks',[string]$count,'-PreviewSourceWarning',$warningCase,'-PreviewWarningProvider','codex','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
@@ -145,6 +145,8 @@ jobs:
                   Invoke-Isolated $powershell $arguments
                   if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Two-task synthetic screenshot is missing.'}
                 }}}
+              }
+              if($env:AITM_TEST_PART -eq 'screenshots-related'){
                 foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){foreach($list in @('closed','open')){
                   $stem="related-agents-$theme-$language-$mode-$list"
                   $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsUiTest','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
@@ -160,6 +162,8 @@ jobs:
                   Invoke-Isolated $powershell $arguments
                   if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Named-title synthetic screenshot is missing.'}
                 }}
+              }
+              if($env:AITM_TEST_PART -eq 'screenshots-showcase'){
                 foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($frame in @('expanded-closed','expanded-open','compact-closed','compact-open','compact-claude')){
                   $stem="showcase-$theme-$language-$frame"
                   $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','2','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsShowcase','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
@@ -169,6 +173,8 @@ jobs:
                   Invoke-Isolated $powershell $arguments
                   if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Two-source showcase screenshot is missing.'}
                 }}}
+              }
+              if($env:AITM_TEST_PART -eq 'screenshots-related'){
                 foreach($theme in @('dark','light')){foreach($mode in @('expanded','compact')){
                   $stem="related-agents-hint-$theme-$mode"
                   $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewScenario','planned','-PreviewRelatedAgents','-ThemeOverride',$theme,'-LanguageOverride','ru','-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "temp/$stem-window.png"),'-HintSnapshotFile',(Join-Path $root "screenshots/$stem.png"))

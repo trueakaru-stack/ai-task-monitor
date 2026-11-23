@@ -595,4 +595,283 @@ namespace AITaskMonitor.CodexObservation
             }
         }
     }
+
+    public sealed class RootEvidenceSnapshot
+    {
+        public bool Complete { get; internal set; }
+        public bool RootsAgree { get; internal set; }
+        public int VersionCount { get; internal set; }
+        public long CheckCount { get; internal set; }
+    }
+
+    // A complete, read-only scan is required before a parent is considered a
+    // root. All directory and header reads stay on one bounded background task.
+    public sealed class CodexRootEvidenceReader : IDisposable
+    {
+        private const int MaximumRequests = 256;
+        private const int MaximumEntries = 100000;
+        private const int MaximumVersions = 64;
+        private const int MaximumSeconds = 60;
+        private const int RetrySeconds = 5;
+        private const int FreshSeconds = 15;
+        private readonly object gate = new object();
+        private readonly string home, root;
+        private readonly WaitHandle fixtureGate;
+        private readonly Dictionary<string, RootEntry> entries = new Dictionary<string, RootEntry>(StringComparer.OrdinalIgnoreCase);
+        private Task<RootResult> pending;
+        private FileSystemWatcher watcher;
+        private string pendingId;
+        private long pendingGeneration, generation;
+        private bool watcherFailed;
+        private volatile bool disposed;
+
+        private sealed class RootEntry
+        {
+            public string Path, Identity;
+            public long Generation, Requested, Attempted, Checked, Checks;
+            public RootResult Result;
+        }
+        private sealed class RootResult
+        {
+            public bool Complete, RootsAgree;
+            public int Count;
+        }
+        private sealed class Version
+        {
+            public string Path, Identity;
+        }
+
+        public CodexRootEvidenceReader(string codexHome) : this(codexHome, null) { }
+
+        // A gate is used only by isolated tests of nonblocking requests.
+        public CodexRootEvidenceReader(string codexHome, WaitHandle fixtureGate)
+        {
+            home = Path.GetFullPath(codexHome);
+            root = Path.GetFullPath(Path.Combine(home, "sessions")).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            this.fixtureGate = fixtureGate;
+        }
+
+        public RootEvidenceSnapshot Snapshot(string threadId, string selectedPath, string selectedIdentity)
+        {
+            Guid parsed;
+            if (!Guid.TryParseExact(threadId, "D", out parsed) || String.IsNullOrEmpty(selectedPath) ||
+                String.IsNullOrEmpty(selectedIdentity)) return new RootEvidenceSnapshot();
+            string path;
+            try
+            {
+                path = Path.GetFullPath(selectedPath);
+                if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return new RootEvidenceSnapshot();
+            }
+            catch { return new RootEvidenceSnapshot(); }
+            lock (gate)
+            {
+                if (disposed) return new RootEvidenceSnapshot();
+                long now = Stopwatch.GetTimestamp();
+                RootEntry entry;
+                if (!entries.TryGetValue(threadId, out entry) || !String.Equals(entry.Path, path, StringComparison.OrdinalIgnoreCase) ||
+                    !String.Equals(entry.Identity, selectedIdentity, StringComparison.Ordinal))
+                {
+                    if (!entries.ContainsKey(threadId) && entries.Count >= MaximumRequests) EvictOldest();
+                    entry = new RootEntry { Path = path, Identity = selectedIdentity, Generation = ++generation };
+                    entries[threadId] = entry;
+                }
+                entry.Requested = now;
+                if (pending != null && pending.IsCompleted)
+                {
+                    try
+                    {
+                        RootEntry current;
+                        RootResult result = pending.Result;
+                        if (entries.TryGetValue(pendingId, out current) && current.Generation == pendingGeneration)
+                        {
+                            current.Result = result;
+                            current.Checked = Stopwatch.GetTimestamp();
+                            current.Checks++;
+                        }
+                    }
+                    catch { }
+                    pending = null;
+                }
+                if (pending == null)
+                {
+                    string nextId = null; RootEntry next = null;
+                    foreach (KeyValuePair<string, RootEntry> item in entries)
+                    {
+                        if (now - item.Value.Requested > FreshSeconds * Stopwatch.Frequency ||
+                            (item.Value.Attempted != 0 && now - item.Value.Attempted < RetrySeconds * Stopwatch.Frequency)) continue;
+                        if (next == null || item.Value.Attempted < next.Attempted) { nextId = item.Key; next = item.Value; }
+                    }
+                    if (next != null)
+                    {
+                        next.Attempted = now; pendingId = nextId; pendingGeneration = next.Generation;
+                        string chosenId = nextId, chosenPath = next.Path, chosenIdentity = next.Identity;
+                        pending = Task.Factory.StartNew(() => Scan(chosenId, chosenPath, chosenIdentity), CancellationToken.None,
+                                                        TaskCreationOptions.None, TaskScheduler.Default);
+                    }
+                }
+                bool fresh = watcher != null && !watcherFailed && entry.Result != null && entry.Result.Complete && entry.Checked != 0 &&
+                             now - entry.Checked <= FreshSeconds * Stopwatch.Frequency;
+                return new RootEvidenceSnapshot { Complete = fresh, RootsAgree = fresh && entry.Result.RootsAgree,
+                                                  VersionCount = fresh ? entry.Result.Count : 0, CheckCount = entry.Checks };
+            }
+        }
+
+        private void EvictOldest()
+        {
+            string oldest = null; long when = Int64.MaxValue;
+            foreach (KeyValuePair<string, RootEntry> item in entries)
+                if (item.Value.Requested < when) { oldest = item.Key; when = item.Value.Requested; }
+            if (oldest != null) entries.Remove(oldest);
+        }
+
+        private RootResult Scan(string id, string selectedPath, string selectedIdentity)
+        {
+            RootResult incomplete = new RootResult();
+            try
+            {
+                if (fixtureGate != null) fixtureGate.WaitOne();
+                if (disposed || !EnsureWatcher()) return incomplete;
+                Type reader = null;
+                foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+                {
+                    reader = assembly.GetType("AITaskMonitor.CodexTitles.RolloutReader", false);
+                    if (reader != null) break;
+                }
+                var validate = reader == null ? null : reader.GetMethod("ValidatePath", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                if (validate == null) return incomplete;
+                Stack<string> directories = new Stack<string>(); directories.Push(root);
+                List<Version> versions = new List<Version>();
+                Stopwatch clock = Stopwatch.StartNew(); int visited = 0; bool selectedFound = false;
+                while (directories.Count != 0)
+                {
+                    if (disposed || clock.Elapsed.TotalSeconds > MaximumSeconds) return incomplete;
+                    string directory = directories.Pop();
+                    FileAttributes directoryAttributes = File.GetAttributes(directory);
+                    if ((directoryAttributes & FileAttributes.Directory) == 0 || (directoryAttributes & FileAttributes.ReparsePoint) != 0) return incomplete;
+                    foreach (string item in Directory.EnumerateFileSystemEntries(directory))
+                    {
+                        if (disposed || ++visited > MaximumEntries || clock.Elapsed.TotalSeconds > MaximumSeconds) return incomplete;
+                        FileAttributes attributes = File.GetAttributes(item);
+                        if ((attributes & FileAttributes.ReparsePoint) != 0)
+                        {
+                            if ((attributes & FileAttributes.Directory) != 0 || MatchesThreadFile(Path.GetFileName(item), id)) return incomplete;
+                            continue;
+                        }
+                        if ((attributes & FileAttributes.Directory) != 0) { directories.Push(item); continue; }
+                        if (!MatchesThreadFile(Path.GetFileName(item), id)) continue;
+                        if (versions.Count >= MaximumVersions) return incomplete;
+                        object[] args = new object[] { home, id, item, null };
+                        if (!(bool)validate.Invoke(null, args) || args[3] == null) return incomplete;
+                        object reference = args[3]; Type type = reference.GetType();
+                        bool conflict = (bool)type.GetField("Conflict").GetValue(reference);
+                        bool isRoot = (bool)type.GetField("IsRoot").GetValue(reference);
+                        string identity = (string)type.GetField("IdentityToken").GetValue(reference);
+                        if (conflict || !isRoot || String.IsNullOrEmpty(identity))
+                            return new RootResult { Complete = true, RootsAgree = false, Count = versions.Count + 1 };
+                        if (String.Equals(Path.GetFullPath(item), selectedPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            selectedFound = String.Equals(identity, selectedIdentity, StringComparison.Ordinal);
+                            if (!selectedFound) return incomplete;
+                        }
+                        versions.Add(new Version { Path = item, Identity = identity });
+                    }
+                }
+                if (!selectedFound || versions.Count == 0) return incomplete;
+                foreach (Version version in versions)
+                    if (!String.Equals(CodexRecentEventObserver.CaptureHeaderIdentity(version.Path, id), version.Identity, StringComparison.Ordinal))
+                        return incomplete;
+                return new RootResult { Complete = true, RootsAgree = true, Count = versions.Count };
+            }
+            catch { return incomplete; }
+        }
+
+        private static bool MatchesThreadFile(string name, string id)
+        {
+            if (!name.StartsWith("rollout-", StringComparison.OrdinalIgnoreCase)) return false;
+            string prefix = "-" + id; int at = name.LastIndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+            if (at < 0) return false;
+            string suffix = name.Substring(at + prefix.Length); Guid parsed;
+            return String.Equals(suffix, ".jsonl", StringComparison.OrdinalIgnoreCase) ||
+                   (suffix.Length == 43 && suffix[0] == '_' && suffix.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase) &&
+                    Guid.TryParseExact(suffix.Substring(1, 36), "D", out parsed));
+        }
+
+        private bool EnsureWatcher()
+        {
+            FileSystemWatcher old;
+            lock (gate)
+            {
+                if (disposed) return false;
+                if (watcher != null && !watcherFailed) return true;
+                old = watcher; watcher = null;
+            }
+            if (old != null) old.Dispose();
+            FileSystemWatcher created = null;
+            try
+            {
+                created = new FileSystemWatcher(root, "*");
+                created.IncludeSubdirectories = true;
+                created.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite;
+                created.Created += OnChange; created.Deleted += OnChange; created.Changed += OnChange;
+                created.Renamed += OnRename; created.Error += OnWatcherError;
+                created.EnableRaisingEvents = true;
+                lock (gate)
+                {
+                    if (disposed) { created.Dispose(); return false; }
+                    watcher = created; watcherFailed = false;
+                }
+                return true;
+            }
+            catch { if (created != null) created.Dispose(); return false; }
+        }
+
+        private void OnChange(object sender, FileSystemEventArgs change)
+        {
+            InvalidateChangedPath(change.FullPath, change.ChangeType == WatcherChangeTypes.Changed);
+        }
+
+        private void OnRename(object sender, RenamedEventArgs change)
+        {
+            InvalidateChangedPath(change.OldFullPath, false);
+            InvalidateChangedPath(change.FullPath, false);
+        }
+
+        private void InvalidateChangedPath(string path, bool contentOnly)
+        {
+            string name = Path.GetFileName(path);
+            bool journal = name.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase);
+            if (!journal && contentOnly) return;
+            lock (gate)
+            {
+                if (disposed) return;
+                foreach (KeyValuePair<string, RootEntry> item in entries)
+                {
+                    if (journal && !MatchesThreadFile(name, item.Key)) continue;
+                    if (contentOnly && String.Equals(item.Value.Path, path, StringComparison.OrdinalIgnoreCase)) continue;
+                    item.Value.Result = null; item.Value.Attempted = 0; item.Value.Generation = ++generation;
+                }
+            }
+        }
+
+        private void OnWatcherError(object sender, ErrorEventArgs error)
+        {
+            lock (gate)
+            {
+                if (disposed) return;
+                watcherFailed = true;
+                foreach (RootEntry entry in entries.Values)
+                {
+                    entry.Result = null; entry.Attempted = 0; entry.Generation = ++generation;
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            FileSystemWatcher old;
+            disposed = true;
+            lock (gate) { entries.Clear(); old = watcher; watcher = null; }
+            if (old != null) old.Dispose();
+        }
+    }
 }
