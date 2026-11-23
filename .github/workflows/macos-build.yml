@@ -184,8 +184,27 @@ jobs:
       - name: Render native verification screenshots
         working-directory: macos
         run: |
+          set -euo pipefail
           mkdir -p docs/verification
-          "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor" --render-previews "$PWD/docs/verification"
+          "dist/AI Task Monitor.app/Contents/MacOS/AITaskMonitor" --render-previews "$PWD/docs/verification" >"$RUNNER_TEMP/aitm-preview.log" 2>&1 &
+          preview_pid=$!
+          trap 'kill "$preview_pid" 2>/dev/null || true; wait "$preview_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..240}; do
+            ready=1
+            for name in expanded-dark expanded-light compact-dark compact-light settings-dark settings-light; do
+              test -s "docs/verification/$name.png" || ready=0
+            done
+            if [[ "$ready" == 1 ]]; then break; fi
+            if ! kill -0 "$preview_pid" 2>/dev/null; then cat "$RUNNER_TEMP/aitm-preview.log" >&2; exit 1; fi
+            sleep 1
+          done
+          for name in expanded-dark expanded-light compact-dark compact-light settings-dark settings-light; do
+            test -s "docs/verification/$name.png"
+            sips -g pixelWidth -g pixelHeight "docs/verification/$name.png" >/dev/null
+          done
+          kill "$preview_pid" 2>/dev/null || true
+          wait "$preview_pid" 2>/dev/null || true
+          trap - EXIT
       - name: Create disk image
         working-directory: macos
         run: ./scripts/create-dmg.sh
