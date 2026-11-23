@@ -142,6 +142,11 @@ jobs:
     env:
       DEVELOPER_DIR: ${{ contains(github.event.head_commit.message, '[macos26]') && '/Applications/Xcode.app/Contents/Developer' || '/Applications/Xcode_16.1.app/Contents/Developer' }}
     steps:
+      - name: Stop build until legacy test isolation is repaired
+        shell: bash
+        run: |
+          echo "::error::The legacy Swift suite is blocked until profile isolation is repaired. This job did not check out, test, build, or render the application."
+          exit 1
       - name: Report blocked integration tests
         shell: bash
         run: |
