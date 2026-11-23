@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import AITaskMonitor
 
@@ -9,7 +10,36 @@ final class CodexRevertSafetyTests: XCTestCase {
     private let revision = "019127f4-35ae-7c73-9e72-a10987654321"
 
     private func withRoot(_ body: (URL) throws -> Void) throws {
-        let root = FileManager.default.temporaryDirectory
+        let env = ProcessInfo.processInfo.environment
+        let base: URL
+        if env["AITM_MACOS_TEST_SANDBOX"] == "1" || env["AITM_SYNTHETIC_REQUIRED"] == "1" {
+            guard env["GITHUB_ACTIONS"] == "true", env["RUNNER_ENVIRONMENT"] == "github-hosted",
+                  env["RUNNER_OS"] == "macOS", env["AITM_MACOS_TEST_SANDBOX"] == "1",
+                  env["HOME"] == nil, env["CODEX_HOME"] == nil,
+                  let configured = env["AITM_SYNTHETIC_TEST_ROOT"],
+                  let denied = env["AITM_CI_DENIED_FILE"] else {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            let probe = denied.withCString { open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) }
+            if probe >= 0 { Darwin.close(probe); throw CocoaError(.fileWriteNoPermission) }
+            guard errno == EACCES || errno == EPERM else { throw CocoaError(.fileWriteNoPermission) }
+            let supplied = URL(fileURLWithPath: configured, isDirectory: true).standardizedFileURL
+            let resolved = supplied.resolvingSymlinksInPath().standardizedFileURL
+            let runnerTemp = URL(fileURLWithPath: "/Users/runner/work/_temp", isDirectory: true)
+                .resolvingSymlinksInPath().standardizedFileURL
+            let container = resolved.deletingLastPathComponent()
+            let values = try resolved.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard supplied == resolved, resolved.lastPathComponent == "temp",
+                  container.lastPathComponent.hasPrefix("aitm-card-tests."),
+                  container.deletingLastPathComponent() == runnerTemp,
+                  values.isDirectory == true, values.isSymbolicLink == false else {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            base = resolved
+        } else {
+            base = FileManager.default.temporaryDirectory
+        }
+        let root = base
             .appendingPathComponent("aitm-revert-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root.appendingPathComponent("sessions"), withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -37,7 +67,18 @@ final class CodexRevertSafetyTests: XCTestCase {
                                     "payload": ["type": type, "turn_id": "synthetic"]]
         var bytes = try JSONSerialization.data(withJSONObject: value)
         bytes.append(0x0a)
-        try bytes.write(to: url, options: .atomic)
+        let temporary = url.deletingLastPathComponent()
+            .appendingPathComponent(".aitm-test-" + UUID().uuidString)
+        let fd = temporary.path.withCString {
+            open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+        }
+        guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close(); _ = temporary.path.withCString { unlink($0) } }
+        try handle.write(contentsOf: bytes)
+        try handle.close()
+        let renamed = temporary.path.withCString { source in url.path.withCString { rename(source, $0) } }
+        guard renamed == 0 else { throw CocoaError(.fileWriteUnknown) }
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(2)], ofItemAtPath: url.path)
     }
 
@@ -77,6 +118,9 @@ final class CodexRevertSafetyTests: XCTestCase {
     }
 
     func testOldTerminalAndNewRevisionRetainUnconfirmedAndDoNotAffectNeighbor() throws {
+        let previousLanguage = AppLanguage.previewOverride
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = previousLanguage }
         try withRoot { root in
             try writeIndex([thread, other], root: root)
             let old = root.appendingPathComponent("sessions/" + name(thread))
@@ -86,13 +130,15 @@ final class CodexRevertSafetyTests: XCTestCase {
             try appendPlan(at: old)
             try writeEvent("task_started", at: neighbor)
             let reader = CodexTaskReader(codexHome: root)
-            let before = try reader.readSnapshot()
+            defer { reader.waitForAmbiguousObservationForTests() }
+            let since = Date().addingTimeInterval(-60)
+            let before = try reader.readSnapshot(observedSince: since)
             XCTAssertEqual(Set(before.tasks.map(\.id)), Set([thread, other]))
             XCTAssertEqual(before.tasks.first { $0.id == thread }?.steps.map(\.title), ["Synthetic step"])
 
             try writeEvent("task_complete", at: old)
             try writeEvent("task_started", at: newest)
-            let during = try reader.readSnapshot(previouslyObserved: [thread, other])
+            let during = try reader.readSnapshot(observedSince: since, previouslyObserved: [thread, other])
             XCTAssertTrue(during.isPartial)
             XCTAssertFalse(during.terminalIDs.contains(thread))
             XCTAssertFalse(during.tasks.contains { $0.id == thread && $0.isActive && !$0.isUnconfirmed })
@@ -110,9 +156,14 @@ final class CodexRevertSafetyTests: XCTestCase {
             // This is only a deterministic recovery fixture, not a claim that
             // Codex normally deletes its older immutable rollout.
             try FileManager.default.removeItem(at: old)
-            let after = try reader.readSnapshot(previouslyObserved: [thread, other])
-            XCTAssertFalse(after.isPartial)
-            XCTAssertTrue(after.tasks.contains { $0.id == thread && $0.isActive && !$0.isUnconfirmed })
+            let after = try reader.readSnapshot(observedSince: since, previouslyObserved: [thread, other])
+            // The remaining path may not be the one that produced the earlier
+            // card. Keep it uncertain rather than promoting or closing it.
+            XCTAssertTrue(after.isPartial)
+            XCTAssertFalse(after.tasks.contains { $0.id == thread })
+            XCTAssertFalse(after.terminalIDs.contains(thread))
+            let stillRetained = TaskSnapshotMerger.merge(previous: merged, current: after.tasks, terminalIDs: after.terminalIDs)
+            XCTAssertTrue(try XCTUnwrap(stillRetained.first { $0.id == thread }).isUnconfirmed)
             XCTAssertTrue(after.tasks.contains { $0.id == other && $0.isActive && !$0.isUnconfirmed })
         }
     }

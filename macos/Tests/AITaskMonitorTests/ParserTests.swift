@@ -62,7 +62,8 @@ final class ParserTests: XCTestCase {
         try (oldStart + "\n" + newEvent + "\n" + terminal + "\n").write(to: session, atomically: true, encoding: .utf8)
         let snapshot = try reader.readSnapshot(now: now, observedSince: since)
         XCTAssertTrue(snapshot.tasks.isEmpty)
-        XCTAssertTrue(snapshot.terminalIDs.contains("019127f4-35ae-7c73-9e72-a10123456001"))
+        XCTAssertFalse(snapshot.terminalIDs.contains("019127f4-35ae-7c73-9e72-a10123456001"))
+        XCTAssertTrue(snapshot.isPartial)
     }
 
     func testCodexReaderKeepsObservedQuietTaskAsUnconfirmed() throws {
