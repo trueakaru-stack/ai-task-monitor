@@ -665,6 +665,11 @@ final class CodexExecDiscoveryTests: XCTestCase {
         let cache = CodexExecDiscoveryCache()
         var existing = (1...16).map { String(format: "old-%03d", $0) }
         var unseen = (1...40).map { String(format: "new-%03d", $0) }
+        let pageCursor = CodexExecDiscoveryCache()
+        _ = pageCursor.selectFair(existing: existing, unseen: unseen, limit: 16)
+        let newestOnlyOnThisPage = "new-000"
+        let nextPage = pageCursor.selectFair(existing: existing, unseen: [newestOnlyOnThisPage] + unseen, limit: 16)
+        XCTAssertTrue(nextPage.contains(newestOnlyOnThisPage))
         var discovered: Set<String> = []
         for _ in 0..<10 {
             let selected = cache.selectFair(existing: existing, unseen: unseen, limit: 16)

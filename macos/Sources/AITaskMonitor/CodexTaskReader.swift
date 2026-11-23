@@ -1400,7 +1400,7 @@ final class CodexExecDiscoveryCache {
         }
         let selectedOld = pick(old, count: oldCount, cursor: &existingCursor)
         let selectedNew: [String]
-        if unseenCursor == nil, newCount > 0, let newest = unseen.first {
+        if newCount > 0, let newest = unseen.first {
             let rest = fresh.filter { $0 != newest }
             let additional = pick(rest, count: newCount - 1, cursor: &unseenCursor)
             if additional.isEmpty { unseenCursor = newest }
