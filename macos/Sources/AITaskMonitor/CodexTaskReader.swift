@@ -340,7 +340,7 @@ struct CodexTaskReader {
                 guard let record = try readUnindexedSession(file, id: id) else { continue }
                 guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
                       let stamp = CodexSubagentMetadataWorker.Stamp(attributes),
-                      stamp.device == record.device, stamp.inode == record.inode else {
+                      stamp.device == record.device, stamp.inode == record.inode, stamp.size >= record.size else {
                     result.isPartial = true
                     continue
                 }
@@ -1033,6 +1033,7 @@ struct CodexTaskReader {
         var truncated: Bool
         var device: UInt64
         var inode: UInt64
+        var size: UInt64
         var subagent: SubagentReference?
         var headerDigest: Data
     }
@@ -1125,7 +1126,8 @@ struct CodexTaskReader {
     private func currentIdentity(of url: URL, matches expected: CodexSubagentMetadataWorker.Stamp) -> Bool {
         guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
               let current = CodexSubagentMetadataWorker.Stamp(attributes) else { return false }
-        return current.device == expected.device && current.inode == expected.inode
+        return current.device == expected.device && current.inode == expected.inode &&
+            current.size >= expected.size && (current.size > expected.size || current.modified == expected.modified)
     }
 
     private func readIndexedTail(_ url: URL, expected: CodexSubagentMetadataWorker.Stamp,
@@ -1136,7 +1138,8 @@ struct CodexTaskReader {
         var before = stat()
         guard fstat(descriptor, &before) == 0, before.st_size >= 0,
               UInt64(bitPattern: Int64(before.st_dev)) == expected.device,
-              UInt64(before.st_ino) == expected.inode else { throw CocoaError(.fileReadUnknown) }
+              UInt64(before.st_ino) == expected.inode,
+              UInt64(before.st_size) >= expected.size else { throw CocoaError(.fileReadUnknown) }
         let length = try handle.seekToEnd()
         let count = min(UInt64(maximumBytes), length)
         try handle.seek(toOffset: length - count)
@@ -1224,12 +1227,13 @@ struct CodexTaskReader {
         try handle.seek(toOffset: end - count)
         let bytes = try handle.read(upToCount: Int(count)) ?? Data()
         var info = stat()
-        guard bytes.count == Int(count), fstat(descriptor, &info) == 0 else { throw CocoaError(.fileReadUnknown) }
+        guard bytes.count == Int(count), fstat(descriptor, &info) == 0,
+              info.st_size >= 0, UInt64(info.st_size) >= end else { throw CocoaError(.fileReadUnknown) }
         let modified = Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec) +
                             Double(info.st_mtimespec.tv_nsec) / 1_000_000_000)
         return UnindexedSessionRecord(tail: String(decoding: bytes, as: UTF8.self), modified: modified,
                                       truncated: end > count, device: UInt64(bitPattern: Int64(info.st_dev)),
-                                      inode: UInt64(info.st_ino), subagent: subagent,
+                                      inode: UInt64(info.st_ino), size: UInt64(info.st_size), subagent: subagent,
                                       headerDigest: Data(SHA256.hash(data: Data(prefix[...newline]))))
     }
 

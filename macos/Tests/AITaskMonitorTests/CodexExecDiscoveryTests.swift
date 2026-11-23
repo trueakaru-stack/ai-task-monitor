@@ -505,6 +505,35 @@ final class CodexExecDiscoveryTests: XCTestCase {
         reader.waitForAmbiguousObservationForTests()
     }
 
+    func testTruncationBetweenIndexedAttributesAndTailIsRejected() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try indexRows(root, [(first, "Parent"), (second, "Child")])
+        _ = try rollout(root, fileID: first)
+        try subagentRollout(root, id: second, parent: first)
+        let child = root.appendingPathComponent("sessions/2026/11/16").appendingPathComponent(rolloutName(second))
+        var armed = false
+        var truncationError: Error?
+        let reader = CodexTaskReader(codexHome: root, afterIndexedAttributesForTests: { id in
+            guard armed, id == self.second else { return }
+            armed = false
+            do { try self.writeFixture(Data(), to: child) } catch { truncationError = error }
+        })
+        defer { reader.waitForAmbiguousObservationForTests() }
+        _ = try reader.readSnapshot()
+        reader.waitForAmbiguousObservationForTests()
+        let before = try reader.readSnapshot()
+        XCTAssertEqual(before.subagentParents[second], first)
+        reader.waitForAmbiguousObservationForTests()
+        armed = true
+        let after = try reader.readSnapshot()
+        XCTAssertNil(truncationError)
+        XCTAssertFalse(armed)
+        XCTAssertTrue(after.isPartial)
+        XCTAssertFalse(after.tasks.contains { $0.id == second })
+        XCTAssertNil(after.subagentParents[second])
+    }
+
     func testAppendsKeepVerifiedGroupWithoutPartialWarning() throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
