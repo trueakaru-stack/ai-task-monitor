@@ -110,9 +110,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for suite in CodexActiveOperationTests CodexExecDiscoveryTests CompactSourceWarningTests ParserTests; do
+          for suite in CodexActiveOperationTests CodexExecDiscoveryTests CompactSourceWarningTests; do
             "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
           done
+          "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ParserTests/testActivityReadsCurrentSummaryWithoutExposingRawReasoning "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
       - name: Check guard skips without hosted test fixture
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
