@@ -79,6 +79,7 @@ jobs:
           else
             test "$(jq -r '.path' <<< "$run")" = '.github/workflows/macos-card-candidate4-20261116.yml'
             check_step 'isolated (macos-15, /Applications/Xcode_16.1.app/Contents/Developer)' 'Save synthetic grouping preview'
+            check_step 'isolated (macos-15, /Applications/Xcode_16.1.app/Contents/Developer)' 'Save isolated verified app'
             check_step 'isolated (macos-15, /Applications/Xcode_16.1.app/Contents/Developer)' 'Save isolated macOS candidate'
             check_step 'isolated (macos-26, /Applications/Xcode.app/Contents/Developer)' 'Save synthetic grouping preview'
             package_run_id="$run_id"
@@ -168,6 +169,24 @@ jobs:
             done
             test "$matched" = 1
           done
+          if [[ "$branch" == macos ]]; then
+            verified_app_output="$RUNNER_TEMP/verified-macos-app"
+            mkdir "$verified_app_output"
+            gh run download "$run_id" --repo "$GITHUB_REPOSITORY" \
+              --name "macos-$version-diagnostic-app-$candidate" --dir "$verified_app_output"
+            mapfile -d '' verified_apps < <(find "$verified_app_output" -type f -name 'AI Task Monitor.app.zip' -print0)
+            mapfile -d '' verified_sources < <(find "$verified_app_output" -type f -name 'source-commit.txt' -print0)
+            mapfile -d '' verified_sums < <(find "$verified_app_output" -type f -name 'SHA256-APP.txt' -print0)
+            test "${#verified_apps[@]}" = 1 && test "${#verified_sources[@]}" = 1 && test "${#verified_sums[@]}" = 1
+            test "$(dirname "${verified_apps[0]}")" = "$(dirname "${verified_sources[0]}")"
+            test "$(dirname "${verified_apps[0]}")" = "$(dirname "${verified_sums[0]}")"
+            test "$(tr -d '\r\n' < "${verified_sources[0]}")" = "$candidate"
+            mapfile -t verified_sum_lines < "${verified_sums[0]}"
+            test "${#verified_sum_lines[@]}" = 1
+            verified_sum_line="${verified_sum_lines[0]%$'\r'}"
+            test "$verified_sum_line" = "$(sha256sum -- "${verified_apps[0]}" | cut -d ' ' -f 1)  AI Task Monitor.app.zip"
+            cmp -- "${verified_apps[0]}" "${bundles[0]}"
+          fi
           jq -er '.notes' "$config" > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo 'Release already exists; refusing to replace it.' >&2
@@ -183,3 +202,40 @@ jobs:
           gh release create "$tag" "${uploads[@]}" \
             --repo "$GITHUB_REPOSITORY" --verify-tag --title "$title" \
             --notes-file "$RUNNER_TEMP/release-notes.md" --latest=false
+
+  correct-windows-notes:
+    if: contains(github.event.head_commit.message, '[publish-verified]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Correct unconfirmed assistant wording
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'trueakaru-stack/ai-task-monitor'
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.2.13" > "$RUNNER_TEMP/windows-release.json"
+          test "$(jq -r '.id' "$RUNNER_TEMP/windows-release.json")" = 455820194
+          jq -e '[.assets[] | select(.name == "AITaskMonitorSetup.exe" and .digest == "sha256:3057f06b552c36cb5ba54a4e95df69b1e0c4a285e896e137e9bc9b4d80c8d575")] | length == 1' "$RUNNER_TEMP/windows-release.json" >/dev/null
+          old_ru='Завершившийся помощник может оставаться в счётчике до обновления состояния или перезапуска монитора.'
+          new_ru='Неподтверждённый помощник может оставаться в счётчике после завершения, если источник не передал подтверждение.'
+          old_en='an assistant may remain in the count after finishing until its state refreshes or the monitor restarts.'
+          new_en='an unconfirmed assistant may remain in the count after finishing if the source does not provide confirmation.'
+          jq -j '.body' "$RUNNER_TEMP/windows-release.json" > "$RUNNER_TEMP/windows-notes-old.md"
+          jq -j --arg old_ru "$old_ru" --arg new_ru "$new_ru" --arg old_en "$old_en" --arg new_en "$new_en" '
+            .body as $body |
+            if (($body | split($old_ru) | length) == 2 and ($body | split($old_en) | length) == 2) then
+              $body | split($old_ru) | join($new_ru) | split($old_en) | join($new_en)
+            elif (($body | split($new_ru) | length) == 2 and ($body | split($new_en) | length) == 2 and
+                  ($body | contains($old_ru) | not) and ($body | contains($old_en) | not)) then
+              $body
+            else error("Windows release notes changed; refusing to overwrite them.") end
+          ' "$RUNNER_TEMP/windows-release.json" > "$RUNNER_TEMP/windows-notes-new.md"
+          if ! cmp -s "$RUNNER_TEMP/windows-notes-old.md" "$RUNNER_TEMP/windows-notes-new.md"; then
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.2.13" | jq -j '.body' > "$RUNNER_TEMP/windows-notes-current.md"
+            cmp "$RUNNER_TEMP/windows-notes-old.md" "$RUNNER_TEMP/windows-notes-current.md"
+            gh release edit v0.2.13 --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/windows-notes-new.md"
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.2.13" | jq -j '.body' > "$RUNNER_TEMP/windows-notes-result.md"
+          cmp "$RUNNER_TEMP/windows-notes-new.md" "$RUNNER_TEMP/windows-notes-result.md"

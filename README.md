@@ -7,7 +7,7 @@
 AI Task Monitor — бесплатное приложение для Windows 11 и macOS, которое помогает следить за локальными задачами Codex и Claude Code в одном окне.
 
 - Показывает доступные задачи и сведения о действиях; неподтверждённый статус отмечает отдельно.
-- Объединяет помощников Codex в карточке родительской задачи, когда связь подтверждена. Список помощников и их доступных действий можно раскрыть; неподтверждённое состояние помечается. Такой помощник может оставаться в счётчике после завершения до обновления состояния или перезапуска монитора.
+- Объединяет помощников Codex в карточке родительской задачи, когда связь подтверждена. Список помощников и их доступных действий можно раскрыть; неподтверждённое состояние помечается. Такой помощник может оставаться в счётчике после завершения, если источник не передал подтверждение.
 - Если агент опубликовал план, отображает его этапы и долю выполненных этапов. Одновременно в карточке видно до пяти этапов; остальные можно прокрутить.
 - Без плана показывает доступную активность; процент не выводится, если данных для оценки недостаточно. Приблизительная оценка помечается знаком `≈`.
 - Компактное окно можно держать поверх других окон и переключать задачи; настройки доступны в развёрнутом режиме. В macOS окно становится активным при наведении.
@@ -34,7 +34,7 @@ AI Task Monitor — бесплатное приложение для Windows 11 
 AI Task Monitor is a free Windows 11 and macOS app for following local Codex and Claude Code tasks in one window.
 
 - Shows available tasks and activity, marking unconfirmed status separately.
-- Groups Codex assistants under their parent task when the relationship is confirmed. Their list and available activity can be expanded, with unconfirmed status marked. An unconfirmed assistant may remain in the count after finishing until its state is refreshed or the monitor restarts.
+- Groups Codex assistants under their parent task when the relationship is confirmed. Their list and available activity can be expanded, with unconfirmed status marked. An unconfirmed assistant may remain in the count after finishing if the source does not provide confirmation.
 - When an agent publishes a plan, shows its steps and the share of completed steps. Up to five steps are visible per card; the rest can be scrolled.
 - Without a plan, shows available activity and omits the percentage when there is not enough information to estimate it. Estimated values use `≈`.
 - A compact window can stay above other windows and switch between tasks; settings are available in the expanded view. On macOS, hovering over the window activates it.
@@ -70,12 +70,17 @@ The [project license](LICENSE) allows free use, including internal business use,
 | ![Windows assistants, dark](screenshots/windows-agents-dark.png) | ![Windows compact assistants, dark](screenshots/windows-compact-agents-dark.png) | ![Windows compact Claude Code, dark](screenshots/windows-compact-claude-dark.png) |
 | ![Windows assistants, light](screenshots/windows-agents-light.png) | ![Windows compact assistants, light](screenshots/windows-compact-agents-light.png) | ![Windows compact Claude Code, light](screenshots/windows-compact-claude-light.png) |
 
-### macOS 0.3.11
+### macOS 0.3.12
 
 | Развёрнуто / Expanded | Компактно / Compact | Настройки / Settings |
 | --- | --- | --- |
 | ![macOS expanded, dark](screenshots/macos-expanded-dark.png) | ![macOS compact, dark](screenshots/macos-compact-dark.png) | ![macOS settings, dark](screenshots/macos-settings-dark.png) |
 | ![macOS expanded, light](screenshots/macos-expanded-light.png) | ![macOS compact, light](screenshots/macos-compact-light.png) | ![macOS settings, light](screenshots/macos-settings-light.png) |
+
+| Помощники / Assistants | Помощники компактно / Compact assistants | Claude Code компактно / Compact Claude Code |
+| --- | --- | --- |
+| ![macOS assistants, dark](screenshots/macos-agents-dark.png) | ![macOS compact assistants, dark](screenshots/macos-compact-agents-dark.png) | ![macOS compact Claude Code, dark](screenshots/macos-compact-claude-dark.png) |
+| ![macOS assistants, light](screenshots/macos-agents-light.png) | ![macOS compact assistants, light](screenshots/macos-compact-agents-light.png) | ![macOS compact Claude Code, light](screenshots/macos-compact-claude-light.png) |
 
 Задачи показаны для примера. Снимки macOS — превью интерфейса; системное оформление окна может отличаться.
 

@@ -1,55 +1,54 @@
 {
-  "tag": "v0.2.13",
-  "platform_branch": "windows",
-  "production_commit": "d777845ae7e66fa28ed18f565d1cbb5e5ab7060f",
-  "candidate_commit": "a26d9569f253b3664a4dc87df631f26c8b437c12",
-  "workflow_run_id": 45235204488,
-  "uninstall_workflow_run_id": 45235204861,
-  "artifact": "verified-windows-setup-a26d9569f253b3664a4dc87df631f26c8b437c12",
-  "asset": "AITaskMonitorSetup.exe",
-  "checksum": "SHA256SUMS-windows.txt",
-  "title": "AI Task Monitor 0.2.13 for Windows",
-  "notes": "## Что изменилось\n\n- Улучшено обнаружение локальных задач Codex с несколькими журналами и длинной историей.\n- Связанные помощники отображаются в карточке родительской задачи; их список и доступные действия можно раскрыть.\n- Неподтверждённое состояние отмечается отдельно. Завершившийся помощник может оставаться в счётчике до обновления состояния или перезапуска монитора.\n\n## Установка\n\nСкачайте установщик и проверьте SHA-256. Установщик не подписан доверенным сертификатом, поэтому Windows SmartScreen может показать предупреждение.\n\n## English\n\nImproved local Codex task discovery and grouped related assistants under their parent task. Unconfirmed status is marked; an assistant may remain in the count after finishing until its state refreshes or the monitor restarts.\n\nVerify the SHA-256 checksum before installing. The installer is not signed with a trusted certificate, so Windows SmartScreen may display a warning.",
+  "tag": "v0.3.12",
+  "platform_branch": "macos",
+  "production_commit": "a87284fdc0744fc6643cad3eed689155cf1efdb3",
+  "candidate_commit": "7489d44700563264582f90957f351d82d423afaa",
+  "workflow_run_id": 45260994339,
+  "artifact": "macos-0.3.12-candidate-7489d44700563264582f90957f351d82d423afaa",
+  "asset": "AITaskMonitor-macOS-0.3.12.dmg",
+  "checksum": "SHA256SUMS-macOS.txt",
+  "title": "AI Task Monitor 0.3.12 for macOS",
+  "notes": "## Что изменилось\n\n- Улучшено обнаружение локальных задач Codex и отображение доступной активности.\n- Связанные помощники объединяются в карточке родительской задачи; их список и доступные действия можно раскрыть.\n- Неподтверждённое состояние отмечается отдельно. Неподтверждённый помощник может оставаться в счётчике после завершения, если источник не передал подтверждение.\n\n## Установка\n\nСкачайте DMG и проверьте SHA-256. Приложение подписано ad hoc и не нотарифицировано Apple; Gatekeeper может предупредить или заблокировать запуск. Сборка CI выполнена прямым компилятором Swift, а не стандартным способом SwiftPM.\n\n## English\n\nImproved local Codex task discovery and grouped related assistants under their parent task. Unconfirmed status is marked; an unconfirmed assistant may remain in the count after finishing if the source does not provide confirmation.\n\nVerify the SHA-256 checksum before installing. The application is ad-hoc signed and not notarized by Apple; Gatekeeper may warn or block it. The CI build uses the Swift compiler directly rather than the standard SwiftPM build.",
   "screenshots": {
-    "screenshots/expanded-dark.png": {
-      "artifact_file": "showcase-dark-ru-expanded-closed.png",
-      "sha256": "aa6e068b11bdce666f869214e6c94cc9c46630be1ffd550d0253d451f1e1486b"
+    "screenshots/macos-expanded-dark.png": {
+      "artifact_file": "grouped-ru-dark-expanded-closed-demo-codex.png",
+      "sha256": "cf7b09010b1af82fcdbdb1ccde9b09d038a569b816c0a16d27852c9a1ec0ff1d"
     },
-    "screenshots/expanded-light.png": {
-      "artifact_file": "showcase-light-ru-expanded-closed.png",
-      "sha256": "9a89e5d0a4358730029bd33b9d3e0b18bebc47dec46fbed1d2030dc52acab659"
+    "screenshots/macos-expanded-light.png": {
+      "artifact_file": "grouped-ru-light-expanded-closed-demo-codex.png",
+      "sha256": "8074296464317e7ef0f9e3c05f920e0f785df4c081871ce7458d5d1731592853"
     },
-    "screenshots/compact-dark.png": {
-      "artifact_file": "showcase-dark-ru-compact-closed.png",
-      "sha256": "df18904c43f4370ebe9c5b2162b53ff0f8ad5bd24083813c0975429774e0d304"
+    "screenshots/macos-compact-dark.png": {
+      "artifact_file": "grouped-ru-dark-compact-closed-demo-codex.png",
+      "sha256": "2df7ddaae3cae5f8e425feb483181bfb966dfb0b58d6094f606a5bb608f5aea7"
     },
-    "screenshots/compact-light.png": {
-      "artifact_file": "showcase-light-ru-compact-closed.png",
-      "sha256": "7d0f9a28dc0bb67be31d00e03736c5b6509e354192c06cc41752ea8807340e59"
+    "screenshots/macos-compact-light.png": {
+      "artifact_file": "grouped-ru-light-compact-closed-demo-codex.png",
+      "sha256": "0e9bcefac143aca4ff7575dcadf2897e0572250e2354bf4d81657004bf234577"
     },
-    "screenshots/windows-agents-dark.png": {
-      "artifact_file": "showcase-dark-ru-expanded-open.png",
-      "sha256": "48e4c6720e15446f10cbc95bc42aeb449d45d9652486fb0e8349641715be669e"
+    "screenshots/macos-agents-dark.png": {
+      "artifact_file": "grouped-ru-dark-expanded-open-demo-codex.png",
+      "sha256": "6fc07465fa2539abd6ee9dc8491ebaa471e0df0aa316107154d4f1a9b3cc0432"
     },
-    "screenshots/windows-agents-light.png": {
-      "artifact_file": "showcase-light-ru-expanded-open.png",
-      "sha256": "76f7e971f50879026ea87609b907b95731b00642ab95bf5a7ed70a01c16cd01d"
+    "screenshots/macos-agents-light.png": {
+      "artifact_file": "grouped-ru-light-expanded-open-demo-codex.png",
+      "sha256": "39fef1e6016bd83d3f02eced95181f19463e5aae0e6f2a56f99a1a523bbda4fd"
     },
-    "screenshots/windows-compact-agents-dark.png": {
-      "artifact_file": "showcase-dark-ru-compact-open.png",
-      "sha256": "d49fbec77e5ac42c59e143dca6e8ca07c27cf4365a49d6ba1da8bec0637a8e7f"
+    "screenshots/macos-compact-agents-dark.png": {
+      "artifact_file": "grouped-ru-dark-compact-open-demo-codex.png",
+      "sha256": "f79870eab21f8075a49d067f299dcec058dd12e1bc7e14d67c2bc761810d8a9b"
     },
-    "screenshots/windows-compact-agents-light.png": {
-      "artifact_file": "showcase-light-ru-compact-open.png",
-      "sha256": "cdb5f94acee446707207acac2daea2bcc3e8250eab0daba7e78fdc13044da1c8"
+    "screenshots/macos-compact-agents-light.png": {
+      "artifact_file": "grouped-ru-light-compact-open-demo-codex.png",
+      "sha256": "abfc6d84a274945f3eb1418131db9d24c0ce0b86068a95fe504d2087ce0f07ee"
     },
-    "screenshots/windows-compact-claude-dark.png": {
-      "artifact_file": "showcase-dark-ru-compact-claude.png",
-      "sha256": "e5b4299e8c25bf5e391230bc7e6135d78d07f25f51fddaeedfd2ef8d17670525"
+    "screenshots/macos-compact-claude-dark.png": {
+      "artifact_file": "grouped-ru-dark-compact-closed-demo-claude.png",
+      "sha256": "f4b2686da81f8fd3c111318f0f60bcd6cb67177c8cb3daf376b08dec1f4da101"
     },
-    "screenshots/windows-compact-claude-light.png": {
-      "artifact_file": "showcase-light-ru-compact-claude.png",
-      "sha256": "0382fc434483820f4d67913bcb28e88b0192e9cfe04e9c8469b02c5f2a1c7cd1"
+    "screenshots/macos-compact-claude-light.png": {
+      "artifact_file": "grouped-ru-light-compact-closed-demo-claude.png",
+      "sha256": "6a42131c0b158e946972560770cfcbcf57a4b1da9d4cb095dd8ab175f144cde4"
     }
   }
 }
