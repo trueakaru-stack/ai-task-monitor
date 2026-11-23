@@ -438,6 +438,47 @@ final class CodexRolloutSelectionTests: XCTestCase {
         }
     }
 
+    func testChangedEndingFileBeforeRecheckStaysUnconfirmed() throws {
+        for scenario in ["replacement", "append"] {
+            try withRoot { root in
+                let files = try setup(root)
+                try FileManager.default.removeItem(at: files.old)
+                var armed = false
+                var changed = false
+                var mutationError: Error?
+                let reader = CodexTaskReader(codexHome: root, beforeTerminalRecheckForTests: {
+                    guard armed && !changed else { return }
+                    changed = true
+                    do {
+                        if scenario == "append" {
+                            try self.append(self.row("task_started", id: self.thread, turn: "next-turn"), to: files.current)
+                        } else {
+                            let replacement = root.appendingPathComponent("replacement")
+                            try self.create(replacement, id: self.thread)
+                            let renamed = replacement.path.withCString { source in
+                                files.current.path.withCString { rename(source, $0) }
+                            }
+                            if renamed != 0 { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+                        }
+                    } catch { mutationError = error }
+                })
+                let initial = try snapshot(reader)
+                let previous = try XCTUnwrap(initial.tasks.first { $0.id == thread && $0.isActive }, scenario)
+                try append(row("task_complete", id: thread), to: files.current)
+                armed = true
+                let after = try reader.readSnapshot(observedSince: monitoringStartedAt, previouslyObserved: [thread])
+                XCTAssertTrue(changed, scenario)
+                XCTAssertNil(mutationError, scenario)
+                XCTAssertFalse(after.terminalIDs.contains(thread), scenario)
+                let merged = TaskSnapshotMerger.merge(previous: [previous], current: after.tasks, terminalIDs: after.terminalIDs)
+                let task = try XCTUnwrap(merged.first { $0.id == thread }, scenario)
+                XCTAssertTrue(task.isUnconfirmed, scenario)
+                XCTAssertTrue(merged.contains { $0.id == neighbor && $0.isActive }, scenario)
+                reader.waitForAmbiguousObservationForTests()
+            }
+        }
+    }
+
     func testOlderTurnTerminalDoesNotSuppressNewTurn() throws {
         try withRoot { root in
             let files = try setup(root)
@@ -850,7 +891,10 @@ final class CodexRolloutSelectionTests: XCTestCase {
             XCTAssertNil(uncertain.progress)
             try append(row("task_complete", id: thread, turn: "new-turn"), to: files.current)
             let finished = try snapshot(reader, observed: [thread])
-            XCTAssertTrue(finished.terminalIDs.contains(thread))
+            XCTAssertFalse(finished.terminalIDs.contains(thread))
+            let afterUncertainEnding = TaskSnapshotMerger.merge(previous: retained, current: finished.tasks,
+                                                               terminalIDs: finished.terminalIDs)
+            XCTAssertTrue(try XCTUnwrap(afterUncertainEnding.first { $0.id == thread }).isUnconfirmed)
             XCTAssertTrue(finished.tasks.contains { $0.id == neighbor && $0.isActive })
         }
         try withRoot { root in
@@ -878,7 +922,9 @@ final class CodexRolloutSelectionTests: XCTestCase {
             try FileManager.default.removeItem(at: files.old)
             _ = try snapshot(reader, observed: [thread])
             try append(row("task_started", id: thread, turn: "new-turn"), to: files.current)
-            XCTAssertTrue(try XCTUnwrap(snapshot(reader, observed: [thread]).tasks.first { $0.id == thread }).isActive)
+            let newTurn = try XCTUnwrap(snapshot(reader, observed: [thread]).tasks.first { $0.id == thread })
+            XCTAssertTrue(newTurn.isUnconfirmed)
+            XCTAssertFalse(newTurn.isActive)
             try append(failedRow(id: thread, turn: "new-turn"), to: files.current)
             let failure = try snapshot(reader, observed: [thread])
             XCTAssertFalse(failure.terminalIDs.contains(thread))
@@ -904,6 +950,28 @@ final class CodexRolloutSelectionTests: XCTestCase {
             XCTAssertEqual(proof.modifiedSeconds, Int64(information.st_mtimespec.tv_sec))
             XCTAssertEqual(proof.modifiedNanoseconds, Int64(information.st_mtimespec.tv_nsec))
             XCTAssertEqual(proof.size, UInt64(information.st_size))
+        }
+    }
+
+    func testRecoveredTurnWithMatchingCompleteEndingCanFinish() throws {
+        try withRoot { root in
+            let files = try setup(root)
+            let reader = CodexTaskReader(codexHome: root)
+            _ = try snapshot(reader)
+            try append(row("agent_reasoning", id: thread), to: files.current)
+            let previous = try XCTUnwrap(snapshot(reader).tasks.first { $0.id == thread })
+            XCTAssertTrue(previous.isUnconfirmed)
+            try FileManager.default.removeItem(at: files.old)
+            _ = try snapshot(reader, observed: [thread])
+            try append(row("task_started", id: thread, turn: "new-turn"), to: files.current)
+            let started = try snapshot(reader, observed: [thread])
+            let current = try XCTUnwrap(started.tasks.first { $0.id == thread })
+            XCTAssertTrue(current.isUnconfirmed)
+            XCTAssertFalse(current.isActive)
+            try append(row("task_complete", id: thread, turn: "new-turn"), to: files.current)
+            let complete = try snapshot(reader, observed: [thread])
+            XCTAssertTrue(complete.terminalIDs.contains(thread))
+            XCTAssertTrue(complete.tasks.contains { $0.id == neighbor && $0.isActive })
         }
     }
 

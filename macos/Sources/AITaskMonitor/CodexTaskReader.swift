@@ -10,6 +10,24 @@ struct CodexTaskSnapshot {
 }
 
 struct CodexTaskReader {
+    private struct TerminalFileIdentity: Equatable {
+        let device: UInt64
+        let inode: UInt64
+        let size: UInt64
+        let modified: Date
+
+        init?(_ attributes: [FileAttributeKey: Any]) {
+            guard let device = (attributes[.systemNumber] as? NSNumber)?.uint64Value,
+                  let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
+                  let size = (attributes[.size] as? NSNumber)?.uint64Value,
+                  let modified = attributes[.modificationDate] as? Date else { return nil }
+            self.device = device
+            self.inode = inode
+            self.size = size
+            self.modified = modified
+        }
+    }
+
     let codexHome: URL
     private let fileManager = FileManager.default
     private let lifecycleCache = CodexLifecycleCache()
@@ -18,9 +36,12 @@ struct CodexTaskReader {
     private let planCache = CodexPlanHistoryCache()
     private let ambiguousRollouts = CodexAmbiguousRolloutWorker()
     private let afterDiscoveryForTests: (() -> Void)?
+    private let beforeTerminalRecheckForTests: (() -> Void)?
 
-    init(codexHome: URL? = nil, afterDiscoveryForTests: (() -> Void)? = nil) {
+    init(codexHome: URL? = nil, afterDiscoveryForTests: (() -> Void)? = nil,
+         beforeTerminalRecheckForTests: (() -> Void)? = nil) {
         self.afterDiscoveryForTests = afterDiscoveryForTests
+        self.beforeTerminalRecheckForTests = beforeTerminalRecheckForTests
         if let codexHome {
             self.codexHome = codexHome
         } else if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
@@ -75,7 +96,7 @@ struct CodexTaskReader {
         let files = discovered.files
         afterDiscoveryForTests?()
         var result = CodexTaskSnapshot()
-        var indexedEndings: [String: (file: URL, interrupted: Bool, toolEvents: [CodexToolEvent]?)] = [:]
+        var indexedEndings: [String: (file: URL, identity: TerminalFileIdentity, interrupted: Bool, toolEvents: [CodexToolEvent]?)] = [:]
         result.isPartial = indexFailure != nil || discovered.isPartial || extra.isPartial || extraFiles.isPartial
         let uncertain = ambiguousRollouts.poll(
             candidates: discovered.ambiguousCandidates, ambiguousIDs: discovered.ambiguousIDs,
@@ -162,11 +183,15 @@ struct CodexTaskReader {
                     recognized = true
                 }
                 if recognized {
+                    guard let identity = TerminalFileIdentity(attributes) else {
+                        result.isPartial = true
+                        continue
+                    }
                     var events: [CodexToolEvent]?
                     if previouslyObserved.contains(id), let observedSince {
                         events = CodexToolEventParser.parse(tail: tail, since: observedSince, now: now)
                     }
-                    indexedEndings[id] = (file, interrupted, events)
+                    indexedEndings[id] = (file, identity, interrupted, events)
                 }
                 continue
             }
@@ -230,6 +255,7 @@ struct CodexTaskReader {
             ))
         }
         if !indexedEndings.isEmpty {
+            beforeTerminalRecheckForTests?()
             do {
                 // One bounded rescan narrows, but cannot eliminate, a race
                 // with another rollout appearing after this verification.
@@ -238,7 +264,9 @@ struct CodexTaskReader {
                 if checked.didHitLimit { result.isPartial = true }
                 for (id, ending) in indexedEndings {
                     guard !checked.didHitLimit, !checked.ambiguousIDs.contains(id),
-                          checked.files[id]?.standardizedFileURL == ending.file.standardizedFileURL else {
+                          checked.files[id]?.standardizedFileURL == ending.file.standardizedFileURL,
+                          let currentAttributes = try? fileManager.attributesOfItem(atPath: ending.file.path),
+                          TerminalFileIdentity(currentAttributes) == ending.identity else {
                         result.isPartial = true
                         continue
                     }
