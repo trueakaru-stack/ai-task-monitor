@@ -98,6 +98,40 @@ jobs:
           /bin/ln -s "$AITM_TEST_DENIED_FILE" "$AITM_TEST_TASK_ROOT/denied-link"
           if "$task_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read via link was not denied.' >&2; exit 1; fi
           if "$task_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write via link was not denied.' >&2; exit 1; fi
+      - name: Diagnose synthetic checkpoint directory access
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          task_policy="$AITM_TEST_TASK_ROOT/profile-offline.sb"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B - <<'PY'
+          import os
+          import tempfile
+          root = os.environ['AITM_SYNTHETIC_TEST_ROOT']
+          fixture = tempfile.mkdtemp(prefix='checkpoint-diagnostic-', dir=root)
+          flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+          try:
+              direct = os.open(fixture, flags)
+          except OSError as error:
+              print('direct synthetic directory errno:', error.errno)
+          else:
+              print('direct synthetic directory: opened')
+              os.close(direct)
+          parent = os.open('/', flags)
+          try:
+              for index, component in enumerate(fixture.split('/')[1:], start=1):
+                  try:
+                      next_parent = os.open(component, flags, dir_fd=parent)
+                  except OSError as error:
+                      print('directory component:', index, 'errno:', error.errno)
+                      break
+                  os.close(parent)
+                  parent = next_parent
+              else:
+                  print('all directory components: opened')
+          finally:
+              os.close(parent)
+          PY
       - name: Build synthetic regression tests
         id: build
         shell: bash
