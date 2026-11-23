@@ -192,6 +192,11 @@ $script:lastAllTasks = @()
 $script:lastCodexTasks = @()
 $script:codexSourcePartial = $false
 $script:codexTitleReader = $null
+$script:codexRolloutReader = $null
+$script:codexRolloutPaths = @{}
+$script:codexRolloutSnapshot = $null
+$script:codexObservedStarts = @{}
+$script:codexTerminalChecks = @{}
 try {
  if(-not ('AITaskMonitor.CodexTitles.Reader' -as [type])){
   Add-Type -TypeDefinition @'
@@ -291,16 +296,16 @@ namespace AITaskMonitor.CodexTitles {
    } catch { result.Clear(); }
    return result;
   }
-  private static byte[] Utf8(string value) { return Encoding.UTF8.GetBytes(value+"\0"); }
-  private static bool SafeFile(string path) {
+  internal static byte[] Utf8(string value) { return Encoding.UTF8.GetBytes(value+"\0"); }
+  internal static bool SafeFile(string path) {
    try { var a=File.GetAttributes(path); return (a & (FileAttributes.Directory|FileAttributes.ReparsePoint)) == 0; }
    catch { return false; }
   }
-  private static bool CanShareRead(string path) {
+  internal static bool CanShareRead(string path) {
    try { using(FileStream stream=File.Open(path,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete)) return true; }
    catch { return false; }
   }
-  private static bool SafeParents(string path) {
+  internal static bool SafeParents(string path) {
    try { for (DirectoryInfo d=new DirectoryInfo(path); d != null; d=d.Parent) {
      FileAttributes a=d.Attributes;
      if ((a & FileAttributes.Directory)==0 || (a & FileAttributes.ReparsePoint)!=0) return false;
@@ -310,7 +315,7 @@ namespace AITaskMonitor.CodexTitles {
   }
   public void Dispose() { stop.Cancel(); }
 
-  private sealed class Native : IDisposable {
+  internal sealed class Native : IDisposable {
    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int VersionFn();
    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int OpenFn(byte[] p,out IntPtr db,int f,IntPtr v);
    [UnmanagedFunctionPointer(CallingConvention.Cdecl)] public delegate int DbFn(IntPtr db);
@@ -361,10 +366,175 @@ namespace AITaskMonitor.CodexTitles {
    public void Dispose() { if(library!=IntPtr.Zero){FreeLibrary(library);library=IntPtr.Zero;} }
   }
  }
+
+ public sealed class RolloutSnapshot {
+  public bool Success;
+  public long StartedTicks;
+  public Dictionary<string,string> Paths=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+  public Dictionary<string,long> CheckedTicks=new Dictionary<string,long>(StringComparer.OrdinalIgnoreCase);
+ }
+
+ // SQLite and rollout-header reads are restricted to a bounded background worker.
+ public sealed class RolloutReader : IDisposable {
+  private sealed class Entry { public string Revision,Path; public long StartedTicks; }
+  private readonly object gate=new object();
+  private readonly CancellationTokenSource stop=new CancellationTokenSource();
+  private readonly Dictionary<string,Entry> entries=new Dictionary<string,Entry>(StringComparer.OrdinalIgnoreCase);
+  private readonly Dictionary<string,long> attempts=new Dictionary<string,long>(StringComparer.OrdinalIgnoreCase);
+  private Dictionary<string,string> wanted=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+  private Dictionary<string,string> pendingIds;
+  private Task<RolloutSnapshot> pending,abandoned;
+  private string home="",pendingHome="";
+  private long pendingStarted;
+
+  public RolloutSnapshot Snapshot(string requestedHome,string[] ids) { return Snapshot(requestedHome,ids,null); }
+  public RolloutSnapshot Snapshot(string requestedHome,string[] ids,string[] revisions) {
+   lock(gate) {
+    if(!String.Equals(home,requestedHome,StringComparison.OrdinalIgnoreCase)) {
+     home=requestedHome; entries.Clear(); attempts.Clear();
+    }
+    var next=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+    if(ids!=null) for(int i=0;i<ids.Length && i<768;i++) {
+     string id=ids[i]; if(String.IsNullOrEmpty(id) || id.Length>128)continue;
+     next[id]=revisions!=null && i<revisions.Length ? (revisions[i] ?? "") : "";
+    }
+    foreach(var old in new List<string>(entries.Keys)) {
+     string revision;
+     if(!next.TryGetValue(old,out revision) || !String.Equals(entries[old].Revision,revision,StringComparison.Ordinal)) entries.Remove(old);
+    }
+    foreach(var item in next) {
+     string prior;
+     if(wanted.TryGetValue(item.Key,out prior) && !String.Equals(prior,item.Value,StringComparison.Ordinal)) attempts.Remove(item.Key);
+    }
+    wanted=next;
+    long now=Stopwatch.GetTimestamp();
+    if(pending!=null && !pending.IsCompleted && (now-pendingStarted)>=4*Stopwatch.Frequency && (abandoned==null || abandoned.IsCompleted)) {
+     abandoned=pending; pending=null;
+    }
+    if(pending!=null && pending.IsCompleted) {
+     try {
+      RolloutSnapshot value=pending.Result;
+      if(String.Equals(home,pendingHome,StringComparison.OrdinalIgnoreCase)) foreach(var item in pendingIds) {
+       string current,path;
+       if(!wanted.TryGetValue(item.Key,out current) || !String.Equals(current,item.Value,StringComparison.Ordinal)) continue;
+       value.Paths.TryGetValue(item.Key,out path);
+       entries[item.Key]=new Entry {Revision=current,Path=value.Success ? path : null,StartedTicks=value.StartedTicks};
+      }
+     } catch { }
+     pending=null;
+    }
+    if(!stop.IsCancellationRequested && pending==null && wanted.Count>0) {
+     var due=new List<string>();
+     foreach(var item in wanted) {
+      long last;
+      if(!attempts.TryGetValue(item.Key,out last) || now-last>=5*Stopwatch.Frequency || !entries.ContainsKey(item.Key)) due.Add(item.Key);
+     }
+     due.Sort((a,b) => { long x,y; attempts.TryGetValue(a,out x); attempts.TryGetValue(b,out y); int c=x.CompareTo(y); return c!=0 ? c : StringComparer.OrdinalIgnoreCase.Compare(a,b); });
+     if(due.Count>0) {
+      if(due.Count>64)due.RemoveRange(64,due.Count-64);
+      pendingIds=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
+      foreach(string id in due) {pendingIds[id]=wanted[id];attempts[id]=now;}
+      if(attempts.Count>4096) {
+       var expired=new List<string>();
+       foreach(string id in attempts.Keys)if(!wanted.ContainsKey(id))expired.Add(id);
+       expired.Sort((a,b) => attempts[a].CompareTo(attempts[b]));
+       foreach(string id in expired){if(attempts.Count<=4096)break;attempts.Remove(id);}
+      }
+      string capturedHome=home; string[] capturedIds=due.ToArray(); CancellationToken token=stop.Token;
+      pendingHome=capturedHome; pendingStarted=now;
+      pending=Task.Factory.StartNew(() => ReadNow(capturedHome,capturedIds,token),token,TaskCreationOptions.None,TaskScheduler.Default);
+     }
+    }
+    var result=new RolloutSnapshot {Success=true};
+    foreach(var item in entries) {
+     if(!String.IsNullOrEmpty(item.Value.Path))result.Paths[item.Key]=item.Value.Path;
+     result.CheckedTicks[item.Key]=item.Value.StartedTicks;
+    }
+    return result;
+   }
+  }
+  public void RefreshSoon(string id) {lock(gate){if(!String.IsNullOrEmpty(id))attempts.Remove(id);}}
+  public static RolloutSnapshot ReadNow(string home,string[] ids) {return ReadNow(home,ids,CancellationToken.None);}
+  private static RolloutSnapshot ReadNow(string home,string[] ids,CancellationToken stop) {
+   var result=new RolloutSnapshot {StartedTicks=Stopwatch.GetTimestamp()};
+   try {
+    string root=NormalizeLocal(home), database=Path.Combine(root,"state_5.sqlite");
+    if(ids==null || ids.Length==0 || !Reader.SafeParents(root) || !Reader.SafeFile(database) ||
+       !Reader.SafeFile(database+"-wal") || !Reader.SafeFile(database+"-shm") || !Reader.CanShareRead(database) ||
+       !Reader.CanShareRead(database+"-wal") || !Reader.CanShareRead(database+"-shm")) return result;
+    using(var sqlite=new Reader.Native()) {
+     if(sqlite.Version()<3031000)return result;
+     IntPtr db=IntPtr.Zero,query=IntPtr.Zero; Reader.Native.ProgressFn progress=null;
+     try {
+      int rc=sqlite.Open(Reader.Utf8(database),out db,0x00000001|0x00008000|0x01000000,IntPtr.Zero);
+      if(rc!=0 || db==IntPtr.Zero || sqlite.ReadOnly(db,Reader.Utf8("main"))!=1)return result;
+      sqlite.BusyTimeout(db,0);sqlite.Limit(db,0,65536);
+      var clock=Stopwatch.StartNew();progress=unused => stop.IsCancellationRequested || clock.ElapsedMilliseconds>=1500 ? 1 : 0;
+      sqlite.SetProgress(db,1000,progress,IntPtr.Zero);
+      rc=sqlite.Prepare(db,Reader.Utf8("SELECT rollout_path,history_mode,CAST(archived AS TEXT) FROM main.threads WHERE id=?1 LIMIT 2"),-1,out query,IntPtr.Zero);
+      if(rc!=0 || query==IntPtr.Zero || sqlite.StatementReadOnly(query)!=1)return result;
+      foreach(string id in ids) {
+       if(stop.IsCancellationRequested || clock.ElapsedMilliseconds>=1500)return result;
+       if(String.IsNullOrEmpty(id) || id.Length>128)continue;
+       sqlite.Reset(query);sqlite.ClearBindings(query);byte[] key=Reader.Utf8(id);
+       if(sqlite.BindText(query,1,key,key.Length-1,new IntPtr(-1))!=0)return result;
+       rc=sqlite.Step(query);if(rc==101)continue;if(rc!=100)return result;
+       string path=sqlite.Column(query,0),mode=sqlite.Column(query,1),archived=sqlite.Column(query,2);
+       if(sqlite.Step(query)!=101)return result;
+       if(archived=="0" && (mode=="paginated" || mode=="legacy") && ValidatePath(root,id,path))result.Paths[id]=NormalizeLocal(path);
+      }
+      result.Success=true;
+     } finally {if(query!=IntPtr.Zero)sqlite.Finalize(query);if(db!=IntPtr.Zero)sqlite.Close(db);GC.KeepAlive(progress);}
+    }
+   } catch {result.Paths.Clear();result.Success=false;}
+   finally {if(!result.Success)result.Paths.Clear();}
+   return result;
+  }
+  private static string NormalizeLocal(string path) {
+   if(String.IsNullOrWhiteSpace(path))throw new ArgumentException("Missing local path.");
+   if(path.StartsWith(@"\\?\",StringComparison.OrdinalIgnoreCase))path=path.Substring(4);
+   if(path.Length<3 || !Char.IsLetter(path[0]) || path[1]!=':' || (path[2]!='\\' && path[2]!='/'))throw new ArgumentException("Expected local drive path.");
+   return Path.GetFullPath(path);
+  }
+  private static bool ValidatePath(string home,string id,string path) {
+   try {
+    string root=NormalizeLocal(Path.Combine(home,"sessions")).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar)+Path.DirectorySeparatorChar;
+    string full=NormalizeLocal(path);
+    if(!full.StartsWith(root,StringComparison.OrdinalIgnoreCase))return false;
+    string name=Path.GetFileName(full),prefix="-"+id; int position=name.LastIndexOf(prefix,StringComparison.OrdinalIgnoreCase);
+    if(!name.StartsWith("rollout-",StringComparison.OrdinalIgnoreCase) || position<0)return false;
+    string suffix=name.Substring(position+prefix.Length);Guid rolloutId;
+    if(!String.Equals(suffix,".jsonl",StringComparison.OrdinalIgnoreCase) && !(suffix.Length==43 && suffix[0]=='_' && suffix.EndsWith(".jsonl",StringComparison.OrdinalIgnoreCase) && Guid.TryParseExact(suffix.Substring(1,36),"D",out rolloutId)))return false;
+    for(DirectoryInfo dir=new DirectoryInfo(Path.GetDirectoryName(full));dir!=null;dir=dir.Parent) {
+     string current=dir.FullName.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar)+Path.DirectorySeparatorChar;
+     if(!current.StartsWith(root,StringComparison.OrdinalIgnoreCase))return false;
+     FileAttributes a=dir.Attributes;if((a&FileAttributes.Directory)==0 || (a&FileAttributes.ReparsePoint)!=0)return false;
+     if(String.Equals(current,root,StringComparison.OrdinalIgnoreCase))break;
+    }
+    if(!Reader.SafeFile(full))return false;
+    byte[] buffer=new byte[65536];string line=null;
+    using(FileStream file=File.Open(full,FileMode.Open,FileAccess.Read,FileShare.ReadWrite|FileShare.Delete)) using(var header=new MemoryStream()) {
+     while(header.Length<=1048576) {
+      int n=file.Read(buffer,0,buffer.Length);if(n<=0)break;int end=Array.IndexOf(buffer,(byte)10,0,n);int take=end<0?n:end;
+      if(header.Length+take>1048576)return false;header.Write(buffer,0,take);
+      if(end>=0){line=new UTF8Encoding(false,true).GetString(header.ToArray()).TrimStart('\uFEFF').TrimEnd('\r');break;}
+     }
+    }
+    if(line==null)return false;
+    Type type=Type.GetType("System.Web.Script.Serialization.JavaScriptSerializer, System.Web.Extensions, Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35",true);
+    var record=type.GetMethod("DeserializeObject").Invoke(Activator.CreateInstance(type),new object[]{line}) as IDictionary<string,object>;
+    object kind,payload,recorded; if(record==null || !record.TryGetValue("type",out kind) || !(kind is string) || (string)kind!="session_meta" || !record.TryGetValue("payload",out payload))return false;
+    var meta=payload as IDictionary<string,object>;
+    return meta!=null && meta.TryGetValue("id",out recorded) && recorded is string && String.Equals((string)recorded,id,StringComparison.OrdinalIgnoreCase);
+   } catch {return false;}
+  }
+  public void Dispose(){stop.Cancel();}
+ }
 }
 '@
  }
  $script:codexTitleReader=[AITaskMonitor.CodexTitles.Reader]::new()
+ $script:codexRolloutReader=[AITaskMonitor.CodexTitles.RolloutReader]::new()
 }catch{}
 $script:lastClaudeTasks = @()
 $script:sourceErrors = @()
@@ -2242,7 +2412,66 @@ function Codex-Uncertain([string]$id,$threadState) {
  return ($threadState.State -eq "unknown" -and $script:observedCodex.ContainsKey($id))
 }
 
+function Update-CodexRolloutPaths($snapshot,$sessions) {
+ $next=@{};$paths=Prop $snapshot 'Paths'
+ if($null -ne $paths){foreach($session in $sessions){
+  $id=[string](Prop $session 'id' '')
+  if($id -and $paths.ContainsKey($id)){$next[$id]=[string]$paths[$id]}
+ }}
+ foreach($id in @($next.Keys)){
+  $new=[string]$next[$id];$old=if($script:codexRolloutPaths.ContainsKey($id)){[string]$script:codexRolloutPaths[$id]}else{''}
+  if([string]::Equals($old,$new,[StringComparison]::OrdinalIgnoreCase)){continue}
+  $cache=$script:sessionDiscovery
+  [Threading.Monitor]::Enter($cache.Gate)
+  try{
+   $cached=if($cache.Files.ContainsKey($id)){[string]$cache.Files[$id]}else{''}
+   if($cached -and -not [string]::Equals($cached,$new,[StringComparison]::OrdinalIgnoreCase)){
+    [void]$cache.Files.Remove($id);[void]$cache.DatedMisses.Remove($id);[void]$cache.RolloutMisses.Remove($id)
+    [void]$script:lifecycleState.Remove($cached);[void]$script:planCache.Remove($cached)
+   }
+  }finally{[Threading.Monitor]::Exit($cache.Gate)}
+  if($script:unindexedPaths.ContainsKey($id) -and -not [string]::Equals([string]$script:unindexedPaths[$id],$new,[StringComparison]::OrdinalIgnoreCase)){
+   $prior=[string]$script:unindexedPaths[$id];[void]$script:unindexedPaths.Remove($id)
+   [void]$script:lifecycleState.Remove($prior);[void]$script:planCache.Remove($prior)
+  }
+  if($old -and -not [string]::Equals($old,$new,[StringComparison]::OrdinalIgnoreCase)){
+   [void]$script:lifecycleState.Remove($old);[void]$script:planCache.Remove($old)
+  }
+  if($script:codexObservedStarts.ContainsKey($id) -and
+     -not [string]::Equals([string]$script:codexObservedStarts[$id].Path,$new,[StringComparison]::OrdinalIgnoreCase)){
+   [void]$script:codexObservedStarts.Remove($id);[void]$script:codexTerminalChecks.Remove($id)
+   [void]$script:observedCodex.Remove($id);[void]$script:planConfirmations.Remove($id)
+  }
+ }
+ $script:codexRolloutPaths=$next;$script:codexRolloutSnapshot=$snapshot
+}
+
+function Confirm-CodexTerminal([string]$id,$state,[string]$path) {
+ $reader=Get-Variable -Scope Script -Name codexRolloutReader -ErrorAction SilentlyContinue
+ if($null -eq $reader){return $true}
+ if($null -eq $reader.Value -or -not $script:codexRolloutPaths.ContainsKey($id) -or
+    -not [string]::Equals([string]$script:codexRolloutPaths[$id],$path,[StringComparison]::OrdinalIgnoreCase) -or
+    -not $script:codexObservedStarts.ContainsKey($id)){return $false}
+ $start=$script:codexObservedStarts[$id]
+ if(-not [string]::Equals([string]$start.Path,$path,[StringComparison]::OrdinalIgnoreCase) -or
+    -not $state.StartKey -or [string]$start.StartKey -cne [string]$state.StartKey){return $false}
+ $check=if($script:codexTerminalChecks.ContainsKey($id)){$script:codexTerminalChecks[$id]}else{$null}
+ if($null -eq $check -or -not [string]::Equals([string]$check.Path,$path,[StringComparison]::OrdinalIgnoreCase) -or
+    [string]$check.StartKey -cne [string]$state.StartKey){
+  $check=[PSCustomObject]@{Path=$path;StartKey=[string]$state.StartKey;After=[Diagnostics.Stopwatch]::GetTimestamp()}
+  $script:codexTerminalChecks[$id]=$check
+ }
+ $checked=Prop $script:codexRolloutSnapshot 'CheckedTicks'
+ if($null -ne $checked -and $checked.ContainsKey($id) -and [long]$checked[$id] -gt [long]$check.After){return $true}
+ $reader.Value.RefreshSoon($id)
+ return $false
+}
+
 function Session-File([string]$id) {
+ $rollouts=Get-Variable -Scope Script -Name codexRolloutPaths -ErrorAction SilentlyContinue
+ if($null -ne $rollouts -and $null -ne $rollouts.Value -and $rollouts.Value.ContainsKey($id)){
+  return [string]$rollouts.Value[$id]
+ }
  $cache=$script:sessionDiscovery
  [Threading.Monitor]::Enter($cache.Gate)
  try {
@@ -3104,6 +3333,18 @@ function Codex-Tasks {
   $sessions+=@($candidate)
   $script:unindexedPaths[$id]=[string]$candidate.path
  }
+ $rolloutReader=Get-Variable -Scope Script -Name codexRolloutReader -ErrorAction SilentlyContinue
+ if($null -ne $rolloutReader){
+  $snapshot=$null
+  if($null -ne $rolloutReader.Value -and $sessions.Count -gt 0){
+   try{
+    $ids=[string[]]@($sessions|ForEach-Object {[string](Prop $_ 'id' '')})
+    $revisions=[string[]]@($sessions|ForEach-Object {[string](Prop $_ 'updated_at' '')})
+    $snapshot=$rolloutReader.Value.Snapshot($codexHome,$ids,$revisions)
+   }catch{}
+  }
+  Update-CodexRolloutPaths $snapshot $sessions
+ }
  $codexTitles=$null
  $parentTitles=@{};$subagentRefs=@{}
  foreach($session in $sessions){
@@ -3168,6 +3409,24 @@ function Codex-Tasks {
   $unindexed=[bool](Prop $session 'unindexed' $false)
   if($title -eq "Guardian review"){continue}
   $threadState = Thread-State $id $unindexed
+  if($null -ne $rolloutReader){
+   $currentPath=Session-File $id
+   if($script:codexObservedStarts.ContainsKey($id) -and
+      -not [string]::Equals([string]$script:codexObservedStarts[$id].Path,$currentPath,[StringComparison]::OrdinalIgnoreCase)){
+    # A fallback path is not evidence that the observed rollout was replaced.
+    # Preserve its start and let Source-Snapshot retain the prior card until
+    # a newly verified path is available.
+    if(-not $script:codexRolloutPaths.ContainsKey($id)){continue}
+    [void]$script:codexObservedStarts.Remove($id);[void]$script:codexTerminalChecks.Remove($id)
+   }
+   if($threadState.State -in @('completed','interrupted')){
+    if(-not (Confirm-CodexTerminal $id $threadState $currentPath)){continue}
+    [void]$script:codexObservedStarts.Remove($id);[void]$script:codexTerminalChecks.Remove($id)
+   }elseif($currentPath -and $threadState.State -eq 'unknown' -and $threadState.HasStartMarker -and $threadState.StartKey){
+    $script:codexObservedStarts[$id]=[PSCustomObject]@{Path=$currentPath;StartKey=[string]$threadState.StartKey}
+    [void]$script:codexTerminalChecks.Remove($id)
+   }
+  }
   if($threadState.State -in @('completed','interrupted')){$script:codexTerminated[$id]=$true}
   $eventActive = $threadState.State -eq "active"
   $uncertain = Codex-Uncertain $id $threadState
@@ -4851,6 +5110,7 @@ $tray=New-Object Windows.Forms.NotifyIcon; $tray.Icon=if($null -ne $script:appli
 $menu=New-Object Windows.Forms.ContextMenuStrip; $script:trayShowMenu=$menu.Items.Add("Развернуть"); $script:trayExitMenu=$menu.Items.Add("Выход"); $script:trayShowMenu.Add_Click({Restore-Window;Set-CompactMode $false}); $script:trayExitMenu.Add_Click({$window.Close()}); $tray.ContextMenuStrip=$menu
 $timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();$cursorVariable=Get-Variable -Scope Script -Name unindexedCursor -ErrorAction SilentlyContinue;if($null -ne $cursorVariable -and $null -ne $cursorVariable.Value -and $null -ne $cursorVariable.Value.Enumerator){try{$cursorVariable.Value.Enumerator.Dispose()}catch{}};if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};Stop-UpdateCheck;if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:kimiModulesAvailable){Stop-KimiMonitorController $script:kimiController};if($script:hermesModulesAvailable -and -not $PreviewSources){try{Stop-HermesMonitorController $script:hermesController}catch{}};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
 $window.Add_Closed({if($null -ne $script:codexTitleReader){$script:codexTitleReader.Dispose()}})
+$window.Add_Closed({if($null -ne $script:codexRolloutReader){$script:codexRolloutReader.Dispose()}})
 if($script:codexCloudModulesAvailable -and -not $SnapshotFile -and $PreviewActiveTasks -lt 0 -and (Load-CodexCloudEnabled)){Set-CodexCloudControllerEnabled $script:codexCloudController $true}
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false

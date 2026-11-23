@@ -105,7 +105,7 @@ jobs:
             }
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if($env:AITM_TEST_PART -eq 'checks'){
-              $tests=if($env:AITM_REMAINING_ONLY -eq '1'){@('Test-CodexPassive.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}else{@('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexTitleLookup.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CompactDotReuse.ps1','Test-CompactSwitchUi.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}
+              $tests=if($env:AITM_REMAINING_ONLY -eq '1'){@('Test-CodexPassive.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}else{@('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexTitleLookup.ps1','Test-CodexRolloutReader.ps1','Test-CodexRolloutResolution.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CompactDotReuse.ps1','Test-CompactSwitchUi.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}
               foreach($test in $tests){
                 Write-Output ('Running '+$test)
                 Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
