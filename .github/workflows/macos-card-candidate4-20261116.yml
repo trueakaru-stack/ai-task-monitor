@@ -273,3 +273,67 @@ jobs:
           path: ${{ runner.temp }}/aitm-card-tests.*/temp/render-*/renders/*.png
           if-no-files-found: error
           retention-days: 30
+      - name: Build and inspect isolated macOS candidate
+        if: ${{ success() && matrix.runner == 'macos-15' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$(git -C "$AITM_TEST_TASK_ROOT/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          task_root="$AITM_TEST_TASK_ROOT"
+          task_source="$task_root/source/macos"
+          task_bin="$task_root/release-tools"
+          mkdir -p "$task_bin" "$task_root/release-artifacts" "$task_root/dmg-mount"
+          cat > "$task_bin/swift" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          test "$1" = build
+          exec "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" "$@" \
+            --cache-path "$AITM_RELEASE_ROOT/swift-cache" --config-path "$AITM_RELEASE_ROOT/swift-config" \
+            --security-path "$AITM_RELEASE_ROOT/swift-security"
+          SCRIPT
+          chmod 700 "$task_bin/swift"
+          task_run="$task_root/run-isolated"
+          task_path="$task_bin:$AITM_TASK_PATH"
+          cd "$task_source"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
+            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/build-app.sh
+          task_app="$task_source/dist/AI Task Monitor.app"
+          test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = 0.3.12
+          test "$(/usr/bin/plutil -extract AITaskMonitorReleaseVersion raw -o - "$task_app/Contents/Info.plist")" = 0.3.12
+          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$task_app/Contents/Info.plist")" = 16
+          /usr/bin/lipo -verify_arch arm64 x86_64 "$task_app/Contents/MacOS/AITaskMonitor"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_app"
+          /usr/bin/codesign -dv --verbose=4 "$task_app" 2>&1 | tee "$task_root/release-artifacts/signature.txt"
+          grep -q 'Signature=adhoc' "$task_root/release-artifacts/signature.txt"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /bin/bash ./scripts/smoke-test.sh "$task_app"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /bin/bash ./scripts/create-dmg.sh
+          task_dmg="$task_source/dist/AITaskMonitor-macOS-0.3.12.dmg"
+          (cd "$task_source/dist" && /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt)
+          /usr/bin/hdiutil verify "$task_dmg"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/hdiutil attach \
+            -readonly -nobrowse -noautoopen -mountpoint "$task_root/dmg-mount" "$task_dmg"
+          trap 'hdiutil detach "$task_root/dmg-mount" >/dev/null 2>&1 || true' EXIT
+          test -d "$task_root/dmg-mount/AI Task Monitor.app"
+          test -L "$task_root/dmg-mount/Applications"
+          test "$(readlink "$task_root/dmg-mount/Applications")" = /Applications
+          test "$(find "$task_root/dmg-mount" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 2
+          /usr/bin/cmp "$task_app/Contents/MacOS/AITaskMonitor" "$task_root/dmg-mount/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
+          /usr/bin/diff -qr "$task_app" "$task_root/dmg-mount/AI Task Monitor.app"
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_root/dmg-mount/AI Task Monitor.app"
+          /usr/bin/hdiutil detach "$task_root/dmg-mount"
+          trap - EXIT
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$task_app" "$task_root/release-artifacts/AI Task Monitor.app.zip"
+          /bin/cp "$task_dmg" "$task_source/dist/SHA256SUMS-macOS.txt" "$task_root/release-artifacts/"
+          (cd "$task_root/release-artifacts" && /usr/bin/shasum -a 256 'AI Task Monitor.app.zip' >> SHA256SUMS-macOS.txt && /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt)
+          printf '%s\n' "$GITHUB_SHA" > "$task_root/release-artifacts/source-commit.txt"
+      - name: Save isolated macOS candidate
+        if: ${{ success() && matrix.runner == 'macos-15' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-0.3.12-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/aitm-card-tests.*/release-artifacts/*
+          if-no-files-found: error
+          retention-days: 7
