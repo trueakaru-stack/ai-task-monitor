@@ -188,6 +188,41 @@ jobs:
           echo "Removed FinderInfo from $count synthetic entries."
           run_logged diff-rw /usr/bin/diff -qr "$task_app" "$rw_app"
           run_logged signature-rw /usr/bin/codesign --verify --deep --strict --verbose=2 "$rw_app"
+          # FSEvents may create a private directory while this disposable image
+          # is writable. Inspect every direct child before removing anything;
+          # refuse links, subdirectories, unknown names and other devices.
+          event_dir="$rw_mount/.fseventsd"
+          if test -e "$event_dir" || test -L "$event_dir"; then
+            test -d "$event_dir"
+            test ! -L "$event_dir"
+            image_device="$(run_isolated /usr/bin/stat -f %d "$rw_mount")"
+            test "$(run_isolated /usr/bin/stat -f %d "$event_dir")" = "$image_device"
+            run_logged list-rw-fsevents /bin/ls -la "$event_dir"
+            cat "$task_root/logs/list-rw-fsevents.log"
+            run_isolated /usr/bin/find -P "$event_dir" -xdev -mindepth 1 -maxdepth 1 -print0 >"$task_root/temp/event-entries"
+            event_count=0
+            while IFS= read -r -d '' entry; do
+              case "$entry" in "$event_dir"/*) ;; *) echo 'Event entry escaped its directory.' >&2; exit 1;; esac
+              entry_name="${entry#"$event_dir"/}"
+              [[ "$entry_name" =~ ^([0-9a-f]{16}|fseventsd-uuid|no_log)$ ]]
+              test -f "$entry"
+              test ! -L "$entry"
+              test "$(run_isolated /usr/bin/stat -f %d "$entry")" = "$image_device"
+              event_count=$((event_count + 1))
+              test "$event_count" -le 128
+            done <"$task_root/temp/event-entries"
+            while IFS= read -r -d '' entry; do
+              test ! -L "$event_dir"
+              test ! -L "$entry"
+              run_isolated /bin/rm "$entry"
+            done <"$task_root/temp/event-entries"
+            test ! -L "$event_dir"
+            run_isolated /bin/rmdir "$event_dir"
+            echo "Removed $event_count verified temporary FSEvents files."
+          fi
+          run_logged list-rw-clean /usr/bin/find "$rw_mount" -mindepth 1 -maxdepth 1 -print
+          cat "$task_root/logs/list-rw-clean.log"
+          test "$(/usr/bin/wc -l <"$task_root/logs/list-rw-clean.log" | /usr/bin/tr -d ' ')" = 2
           run_logged detach-rw /usr/bin/hdiutil detach "$rw_mount"
           trap - EXIT
           run_logged convert-udzo /usr/bin/hdiutil convert "$task_root/temp/hybrid-rw.dmg" -format UDZO \
