@@ -130,7 +130,7 @@ final class ParserTests: XCTestCase {
         let start = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"new-turn"}}"#
         XCTAssertEqual(reader.parseActivity(from: old + "\n" + response), "Checking screenshot stability")
         XCTAssertEqual(reader.parseActivity(from: response + "\n" + completed), "Check build")
-        XCTAssertEqual(reader.parseActivity(from: response + "\n" + commentary), "Checking screenshot stability")
+        XCTAssertEqual(reader.parseActivity(from: response + "\n" + commentary), "Preparing check")
         XCTAssertEqual(reader.parseActivity(from: response + "\n" + start), "")
         XCTAssertEqual(reader.parseActivity(from: response + "\n" + start + "\n" + commentary), "Preparing check")
         let rawOnly = #"{"type":"response_item","payload":{"type":"reasoning","summary":[],"content":[{"text":"PRIVATE_RAW_CONTENT"}]}}"#

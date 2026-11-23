@@ -113,7 +113,7 @@ struct CodexTaskReader {
 
             let plan = try planCache.read(from: file)
             let steps = plan.steps
-            let activity = parseActivity(from: tail)
+            let activity = parseActivity(from: tail, sessionID: id)
             let progress = MonitoredTask.progress(for: steps)
             let unconfirmed = now.timeIntervalSince(modified) >= 7_200
             var displayTitle = title
@@ -194,7 +194,7 @@ struct CodexTaskReader {
                 }
                 let plan = CodexPlanParser.parse(record.tail)
                 let steps = plan.steps
-                let detail = parseActivity(from: record.tail)
+                let detail = parseActivity(from: record.tail, sessionID: id)
                 let status = tr("Статус не подтверждён", "Status unconfirmed")
                 execDiscovery.remember(id: id, file: file, device: record.device, inode: record.inode,
                                        startKey: state.startKey)
@@ -232,7 +232,7 @@ struct CodexTaskReader {
         CodexPlanParser.parse(tail).steps
     }
 
-    func parseActivity(from tail: String) -> String {
+    func parseActivity(from tail: String, sessionID: String? = nil) -> String {
         func decodedJSONContains(_ line: Substring, _ value: String) -> Bool {
             guard line.contains("\\u"), let record = FileHelpers.jsonObject(line) else { return false }
             var pending: [Any] = [record]
@@ -255,6 +255,13 @@ struct CodexTaskReader {
 
         var latestSummary = ""
         var latestCommentary = ""
+        var latestSummaryIndex = -1
+        var latestCommentaryIndex = -1
+        var latestOtherItemIndex = -1
+        var latestFigma: (description: String, index: Int)?
+        var seenFigmaIDs: Set<String> = []
+        var completedFigmaDescriptions: [String: String] = [:]
+        var figmaTrackingReliable = true
         var turnID = ""
         var hasVisibleTurnStart = false
         var turnStartIndex: Int?
@@ -276,10 +283,19 @@ struct CodexTaskReader {
             let recordType = record.string("type")
             let kind = payload.string("type")
             let eventTurnID = payload.string("turn_id")
+            let eventThreadID = payload.string("thread_id")
+            if let sessionID, !eventThreadID.isEmpty, eventThreadID != sessionID { continue }
             if recordType == "event_msg", ["task_started", "turn_started"].contains(kind) {
                 turnID = eventTurnID
                 latestSummary = ""
                 latestCommentary = ""
+                latestSummaryIndex = -1
+                latestCommentaryIndex = -1
+                latestOtherItemIndex = -1
+                latestFigma = nil
+                seenFigmaIDs.removeAll()
+                completedFigmaDescriptions.removeAll()
+                figmaTrackingReliable = true
                 hasVisibleTurnStart = !eventTurnID.isEmpty
                 turnStartIndex = hasVisibleTurnStart ? lineIndex : nil
                 activeCalls.removeAll()
@@ -294,7 +310,51 @@ struct CodexTaskReader {
                 turnStartIndex = nil
                 activeCalls.removeAll()
                 seenCallIDs.removeAll()
+                latestFigma = nil
+                seenFigmaIDs.removeAll()
+                completedFigmaDescriptions.removeAll()
                 continue
+            }
+            if hasVisibleTurnStart && callTrackingReliable && figmaTrackingReliable,
+               recordType == "event_msg", kind == "item_completed",
+               let sessionID, !sessionID.isEmpty {
+                let item = payload.object("item")
+                let itemType = item?.string("type") ?? ""
+                var duplicateFigma = false
+                let matches = eventThreadID == sessionID && eventTurnID == turnID
+                let couldMatch = (eventThreadID.isEmpty || eventThreadID == sessionID) &&
+                                 (eventTurnID.isEmpty || eventTurnID == turnID)
+                if matches, let item, itemType == "McpToolCall", item.string("server") == "codex_apps",
+                   item.string("tool") == "figma.use_figma" {
+                    let id = item.string("id")
+                    let bytes = id.utf8
+                    let validID = !bytes.isEmpty && bytes.count <= 256 && bytes.allSatisfy {
+                        (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95
+                    }
+                    var description = ""
+                    if let rawDescription = item.object("arguments")?["description"] as? String,
+                       rawDescription.utf16.count <= 4_096 {
+                        description = FileHelpers.normalized(rawDescription, limit: 4_096)
+                    }
+                    let completed = item.string("status") == "completed" &&
+                                    (item["error"] == nil || item["error"] is NSNull) &&
+                                    (item.object("result")?["isError"] as? Bool) != true && !description.isEmpty
+                    if validID {
+                        let firstRecord = seenFigmaIDs.insert(id).inserted
+                        if seenFigmaIDs.count > 4_096 {
+                            figmaTrackingReliable = false
+                            latestFigma = nil
+                        } else if firstRecord && completed {
+                            completedFigmaDescriptions[id] = description
+                            latestFigma = (description, lineIndex)
+                        } else if !firstRecord && completed && completedFigmaDescriptions[id] == description {
+                            duplicateFigma = true
+                        }
+                    }
+                }
+                if couldMatch && itemType != "Reasoning" && itemType != "AgentMessage" && !duplicateFigma {
+                    latestOtherItemIndex = lineIndex
+                }
             }
             if hasVisibleTurnStart && callTrackingReliable && recordType == "response_item" {
                 let callID = payload.string("call_id")
@@ -346,11 +406,18 @@ struct CodexTaskReader {
                 }
             } else if recordType == "event_msg", kind == "agent_message", payload.string("phase") == "commentary" {
                 let message = payload.string("message")
-                if !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { latestCommentary = message }
-            } else if payload.string("type") == "message", payload.string("phase") == "commentary" {
+                if !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    latestCommentary = message
+                    latestCommentaryIndex = lineIndex
+                }
+            } else if recordType == "response_item", kind == "message", payload.string("phase") == "commentary",
+                      (payload.string("role").isEmpty || payload.string("role") == "assistant") {
                 for part in payload.array("content") where part.string("type") == "output_text" {
                     let text = part.string("text")
-                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { latestCommentary = text }
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        latestCommentary = text
+                        latestCommentaryIndex = lineIndex
+                    }
                 }
             } else if kind == "item_completed", let item = payload.object("item") {
                 if item.string("type") == "Reasoning" {
@@ -358,7 +425,10 @@ struct CodexTaskReader {
                 } else if item.string("type") == "AgentMessage", item.string("phase") == "commentary" {
                     for part in item.array("content") where part.string("type") == "Text" {
                         let text = part.string("text")
-                        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { latestCommentary = text }
+                        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            latestCommentary = text
+                            latestCommentaryIndex = lineIndex
+                        }
                     }
                 }
             }
@@ -371,7 +441,10 @@ struct CodexTaskReader {
                     let remainder = firstLine.dropFirst(2)
                     if let end = remainder.range(of: "**") { extracted = String(remainder[..<end.lowerBound]) }
                 }
-                if !extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { latestSummary = extracted }
+                if !extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    latestSummary = extracted
+                    latestSummaryIndex = lineIndex
+                }
             }
         }
         if hasVisibleTurnStart && callTrackingReliable, let turnStartIndex {
@@ -384,7 +457,13 @@ struct CodexTaskReader {
                 if !seenEarlier { return active.title }
             }
         }
-        return FileHelpers.normalized(latestSummary.isEmpty ? latestCommentary : latestSummary, limit: 600)
+        if hasVisibleTurnStart && callTrackingReliable && figmaTrackingReliable, let latestFigma,
+           latestFigma.index > max(latestSummaryIndex, latestCommentaryIndex),
+           latestFigma.index >= latestOtherItemIndex {
+            return tr("Последнее действие в Figma: ", "Last Figma action: ") + latestFigma.description
+        }
+        let latestText = latestCommentaryIndex > latestSummaryIndex ? latestCommentary : latestSummary
+        return FileHelpers.normalized(latestText, limit: 600)
     }
 
     // A supported timestamped basename is exactly the form emitted by the
