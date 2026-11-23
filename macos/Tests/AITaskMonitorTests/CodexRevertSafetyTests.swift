@@ -67,7 +67,18 @@ final class CodexRevertSafetyTests: XCTestCase {
                                     "payload": ["type": type, "turn_id": "synthetic"]]
         var bytes = try JSONSerialization.data(withJSONObject: value)
         bytes.append(0x0a)
-        try bytes.write(to: url, options: .atomic)
+        let temporary = url.deletingLastPathComponent()
+            .appendingPathComponent(".aitm-test-" + UUID().uuidString)
+        let fd = temporary.path.withCString {
+            open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600))
+        }
+        guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close(); _ = temporary.path.withCString { unlink($0) } }
+        try handle.write(contentsOf: bytes)
+        try handle.close()
+        let renamed = temporary.path.withCString { source in url.path.withCString { rename(source, $0) } }
+        guard renamed == 0 else { throw CocoaError(.fileWriteUnknown) }
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(2)], ofItemAtPath: url.path)
     }
 

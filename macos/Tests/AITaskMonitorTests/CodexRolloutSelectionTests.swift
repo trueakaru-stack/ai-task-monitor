@@ -109,11 +109,12 @@ final class CodexRolloutSelectionTests: XCTestCase {
         return (old, current, other)
     }
 
-    private func snapshot(_ reader: CodexTaskReader, observed: Set<String> = [], since: Date? = nil) throws -> CodexTaskSnapshot {
+    private func snapshot(_ reader: CodexTaskReader, observed: Set<String> = [], hidden: Set<String> = [],
+                          since: Date? = nil) throws -> CodexTaskSnapshot {
         let start = since ?? monitoringStartedAt
-        _ = try reader.readSnapshot(observedSince: start, previouslyObserved: observed)
+        _ = try reader.readSnapshot(observedSince: start, previouslyObserved: observed, hiddenIDs: hidden)
         reader.waitForAmbiguousObservationForTests()
-        let result = try reader.readSnapshot(observedSince: start, previouslyObserved: observed)
+        let result = try reader.readSnapshot(observedSince: start, previouslyObserved: observed, hiddenIDs: hidden)
         reader.waitForAmbiguousObservationForTests()
         return result
     }
@@ -149,8 +150,9 @@ final class CodexRolloutSelectionTests: XCTestCase {
             try append(row("task_complete", id: thread), to: files.current)
             let terminal = try snapshot(reader, observed: [thread])
             XCTAssertFalse(terminal.terminalIDs.contains(thread))
-            let retained = TaskSnapshotMerger.merge(previous: [hint], current: terminal.tasks, terminalIDs: terminal.terminalIDs)
-            XCTAssertTrue(try XCTUnwrap(retained.first { $0.id == thread }).isUnconfirmed)
+            XCTAssertNotNil(terminal.uncertainEndings[thread])
+            XCTAssertFalse(terminal.tasks.contains { $0.id == thread })
+            XCTAssertTrue(terminal.tasks.contains { $0.id == neighbor && $0.isActive })
         }
     }
 
@@ -211,14 +213,18 @@ final class CodexRolloutSelectionTests: XCTestCase {
             var batch = try row("task_complete", id: thread)
             batch.append(try row("agent_message", id: thread))
             try append(batch, to: files.current)
-            XCTAssertFalse(try snapshot(reader).tasks.contains { $0.id == thread })
+            let ending = try snapshot(reader)
+            let notice = try XCTUnwrap(ending.uncertainEndings[thread])
+            XCTAssertFalse(ending.tasks.contains { $0.id == thread })
+            XCTAssertFalse(ending.terminalIDs.contains(thread))
+            reader.acknowledgeUncertainEndings([thread: notice.token])
             try append(row("item_completed", id: thread), to: files.current)
-            let late = try snapshot(reader)
+            let late = try snapshot(reader, hidden: [thread])
             XCTAssertFalse(late.tasks.contains { $0.id == thread })
             XCTAssertFalse(late.terminalIDs.contains(thread))
             try append(row("task_started", id: thread, turn: "new-turn"), to: files.current)
-            let newTurn = try snapshot(reader)
-            XCTAssertTrue(try XCTUnwrap(newTurn.tasks.first { $0.id == thread }).isUnconfirmed)
+            let newTurn = try snapshot(reader, hidden: [thread])
+            XCTAssertFalse(newTurn.tasks.contains { $0.id == thread })
         }
         try withRoot { root in
             let files = try setup(root)
@@ -229,6 +235,60 @@ final class CodexRolloutSelectionTests: XCTestCase {
             let late = try snapshot(reader)
             XCTAssertFalse(late.tasks.contains { $0.id == thread })
             XCTAssertFalse(late.terminalIDs.contains(thread))
+        }
+    }
+
+    func testCompleteTerminalBeforePartialTailIsNotIgnored() throws {
+        try withRoot { root in
+            let files = try setup(root)
+            let reader = CodexTaskReader(codexHome: root)
+            _ = try snapshot(reader)
+            try append(row("agent_reasoning", id: thread), to: files.current)
+            XCTAssertTrue(try XCTUnwrap(snapshot(reader).tasks.first { $0.id == thread }).isUnconfirmed)
+
+            let following = try row("agent_message", id: thread)
+            let split = following.count / 2
+            var batch = try row("task_complete", id: thread)
+            batch.append(contentsOf: following.prefix(split))
+            try append(batch, to: files.current)
+            let ending = try snapshot(reader, observed: [thread])
+            let notice = try XCTUnwrap(ending.uncertainEndings[thread])
+            XCTAssertFalse(ending.tasks.contains { $0.id == thread })
+            XCTAssertFalse(ending.terminalIDs.contains(thread))
+            XCTAssertTrue(ending.tasks.contains { $0.id == neighbor && $0.isActive })
+
+            reader.acknowledgeUncertainEndings([thread: notice.token])
+            try append(Data(following.dropFirst(split)), to: files.current)
+            let completed = try snapshot(reader, hidden: [thread])
+            XCTAssertNil(completed.uncertainEndings[thread])
+            XCTAssertFalse(completed.tasks.contains { $0.id == thread })
+            XCTAssertFalse(completed.terminalIDs.contains(thread))
+            XCTAssertTrue(completed.tasks.contains { $0.id == neighbor && $0.isActive })
+        }
+    }
+
+    func testEndingBeforeCompetingHistoryBaselineHidesObservedCard() throws {
+        try withRoot { root in
+            let files = try setup(root)
+            try FileManager.default.removeItem(at: files.old)
+            let reader = CodexTaskReader(codexHome: root)
+            let initial = try snapshot(reader)
+            XCTAssertTrue(initial.tasks.contains { $0.id == thread && $0.isActive })
+
+            // The ending and the second history appear between refreshes.
+            try append(row("task_complete", id: thread), to: files.current)
+            try create(files.old, id: thread, event: "unrelated_event")
+            let ambiguous = try snapshot(reader, observed: [thread])
+            let notice = try XCTUnwrap(ambiguous.uncertainEndings[thread])
+            XCTAssertFalse(ambiguous.tasks.contains { $0.id == thread })
+            XCTAssertFalse(ambiguous.terminalIDs.contains(thread))
+            XCTAssertTrue(ambiguous.tasks.contains { $0.id == neighbor && $0.isActive })
+
+            reader.acknowledgeUncertainEndings([thread: notice.token])
+            let unchanged = try snapshot(reader, hidden: [thread])
+            XCTAssertFalse(unchanged.tasks.contains { $0.id == thread })
+            XCTAssertFalse(unchanged.terminalIDs.contains(thread))
+            XCTAssertTrue(unchanged.tasks.contains { $0.id == neighbor && $0.isActive })
         }
     }
 
@@ -617,8 +677,10 @@ final class CodexRolloutSelectionTests: XCTestCase {
             try append(row("task_complete", id: thread), to: files.current)
             let oldTerminal = try snapshot(reader, observed: [thread])
             XCTAssertFalse(oldTerminal.terminalIDs.contains(thread))
+            let notice = try XCTUnwrap(oldTerminal.uncertainEndings[thread])
+            reader.acknowledgeUncertainEndings([thread: notice.token])
             try append(row("task_started", id: thread, turn: "new-turn"), to: files.current)
-            let active = try snapshot(reader, observed: [thread])
+            let active = try snapshot(reader, hidden: [thread])
             let current = try XCTUnwrap(active.tasks.first { $0.id == thread })
             XCTAssertTrue(current.isActive)
             XCTAssertFalse(current.isUnconfirmed)
@@ -627,9 +689,13 @@ final class CodexRolloutSelectionTests: XCTestCase {
             try append(row("task_complete", id: thread, turn: ""), to: files.current)
             let unscoped = try snapshot(reader, observed: [thread])
             XCTAssertFalse(unscoped.terminalIDs.contains(thread))
+            let laterNotice = try XCTUnwrap(unscoped.uncertainEndings[thread])
+            XCTAssertFalse(unscoped.tasks.contains { $0.id == thread })
+            reader.acknowledgeUncertainEndings([thread: laterNotice.token])
             try append(row("task_complete", id: thread, turn: "new-turn"), to: files.current)
-            let finished = try snapshot(reader, observed: [thread])
-            XCTAssertTrue(finished.terminalIDs.contains(thread))
+            let finished = try snapshot(reader, hidden: [thread])
+            XCTAssertFalse(finished.terminalIDs.contains(thread))
+            XCTAssertFalse(finished.tasks.contains { $0.id == thread })
             XCTAssertTrue(finished.tasks.contains { $0.id == neighbor && $0.isActive })
         }
         try withRoot { root in
@@ -777,6 +843,78 @@ final class CodexRolloutSelectionTests: XCTestCase {
             XCTAssertTrue(tracker.observe(normal, sessionsDirectory: sessions).isEmpty)
             try append(row("task_started", id: thread, turn: "after-capacity"), to: files.current)
             XCTAssertNotNil(tracker.observe(normal, sessionsDirectory: sessions)[thread])
+        }
+    }
+
+    @MainActor
+    private func drive(_ store: TaskStore, reader: CodexTaskReader, until condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(5)
+        repeat {
+            store.refresh()
+            reader.waitForAmbiguousObservationForTests()
+            store.waitForCodexHiddenStateForTests()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            if condition() { return true }
+        } while Date() < deadline
+        return false
+    }
+
+    @MainActor
+    func testHiddenEndingPersistsAcrossRestartWithoutHidingNeighbor() throws {
+        try withRoot { root in
+            let files = try setup(root)
+            let checkpoint = CodexHiddenStateStore(directory: root.appendingPathComponent("checkpoint"))
+            let key = CodexHiddenKey(codexHomeID: CodexHiddenKey.homeIdentifier(for: root), threadID: thread)
+            let saved: CodexHiddenRecord
+            do {
+                let reader = CodexTaskReader(codexHome: root)
+                let active = TaskStore(codexReader: reader,
+                    claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("missing-claude")),
+                    previewTasks: [], codexHiddenStore: checkpoint, loadClaudeRetentionPolicy: { nil })
+                defer {
+                    active.waitForCodexHiddenStateForTests()
+                    reader.waitForAmbiguousObservationForTests()
+                }
+                active.refresh()
+                try append(row("task_started", id: neighbor, turn: "neighbor-new"), to: files.other)
+                XCTAssertTrue(drive(active, reader: reader) { active.tasks.contains { $0.id == self.neighbor && $0.isActive } })
+
+                try append(row("agent_reasoning", id: thread), to: files.current)
+                XCTAssertTrue(drive(active, reader: reader) { active.tasks.contains { $0.id == self.thread && $0.isUnconfirmed } })
+                try append(row("task_complete", id: thread), to: files.current)
+                XCTAssertTrue(drive(active, reader: reader) {
+                    !active.tasks.contains { $0.id == self.thread } &&
+                        active.tasks.contains { $0.id == self.neighbor && $0.isActive } &&
+                        (try? checkpoint.load()[key]) != nil
+                })
+                saved = try XCTUnwrap(checkpoint.load()[key])
+                XCTAssertNotNil(saved.turnID)
+            }
+
+            // A surviving old history can look active after a normal restart.
+            // The checkpoint must suppress it without hiding its neighbor.
+            try FileManager.default.removeItem(at: files.current)
+            let restartedReader = CodexTaskReader(codexHome: root)
+            let restarted = TaskStore(codexReader: restartedReader,
+                claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("missing-claude")),
+                previewTasks: [], codexHiddenStore: checkpoint, loadClaudeRetentionPolicy: { nil })
+            defer {
+                restarted.waitForCodexHiddenStateForTests()
+                restartedReader.waitForAmbiguousObservationForTests()
+            }
+            restarted.refresh()
+            try append(row("agent_reasoning", id: thread), to: files.old)
+            try append(row("task_started", id: neighbor, turn: "neighbor-restarted"), to: files.other)
+            XCTAssertTrue(drive(restarted, reader: restartedReader) {
+                restarted.tasks.contains { $0.id == self.neighbor && $0.isActive }
+            })
+            for _ in 0..<3 {
+                restarted.refresh()
+                restartedReader.waitForAmbiguousObservationForTests()
+                XCTAssertFalse(restarted.tasks.contains { $0.id == self.thread })
+                XCTAssertTrue(restarted.tasks.contains { $0.id == self.neighbor && $0.isActive })
+            }
+            XCTAssertEqual(try checkpoint.load()[key], saved)
         }
     }
 }

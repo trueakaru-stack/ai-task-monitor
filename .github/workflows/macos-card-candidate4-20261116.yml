@@ -128,7 +128,10 @@ jobs:
           AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import errno,socket; exec("try:\n s=socket.socket()\n s.connect((\"127.0.0.1\",9))\nexcept OSError as e:\n assert e.errno in (errno.EACCES,errno.EPERM), e\nelse:\n raise AssertionError(\"network was not denied\")")'
           AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexRolloutSelectionTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/rollout-tests.log"
           if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/rollout-tests.log"; then echo 'Rollout tests were skipped.' >&2; exit 1; fi
-          grep -Eq 'Executed 28 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/rollout-tests.log"
+          grep -Eq 'Executed 31 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/rollout-tests.log"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexHiddenStateStoreTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/hidden-store-tests.log"
+          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/hidden-store-tests.log"; then echo 'Hidden-state tests were skipped.' >&2; exit 1; fi
+          grep -Eq 'Executed 10 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/hidden-store-tests.log"
           AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexRevertSafetyTests/testOldTerminalAndNewRevisionRetainUnconfirmedAndDoNotAffectNeighbor "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"
           if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"; then echo 'Existing rollout test was skipped.' >&2; exit 1; fi
           grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"
