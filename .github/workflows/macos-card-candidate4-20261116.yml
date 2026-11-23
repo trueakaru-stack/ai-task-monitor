@@ -1,8 +1,8 @@
 name: Synthetic macOS capacity regressions
 on:
   push:
-    branches: ['macos', 'codex/macos-kimi-scope-fix-20261116', 'codex/macos-activity-ci-20261123']
-    paths: ['.github/workflows/macos-build.yml', '.github/workflows/macos-card-candidate4-20261116.yml', 'macos/**']
+    branches: ['macos', 'codex/macos-kimi-scope-fix-20261116', 'codex/macos-activity-ci-20261123', 'codex/macos-icon-fallback-ci-20261123']
+    paths: ['.github/workflows/macos-build.yml', '.github/workflows/macos-card-candidate4-20261116.yml', '.github/macos-icon-fallback-20261123/**', 'macos/**']
 permissions:
   contents: read
 jobs:
@@ -98,6 +98,13 @@ jobs:
           /bin/ln -s "$AITM_TEST_DENIED_FILE" "$AITM_TEST_TASK_ROOT/denied-link"
           if "$task_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read via link was not denied.' >&2; exit 1; fi
           if "$task_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write via link was not denied.' >&2; exit 1; fi
+      - name: Verify isolated icon fallback guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AITM_TEST_TASK_ROOT/source/macos"
+          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_TASK_ROOT/profile-offline.sb" "$AITM_TEST_TASK_ROOT/run-isolated" \
+            /bin/bash "$AITM_TEST_TASK_ROOT/source/.github/macos-icon-fallback-20261123/test-iconutil-guard.sh" "$AITM_TEST_TASK_ROOT/source"
       - name: Build synthetic regression tests
         id: build
         shell: bash
@@ -355,7 +362,8 @@ jobs:
           test "$(cd -P "$task_directory" && pwd -P)" = "$task_directory"
           printf '%s\n' "$task_directory"
           SCRIPT
-          chmod 700 "$task_bin/swift" "$task_bin/mktemp"
+          cp "$task_root/source/.github/macos-icon-fallback-20261123/iconutil-ci.sh" "$task_bin/iconutil"
+          chmod 700 "$task_bin/swift" "$task_bin/mktemp" "$task_bin/iconutil"
           task_run="$task_root/run-isolated"
           task_path="$task_bin:$AITM_TASK_PATH"
           if AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >/dev/null 2>&1; then
@@ -435,6 +443,13 @@ jobs:
           /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_app"
           /usr/bin/codesign -dv --verbose=4 "$task_app" 2>&1 | tee "$task_root/release-artifacts/signature.txt"
           grep -q 'Signature=adhoc' "$task_root/release-artifacts/signature.txt"
+          task_icon_sha=ec9ba4d716b1988dfad213127d9d2dffbb37e188199f8c7576d4325774e78e67
+          if test -f "$task_root/release-artifacts/icon-fallback-used"; then
+            test ! -L "$task_root/release-artifacts/icon-fallback-used"
+            test "$(cat "$task_root/release-artifacts/icon-fallback-used")" = "$task_icon_sha"
+            task_icon_actual="$(/usr/bin/shasum -a 256 "$task_app/Contents/Resources/AppIcon.icns")"
+            test "${task_icon_actual%% *}" = "$task_icon_sha"
+          fi
           AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
             "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/smoke-test.sh "$task_app"
           AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
@@ -452,6 +467,10 @@ jobs:
           /usr/bin/cmp "$task_app/Contents/MacOS/AITaskMonitor" "$task_root/dmg-mount/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
           /usr/bin/diff -qr "$task_app" "$task_root/dmg-mount/AI Task Monitor.app"
           /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_root/dmg-mount/AI Task Monitor.app"
+          if test -f "$task_root/release-artifacts/icon-fallback-used"; then
+            task_icon_actual="$(/usr/bin/shasum -a 256 "$task_root/dmg-mount/AI Task Monitor.app/Contents/Resources/AppIcon.icns")"
+            test "${task_icon_actual%% *}" = "$task_icon_sha"
+          fi
           /usr/bin/hdiutil detach "$task_root/dmg-mount"
           trap - EXIT
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$task_app" "$task_root/release-artifacts/AI Task Monitor.app.zip"
