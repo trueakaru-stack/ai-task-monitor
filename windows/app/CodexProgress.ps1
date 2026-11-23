@@ -2657,31 +2657,20 @@ function Codex-FigmaCompleted($payload,[string]$id,[string]$turnId) {
  return [PSCustomObject]@{Id=$itemId;Description=[regex]::Replace($description.Trim(),'\s+',' ')}
 }
 
-function Codex-FirstFigmaCompletion([string[]]$lines,[int]$startIndex,[string]$id,[string]$turnId) {
- if($startIndex -lt 0 -or -not $turnId){return $null}
- $first=New-Object 'Collections.Generic.Dictionary[string,int]' ([StringComparer]::Ordinal)
- $descriptions=New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
- $conflicts=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
- $lastUnreadable=-1
- for($index=$startIndex+1;$index -lt $lines.Count;$index++){
+function Codex-FirstFigmaCompletion([string[]]$lines,[int]$startIndex,[int]$candidateIndex,$candidate) {
+ if($startIndex -lt 0 -or $null -eq $candidate -or $candidateIndex -le $startIndex -or $candidateIndex -ge $lines.Count){return $false}
+ if(($lines.Count-1-$candidateIndex) -gt 512){return $false}
+ for($index=$startIndex+1;$index -lt $candidateIndex;$index++){
+  if(Codex-ContainsIdentifier $lines[$index] ([string]$candidate.Id)){return $false}
+ }
+ for($index=$candidateIndex+1;$index -lt $lines.Count;$index++){
   $line=$lines[$index]
   if([string]::IsNullOrWhiteSpace($line)){continue}
-  if([Text.Encoding]::UTF8.GetByteCount($line) -gt 1048576){$lastUnreadable=$index;continue}
-  try{$record=ConvertFrom-Json -InputObject $line -ErrorAction Stop}catch{$lastUnreadable=$index;continue}
-  $payload=Prop $record 'payload'
-  if($record -isnot [PSCustomObject] -or $payload -isnot [PSCustomObject]){$lastUnreadable=$index;continue}
-  if([string](Prop $record 'type' '') -cne 'event_msg'){continue}
-  if([string](Prop $payload 'type' '') -cne 'item_completed'){continue}
-  $eventThread=[string](Prop $payload 'thread_id' '');$eventTurn=[string](Prop $payload 'turn_id' '')
-  if(($eventThread -and $eventThread -cne $id) -or ($eventTurn -and $eventTurn -cne $turnId)){continue}
-  $itemId=[string](Prop (Prop $payload 'item') 'id' '')
-  if($itemId -cnotmatch '^[A-Za-z0-9_-]{1,256}$'){continue}
-  $completed=Codex-FigmaCompleted $payload $id $turnId
-  $description=if($null -ne $completed){[string]$completed.Description}else{''}
-  if(-not $first.ContainsKey($itemId)){$first.Add($itemId,$index);$descriptions.Add($itemId,$description)}
-  elseif($descriptions[$itemId] -cne $description){[void]$conflicts.Add($itemId)}
+  if([Text.Encoding]::UTF8.GetByteCount($line) -gt 1048576){return $false}
+  try{$record=ConvertFrom-Json -InputObject $line -ErrorAction Stop}catch{return $false}
+  if($record -isnot [PSCustomObject] -or (Prop $record 'payload') -isnot [PSCustomObject]){return $false}
  }
- return [PSCustomObject]@{First=$first;Conflicts=$conflicts;LastUnreadable=$lastUnreadable}
+ return $true
 }
 
 function Codex-Activity([string]$id) {
@@ -2699,10 +2688,11 @@ function Codex-Activity([string]$id) {
     $startIndex=$index;$turnId=[string](Prop $payload "turn_id" "");break
    }
   }
-  $currentTool=Codex-CurrentToolActivity $lines $turnId;$laterAction=$false;$figmaScan=$null;$figmaScanned=$false
+  $currentTool=Codex-CurrentToolActivity $lines $turnId;$laterAction=$false;$figmaSuppressed=$false
   if($currentTool){return $currentTool}
   for($index=$lines.Count-1;$index -gt $startIndex;$index--){
    $line=$lines[$index]
+   if($figmaSuppressed -and $line -notmatch '"(agent_reasoning|reasoning|Reasoning|commentary|AgentMessage)"'){continue}
    if($line.Length -gt 1048576 -or $line -notmatch '"(agent_reasoning|reasoning|Reasoning|commentary|item_completed)"'){continue}
    try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
    $payload=Prop $record "payload"
@@ -2719,11 +2709,8 @@ function Codex-Activity([string]$id) {
     if($completedType -notin @('Reasoning','AgentMessage')){
      $figma=Codex-FigmaCompleted $payload $id $turnId
      if($null -ne $figma){
-      if(-not $figmaScanned){$figmaScan=Codex-FirstFigmaCompletion $lines $startIndex $id $turnId;$figmaScanned=$true}
-      if($null -eq $figmaScan -or -not $figmaScan.First.ContainsKey([string]$figma.Id)){continue}
-      if($figmaScan.Conflicts.Contains([string]$figma.Id)){$laterAction=$true;continue}
-      if($figmaScan.First[[string]$figma.Id] -ne $index){continue}
-      if(-not $laterAction -and -not $latestCommentary -and $figmaScan.LastUnreadable -le $index){$prefix=if($script:resolvedLanguage -eq 'en'){'Last Figma action: '}else{'Последнее действие в Figma: '};return $prefix+$figma.Description}
+      if(-not $laterAction -and -not $latestCommentary -and (Codex-FirstFigmaCompletion $lines $startIndex $index $figma)){$prefix=if($script:resolvedLanguage -eq 'en'){'Last Figma action: '}else{'Последнее действие в Figma: '};return $prefix+$figma.Description}
+      $figmaSuppressed=$true;$laterAction=$true;continue
      }
      $laterAction=$true
     }
@@ -2812,9 +2799,10 @@ function Codex-ObservedActivity([string]$id,[string]$startKey) {
   $turn=if($startKey.StartsWith('turn:',[StringComparison]::Ordinal)){$startKey.Substring(5)}else{''}
   $currentTool=Codex-CurrentToolActivity $lines $turn
   if($currentTool){return $currentTool}
-  $startIndex=Codex-TurnStartIndex $lines $turn;$laterAction=$false;$figmaScan=$null;$figmaScanned=$false
+  $startIndex=Codex-TurnStartIndex $lines $turn;$laterAction=$false;$figmaSuppressed=$false
   for($index=$lines.Count-1;$index -gt $startIndex;$index--){
    $line=$lines[$index]
+   if($figmaSuppressed -and $line -notmatch '"(Reasoning|AgentMessage|agent_message|commentary)"'){continue}
    if($line.Length -gt 1048576 -or $line -notmatch '"(item_completed|agent_message|commentary)"'){continue}
    try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
    $payload=Prop $record 'payload';$recordType=[string](Prop $record 'type' '');$kind=[string](Prop $payload 'type' '')
@@ -2829,11 +2817,8 @@ function Codex-ObservedActivity([string]$id,[string]$startKey) {
     if($actionType -notin @('Reasoning','AgentMessage')){
      $figma=Codex-FigmaCompleted $payload $id $turn
      if($null -ne $figma){
-      if(-not $figmaScanned){$figmaScan=Codex-FirstFigmaCompletion $lines $startIndex $id $turn;$figmaScanned=$true}
-      if($null -eq $figmaScan -or -not $figmaScan.First.ContainsKey([string]$figma.Id)){continue}
-      if($figmaScan.Conflicts.Contains([string]$figma.Id)){$laterAction=$true;continue}
-      if($figmaScan.First[[string]$figma.Id] -ne $index){continue}
-      if(-not $laterAction -and $figmaScan.LastUnreadable -le $index){$prefix=if($script:resolvedLanguage -eq 'en'){'Last Figma action: '}else{'Последнее действие в Figma: '};return $prefix+$figma.Description}
+      if(-not $laterAction -and (Codex-FirstFigmaCompletion $lines $startIndex $index $figma)){$prefix=if($script:resolvedLanguage -eq 'en'){'Last Figma action: '}else{'Последнее действие в Figma: '};return $prefix+$figma.Description}
+      $figmaSuppressed=$true;$laterAction=$true;continue
      }
      $laterAction=$true
     }

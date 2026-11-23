@@ -153,7 +153,7 @@ $foreignThread=@{type='event_msg';payload=@{type='agent_message';thread_id='othe
 $script:activityTail=$start+"`n"+$figmaFallback+"`n"+$figma+"`n"+$foreignThread
 Check-FigmaPair 'commentary from another chat' 'Last Figma action: Checking components' 'Last Figma action: Checking components'
 $script:activityTail=$start+"`n"+$figmaFallback+"`n"+$figma+"`n"+$figma
-Check-FigmaPair 'duplicate Figma completion' 'Last Figma action: Checking components' 'Last Figma action: Checking components'
+Check-FigmaPair 'duplicate Figma completion' 'Expected fallback' 'Expected fallback'
 $conflictItem=@{};foreach($key in $figmaItem.Keys){$conflictItem[$key]=$figmaItem[$key]};$conflictItem.arguments=@{description='Conflicting description';code='PRIVATE_CONFLICT'}
 $conflictingFigma=@{type='event_msg';payload=@{type='item_completed';thread_id='fixture';turn_id='new-turn';item=$conflictItem}}|ConvertTo-Json -Compress -Depth 12
 $script:activityTail=$start+"`n"+$figmaFallback+"`n"+$figma+"`n"+$conflictingFigma
@@ -163,7 +163,7 @@ Check-FigmaPair 'duplicate after newer summary' 'Expected fallback' 'Expected fa
 $secondFigmaItem=@{};foreach($key in $figmaItem.Keys){$secondFigmaItem[$key]=$figmaItem[$key]};$secondFigmaItem.id='figma-call-2';$secondFigmaItem.arguments=@{description='Second design action';code='PRIVATE_SECOND_CODE'}
 $secondFigma=@{type='event_msg';payload=@{type='item_completed';thread_id='fixture';turn_id='new-turn';item=$secondFigmaItem}}|ConvertTo-Json -Compress -Depth 12
 $script:activityTail=$start+"`n"+$figmaFallback+"`n"+$figma+"`n"+$secondFigma+"`n"+$figma
-Check-FigmaPair 'duplicate after newer action' 'Last Figma action: Second design action' 'Last Figma action: Second design action'
+Check-FigmaPair 'duplicate after newer action' 'Expected fallback' 'Expected fallback'
 $script:activityTail=$start+"`n"+$figmaFallback+"`n"+$figma+"`n"+'{"incomplete":'
 Check-FigmaPair 'malformed after Figma' 'Expected fallback' 'Expected fallback'
 $script:activityTail=$start+"`n"+$figmaFallback+"`n"+$figma+"`n"+'{"type":"event_msg"}'
@@ -187,13 +187,17 @@ for($stressIndex=0;$stressIndex -lt 300;$stressIndex++){
 $figmaFlood=$figmaStress -join "`n"
 $script:activityTail=$start+"`n"+$figmaFallback+"`n"+$figmaFlood+"`n"+$figmaFlood
 $figmaWatch=[Diagnostics.Stopwatch]::StartNew()
-Assert-Activity 'Last Figma action: Synthetic 299' 'The latest unique Figma action was lost under duplicate load'
+Assert-Activity 'Expected fallback' 'An oversized Figma event set did not safely fall back'
 $figmaWatch.Stop();$figmaMainMs=$figmaWatch.ElapsedMilliseconds
 $figmaWatch.Restart()
-if((Codex-ObservedActivity 'fixture' 'turn:new-turn') -cne 'Last Figma action: Synthetic 299'){throw 'Observed Figma activity was lost under duplicate load.'}
+if((Codex-ObservedActivity 'fixture' 'turn:new-turn') -cne 'Expected fallback'){throw 'Observed Figma activity did not safely fall back under duplicate load.'}
 $figmaWatch.Stop();$figmaObservedMs=$figmaWatch.ElapsedMilliseconds
 if($figmaMainMs -gt 2000 -or $figmaObservedMs -gt 2000){throw "Figma duplicate handling exceeded two seconds: main=$figmaMainMs ms, observed=$figmaObservedMs ms."}
 Write-Output "Figma duplicate load: main=$figmaMainMs ms, observed=$figmaObservedMs ms."
+$manyUnique=@($figmaStress | Select-Object -First 129) -join "`n"
+$script:activityTail=$start+"`n"+$figmaFallback+"`n"+$manyUnique
+Assert-Activity 'Last Figma action: Synthetic 128' 'A new Figma action was lost in a long turn'
+if((Codex-ObservedActivity 'fixture' 'turn:new-turn') -cne 'Last Figma action: Synthetic 128'){throw 'Observed Figma activity was lost in a long turn.'}
 $figmaOrdinary=('{"type":"event_msg","payload":{"type":"token_count"}}'+"`n")*5000
 $script:activityTail=$start+"`n"+$figmaFallback+"`n"+$figmaOrdinary+$figma
 $figmaWatch.Restart()
@@ -201,6 +205,22 @@ Assert-Activity 'Last Figma action: Checking components' 'A recent Figma action 
 $figmaWatch.Stop();$figmaLongMs=$figmaWatch.ElapsedMilliseconds
 if($figmaLongMs -gt 2000){throw "A long turn with a Figma action exceeded two seconds: $figmaLongMs ms."}
 Write-Output "Figma in 5,000-event turn: $figmaLongMs ms."
+$ordinaryAfter='{"type":"event_msg","payload":{"type":"token_count"}}'
+$script:activityTail=$start+"`n"+$figmaFallback+"`n"+$figma+(("`n"+$ordinaryAfter)*512)
+Assert-Activity 'Last Figma action: Checking components' 'Figma action was lost at the trailing-window limit'
+if((Codex-ObservedActivity 'fixture' 'turn:new-turn') -cne 'Last Figma action: Checking components'){throw 'Observed Figma action was lost at the trailing-window limit.'}
+$script:activityTail+="`n"+$ordinaryAfter
+Assert-Activity 'Expected fallback' 'Figma was displayed beyond the trailing-window limit'
+if((Codex-ObservedActivity 'fixture' 'turn:new-turn') -cne 'Expected fallback'){throw 'Observed Figma activity exceeded the trailing-window limit.'}
+$script:activityTail=$start+"`n"+$figmaFallback+"`n"+$figma+(("`n"+$ordinaryAfter)*5000)
+$figmaWatch.Restart()
+Assert-Activity 'Expected fallback' 'Figma remained current after a long trailing sequence'
+$figmaWatch.Stop();$figmaAfterMainMs=$figmaWatch.ElapsedMilliseconds
+$figmaWatch.Restart()
+if((Codex-ObservedActivity 'fixture' 'turn:new-turn') -cne 'Expected fallback'){throw 'Observed Figma remained current after a long trailing sequence.'}
+$figmaWatch.Stop();$figmaAfterObservedMs=$figmaWatch.ElapsedMilliseconds
+if($figmaAfterMainMs -gt 2000 -or $figmaAfterObservedMs -gt 2000){throw "Figma followed by 5,000 events exceeded two seconds: main=$figmaAfterMainMs ms, observed=$figmaAfterObservedMs ms."}
+Write-Output "Figma followed by 5,000 events: main=$figmaAfterMainMs ms, observed=$figmaAfterObservedMs ms."
 $script:resolvedLanguage='ru'
 $script:activityTail = $start + "`n" + $response + "`n" + $completed
 Assert-Activity 'Check build' 'Completed reasoning summary was ignored'
