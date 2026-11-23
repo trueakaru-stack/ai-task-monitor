@@ -110,9 +110,9 @@ if($normal.Count -ne 1 -or $normal[0].Title -cne 'Indexed title' -or $fallback.C
 $child=@($tasks|Where-Object Id -eq 'child')
 $namedChild=@($tasks|Where-Object Id -eq 'namedchild')
 $missingParent=@($tasks|Where-Object Id -eq 'missingparent')
-if($child.Count -ne 1 -or $child[0].Title -cne 'Indexed title (agent reader)' -or $child[0].TitleGenerated -or
+if($child.Count -ne 1 -or $child[0].Title -cne 'Generated title' -or -not $child[0].TitleGenerated -or
    $namedChild.Count -ne 1 -or $namedChild[0].Title -cne 'Child own title' -or
-   $missingParent.Count -ne 1 -or $missingParent[0].Title -cne 'Generated title'){throw 'Subagent title fallback or own-title precedence is incorrect.'}
+   $missingParent.Count -ne 1 -or $missingParent[0].Title -cne 'Generated title'){throw 'Unverified parent titles or own-title precedence are incorrect.'}
 '@
  & ([scriptblock]::Create(($definitions -join "`n")+"`n"+$checks)) $fixture
  Require ((SharedHash $dbPath) -ceq $mainBefore -and (SharedHash ($dbPath+'-wal')) -ceq $walBefore) 'Read-only lookup changed the database or WAL.'

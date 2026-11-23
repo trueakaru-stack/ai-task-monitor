@@ -267,7 +267,7 @@ $parentPath=$paths[$parentId]
 [IO.File]::WriteAllText($parentPath,('{"type":"session_meta","payload":{"id":"'+$parentId+'"}}'+"`n"),[Text.UTF8Encoding]::new($false));Write-Event $parentPath 'task_started' 'parent-start'
 $parentIdentity=[AITaskMonitor.CodexObservation.CodexRecentEventObserver]::CaptureHeaderIdentity($parentPath,$parentId)
 Require ([bool]$parentIdentity) 'The synthetic parent identity could not be captured.'
-$script:fixtureUnindexed=@([PSCustomObject]@{id=$firstId;thread_name='Agent';unindexed=$true;path=$identityPath;parentThreadId=$parentId;agentNickname='reader';updated_at='revision'})
+$script:fixtureUnindexed=@([PSCustomObject]@{id=$firstId;thread_name='';titleGenerated=$true;unindexed=$true;path=$identityPath;parentThreadId=$parentId;agentNickname='reader';updated_at='revision'})
 $script:fixtureSnapshot=[PSCustomObject]@{Paths=@{$parentId=$parentPath;$firstId=$identityPath};CheckedTicks=@{};ParentReferences=@{$parentId=[PSCustomObject]@{IsRoot=$true;IdentityToken=$parentIdentity};$firstId=[PSCustomObject]@{ParentThreadId=$parentId;AgentNickname='reader';IdentityToken=$identity}}}
 $script:lastCodexTasks=@();$script:codexObservedStarts=@{};$script:observedCodex=@{};$script:lifecycleState=@{};$script:unindexedPaths=@{};$script:codexRolloutPaths=@{}
 $script:codexRecentEventObserver=[AITaskMonitor.CodexObservation.CodexRecentEventObserver]::new($sessionsDirectory)
@@ -282,6 +282,8 @@ try{
  Require ($parentState.BaselineReady -and $parentState.IdentityToken -ceq $parentIdentity) 'The synthetic parent baseline did not match.'
  $verifiedGroup=Source-Snapshot
  Require (@($verifiedGroup.Tasks).Count -eq 1 -and $verifiedGroup.Tasks[0].Id -ceq $parentId -and $verifiedGroup.Tasks[0].RelatedAgentCount -eq 1) 'A verified unindexed child with a start was not grouped.'
+ $verifiedChild=@($script:lastCodexTasks|Where-Object Id -eq $firstId)
+ Require ($verifiedChild.Count -eq 1 -and $verifiedChild[0].Title -ceq 'Verified parent (agent reader)' -and -not $verifiedChild[0].TitleGenerated) 'A verified child did not receive its parent-derived title.'
  for($i=0;$i -lt 3;$i++){
   Write-Event $identityPath 'token_count' ''
   $previous=$identityState.CheckCount;$watch.Restart()
