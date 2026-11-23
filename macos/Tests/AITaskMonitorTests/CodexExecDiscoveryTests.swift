@@ -288,6 +288,64 @@ final class CodexExecDiscoveryTests: XCTestCase {
         }
     }
 
+    func testTwoRootRolloutsCanConfirmLineageButNeverActivity() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try indexRows(root, [(first, "Parent")])
+        _ = try rollout(root, fileID: first, source: "vscode", threadSource: "agent_created_thread")
+        let secondRoot = try rollout(root, fileID: first, source: "vscode", revision: revision,
+                                     threadSource: "agent_created_thread")
+        try subagentRollout(root, id: second, parent: first, threadSource: "subagent")
+        let reader = CodexTaskReader(codexHome: root)
+        defer { reader.waitForAmbiguousObservationForTests() }
+        var snapshot = try reader.readSnapshot()
+        var proved = false
+        for _ in 0..<8 {
+            reader.waitForAmbiguousObservationForTests()
+            snapshot = try reader.readSnapshot()
+            if snapshot.confirmedSubagentRoots.contains(first) { proved = true; break }
+        }
+        XCTAssertTrue(proved)
+        XCTAssertEqual(snapshot.subagentParents[second], first)
+        let grouped = CodexTaskGrouping.project(snapshot.tasks, parents: snapshot.subagentParents,
+            titles: snapshot.subagentTitles, confirmedRoots: snapshot.confirmedSubagentRoots)
+        let parent = try XCTUnwrap(grouped.first { $0.id == "codex-group:" + first })
+        XCTAssertEqual(parent.title, "Parent")
+        XCTAssertEqual(parent.codexAgentCount, 1)
+        XCTAssertTrue(parent.isUnconfirmed)
+        XCTAssertFalse(parent.isActive)
+        XCTAssertNil(parent.progress)
+        XCTAssertFalse(snapshot.terminalIDs.contains(first))
+
+        let original = try Data(contentsOf: secondRoot)
+        let text = try XCTUnwrap(String(data: original, encoding: .utf8))
+        for different in ["subagent", "user"] {
+            try writeFixture(Data(text.replacingOccurrences(of: "agent_created_thread", with: different).utf8), to: secondRoot)
+            _ = try reader.readSnapshot()
+            reader.waitForAmbiguousObservationForTests()
+            snapshot = try reader.readSnapshot()
+            XCTAssertFalse(snapshot.confirmedSubagentRoots.contains(first), different)
+            XCTAssertTrue(CodexTaskGrouping.project(snapshot.tasks, parents: snapshot.subagentParents,
+                titles: snapshot.subagentTitles, confirmedRoots: snapshot.confirmedSubagentRoots).contains { $0.id == second })
+            try writeFixture(original, to: secondRoot)
+            for _ in 0..<8 {
+                reader.waitForAmbiguousObservationForTests()
+                snapshot = try reader.readSnapshot()
+                if snapshot.confirmedSubagentRoots.contains(first) { break }
+            }
+            XCTAssertTrue(snapshot.confirmedSubagentRoots.contains(first), different)
+        }
+        let otherDir = root.appendingPathComponent("sessions/2001/01/01", isDirectory: true)
+        try FileManager.default.createDirectory(at: otherDir, withIntermediateDirectories: true)
+        let thirdRoot = otherDir.appendingPathComponent(rolloutName(first))
+        try writeFixture(Data(text.replacingOccurrences(of: "agent_created_thread", with: "subagent").utf8), to: thirdRoot)
+        snapshot = try reader.readSnapshot()
+        XCTAssertFalse(snapshot.confirmedSubagentRoots.contains(first), "A new version must invalidate the old proof")
+        XCTAssertFalse(snapshot.terminalIDs.contains(first))
+    }
+
     func testThreadSourceMustAgreeWithSubagentMetadata() throws {
         let cases: [(Any?, Bool)] = [(nil, true), (NSNull(), true), ("subagent", true),
                                      ("user", false), ("guardian_review", false), ("unknown", false), (42, false)]

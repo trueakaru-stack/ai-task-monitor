@@ -142,7 +142,7 @@ jobs:
           set -euo pipefail
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
           task_policy="$AITM_TEST_TASK_ROOT/profile-offline.sb"
-          for spec in 'CodexTaskGroupingTests:12' 'CodexSubagentMetadataWorkerTests:3' 'CodexExecDiscoveryTests/testVerifiedParentIDReachesSnapshotForIndexedAndUnindexedChild:1' 'CodexExecDiscoveryTests/testIndexedChildWithConflictingParentMetadataHasNoLink:1' 'CodexExecDiscoveryTests/testConflictingNicknameKeepsSeparateCard:1' 'CodexExecDiscoveryTests/testUnknownIntermediateMetadataNeverCreatesRoot:1' 'CodexExecDiscoveryTests/testOnlyExplicitCompatibleRootMetadataEnablesGrouping:1' 'CodexExecDiscoveryTests/testThreadSourceMustAgreeWithSubagentMetadata:1' 'CodexExecDiscoveryTests/testStringSourceWithSubagentClassificationRemainsSeparate:1' 'CodexExecDiscoveryTests/testDuplicateMetadataKeysNeverCreateRelationship:1' 'CodexExecDiscoveryTests/testReplacementAtSamePathInvalidatesCachedRelationship:1' 'CodexExecDiscoveryTests/testReplacementBetweenIndexedAttributesAndTailCannotMixRelationship:1' 'CodexExecDiscoveryTests/testAppendsKeepVerifiedGroupWithoutPartialWarning:1' 'CodexExecDiscoveryTests/testLargeHistoryEventuallyGroupsUnindexedChildAndRejectsConflict:1' 'CodexExecDiscoveryTests/testNewUnindexedAssistantIsNotStarvedBySixteenRetainedSessions:1' 'CodexExecDiscoveryTests/testFairSelectionAdvancesWhenPreviouslySelectedNewIDsLeaveQueue:1' 'CodexExecDiscoveryTests/testRewrittenHeaderOnSameInodeInvalidatesRelationship:1' 'CodexExecDiscoveryTests/testCachedUniquePathDoesNotConfirmTerminalDuringNextIncompleteSweep:1' 'CodexExecDiscoveryTests/testPagedHistoryDuplicatePreventsFalseCompletion:1' 'CodexExecDiscoveryTests/testIndexedCompletedIntermediateIsDiscoveredForActiveGrandchild:1' 'CodexExecDiscoveryTests/testUnavailableOldIntermediateLeavesGrandchildSeparate:1' 'CodexExecDiscoveryTests/testTaskStoreGroupsVerifiedChildAndKeepsSelectionAndDisclosure:1'; do
+          for spec in 'CodexTaskGroupingTests:12' 'CodexSubagentMetadataWorkerTests:3' 'CodexAmbiguousRootMetadataWorkerTests:1' 'CodexExecDiscoveryTests/testVerifiedParentIDReachesSnapshotForIndexedAndUnindexedChild:1' 'CodexExecDiscoveryTests/testIndexedChildWithConflictingParentMetadataHasNoLink:1' 'CodexExecDiscoveryTests/testConflictingNicknameKeepsSeparateCard:1' 'CodexExecDiscoveryTests/testUnknownIntermediateMetadataNeverCreatesRoot:1' 'CodexExecDiscoveryTests/testOnlyExplicitCompatibleRootMetadataEnablesGrouping:1' 'CodexExecDiscoveryTests/testTwoRootRolloutsCanConfirmLineageButNeverActivity:1' 'CodexExecDiscoveryTests/testThreadSourceMustAgreeWithSubagentMetadata:1' 'CodexExecDiscoveryTests/testStringSourceWithSubagentClassificationRemainsSeparate:1' 'CodexExecDiscoveryTests/testDuplicateMetadataKeysNeverCreateRelationship:1' 'CodexExecDiscoveryTests/testReplacementAtSamePathInvalidatesCachedRelationship:1' 'CodexExecDiscoveryTests/testReplacementBetweenIndexedAttributesAndTailCannotMixRelationship:1' 'CodexExecDiscoveryTests/testAppendsKeepVerifiedGroupWithoutPartialWarning:1' 'CodexExecDiscoveryTests/testLargeHistoryEventuallyGroupsUnindexedChildAndRejectsConflict:1' 'CodexExecDiscoveryTests/testNewUnindexedAssistantIsNotStarvedBySixteenRetainedSessions:1' 'CodexExecDiscoveryTests/testFairSelectionAdvancesWhenPreviouslySelectedNewIDsLeaveQueue:1' 'CodexExecDiscoveryTests/testRewrittenHeaderOnSameInodeInvalidatesRelationship:1' 'CodexExecDiscoveryTests/testCachedUniquePathDoesNotConfirmTerminalDuringNextIncompleteSweep:1' 'CodexExecDiscoveryTests/testPagedHistoryDuplicatePreventsFalseCompletion:1' 'CodexExecDiscoveryTests/testIndexedCompletedIntermediateIsDiscoveredForActiveGrandchild:1' 'CodexExecDiscoveryTests/testUnavailableOldIntermediateLeavesGrandchildSeparate:1' 'CodexExecDiscoveryTests/testTaskStoreGroupsVerifiedChildAndKeepsSelectionAndDisclosure:1'; do
             suite="${spec%:*}"
             count="${spec##*:}"
             log="$AITM_TEST_TASK_ROOT/grouping-${count}-$(printf '%s' "$suite" | /usr/bin/shasum | cut -c 1-12).log"
@@ -289,10 +289,20 @@ jobs:
           cat > "$task_bin/swift" <<'SCRIPT'
           #!/bin/bash
           set -euo pipefail
-          test "$1" = build
-          exec "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" "$@" --disable-sandbox --manifest-cache none \
-            --cache-path "$AITM_RELEASE_ROOT/swift-cache" --config-path "$AITM_RELEASE_ROOT/swift-config" \
-            --security-path "$AITM_RELEASE_ROOT/swift-security"
+          test "$#" = 7
+          test "$1" = build && test "$2" = -c && test "$3" = release
+          test "$4" = --arch && test "$5" = arm64 && test "$6" = --arch && test "$7" = x86_64
+          task_swift="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
+          task_options=(--disable-sandbox --manifest-cache none --cache-path "$AITM_RELEASE_ROOT/swift-cache"
+                        --config-path "$AITM_RELEASE_ROOT/swift-config" --security-path "$AITM_RELEASE_ROOT/swift-security")
+          "$task_swift" build -c release --triple arm64-apple-macosx13.0 "${task_options[@]}"
+          "$task_swift" build -c release --triple x86_64-apple-macosx13.0 "${task_options[@]}"
+          task_arm="$("$task_swift" build -c release --triple arm64-apple-macosx13.0 --show-bin-path "${task_options[@]}")"
+          task_x64="$("$task_swift" build -c release --triple x86_64-apple-macosx13.0 --show-bin-path "${task_options[@]}")"
+          test -f "$task_arm/AITaskMonitor" && test -f "$task_x64/AITaskMonitor"
+          mkdir -p .build/apple/Products/Release
+          /usr/bin/xcrun lipo -create "$task_arm/AITaskMonitor" "$task_x64/AITaskMonitor" -output .build/apple/Products/Release/AITaskMonitor
+          /usr/bin/xcrun lipo -verify_arch arm64 x86_64 .build/apple/Products/Release/AITaskMonitor
           SCRIPT
           chmod 700 "$task_bin/swift"
           task_run="$task_root/run-isolated"

@@ -51,6 +51,7 @@ struct CodexTaskReader {
     private let planCache = CodexPlanHistoryCache()
     private let ambiguousRollouts = CodexAmbiguousRolloutWorker()
     private let subagentMetadata = CodexSubagentMetadataWorker()
+    private let ambiguousRootMetadata = CodexAmbiguousRootMetadataWorker()
     private let afterDiscoveryForTests: (() -> Void)?
     private let beforeTerminalRecheckForTests: (() -> Void)?
     private let afterIndexedAttributesForTests: ((String) -> Void)?
@@ -79,6 +80,7 @@ struct CodexTaskReader {
     func waitForAmbiguousObservationForTests() {
         ambiguousRollouts.waitUntilIdleForTests()
         subagentMetadata.waitUntilIdleForTests()
+        ambiguousRootMetadata.waitUntilIdleForTests()
     }
 
     func readSnapshot(now: Date = Date(), observedSince: Date? = nil, previouslyObserved: Set<String> = []) throws -> CodexTaskSnapshot {
@@ -106,13 +108,14 @@ struct CodexTaskReader {
         }
         let discovered = try sessionFiles(for: indexedIDs, now: now, observedSince: observedSince,
                                           previouslyObserved: previouslyObserved)
-        let extraFiles: (files: [String: URL], ambiguousCandidates: [String: [URL]], ambiguousIDs: Set<String>, isPartial: Bool, didHitLimit: Bool)
+        let extraFiles: (files: [String: URL], ambiguousCandidates: [String: [URL]], ambiguousIDs: Set<String>,
+                         isPartial: Bool, didHitLimit: Bool, rootCandidates: [String: [URL]])
         do {
             extraFiles = try sessionFiles(for: extra.ids, now: now, observedSince: observedSince,
                                           previouslyObserved: previouslyObserved, maximumVisited: 256)
         } catch {
             guard !indexedIDs.isEmpty else { throw error }
-            extraFiles = ([:], [:], [], true, false)
+            extraFiles = ([:], [:], [], true, false, [:])
         }
         let files = discovered.files
         afterDiscoveryForTests?()
@@ -459,7 +462,7 @@ struct CodexTaskReader {
                   metadata.device == current.device, metadata.inode == current.inode,
                   metadata.size <= current.size else { throw CocoaError(.fileReadUnknown) }
             return CodexSubagentMetadataWorker.Observation(file: file, stamp: current, parentID: metadata.parentID,
-                                                           isConfirmedRoot: metadata.isConfirmedRoot, headerDigest: metadata.headerDigest)
+                                                           isConfirmedRoot: metadata.rootClassification != nil, headerDigest: metadata.headerDigest)
         }
         var verifiedMetadata: Set<String> = []
         var checkedAncestors = 0
@@ -503,6 +506,11 @@ struct CodexTaskReader {
         if !result.subagentParents.isEmpty && !visibleIDs.subtracting(verifiedMetadata).isEmpty {
             result.isPartial = true
         }
+        let ambiguousRootIDs = ambiguousRootMetadata.poll(candidates: discovered.rootCandidates,
+            targets: Set(result.subagentParents.values)) { id, files in
+                self.verifyAmbiguousRoot(id: id, files: files)
+            }
+        result.confirmedSubagentRoots.formUnion(ambiguousRootIDs.map { $0.lowercased() })
         for parent in Set(result.subagentParents.values) {
             guard let title = sessions[parent]?.string("thread_name"),
                   !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1063,16 +1071,16 @@ struct CodexTaskReader {
         return SubagentReference(parentID: parentID, nickname: nickname)
     }
 
-    private func confirmedSubagentRoot(_ payload: [String: Any]) -> Bool {
+    private func confirmedSubagentRoot(_ payload: [String: Any]) -> String? {
         guard let source = payload["source"] as? String, ["cli", "vscode", "exec", "mcp"].contains(source),
               let classification = payload["thread_source"] as? String,
-              ["user", "agent_created_thread"].contains(classification) else { return false }
-        if let parent = payload["parent_thread_id"], !(parent is NSNull) { return false }
+              ["user", "agent_created_thread"].contains(classification) else { return nil }
+        if let parent = payload["parent_thread_id"], !(parent is NSNull) { return nil }
         if let path = payload["agent_path"], !(path is NSNull) {
-            guard let path = path as? String, path == "/root" else { return false }
+            guard let path = path as? String, path == "/root" else { return nil }
         }
-        if let nickname = payload["agent_nickname"], !(nickname is NSNull) { return false }
-        return true
+        if let nickname = payload["agent_nickname"], !(nickname is NSNull) { return nil }
+        return classification
     }
 
     private func subagentTitle(_ reference: SubagentReference?, sessions: [String: [String: Any]]) -> String? {
@@ -1140,7 +1148,7 @@ struct CodexTaskReader {
         return String(decoding: data, as: UTF8.self)
     }
 
-    private func readSubagentParent(_ url: URL, id: String) throws -> (parentID: String?, isConfirmedRoot: Bool, device: UInt64, inode: UInt64, size: UInt64, headerDigest: Data) {
+    private func readSubagentParent(_ url: URL, id: String) throws -> (parentID: String?, rootClassification: String?, device: UInt64, inode: UInt64, size: UInt64, headerDigest: Data) {
         let descriptor = try openSessionFile(url)
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
@@ -1161,6 +1169,33 @@ struct CodexTaskReader {
         return (subagentReference(payload, id: id)?.parentID, confirmedSubagentRoot(payload),
                 UInt64(bitPattern: Int64(after.st_dev)), UInt64(after.st_ino), UInt64(after.st_size),
                 Data(SHA256.hash(data: originalHeader)))
+    }
+
+    private func verifyAmbiguousRoot(id: String, files: [URL]) -> Bool {
+        guard (2...8).contains(files.count) else { return false }
+        var evidence: [(file: URL, device: UInt64, inode: UInt64, digest: Data, classification: String)] = []
+        var classification: String?
+        for file in files {
+            guard let metadata = try? readSubagentParent(file, id: id), metadata.parentID == nil,
+                  let kind = metadata.rootClassification,
+                  classification == nil || classification == kind,
+                  let attributes = try? fileManager.attributesOfItem(atPath: file.path),
+                  let stamp = CodexSubagentMetadataWorker.Stamp(attributes),
+                  stamp.device == metadata.device, stamp.inode == metadata.inode,
+                  stamp.size >= metadata.size else { return false }
+            classification = kind
+            evidence.append((file, metadata.device, metadata.inode, metadata.headerDigest, kind))
+        }
+        for entry in evidence {
+            guard let metadata = try? readSubagentParent(entry.file, id: id), metadata.parentID == nil,
+                  metadata.rootClassification == entry.classification,
+                  metadata.device == entry.device, metadata.inode == entry.inode,
+                  metadata.headerDigest == entry.digest,
+                  let attributes = try? fileManager.attributesOfItem(atPath: entry.file.path),
+                  let stamp = CodexSubagentMetadataWorker.Stamp(attributes),
+                  stamp.device == entry.device, stamp.inode == entry.inode else { return false }
+        }
+        return true
     }
 
     /// A live session keeps writing the same descriptor while this bounded
@@ -1199,8 +1234,8 @@ struct CodexTaskReader {
     }
 
     private func sessionFiles(for ids: Set<String>, now: Date, observedSince: Date?,
-                              previouslyObserved: Set<String>, maximumVisited: Int? = nil) throws -> (files: [String: URL], ambiguousCandidates: [String: [URL]], ambiguousIDs: Set<String>, isPartial: Bool, didHitLimit: Bool) {
-        guard !ids.isEmpty else { return ([:], [:], [], false, false) }
+                              previouslyObserved: Set<String>, maximumVisited: Int? = nil) throws -> (files: [String: URL], ambiguousCandidates: [String: [URL]], ambiguousIDs: Set<String>, isPartial: Bool, didHitLimit: Bool, rootCandidates: [String: [URL]]) {
+        guard !ids.isEmpty else { return ([:], [:], [], false, false, [:]) }
         let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
         var enumerationError: Error?
         guard let enumerator = fileManager.enumerator(at: sessions, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles], errorHandler: { _, error in
@@ -1210,6 +1245,7 @@ struct CodexTaskReader {
         let uuidIDs = ids.filter { $0.utf8.count == 36 && UUID(uuidString: $0) != nil }
         var files: [String: URL] = [:]
         var ambiguousCandidates: [String: [URL]] = [:]
+        var rootCandidates: [String: [URL]] = [:]
         var candidates: [String: [URL]] = [:]
         var variants: [String: [String]] = [:]
         for id in uuidIDs { variants[id.lowercased(), default: []].append(id) }
@@ -1219,7 +1255,7 @@ struct CodexTaskReader {
             visited += 1
             // Do not claim an unindexed task when a bounded scan cannot rule
             // out a second rollout or an ambiguous filename later in the tree.
-            if let maximumVisited, visited > maximumVisited { return ([:], [:], [], true, true) }
+            if let maximumVisited, visited > maximumVisited { return ([:], [:], [], true, true, [:]) }
             let file = url.lastPathComponent
             let compressed = file.hasSuffix(".jsonl.zst")
             let suffix = compressed ? ".jsonl.zst" : ".jsonl"
@@ -1273,7 +1309,12 @@ struct CodexTaskReader {
             guard distinct.count == 1, let chosen = distinct.first else {
                 // Baseline even cold histories, so one later event can be
                 // observed without treating old records as new activity.
-                if maximumVisited == nil { ambiguousCandidates[owner] = distinct }
+                if maximumVisited == nil {
+                    ambiguousCandidates[owner] = distinct
+                    // Root proof sees even compressed siblings; it must not
+                    // silently assume that an unread version agrees.
+                    rootCandidates[owner] = variantsForOwner
+                }
                 // Entirely old histories that have never been observed do not
                 // imply an active ambiguity. Check every variant first.
                 if !distinct.isEmpty && distinct.allSatisfy(predatesObservation) { continue }
@@ -1292,7 +1333,7 @@ struct CodexTaskReader {
             }
             files[owner] = chosen
         }
-        return (files, ambiguousCandidates, ambiguous, !ambiguous.isEmpty || uuidIDs.count != ids.count, false)
+        return (files, ambiguousCandidates, ambiguous, !ambiguous.isEmpty || uuidIDs.count != ids.count, false, rootCandidates)
     }
 
 }
