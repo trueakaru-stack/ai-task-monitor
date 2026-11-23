@@ -140,10 +140,6 @@ jobs:
           # in the synthetic staging directory before creating the image.
           run_logged create-padding /bin/dd if=/dev/zero of="$task_root/temp/app-stage/.aitm-padding" bs=1048576 count=16
           test "$(run_isolated /usr/bin/stat -f %z "$task_root/temp/app-stage/.aitm-padding")" = 16777216
-          # Apple's documented per-volume marker is tested only on this image.
-          run_isolated /bin/mkdir "$task_root/temp/app-stage/.fseventsd"
-          run_isolated /usr/bin/touch "$task_root/temp/app-stage/.fseventsd/no_log"
-          test "$(run_isolated /usr/bin/stat -f %z "$task_root/temp/app-stage/.fseventsd/no_log")" = 0
           run_logged hybrid /usr/bin/hdiutil makehybrid -hfs -hfs-volume-name 'AI Task Monitor' \
             -o "$task_root/temp/hybrid.dmg" "$task_root/temp/app-stage"
           test -s "$task_root/temp/hybrid.dmg"
@@ -169,6 +165,24 @@ jobs:
           [[ "$free_kb" =~ ^[0-9]+$ ]]
           test "$free_kb" -ge 1024
           echo "Freed image space: $free_kb KiB available."
+          # Test Apple's per-volume marker only on the verified synthetic mount.
+          # Refuse to modify existing entries from any other source.
+          event_dir="$rw_mount/.fseventsd"
+          if test -e "$event_dir" || test -L "$event_dir"; then
+            test -d "$event_dir"
+            test ! -L "$event_dir"
+            run_logged list-rw-fsevents-before /bin/ls -la "$event_dir"
+            cat "$task_root/logs/list-rw-fsevents-before.log"
+            test -z "$(run_isolated /usr/bin/find -P "$event_dir" -xdev -mindepth 1 -maxdepth 1 -print -quit)"
+          else
+            run_isolated /bin/mkdir "$event_dir"
+          fi
+          image_device="$(run_isolated /usr/bin/stat -f %d "$rw_mount")"
+          test "$(run_isolated /usr/bin/stat -f %d "$event_dir")" = "$image_device"
+          test ! -L "$event_dir/no_log"
+          run_isolated /usr/bin/touch "$event_dir/no_log"
+          test "$(run_isolated /usr/bin/stat -f %z "$event_dir/no_log")" = 0
+          test "$(run_isolated /usr/bin/stat -f %d "$event_dir/no_log")" = "$image_device"
           run_isolated /bin/rm "$rw_mount/.aitm-padding"
           test ! -e "$rw_mount/.aitm-padding"
           run_isolated /usr/bin/touch "$rw_mount/.aitm-write-probe"
@@ -192,44 +206,20 @@ jobs:
           echo "Removed FinderInfo from $count synthetic entries."
           run_logged diff-rw /usr/bin/diff -qr "$task_app" "$rw_app"
           run_logged signature-rw /usr/bin/codesign --verify --deep --strict --verbose=2 "$rw_app"
-          # Remove only our empty marker and its empty directory. Any other
-          # FSEvents entry is a diagnostic failure and is never deleted.
-          event_dir="$rw_mount/.fseventsd"
-          if test -e "$event_dir" || test -L "$event_dir"; then
-            test -d "$event_dir"
-            test ! -L "$event_dir"
-            image_device="$(run_isolated /usr/bin/stat -f %d "$rw_mount")"
-            test "$(run_isolated /usr/bin/stat -f %d "$event_dir")" = "$image_device"
-            run_logged list-rw-fsevents /bin/ls -la "$event_dir"
-            cat "$task_root/logs/list-rw-fsevents.log"
-            run_isolated /usr/bin/find -P "$event_dir" -xdev -mindepth 1 -maxdepth 1 -print0 >"$task_root/temp/event-entries"
-            event_count=0
-            while IFS= read -r -d '' entry; do
-              case "$entry" in "$event_dir"/*) ;; *) echo 'Event entry escaped its directory.' >&2; exit 1;; esac
-              entry_name="${entry#"$event_dir"/}"
-              test "$entry_name" = no_log
-              test -f "$entry"
-              test ! -L "$entry"
-              test "$(run_isolated /usr/bin/stat -f %d "$entry")" = "$image_device"
-              test "$(run_isolated /usr/bin/stat -f %z "$entry")" = 0
-              event_count=$((event_count + 1))
-              test "$event_count" -le 1
-            done <"$task_root/temp/event-entries"
-            test "$event_count" = 1
-            while IFS= read -r -d '' entry; do
-              test ! -L "$event_dir"
-              test ! -L "$entry"
-              run_isolated /bin/rm "$entry"
-            done <"$task_root/temp/event-entries"
-            test ! -L "$event_dir"
-            run_isolated /bin/rmdir "$event_dir"
-            echo 'Removed only the verified empty no_log marker.'
-          else
-            echo 'The synthetic no_log marker disappeared before inspection.' >&2; exit 1
-          fi
+          # The only permitted hidden entry is our empty no_log marker.
+          test -d "$event_dir"
+          test ! -L "$event_dir"
+          test -f "$event_dir/no_log"
+          test ! -L "$event_dir/no_log"
+          test "$(run_isolated /usr/bin/stat -f %z "$event_dir/no_log")" = 0
+          run_logged list-rw-fsevents /bin/ls -la "$event_dir"
+          cat "$task_root/logs/list-rw-fsevents.log"
+          run_logged list-rw-event-paths /usr/bin/find -P "$event_dir" -xdev -mindepth 1 -maxdepth 1 -print
+          test "$(/usr/bin/wc -l <"$task_root/logs/list-rw-event-paths.log" | /usr/bin/tr -d ' ')" = 1
+          test "$(cat "$task_root/logs/list-rw-event-paths.log")" = "$event_dir/no_log"
           run_logged list-rw-clean /usr/bin/find "$rw_mount" -mindepth 1 -maxdepth 1 -print
           cat "$task_root/logs/list-rw-clean.log"
-          test "$(/usr/bin/wc -l <"$task_root/logs/list-rw-clean.log" | /usr/bin/tr -d ' ')" = 2
+          test "$(/usr/bin/wc -l <"$task_root/logs/list-rw-clean.log" | /usr/bin/tr -d ' ')" = 3
           run_logged detach-rw /usr/bin/hdiutil detach "$rw_mount"
           trap - EXIT
           run_logged convert-udzo /usr/bin/hdiutil convert "$task_root/temp/hybrid-rw.dmg" -format UDZO \
@@ -254,7 +244,15 @@ jobs:
           ro_app="$ro_mount/AI Task Monitor.app"
           run_logged list-ro-paths /usr/bin/find "$ro_mount" -mindepth 1 -maxdepth 1 -print
           cat "$task_root/logs/list-ro-paths.log"
-          test "$(/usr/bin/wc -l <"$task_root/logs/list-ro-paths.log" | /usr/bin/tr -d ' ')" = 2
+          test "$(/usr/bin/wc -l <"$task_root/logs/list-ro-paths.log" | /usr/bin/tr -d ' ')" = 3
+          test -d "$ro_mount/.fseventsd"
+          test ! -L "$ro_mount/.fseventsd"
+          test -f "$ro_mount/.fseventsd/no_log"
+          test ! -L "$ro_mount/.fseventsd/no_log"
+          test "$(run_isolated /usr/bin/stat -f %z "$ro_mount/.fseventsd/no_log")" = 0
+          run_logged list-ro-event-paths /usr/bin/find -P "$ro_mount/.fseventsd" -xdev -mindepth 1 -maxdepth 1 -print
+          test "$(/usr/bin/wc -l <"$task_root/logs/list-ro-event-paths.log" | /usr/bin/tr -d ' ')" = 1
+          test "$(cat "$task_root/logs/list-ro-event-paths.log")" = "$ro_mount/.fseventsd/no_log"
           run_logged list-ro-executable /bin/ls -l "$ro_app/Contents/MacOS/AITaskMonitor"
           cat "$task_root/logs/list-ro-executable.log"
           test -x "$ro_app/Contents/MacOS/AITaskMonitor"
