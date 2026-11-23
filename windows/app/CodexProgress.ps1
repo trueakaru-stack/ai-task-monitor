@@ -5291,7 +5291,7 @@ function Update-View {
      if($PreviewRelatedAgentsShowcase){
       $agent.AgentNickname=@('Curie','Averroes','Noether')[$agentIndex]
       $agent.Activity=@((Preview-Text 'Проверка обработки ошибок' 'Checking error handling'),(Preview-Text 'Проверка загрузки данных' 'Checking data loading'),(Preview-Text 'Сравнение результатов проверок' 'Comparing check results'))[$agentIndex]
-      $agent.Active=$true;$agent.Status='В работе';$agent.ActivityObserved=$false
+      $agent.Active=$false;$agent.Status='Статус не подтверждён';$agent.ActivityObserved=$true
      }
      $agentIndex++
      $previewTasks+=@($agent)
@@ -5682,7 +5682,18 @@ if ($SnapshotFile) {
  if($PreviewRelatedAgentsShowcase){
   $demoCodex=@($script:lastAllTasks|Where-Object {[string]$_.Provider -eq 'codex'})
   $demoClaude=@($script:lastAllTasks|Where-Object {[string]$_.Provider -eq 'claude'})
-  if($demoCodex.Count -ne 1 -or $demoClaude.Count -ne 1 -or [int]$demoCodex[0].RelatedAgentCount -ne 3 -or -not $script:showProviderLabels){throw 'The two-source agent showcase is incomplete.'}
+  if($demoCodex.Count -ne 1 -or $demoClaude.Count -ne 1 -or [int]$demoCodex[0].RelatedAgentCount -ne 3 -or
+     -not [bool]$demoCodex[0].RelatedAgentsUnconfirmed -or -not $script:showProviderLabels){throw 'The two-source agent showcase is incomplete.'}
+  function Find-ShowcaseAgentStatus($parent){
+   if($parent -is [Windows.Controls.TextBlock] -and $parent.IsVisible -and $parent.Tag -ceq 'related-agent-status'){return $parent}
+   for($i=0;$i -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$i++){
+    $found=Find-ShowcaseAgentStatus ([Windows.Media.VisualTreeHelper]::GetChild($parent,$i));if($null -ne $found){return $found}
+   }
+   return $null
+  }
+  $demoSurface=if($CompactMode){$compactTasksPanel}else{$tasksPanel}
+  $demoStatus=Find-ShowcaseAgentStatus $demoSurface
+  if($null -eq $demoStatus -or $demoStatus.Text -cne (Related-AgentStatus $demoCodex[0])){throw 'The showcase agent uncertainty is not visible.'}
   if($PreviewRelatedAgentsSelectClaude){
    $demoDot=@($compactDotsPanel.Children|Where-Object {[string]$_.Tag -ceq [string]$demoClaude[0].Id})
    if($demoDot.Count -ne 1){throw 'The Claude task switch is missing.'}
