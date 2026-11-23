@@ -9,6 +9,8 @@ $sessions = Join-Path $fixture 'sessions'
 $first = Join-Path $sessions 'first.jsonl'
 $second = Join-Path $sessions 'second.jsonl'
 $replacement = Join-Path $sessions 'replacement.jsonl'
+$capacityDirectory = Join-Path $sessions 'capacity'
+$capacityFiles = [Collections.Generic.List[string]]::new()
 $utf8 = [Text.UTF8Encoding]::new($false)
 
 function Require([bool]$condition, [string]$message) { if (-not $condition) { throw $message } }
@@ -35,6 +37,7 @@ function Write-Synthetic([string]$path, [string]$id) {
 
 $observer = $null
 $blocked = $null
+$idleObserver = $null
 $gate = $null
 try {
     [void][IO.Directory]::CreateDirectory($sessions)
@@ -128,6 +131,63 @@ try {
     Append-Synthetic $replacement (Event $id 'new-turn')
     [void](Wait-Synthetic $observer $id $replacement { param($snapshot) $snapshot.HasEvent })
 
+    # At the reader's full 768-path bound, repeated discovery must not evict
+    # an already observed task before its next refresh.
+    [void][IO.Directory]::CreateDirectory($capacityDirectory)
+    for ($i = 0; $i -lt 766; $i++) {
+        $capacityId = 'capacity-{0:D4}' -f $i
+        $capacityPath = Join-Path $capacityDirectory ($capacityId + '.jsonl')
+        $capacityFiles.Add($capacityPath)
+        Write-Synthetic $capacityPath $capacityId
+        [void]$observer.Snapshot($capacityId, $capacityPath)
+    }
+    $stillObserved = $observer.Snapshot($id, $replacement)
+    Require ($stillObserved.BaselineReady -and $stillObserved.HasEvent) 'Candidate capacity evicted an observed task.'
+
+    # Simulate the two-second UI poll while one log continues to grow. The
+    # independently scheduled worker must complete at least two regular
+    # rounds and keep the observed cursor through more than 2 MiB of appends.
+    $lastCapacityId = 'capacity-0765'
+    $lastCapacityPath = $capacityFiles[$capacityFiles.Count - 1]
+    $lastCapacity = Wait-Synthetic $observer $lastCapacityId $lastCapacityPath { param($snapshot) $snapshot.BaselineReady }
+    $activeChecks = $stillObserved.CheckCount
+    $paddingLine = '{"type":"event_msg","payload":{"type":"fixture_padding","value":"' + ('x' * 65536) + '"}}' + "`n"
+    for ($round = 0; $round -lt 40; $round++) {
+        Append-Synthetic $replacement $paddingLine
+        if (($round % 8) -eq 0) {
+            $callClock = [Diagnostics.Stopwatch]::StartNew()
+            for ($item = 0; $item -lt $capacityFiles.Count; $item++) {
+                [void]$observer.Snapshot(('capacity-{0:D4}' -f $item), $capacityFiles[$item])
+            }
+            Require ($callClock.ElapsedMilliseconds -lt 2000) 'A full candidate poll blocked the caller.'
+        }
+        Start-Sleep -Milliseconds 250
+        $running = $observer.Snapshot($id, $replacement)
+        Require ($running.BaselineReady) ('Normal appends reset the baseline at round ' + $round + '.')
+    }
+    $lastAgain = $observer.Snapshot($lastCapacityId, $lastCapacityPath)
+    Require ($lastAgain.CheckCount -ge $lastCapacity.CheckCount + 2) 'The background worker did not complete two fair rounds.'
+    Require ($running.CheckCount -gt $activeChecks + 2) 'The observed log did not receive repeated background checks.'
+    [void](Wait-Synthetic $observer $id $replacement { param($snapshot) $snapshot.HasEvent })
+
+    # Once entries are no longer requested, the worker must stop; a later
+    # request must be able to start it again without involving the UI.
+    $idleObserver = [AITaskMonitor.CodexObservation.CodexRecentEventObserver]::new($sessions)
+    [void](Wait-Synthetic $idleObserver $id $replacement { param($snapshot) $snapshot.BaselineReady })
+    $private = [Reflection.BindingFlags]'Instance,NonPublic'
+    $idleType = $idleObserver.GetType();$idleGate = $idleType.GetField('gate', $private).GetValue($idleObserver)
+    $idleEntries = $idleType.GetField('entries', $private).GetValue($idleObserver)
+    [Threading.Monitor]::Enter($idleGate)
+    try { $idleEntries[$id].GetType().GetField('Requested').SetValue($idleEntries[$id], [long]0) }
+    finally { [Threading.Monitor]::Exit($idleGate) }
+    $idleClock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        Start-Sleep -Milliseconds 50
+        $idleWorker = $idleType.GetField('worker', $private).GetValue($idleObserver)
+    } while ($null -ne $idleWorker -and $idleClock.ElapsedMilliseconds -lt 5000)
+    Require ($null -eq $idleWorker) 'The observer kept a worker running after all entries expired.'
+    [void](Wait-Synthetic $idleObserver $id $replacement { param($snapshot) $snapshot.BaselineReady })
+
     # A blocked worker must not block the UI-facing method or start more work.
     $gate = [Threading.ManualResetEvent]::new($false)
     $blocked = [AITaskMonitor.CodexObservation.CodexRecentEventObserver]::new($sessions, $gate)
@@ -137,12 +197,15 @@ try {
     Require (-not $blocked.Snapshot($id, $replacement).HasEvent) 'A blocked worker invented evidence.'
     [void]$gate.Set()
     [void](Wait-Synthetic $blocked $id $replacement { param($snapshot) $snapshot.BaselineReady })
-    Write-Output 'Synthetic recent-event observer: long journal, exact IDs, partial/corrupt data, lost range, replacement, truncation, isolation and nonblocking snapshot verified.'
+    Write-Output 'Synthetic recent-event observer: long journal, exact IDs, partial/corrupt data, replacement, isolation, 768 candidates and nonblocking snapshot verified.'
 } finally {
     if ($null -ne $observer) { $observer.Dispose() }
+    if ($null -ne $idleObserver) { $idleObserver.Dispose() }
     if ($null -ne $gate) { [void]$gate.Set() }
     if ($null -ne $blocked) { $blocked.Dispose() }
     if ($null -ne $gate) { $gate.Dispose() }
+    foreach ($path in $capacityFiles) { if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
+    if ([IO.Directory]::Exists($capacityDirectory)) { [IO.Directory]::Delete($capacityDirectory) }
     foreach ($path in @($first, $second, $replacement)) { if ([IO.File]::Exists($path)) { [IO.File]::Delete($path) } }
     if ([IO.Directory]::Exists($sessions)) { [IO.Directory]::Delete($sessions) }
     if ([IO.Directory]::Exists($fixture)) { [IO.Directory]::Delete($fixture) }

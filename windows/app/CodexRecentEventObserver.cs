@@ -16,6 +16,9 @@ namespace AITaskMonitor.CodexObservation
         public bool HasEvent { get; internal set; }
         public bool BaselineReady { get; internal set; }
         public long CheckCount { get; internal set; }
+        public string IdentityToken { get; internal set; }
+        public long FileLength { get; internal set; }
+        public long LastWriteUtcTicks { get; internal set; }
     }
 
     // All filesystem access and JSON decoding happen on a single worker.
@@ -23,8 +26,14 @@ namespace AITaskMonitor.CodexObservation
     // uncertainty and deciding which card to show.
     public sealed class CodexRecentEventObserver : IDisposable
     {
-        private const int MaximumEntries = 256;
-        private const int EntriesPerPass = 8;
+        // The rollout reader exposes at most 768 verified paths per snapshot.
+        // Keep at least that many baselines so one extra candidate cannot evict
+        // every active session on each UI refresh.
+        private const int MaximumEntries = 768;
+        private const int EntriesPerPass = 64;
+        private const int PriorityPerPass = 8;
+        private const int PassDelayMilliseconds = 250;
+        private const int IdleSeconds = 30;
         private const int MaximumHeader = 65536;
         private const int MaximumLine = 1048576;
         private const int MaximumAppend = 2097152;
@@ -37,8 +46,7 @@ namespace AITaskMonitor.CodexObservation
         private Task worker;
         private bool disposed;
         private long generation;
-        private long nextPass;
-        private string lastVisited = "";
+        private string lastVisited = "", lastPriority = "";
 
         private sealed class Entry
         {
@@ -53,6 +61,8 @@ namespace AITaskMonitor.CodexObservation
             public long Offset, WriteStamp;
             public byte[] Header, Anchor, Partial;
             public bool SkipBaselinePartial, Observed, PendingEvidence;
+            public string IdentityToken;
+            public long FileLength, LastWriteUtcTicks;
 
             public Cursor Copy()
             {
@@ -107,14 +117,17 @@ namespace AITaskMonitor.CodexObservation
                     entries[threadId] = entry;
                 }
                 entry.Requested = now;
-                Schedule(now);
+                Schedule();
                 long freshnessSeconds = Math.Max(4, 2 * ((entries.Count + EntriesPerPass - 1) / EntriesPerPass));
                 bool fresh = entry.Cursor != null && entry.Checked != 0 &&
                              now - entry.Checked <= freshnessSeconds * Stopwatch.Frequency;
                 return new RecentEventSnapshot {
                     BaselineReady = fresh,
                     HasEvent = fresh && entry.Cursor.Observed,
-                    CheckCount = entry.Checks
+                    CheckCount = entry.Checks,
+                    IdentityToken = fresh ? entry.Cursor.IdentityToken : "",
+                    FileLength = fresh ? entry.Cursor.FileLength : -1,
+                    LastWriteUtcTicks = fresh ? entry.Cursor.LastWriteUtcTicks : 0
                 };
             }
         }
@@ -130,54 +143,79 @@ namespace AITaskMonitor.CodexObservation
             if (oldest != null) entries.Remove(oldest);
         }
 
-        private void Schedule(long now)
+        private void Schedule()
         {
-            if (disposed || now < nextPass || (worker != null && !worker.IsCompleted)) return;
-            nextPass = now + Stopwatch.Frequency / 2;
+            if (disposed || (worker != null && !worker.IsCompleted)) return;
             worker = Task.Factory.StartNew(Work, CancellationToken.None, TaskCreationOptions.None, TaskScheduler.Default);
         }
 
         private void Work()
         {
-            List<Request> batch = new List<Request>();
-            lock (gate)
+            while (true)
             {
-                List<string> ids = new List<string>(entries.Keys);
-                ids.Sort(StringComparer.Ordinal);
-                int start = ids.FindIndex(delegate(string value) { return StringComparer.Ordinal.Compare(value, lastVisited) > 0; });
-                if (start < 0) start = 0;
-                int count = Math.Min(EntriesPerPass, ids.Count);
-                for (int i = 0; i < count; i++)
-                {
-                    string id = ids[(start + i) % ids.Count];
-                    Entry entry = entries[id];
-                    batch.Add(new Request { Id = id, Path = entry.Path, Generation = entry.Generation,
-                                            Cursor = entry.Cursor == null ? null : entry.Cursor.Copy() });
-                    lastVisited = id;
-                }
-            }
-            foreach (Request request in batch)
-            {
-                Cursor result = null;
-                try
-                {
-                    if (fixtureGate != null) fixtureGate.WaitOne();
-                    result = Probe(request);
-                }
-                catch { result = null; }
+                List<Request> batch = new List<Request>();
                 lock (gate)
                 {
-                    Entry current;
-                    if (!disposed && entries.TryGetValue(request.Id, out current) &&
-                        current.Generation == request.Generation &&
-                        String.Equals(current.Path, request.Path, StringComparison.OrdinalIgnoreCase))
+                    if (disposed) return;
+                    long cutoff = Stopwatch.GetTimestamp() - IdleSeconds * Stopwatch.Frequency;
+                    foreach (string id in new List<string>(entries.Keys))
+                        if (entries[id].Requested < cutoff) entries.Remove(id);
+                    if (entries.Count == 0) { worker = null; return; }
+                    List<string> ids = new List<string>(entries.Keys);
+                    ids.Sort(StringComparer.Ordinal);
+                    List<string> priority = ids.FindAll(delegate(string id) {
+                        Cursor cursor = entries[id].Cursor;
+                        return cursor != null && (cursor.Observed || cursor.PendingEvidence);
+                    });
+                    HashSet<string> chosen = new HashSet<string>(StringComparer.Ordinal);
+                    int firstPriority = priority.FindIndex(delegate(string value) { return StringComparer.Ordinal.Compare(value, lastPriority) > 0; });
+                    if (firstPriority < 0) firstPriority = 0;
+                    int priorityCount = Math.Min(PriorityPerPass, priority.Count);
+                    for (int i = 0; i < priorityCount; i++)
                     {
-                        current.Cursor = result;
-                        current.Checked = result == null ? 0 : Stopwatch.GetTimestamp();
-                        current.Checks++;
+                        string id = priority[(firstPriority + i) % priority.Count];
+                        AddRequest(batch, entries[id]); chosen.Add(id); lastPriority = id;
+                    }
+                    int start = ids.FindIndex(delegate(string value) { return StringComparer.Ordinal.Compare(value, lastVisited) > 0; });
+                    if (start < 0) start = 0;
+                    for (int i = 0; i < ids.Count && batch.Count < EntriesPerPass; i++)
+                    {
+                        string id = ids[(start + i) % ids.Count];
+                        lastVisited = id;
+                        if (chosen.Add(id)) AddRequest(batch, entries[id]);
                     }
                 }
+                foreach (Request request in batch)
+                {
+                    lock (gate) { if (disposed) return; }
+                    Cursor result = null;
+                    try
+                    {
+                        if (fixtureGate != null) fixtureGate.WaitOne();
+                        result = Probe(request);
+                    }
+                    catch { result = null; }
+                    lock (gate)
+                    {
+                        Entry current;
+                        if (!disposed && entries.TryGetValue(request.Id, out current) &&
+                            current.Generation == request.Generation &&
+                            String.Equals(current.Path, request.Path, StringComparison.OrdinalIgnoreCase))
+                        {
+                            current.Cursor = result;
+                            current.Checked = result == null ? 0 : Stopwatch.GetTimestamp();
+                            current.Checks++;
+                        }
+                    }
+                }
+                Thread.Sleep(PassDelayMilliseconds);
             }
+        }
+
+        private static void AddRequest(List<Request> batch, Entry entry)
+        {
+            batch.Add(new Request { Id = entry.Id, Path = entry.Path, Generation = entry.Generation,
+                                    Cursor = entry.Cursor == null ? null : entry.Cursor.Copy() });
         }
 
         private Cursor Probe(Request request)
@@ -195,7 +233,8 @@ namespace AITaskMonitor.CodexObservation
                     VerifyStillSelected(handle, request.Path, before);
                     return new Cursor { Volume = before.Volume, IndexHigh = before.IndexHigh, IndexLow = before.IndexLow,
                         Offset = before.Length, WriteStamp = before.WriteStamp, Header = header, Anchor = anchor,
-                        Partial = new byte[0], SkipBaselinePartial = partial };
+                        Partial = new byte[0], SkipBaselinePartial = partial, IdentityToken = MakeIdentityToken(before, header),
+                        FileLength = before.Length, LastWriteUtcTicks = DateTime.FromFileTimeUtc(before.WriteStamp).Ticks };
                 }
                 if (old.Volume != before.Volume || old.IndexHigh != before.IndexHigh || old.IndexLow != before.IndexLow ||
                     before.Length < old.Offset || before.Length - old.Offset > MaximumAppend ||
@@ -213,7 +252,9 @@ namespace AITaskMonitor.CodexObservation
                 old.WriteStamp = before.WriteStamp;
                 if (count > 0)
                 {
-                    bool evidence = old.PendingEvidence;
+                    // Preserve a prior valid observation while a later append
+                    // is partial or the bounded reader is catching up.
+                    bool evidence = old.PendingEvidence || old.Observed;
                     List<byte> partial = new List<byte>(old.Partial);
                     foreach (byte value in next)
                     {
@@ -247,6 +288,8 @@ namespace AITaskMonitor.CodexObservation
                 old.Anchor = ReadAnchor(file, old.Offset);
                 FileIdentity after = VerifyStillSelected(handle, request.Path, before);
                 if (!Same(previousAnchor, ReadAnchor(file, previousOffset)) || !Same(header, ReadHeader(file, request.Id))) return null;
+                old.FileLength = after.Length;
+                old.LastWriteUtcTicks = DateTime.FromFileTimeUtc(after.WriteStamp).Ticks;
                 if (after.Length > before.Length)
                 {
                     old.PendingEvidence = old.PendingEvidence || old.Observed;
@@ -390,6 +433,44 @@ namespace AITaskMonitor.CodexObservation
         }
 
         public void Dispose() { lock (gate) { disposed = true; entries.Clear(); } }
+
+        // The rollout reader uses this same strict parser before trusting a
+        // parent relationship. Duplicate keys make identity ambiguous.
+        public static bool HeaderHasUniqueKeys(string json)
+        {
+            try { Metadata.Parse(new UTF8Encoding(false, true).GetBytes(json)); return true; }
+            catch { return false; }
+        }
+
+        public static string CaptureHeaderIdentity(string journalPath, string threadId)
+        {
+            return CaptureMatchingHeaderIdentity(journalPath, threadId, null);
+        }
+
+        public static string CaptureMatchingHeaderIdentity(string journalPath, string threadId, byte[] expectedHeader)
+        {
+            try
+            {
+                string normalized=Path.GetFullPath(journalPath);
+                using (SafeFileHandle handle=OpenRead(normalized))
+                using (FileStream file=new FileStream(handle,FileAccess.Read,4096,false))
+                {
+                    FileIdentity identity=Identify(handle,normalized);
+                    byte[] header=ReadHeader(file,threadId);
+                    if (expectedHeader != null && !Same(header, expectedHeader)) return "";
+                    VerifyStillSelected(handle,normalized,identity);
+                    return MakeIdentityToken(identity,header);
+                }
+            }
+            catch { return ""; }
+        }
+
+        private static string MakeIdentityToken(FileIdentity identity,byte[] header)
+        {
+            using (var hash=System.Security.Cryptography.SHA256.Create())
+                return identity.Volume.ToString("X8")+identity.IndexHigh.ToString("X8")+identity.IndexLow.ToString("X8")+
+                       BitConverter.ToString(hash.ComputeHash(header)).Replace("-","");
+        }
 
         // A strict, bounded JSON reader retains only lifecycle routing fields.
         // It neither returns nor logs arbitrary strings from the journal.

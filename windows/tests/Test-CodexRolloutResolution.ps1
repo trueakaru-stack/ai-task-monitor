@@ -17,11 +17,11 @@ $fixture=$args[0]
 function Require([bool]$condition,[string]$message){if(-not $condition){throw $message}}
 $unconfirmed=-join @(1057,1090,1072,1090,1091,1089,32,1085,1077,32,1087,1086,1076,1090,1074,1077,1088,1078,1076,1105,1085|ForEach-Object {[char]$_})
 function Codex-IndexCandidates{return @($script:fixtureSessions)}
-function Codex-UnindexedCandidates([bool]$HasIndexedHistory){return @()}
-function Codex-ReadSubagentMetadata([string]$id){return $null}
+function Codex-UnindexedCandidates([bool]$HasIndexedHistory){if($null -eq $script:fixtureUnindexed){return @()};return @($script:fixtureUnindexed)}
+function Codex-ReadSubagentMetadata([string]$id){if($null -ne $script:fixtureFallbackRefs -and $script:fixtureFallbackRefs.ContainsKey($id)){return $script:fixtureFallbackRefs[$id]};return $null}
 function Manual-Tasks($sessions){if($script:fixtureOldManual){return @{'long-observer'=[PSCustomObject]@{title='Old title';paused=$true;progress=100}}};return @{}}
 function Codex-Plan([string]$id){if($id -eq 'long-observer'){throw 'Old plan must not be read for an event-only observation.'};return @()}
-function Codex-ObservedActivity([string]$id,[string]$startKey){return 'Synthetic activity'}
+function Codex-ObservedActivity([string]$id,[string]$startKey){if($script:fixtureNoActivity){return ''};return 'Synthetic activity'}
 function Claude-ConnectionState{return 'disconnected'}
 $codexHome=$fixture;$sessionIndex=Join-Path $fixture 'session_index.jsonl';$ClaudeEventFile=''
 [IO.File]::WriteAllText($sessionIndex,'')
@@ -191,9 +191,12 @@ foreach($id in $ids){
  $paths[$id]=$path;$ticks[$id]=[Diagnostics.Stopwatch]::GetTimestamp()
  $script:fixtureSessions+=@([PSCustomObject]@{id=$id;thread_name=$(if($id -eq $parentId){'Verified parent'}else{'Agent'});updated_at='revision'})
 }
-$references=@{};$references[$firstId]=[PSCustomObject]@{ParentThreadId=$parentId;AgentNickname='one'}
-$references[$secondId]=[PSCustomObject]@{ParentThreadId=$parentId;AgentNickname='two'}
-$references[$nestedId]=[PSCustomObject]@{ParentThreadId=$firstId;AgentNickname='nested'}
+$references=@{};$references[$parentId]=[PSCustomObject]@{IsRoot=$true;IdentityToken='fixture-'+$parentId}
+$references[$firstId]=[PSCustomObject]@{ParentThreadId=$parentId;AgentNickname='one';IdentityToken='fixture-'+$firstId}
+$references[$secondId]=[PSCustomObject]@{ParentThreadId=$parentId;AgentNickname='two';IdentityToken='fixture-'+$secondId}
+$references[$nestedId]=[PSCustomObject]@{ParentThreadId=$firstId;AgentNickname='nested';IdentityToken='fixture-'+$nestedId}
+$script:codexRecentEventObserver=[PSCustomObject]@{}
+$script:codexRecentEventObserver|Add-Member ScriptMethod Snapshot {param($id,$path) return [PSCustomObject]@{BaselineReady=$true;IdentityToken='fixture-'+$id;HasEvent=$false}}
 $script:fixtureSnapshot=[PSCustomObject]@{Paths=$paths;CheckedTicks=$ticks;ParentReferences=$references}
 $script:fixtureOldManual=$false;$script:lastCodexTasks=@();$script:codexObservedStarts=@{};$script:observedCodex=@{};$script:lifecycleState=@{};$script:codexRolloutPaths=@{}
 $grouped=Source-Snapshot
@@ -202,8 +205,105 @@ Require (@($grouped.Tasks).Count -eq 1 -and $grouped.Tasks[0].Id -ceq $parentId 
  @($grouped.Tasks[0].RelatedAgents).Count -eq 3 -and [string]$grouped.Tasks[0].Title -ceq 'Verified parent') 'The source pipeline did not group verified nested agents.'
 Require (@($script:lastCodexTasks).Count -eq 4) 'Grouping discarded the raw records needed for source recovery.'
 $script:fixtureSnapshot=[PSCustomObject]@{Paths=$paths;CheckedTicks=$ticks;ParentReferences=@{}}
+$script:fixtureNoActivity=$true
 $unverified=Source-Snapshot
 Require (@($unverified.Tasks).Count -eq 4) 'Tasks were grouped without verified links or were lost when verification disappeared.'
+$separateChild=@($unverified.Tasks|Where-Object Id -eq $firstId)
+Require ($separateChild.Count -eq 1 -and -not $separateChild[0].Active -and $separateChild[0].ActivityIsLast -and
+ [string]$separateChild[0].Activity -ceq 'Synthetic activity') 'An ungrouped uncertain agent lost its last known action.'
+$rotated=Join-Path $dated ('rollout-2026-11-23T10-30-00-'+$firstId+'_20000000-0000-0000-0000-000000000003.jsonl')
+[IO.File]::WriteAllText($rotated,"{}`n",[Text.UTF8Encoding]::new($false));Write-Event $rotated 'task_started' ('turn-'+$firstId)
+$paths[$firstId]=$rotated;$ticks[$firstId]=[Diagnostics.Stopwatch]::GetTimestamp()
+$otherPath=Source-Snapshot;$otherPathChild=@($otherPath.Tasks|Where-Object Id -eq $firstId)
+Require ($otherPathChild.Count -eq 1 -and -not [bool](Prop $otherPathChild[0] 'ActivityIsLast' $false) -and
+ [string]$otherPathChild[0].Activity -ceq $unconfirmed) 'An action from another rollout was reused.'
+Write-Event $paths[$firstId] 'task_started' 'different-turn'
+$newTurn=Source-Snapshot;$newChild=@($newTurn.Tasks|Where-Object Id -eq $firstId)
+Require ($newChild.Count -eq 1 -and -not [bool](Prop $newChild[0] 'ActivityIsLast' $false) -and
+ [string]$newChild[0].Activity -ceq $unconfirmed) 'An action from another turn was shown for a new turn.'
+$script:fixtureNoActivity=$false
+$knownAction=[PSCustomObject]@{Id='retained';Provider='codex';Active=$true;Status='running';Activity='Known action';ActivityGenerated=$false;Progress=20;ProgressKind='exact';Steps=@()}
+$lastAction=@(Unconfirmed-Tasks @($knownAction))
+Require ($lastAction.Count -eq 1 -and -not $lastAction[0].Active -and $lastAction[0].ActivityIsLast -and
+ $lastAction[0].Activity -ceq 'Known action' -and [string]$lastAction[0].Status -ceq $unconfirmed) 'A source outage did not retain a previously observed action as last.'
+$script:codexRecentEventObserver=$null
+$otherParent='60000000-0000-0000-0000-000000000005'
+$alternate=Join-Path $dated ('rollout-2026-11-23T11-00-00-'+$firstId+'_20000000-0000-0000-0000-000000000001.jsonl')
+[IO.File]::WriteAllText($alternate,"{}`n",[Text.UTF8Encoding]::new($false));Write-Event $alternate 'task_started' 'alternate-turn'
+$script:fixtureSessions=@(
+ [PSCustomObject]@{id=$parentId;thread_name='Verified parent';updated_at='revision'},
+ [PSCustomObject]@{id=$firstId;thread_name='Generated title';titleGenerated=$true;updated_at='revision'}
+)
+$script:fixtureFallbackRefs=@{};$script:fixtureFallbackRefs[$firstId]=[PSCustomObject]@{ParentThreadId=$parentId;AgentNickname='reader'}
+$script:fixtureSnapshot=[PSCustomObject]@{Paths=@{};CheckedTicks=@{}}
+$script:sessionDiscovery.Files[$parentId]=$paths[$parentId];$script:sessionDiscovery.Files[$firstId]=$paths[$firstId]
+$script:lastCodexTasks=@();$script:codexObservedStarts=@{};$script:observedCodex=@{};$script:lifecycleState=@{};$script:codexRolloutPaths=@{}
+$fallbackConflict=Source-Snapshot
+Require (@($fallbackConflict.Tasks).Count -eq 2 -and @($fallbackConflict.Tasks|Where-Object Id -eq $firstId).Count -eq 1) 'A fallback journal was used to group an unverified duplicate session.'
+$script:fixtureSessions=@([PSCustomObject]@{id=$parentId;thread_name='Verified parent';updated_at='revision'})
+$script:fixtureFallbackRefs=@{};$script:fixtureUnindexed=@([PSCustomObject]@{id=$firstId;thread_name='Agent';unindexed=$true;path=$paths[$firstId];parentThreadId=$parentId;agentNickname='reader';updated_at='revision'})
+$script:lastCodexTasks=@();$script:codexObservedStarts=@{};$script:observedCodex=@{};$script:lifecycleState=@{};$script:unindexedPaths=@{}
+$firstPage=Source-Snapshot
+$script:fixtureUnindexed=@([PSCustomObject]@{id=$firstId;thread_name='Agent';unindexed=$true;path=$alternate;parentThreadId=$otherParent;agentNickname='reader';updated_at='revision'})
+$secondPage=Source-Snapshot
+Require (@($firstPage.Tasks|Where-Object Id -eq $firstId).Count -eq 1 -and @($secondPage.Tasks|Where-Object Id -eq $firstId).Count -eq 1 -and
+ @($firstPage.Tasks|Where-Object {$null -ne $_.PSObject.Properties['RelatedAgentCount']}).Count -eq 0) 'Conflicting unindexed pages created a false grouping or lost the child.'
+
+# A selected unindexed child can be grouped only after independent file-identity confirmation.
+$identityPath=Join-Path $dated ('rollout-2026-11-23T12-00-00-'+$firstId+'.jsonl')
+$makeHeader={param($parent)
+ @{type='session_meta';payload=@{id=$firstId;parent_thread_id=$parent;agent_nickname='reader';agent_path='/root/reader';source=@{subagent=@{thread_spawn=@{parent_thread_id=$parent;agent_nickname='reader';agent_path='/root/reader'}}}}}|ConvertTo-Json -Compress -Depth 8
+}
+[IO.File]::WriteAllText($identityPath,((& $makeHeader $parentId)+"`n"),[Text.UTF8Encoding]::new($false));Write-Event $identityPath 'task_started' 'observed-start'
+$identity=[AITaskMonitor.CodexObservation.CodexRecentEventObserver]::CaptureHeaderIdentity($identityPath,$firstId)
+Require ([bool]$identity) 'The synthetic child identity could not be captured.'
+$parentPath=$paths[$parentId]
+[IO.File]::WriteAllText($parentPath,('{"type":"session_meta","payload":{"id":"'+$parentId+'"}}'+"`n"),[Text.UTF8Encoding]::new($false));Write-Event $parentPath 'task_started' 'parent-start'
+$parentIdentity=[AITaskMonitor.CodexObservation.CodexRecentEventObserver]::CaptureHeaderIdentity($parentPath,$parentId)
+Require ([bool]$parentIdentity) 'The synthetic parent identity could not be captured.'
+$script:fixtureUnindexed=@([PSCustomObject]@{id=$firstId;thread_name='Agent';unindexed=$true;path=$identityPath;parentThreadId=$parentId;agentNickname='reader';updated_at='revision'})
+$script:fixtureSnapshot=[PSCustomObject]@{Paths=@{$parentId=$parentPath;$firstId=$identityPath};CheckedTicks=@{};ParentReferences=@{$parentId=[PSCustomObject]@{IsRoot=$true;IdentityToken=$parentIdentity};$firstId=[PSCustomObject]@{ParentThreadId=$parentId;AgentNickname='reader';IdentityToken=$identity}}}
+$script:lastCodexTasks=@();$script:codexObservedStarts=@{};$script:observedCodex=@{};$script:lifecycleState=@{};$script:unindexedPaths=@{};$script:codexRolloutPaths=@{}
+$script:codexRecentEventObserver=[AITaskMonitor.CodexObservation.CodexRecentEventObserver]::new($sessionsDirectory)
+try{
+ $initial=Source-Snapshot
+ Require (@($initial.Tasks).Count -eq 2) 'A child was grouped before identity confirmation.'
+ $watch=[Diagnostics.Stopwatch]::StartNew()
+ do{$identityState=$script:codexRecentEventObserver.Snapshot($firstId,$identityPath);if($identityState.BaselineReady){break};Start-Sleep -Milliseconds 40}while($watch.ElapsedMilliseconds -lt 10000)
+ Require ($identityState.BaselineReady -and $identityState.IdentityToken -ceq $identity) 'The synthetic identity baseline did not match.'
+ $watch.Restart()
+ do{$parentState=$script:codexRecentEventObserver.Snapshot($parentId,$parentPath);if($parentState.BaselineReady){break};Start-Sleep -Milliseconds 40}while($watch.ElapsedMilliseconds -lt 10000)
+ Require ($parentState.BaselineReady -and $parentState.IdentityToken -ceq $parentIdentity) 'The synthetic parent baseline did not match.'
+ $verifiedGroup=Source-Snapshot
+ Require (@($verifiedGroup.Tasks).Count -eq 1 -and $verifiedGroup.Tasks[0].Id -ceq $parentId -and $verifiedGroup.Tasks[0].RelatedAgentCount -eq 1) 'A verified unindexed child with a start was not grouped.'
+ for($i=0;$i -lt 3;$i++){
+  Write-Event $identityPath 'token_count' ''
+  $previous=$identityState.CheckCount;$watch.Restart()
+  do{$identityState=$script:codexRecentEventObserver.Snapshot($firstId,$identityPath);if($identityState.CheckCount -gt $previous){break};Start-Sleep -Milliseconds 40}while($watch.ElapsedMilliseconds -lt 10000)
+  $appendGroup=Source-Snapshot
+  Require ($identityState.IdentityToken -ceq $identity -and @($appendGroup.Tasks).Count -eq 1 -and $appendGroup.Tasks[0].RelatedAgentCount -eq 1) 'A normal append caused a verified group to disappear.'
+ }
+ $priorStamp=[IO.File]::GetLastWriteTimeUtc($identityPath);$priorLength=([IO.FileInfo]::new($identityPath)).Length
+ $replacementPath=Join-Path $dated 'synthetic-replacement.jsonl'
+ $replacementHeader=(& $makeHeader $otherParent)+"`n"
+ $replacementBytes=[Text.UTF8Encoding]::new($false).GetBytes($replacementHeader)
+ Require ($replacementBytes.Length -le $priorLength) 'The synthetic replacement is too large.'
+ $replacement=[byte[]]::new([int]$priorLength);[Array]::Copy($replacementBytes,$replacement,$replacementBytes.Length)
+ for($i=$replacementBytes.Length;$i -lt $replacement.Length;$i++){$replacement[$i]=10}
+ [IO.File]::WriteAllBytes($replacementPath,$replacement);[IO.File]::SetLastWriteTimeUtc($replacementPath,$priorStamp)
+ [IO.File]::Delete($identityPath);[IO.File]::Move($replacementPath,$identityPath)
+ Require (([IO.FileInfo]::new($identityPath)).Length -eq $priorLength -and [IO.File]::GetLastWriteTimeUtc($identityPath) -eq $priorStamp) 'The replacement did not preserve synthetic size and timestamp.'
+ $previous=$identityState.CheckCount;$watch.Restart()
+ do{$identityState=$script:codexRecentEventObserver.Snapshot($firstId,$identityPath);if($identityState.CheckCount -gt $previous -and (-not $identityState.BaselineReady -or $identityState.IdentityToken -cne $identity)){break};Start-Sleep -Milliseconds 40}while($watch.ElapsedMilliseconds -lt 10000)
+ Require (-not $identityState.BaselineReady -or $identityState.IdentityToken -cne $identity) 'The replacement reused the prior file identity.'
+ $script:fixtureNoActivity=$true
+ $replacementView=Source-Snapshot
+ Require (@($replacementView.Tasks).Count -eq 2 -and @($replacementView.Tasks|Where-Object Id -eq $firstId).Count -eq 1) 'A replaced file remained grouped under its previous parent.'
+ $replacementChild=@($replacementView.Tasks|Where-Object Id -eq $firstId)
+ Require ($replacementChild.Count -eq 1 -and -not [bool](Prop $replacementChild[0] 'ActivityIsLast' $false) -and
+  [string]$replacementChild[0].Activity -ceq $unconfirmed) 'The last action was carried across a same-path file replacement.'
+ $script:fixtureNoActivity=$false
+}finally{$script:codexRecentEventObserver.Dispose();$script:codexRecentEventObserver=$null}
 Write-Output 'Codex rollout resolution: unconfirmed endings, long-task observation and verified source grouping passed.'
 '@
 try{& ([scriptblock]::Create(($definitions -join "`n")+"`n"+$checks)) $root}

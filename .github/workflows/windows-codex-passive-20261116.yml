@@ -139,12 +139,29 @@ jobs:
                   Invoke-Isolated $powershell $arguments
                   if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Two-task synthetic screenshot is missing.'}
                 }}}
-                foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){
-                  $stem="related-agents-$theme-$language-$mode"
+                foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){foreach($list in @('closed','open')){
+                  $stem="related-agents-$theme-$language-$mode-$list"
                   $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsUiTest','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
                   if($mode -eq 'compact'){$arguments+='-CompactMode'}
+                  if($list -eq 'open'){$arguments+='-PreviewRelatedAgentsExpanded'}
                   Invoke-Isolated $powershell $arguments
                   if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Related-agent synthetic screenshot is missing.'}
+                }}}}
+                foreach($theme in @('dark','light')){foreach($mode in @('expanded','compact')){
+                  $stem="related-agents-named-$theme-$mode"
+                  $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsNamedTitle','-PreviewRelatedAgentsUiTest','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride','ru','-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
+                  if($mode -eq 'compact'){$arguments+='-CompactMode'}
+                  Invoke-Isolated $powershell $arguments
+                  if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Named-title synthetic screenshot is missing.'}
+                }}
+                foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($frame in @('expanded-open','compact-closed','compact-open','compact-claude')){
+                  $stem="showcase-$theme-$language-$frame"
+                  $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','2','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsShowcase','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
+                  if($frame.StartsWith('compact')){$arguments+=@('-CompactMode','-PreviewCompactSwitchUiTest')}
+                  if($frame.EndsWith('open')){$arguments+='-PreviewRelatedAgentsExpanded'}
+                  if($frame.EndsWith('claude')){$arguments+='-PreviewRelatedAgentsSelectClaude'}
+                  Invoke-Isolated $powershell $arguments
+                  if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Two-source showcase screenshot is missing.'}
                 }}}
                 foreach($theme in @('dark','light')){foreach($mode in @('expanded','compact')){
                   $stem="related-agents-hint-$theme-$mode"
@@ -166,4 +183,12 @@ jobs:
           name: windows-codex-passive-${{ matrix.part }}
           path: ${{ runner.temp }}/aitm-codex-passive-ci-*/screenshots/*.png
           if-no-files-found: warn
+          retention-days: 7
+      - name: Preserve candidate installer
+        if: success() && matrix.part == 'checks' && !contains(github.event.head_commit.message, '[remaining-checks]')
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-candidate
+          path: ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/AITaskMonitorSetup.exe
+          if-no-files-found: error
           retention-days: 7

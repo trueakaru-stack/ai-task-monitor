@@ -1,8 +1,10 @@
-# Windows .NET test safety
+# Windows host execution safety
 
-- Do not invoke bare `python` or `py` on the user's Windows machine: these commands can resolve to Python Install Manager and start an installation or update. Use PowerShell/.NET APIs, or first verify an existing interpreter's explicit path and ensure it is not an installer alias. An isolated hosted runner may use its verified Python toolchain.
+- These rules apply to every command run on the user's Windows computer, including work on the macOS branch and commands delegated to other agents. The coordinator must pass them explicitly to each agent that can run Windows commands.
+- Never invoke `python`, `python3`, `py`, `pip` or related Windows execution aliases by bare name. They can launch Python Install Manager and install or update software. Prefer `apply_patch` or PowerShell/.NET APIs; if Python is needed, first verify the full path to an existing interpreter and confirm it is not an execution alias or installer. An isolated hosted runner may use its verified Python toolchain.
 - Never change the persistent user or machine `PATH` while running tests.
 - Set `DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=0` in every process that launches `dotnet`, including CI jobs and nested child environments rebuilt from an allowlist. A separate `DOTNET_CLI_HOME` alone does not prevent the SDK from changing the user's `PATH`.
+- After test runs, check that persistent user and machine `PATH` are unchanged.
 - Before reusing scripts from the adjacent `AI Task Monitor Audit` directory, inspect their complete process environment. Many historical copies do not include this protection, and inheriting the flag from a parent is insufficient when a script clears the child environment.
 - Run `windows/tests/Test-DotnetPathSafety.py` when changing test launchers. Its static checks cover known patterns; they do not prove that every possible launcher is safe.
 

@@ -208,9 +208,9 @@ Require ($card.Count -eq 1 -and -not $card[0].Active -and $card[0].Status -eq '�
  $card[0].ActivityObserved -and $card[0].Activity -eq 'Synthetic observed action' -and
  $null -eq $card[0].Progress -and -not $card[0].PlanConfirmed -and @($card[0].Steps).Count -eq 1) 'A start, message and plan were not retained as unconfirmed.'
 $script:resolvedLanguage='ru'
-Require ((Localized-TaskActivity $card[0]) -ceq 'Статус не подтверждён. Из журнала: Synthetic observed action') 'The Russian observed-message label is incorrect.'
+Require ((Localized-TaskActivity $card[0]) -ceq 'Статус не подтверждён. Последнее: Synthetic observed action') 'The Russian observed-message label is incorrect.'
 $script:resolvedLanguage='en'
-Require ((Localized-TaskActivity $card[0]) -ceq 'Status unconfirmed. From log: Synthetic observed action') 'The English observed-message label is incorrect.'
+Require ((Localized-TaskActivity $card[0]) -ceq 'Status unconfirmed. Last: Synthetic observed action') 'The English observed-message label is incorrect.'
 [IO.File]::Delete((Join-Path $lockDirectory 'task-a.lock'))
 $withoutLock=Source-Snapshot
 Require (@($withoutLock.Tasks|Where-Object {$_.Id -eq 'task-a' -and -not $_.Active}).Count -eq 1) 'A missing lock was treated as completion.'
@@ -327,8 +327,8 @@ try{
  $script:resolvedLanguage='ru'
  Require ((Localized-TaskTitle $card[0]) -ceq 'Задача Codex') 'The generated Russian Codex title was changed.'
  $observed=[PSCustomObject]@{Provider='codex';Status='Статус не подтверждён';ActivityObserved=$true;Activity='Проверяю окно'}
- Require ((Localized-CompactTaskActivity $observed) -ceq 'Статус не подтверждён: Проверяю окно' -and
-  (Localized-TaskActivity $observed) -ceq 'Статус не подтверждён. Из журнала: Проверяю окно') 'Compact activity lost uncertainty or changed the expanded text.'
+ Require ((Localized-CompactTaskActivity $observed) -ceq 'Статус не подтверждён. Последнее: Проверяю окно' -and
+  (Localized-TaskActivity $observed) -ceq 'Статус не подтверждён. Последнее: Проверяю окно') 'Compact activity lost uncertainty or changed the expanded text.'
  Require ((Source-WarningText @('Codex') @() @() $true) -ceq 'Список задач Codex может быть неполным' -and
   (Source-WarningText @('Codex') @() @('Codex') $false) -ceq 'Часть данных недоступна: Codex') 'Codex coverage and read failures were conflated in Russian.'
  Require ((Source-WarningText @('Codex') @() @('Codex') $false $true) -ceq '' -and

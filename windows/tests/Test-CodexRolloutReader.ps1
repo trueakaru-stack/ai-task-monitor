@@ -4,6 +4,7 @@ $text=[IO.File]::ReadAllText((Resolve-Path -LiteralPath $source))
 $match=[regex]::Match($text,"(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@")
 if(-not $match.Success){throw 'The rollout reader source was not found.'}
 Add-Type -TypeDefinition $match.Groups[1].Value -ErrorAction Stop
+Add-Type -Path (Join-Path $PSScriptRoot '..\app\CodexRecentEventObserver.cs') -ErrorAction Stop
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -55,10 +56,50 @@ try{
  $result=[AITaskMonitor.CodexTitles.RolloutReader]::ReadNow($fixtureRoot,[string[]]@($firstId,$wrongId,$hugeId))
  Require ($result.Success -and $result.Paths[$firstId] -ceq $first -and -not $result.Paths.ContainsKey($wrongId) -and -not $result.Paths.ContainsKey($hugeId)) 'Extended path, owner or bounded header validation failed.'
  Require ((Hash-File $dbPath) -ceq $dbHash -and (Hash-File ($dbPath+'-wal')) -ceq $walHash) 'The reader changed the fixture database or WAL.'
+ $rootCases=@(
+  @{source='cli';thread='user';root=$true},
+  @{source='vscode';thread='agent_created_thread';root=$true},
+  @{source='exec';thread='user';root=$true},
+  @{source='mcp';thread='user';root=$true},
+  @{source=$null;thread='user';root=$false},
+  @{source='unknown';thread='user';root=$false},
+  @{source=@{unexpected='value'};thread='user';root=$false},
+  @{source='vscode';thread='subagent';root=$false},
+  @{source='vscode';thread='unknown';root=$false},
+  @{source='vscode';thread=$null;root=$false}
+ )
+ $rootIds=[Collections.Generic.List[string]]::new()
+ for($case=0;$case -lt $rootCases.Count;$case++){
+  $rootId='12000000-0000-0000-0000-{0:D12}' -f $case;$rootIds.Add($rootId)
+  $rootPath=Write-FixtureSession $folder $rootId
+  $rootPayload=@{id=$rootId}
+  if($null -ne $rootCases[$case].source){$rootPayload.source=$rootCases[$case].source}
+  if($null -ne $rootCases[$case].thread){$rootPayload.thread_source=$rootCases[$case].thread}
+  $rootHeader=@{type='session_meta';payload=$rootPayload}|ConvertTo-Json -Compress -Depth 6
+  [IO.File]::WriteAllText($rootPath,($rootHeader+"`n"),[Text.UTF8Encoding]::new($false))
+  $database.Execute(('INSERT INTO threads VALUES('+(@((Quote-Sql $rootId),(Quote-Sql $rootPath),"'paginated'",'0') -join ',')+');'))
+ }
+ $rootResult=[AITaskMonitor.CodexTitles.RolloutReader]::ReadNow($fixtureRoot,$rootIds.ToArray())
+ for($case=0;$case -lt $rootCases.Count;$case++){
+  $rootId=$rootIds[$case];$rootRef=$rootResult.ParentReferences[$rootId]
+  Require ($rootResult.Paths.ContainsKey($rootId) -and $null -ne $rootRef -and [bool]$rootRef.IsRoot -eq [bool]$rootCases[$case].root -and [bool]$rootRef.Conflict -ne [bool]$rootCases[$case].root) 'Root-source classification was not conservative.'
+ }
  $childId='10000000-0000-0000-0000-000000000004';$badChild='10000000-0000-0000-0000-000000000005';$partialChild='10000000-0000-0000-0000-000000000006'
  $child=Write-FixtureSession $folder $childId;$bad=Write-FixtureSession $folder $badChild;$partial=Write-FixtureSession $folder $partialChild
  $spawn=@{parent_thread_id=$firstId;agent_nickname='reader';agent_path='/root/reader'}
- $childMetadata=@{type='session_meta';payload=@{id=$childId;parent_thread_id=$firstId;agent_nickname='reader';agent_path='/root/reader';source=@{subagent=@{thread_spawn=$spawn}}}}|ConvertTo-Json -Compress -Depth 8
+ $childMetadata=@{type='session_meta';payload=@{id=$childId;thread_source='subagent';parent_thread_id=$firstId;agent_nickname='reader';agent_path='/root/reader';source=@{subagent=@{thread_spawn=$spawn}}}}|ConvertTo-Json -Compress -Depth 8
+ [IO.File]::WriteAllText($child,($childMetadata+"`n"),[Text.UTF8Encoding]::new($false))
+ $capture=[AITaskMonitor.CodexTitles.RolloutReader].GetMethod('CaptureParentIdentity',[Reflection.BindingFlags]'Static,NonPublic')
+ $oldBytes=[Text.UTF8Encoding]::new($false).GetBytes($childMetadata)
+ $captureArgs=[object[]]::new(3);$captureArgs[0]=[string]$child;$captureArgs[1]=[string]$childId;$captureArgs[2]=[byte[]]$oldBytes
+ $originalToken=[string]$capture.Invoke($null,$captureArgs)
+ Require ([bool]$originalToken -and $originalToken -ceq [AITaskMonitor.CodexObservation.CodexRecentEventObserver]::CaptureHeaderIdentity($child,$childId)) 'A matching header did not establish identity.'
+ $swappedMetadata=@{type='session_meta';payload=@{id=$childId;thread_source='subagent';parent_thread_id=$wrongId;agent_nickname='reader';agent_path='/root/reader';source=@{subagent=@{thread_spawn=@{parent_thread_id=$wrongId;agent_nickname='reader';agent_path='/root/reader'}}}}}|ConvertTo-Json -Compress -Depth 8
+ $swap=Join-Path $folder 'synthetic-replacement.tmp'
+ [IO.File]::WriteAllText($swap,($swappedMetadata+"`n"),[Text.UTF8Encoding]::new($false))
+ [IO.File]::Delete($child);[IO.File]::Move($swap,$child)
+ $swappedToken=[string]$capture.Invoke($null,$captureArgs)
+ Require (-not $swappedToken -and [bool][AITaskMonitor.CodexObservation.CodexRecentEventObserver]::CaptureHeaderIdentity($child,$childId)) 'A header from one file was paired with another file identity.'
  [IO.File]::WriteAllText($child,($childMetadata+"`n"),[Text.UTF8Encoding]::new($false))
  $badMetadata=@{type='session_meta';payload=@{id=$badChild;parent_thread_id=$firstId;agent_nickname='reader';agent_path='/root/reader';source=@{subagent=@{thread_spawn=@{parent_thread_id=$wrongId;agent_nickname='reader';agent_path='/root/reader'}}}}}|ConvertTo-Json -Compress -Depth 8
  [IO.File]::WriteAllText($bad,($badMetadata+"`n"),[Text.UTF8Encoding]::new($false))
@@ -69,6 +110,23 @@ try{
  Require ($links.Success -and $links.Paths.ContainsKey($childId) -and $links.ParentReferences[$childId].ParentThreadId -ceq $firstId -and
  -not $links.ParentReferences[$childId].Conflict -and $links.Paths.ContainsKey($badChild) -and $links.ParentReferences[$badChild].Conflict -and
  $links.ParentReferences[$partialChild].Conflict) 'Verified parent metadata or conflicting metadata was misclassified.'
+ $duplicateIds=New-Object 'Collections.Generic.List[string]'
+ foreach($field in @('id','parent_thread_id','agent_nickname','agent_path','nested_parent','nested_nickname','nested_path')){
+  $duplicateId='11000000-0000-0000-0000-{0:D12}' -f $duplicateIds.Count;$duplicateIds.Add($duplicateId)
+  $duplicatePath=Write-FixtureSession $folder $duplicateId
+  $header='{"type":"session_meta","payload":{"id":"'+$duplicateId+'","parent_thread_id":"'+$firstId+'","agent_nickname":"reader","agent_path":"/root/reader","source":{"subagent":{"thread_spawn":{"parent_thread_id":"'+$firstId+'","agent_nickname":"reader","agent_path":"/root/reader"}}}}}'
+  $key=switch($field){'nested_parent'{'parent_thread_id'} 'nested_nickname'{'agent_nickname'} 'nested_path'{'agent_path'} default{$field}}
+  $actual=if($key -eq 'id'){$duplicateId}elseif($key -eq 'parent_thread_id'){$firstId}elseif($key -eq 'agent_nickname'){'reader'}else{'/root/reader'}
+  $other=if($key -in @('id','parent_thread_id')){$wrongId}elseif($key -eq 'agent_nickname'){'other'}else{'/root/other'}
+  $needle='"'+$key+'":"'+$actual+'"';$position=if($field.StartsWith('nested_')){$header.LastIndexOf($needle)}else{$header.IndexOf($needle)}
+  if($position -lt 0){throw 'Synthetic duplicate field was not located.'}
+  $replacement='"'+$key+'":"'+$other+'",'+$needle
+  $header=$header.Substring(0,$position)+$replacement+$header.Substring($position+$needle.Length)
+  [IO.File]::WriteAllText($duplicatePath,($header+"`n"),[Text.UTF8Encoding]::new($false))
+  $database.Execute(('INSERT INTO threads VALUES('+(@((Quote-Sql $duplicateId),(Quote-Sql $duplicatePath),"'paginated'",'0') -join ',')+');'))
+ }
+ $duplicates=[AITaskMonitor.CodexTitles.RolloutReader]::ReadNow($fixtureRoot,$duplicateIds.ToArray())
+ foreach($duplicateId in $duplicateIds){Require ($duplicates.Paths.ContainsKey($duplicateId) -and $duplicates.ParentReferences[$duplicateId].Conflict) 'A duplicate identity field was trusted for grouping or hid the separate session.'}
  $metaReader=[AITaskMonitor.CodexTitles.RolloutReader]::new();$metaWatch=[Diagnostics.Stopwatch]::StartNew()
  try{
   do{$meta=$metaReader.Snapshot($fixtureRoot,[string[]]@($childId,$badChild));if($meta.ParentReferences.Count -eq 2){break};Start-Sleep -Milliseconds 25}while($metaWatch.ElapsedMilliseconds -lt 10000)
