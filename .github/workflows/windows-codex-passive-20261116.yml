@@ -160,7 +160,7 @@ jobs:
                   Invoke-Isolated $powershell $arguments
                   if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Named-title synthetic screenshot is missing.'}
                 }}
-                foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($frame in @('expanded-open','compact-closed','compact-open','compact-claude')){
+                foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($frame in @('expanded-closed','expanded-open','compact-closed','compact-open','compact-claude')){
                   $stem="showcase-$theme-$language-$frame"
                   $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','2','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsShowcase','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
                   if($frame.StartsWith('compact')){$arguments+=@('-CompactMode','-PreviewCompactSwitchUiTest')}

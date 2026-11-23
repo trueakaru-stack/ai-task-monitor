@@ -3507,15 +3507,9 @@ function Codex-Tasks {
  foreach($session in $sessions){
   $parentId=[string](Prop $session 'id' '');$parentTitle=[string](Prop $session 'thread_name' '')
   if($parentId -and -not [string]::IsNullOrWhiteSpace($parentTitle) -and $parentTitle -cne 'Guardian review' -and -not [bool](Prop $session 'titleGenerated' $false)){$parentTitles[$parentId]=$parentTitle}
-  $referenceParent=[string](Prop $session 'parentThreadId' '');$referenceName=[string](Prop $session 'agentNickname' '')
-  if($referenceParent -and $referenceName){
-   $subagentRefs[$parentId]=[PSCustomObject]@{ParentThreadId=$referenceParent;AgentNickname=$referenceName}
-  }
-  elseif($parentId -and -not [bool](Prop $session 'unindexed' $false) -and
-         ([bool](Prop $session 'titleGenerated' $false) -or [string]::IsNullOrWhiteSpace($parentTitle))){
-   $reference=Codex-ReadSubagentMetadata $parentId
-   if($null -ne $reference){$subagentRefs[$parentId]=$reference}
-  }
+  # A paged discovery result can contain competing rollouts for the same ID.
+  # Use its parent and nickname only after the reader and observer agree on
+  # the selected file identity; otherwise the separate title stays neutral.
   $check=$null
   if($null -ne $identityObserver -and $null -ne $identityObserver.Value -and $null -ne $verifiedPaths -and $verifiedPaths.ContainsKey($parentId)){
    try{
@@ -4334,7 +4328,7 @@ function New-TaskTitleLine($task,[double]$rightMargin,[bool]$fixedHeight) {
   if($fixedHeight){$title.Height=22;$title.HorizontalAlignment='Left'}
   return $title
  }
- $line=New-Object Windows.Controls.Grid;$line.Margin=New-Object Windows.Thickness(0,0,$rightMargin,0);$line.MaxWidth=390
+ $line=New-Object Windows.Controls.Grid;$line.Margin=New-Object Windows.Thickness(0,0,$rightMargin,0);$line.MaxWidth=390;$line.HorizontalAlignment='Left'
  if($fixedHeight){$line.Height=22}
  $nameColumn=New-Object Windows.Controls.ColumnDefinition;$nameColumn.Width=New-Object Windows.GridLength(1,'Star')
  $countColumn=New-Object Windows.Controls.ColumnDefinition;$countColumn.Width=[Windows.GridLength]::Auto

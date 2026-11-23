@@ -239,15 +239,21 @@ $script:fixtureSnapshot=[PSCustomObject]@{Paths=@{};CheckedTicks=@{}}
 $script:sessionDiscovery.Files[$parentId]=$paths[$parentId];$script:sessionDiscovery.Files[$firstId]=$paths[$firstId]
 $script:lastCodexTasks=@();$script:codexObservedStarts=@{};$script:observedCodex=@{};$script:lifecycleState=@{};$script:codexRolloutPaths=@{}
 $fallbackConflict=Source-Snapshot
-Require (@($fallbackConflict.Tasks).Count -eq 2 -and @($fallbackConflict.Tasks|Where-Object Id -eq $firstId).Count -eq 1) 'A fallback journal was used to group an unverified duplicate session.'
-$script:fixtureSessions=@([PSCustomObject]@{id=$parentId;thread_name='Verified parent';updated_at='revision'})
-$script:fixtureFallbackRefs=@{};$script:fixtureUnindexed=@([PSCustomObject]@{id=$firstId;thread_name='Agent';unindexed=$true;path=$paths[$firstId];parentThreadId=$parentId;agentNickname='reader';updated_at='revision'})
+$fallbackChild=@($fallbackConflict.Tasks|Where-Object Id -eq $firstId)
+Require (@($fallbackConflict.Tasks).Count -eq 2 -and $fallbackChild.Count -eq 1 -and $fallbackChild[0].TitleGenerated -and
+ [string]$fallbackChild[0].Title -notmatch 'Verified parent') 'An unverified fallback supplied a parent title or grouped a duplicate session.'
+$script:fixtureSessions=@([PSCustomObject]@{id=$parentId;thread_name='Verified parent';updated_at='revision'},[PSCustomObject]@{id=$otherParent;thread_name='Other parent';updated_at='revision'})
+$script:fixtureFallbackRefs=@{};$script:fixtureUnindexed=@([PSCustomObject]@{id=$firstId;thread_name='';titleGenerated=$true;unindexed=$true;path=$paths[$firstId];parentThreadId=$parentId;agentNickname='reader';updated_at='revision'})
 $script:lastCodexTasks=@();$script:codexObservedStarts=@{};$script:observedCodex=@{};$script:lifecycleState=@{};$script:unindexedPaths=@{}
 $firstPage=Source-Snapshot
-$script:fixtureUnindexed=@([PSCustomObject]@{id=$firstId;thread_name='Agent';unindexed=$true;path=$alternate;parentThreadId=$otherParent;agentNickname='reader';updated_at='revision'})
+$script:fixtureUnindexed=@([PSCustomObject]@{id=$firstId;thread_name='';titleGenerated=$true;unindexed=$true;path=$alternate;parentThreadId=$otherParent;agentNickname='reader';updated_at='revision'})
 $secondPage=Source-Snapshot
 Require (@($firstPage.Tasks|Where-Object Id -eq $firstId).Count -eq 1 -and @($secondPage.Tasks|Where-Object Id -eq $firstId).Count -eq 1 -and
  @($firstPage.Tasks|Where-Object {$null -ne $_.PSObject.Properties['RelatedAgentCount']}).Count -eq 0) 'Conflicting unindexed pages created a false grouping or lost the child.'
+foreach($page in @($firstPage,$secondPage)){
+ $child=@($page.Tasks|Where-Object Id -eq $firstId)
+ Require ($child.Count -eq 1 -and $child[0].TitleGenerated -and [string]$child[0].Title -notmatch 'Verified parent|Other parent') 'A conflicting discovery page supplied an unverified parent title.'
+}
 
 # A selected unindexed child can be grouped only after independent file-identity confirmation.
 $identityPath=Join-Path $dated ('rollout-2026-11-23T12-00-00-'+$firstId+'.jsonl')
