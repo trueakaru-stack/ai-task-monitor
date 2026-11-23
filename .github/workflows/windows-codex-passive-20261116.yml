@@ -120,6 +120,12 @@ jobs:
                 $installerWork=Join-Path $root 'temp/observer-installer-work'
                 Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/Build-Installer-v2.ps1'),'-OutputDirectory',$installerOutput,'-BuildTempDirectory',$installerWork)
                 Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/tests/Test-CodexRecentEventPackaging.ps1'),'-InstallerPath',(Join-Path $installerOutput 'AITaskMonitorSetup.exe'))
+                $installerPath=Join-Path $installerOutput 'AITaskMonitorSetup.exe'
+                $verifiedCommit=(git -C "$source" rev-parse HEAD).Trim()
+                if($LASTEXITCODE -ne 0 -or $verifiedCommit -cne $env:GITHUB_SHA){throw 'The installer source revision changed.'}
+                $installerHash=(Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                [IO.File]::WriteAllText(($installerPath+'.sha256'),($installerHash+'  AITaskMonitorSetup.exe'+"`n"),[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $installerOutput 'source-commit.txt'),($verifiedCommit+"`n"),[Text.UTF8Encoding]::new($false))
               }
             }else{
               $counts=if($env:AITM_TEST_PART -eq 'screenshots-active'){@(1)}else{@(0)}
@@ -189,6 +195,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer-candidate
-          path: ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/AITaskMonitorSetup.exe
+          path: |
+            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/AITaskMonitorSetup.exe
+            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/AITaskMonitorSetup.exe.sha256
+            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/source-commit.txt
           if-no-files-found: error
           retention-days: 7
