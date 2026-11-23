@@ -1,7 +1,7 @@
 name: Synthetic macOS capacity regressions
 on:
   push:
-    branches: ['macos', 'codex/macos-kimi-scope-fix-20261116']
+    branches: ['macos', 'codex/macos-kimi-scope-fix-20261116', 'codex/macos-activity-ci-20261123']
     paths: ['.github/workflows/macos-card-candidate4-20261116.yml', 'macos/**']
 permissions:
   contents: read
@@ -105,6 +105,29 @@ jobs:
           task_bin="$("${task_compiler[@]}" build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
           test -d "$task_bin/AITaskMonitorPackageTests.xctest"
           printf 'AITM_TEST_BIN=%s\n' "$task_bin" >> "$GITHUB_ENV"
+      - name: Verify Codex activity, task names and compact warnings
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for suite in CodexActiveOperationTests CodexExecDiscoveryTests CompactSourceWarningTests; do
+            "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
+          done
+      - name: Render compact and expanded Codex warning previews
+        id: codex_render
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$AITM_TEST_TASK_ROOT/run-isolated" /usr/bin/env AITM_CODEX_PARTIAL_PREVIEW_ONLY=1 "$AITM_TEST_BIN/AITaskMonitor" --render-previews "$AITM_TEST_TASK_ROOT/temp/codex-activity-renders"
+      - name: Save Codex warning previews
+        if: ${{ !cancelled() && steps.codex_render.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-codex-activity-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-card-tests.*/temp/codex-activity-renders/*.png
+          if-no-files-found: error
+          retention-days: 30
       - name: Check guard skips without hosted test fixture
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
