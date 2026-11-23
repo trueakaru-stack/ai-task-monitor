@@ -8,6 +8,8 @@ struct CodexRolloutHint: Equatable {
     let size: UInt64
     let modified: Date
     let turnID: String
+    var modifiedSeconds: Int64? = nil
+    var modifiedNanoseconds: Int64? = nil
 }
 
 /// Observes bounded appends to competing rollouts without selecting a history.
@@ -234,7 +236,8 @@ final class CodexAmbiguousRolloutTracker {
                           let turn = usefulPaths[only.key], !turn.isEmpty {
                     let identity = only.value.identity
                     hints[id] = CodexRolloutHint(path: only.key, device: identity.device, inode: identity.inode,
-                                                 size: identity.size, modified: identity.modified, turnID: turn)
+                                                 size: identity.size, modified: identity.modified, turnID: turn,
+                                                 modifiedSeconds: identity.seconds, modifiedNanoseconds: identity.nanoseconds)
                 }
             } catch ReadFailure.changedDuringRead {
                 // A live append can race with a scan. Keep the prior baseline.
@@ -314,7 +317,8 @@ final class CodexAmbiguousRolloutTracker {
                    sample.cursor.currentTurn == turn, !sample.cursor.closedTurns.contains(turn) {
                     let identity = sample.cursor.identity
                     starts[id] = CodexRolloutHint(path: previous.path, device: identity.device, inode: identity.inode,
-                                                  size: identity.size, modified: identity.modified, turnID: turn)
+                                                  size: identity.size, modified: identity.modified, turnID: turn,
+                                                  modifiedSeconds: identity.seconds, modifiedNanoseconds: identity.nanoseconds)
                 }
             } catch ReadFailure.changedDuringRead {
                 // A writer raced this scan; try again with the old cursor.

@@ -664,6 +664,28 @@ final class CodexRolloutSelectionTests: XCTestCase {
         }
     }
 
+    func testUniqueRecoveryProofCarriesExactFilesystemTime() throws {
+        try withRoot { root in
+            let files = try setup(root)
+            let sessions = root.appendingPathComponent("sessions")
+            let tracker = CodexAmbiguousRolloutTracker()
+            let candidates = [thread: [files.old, files.current]]
+            XCTAssertTrue(tracker.observe(candidates, sessionsDirectory: sessions).isEmpty)
+            try append(row("agent_reasoning", id: thread), to: files.current)
+            let previous = try XCTUnwrap(tracker.observe(candidates, sessionsDirectory: sessions)[thread])
+            try FileManager.default.removeItem(at: files.old)
+            XCTAssertTrue(tracker.observeUnique([thread: previous], protectedIDs: [thread], sessionsDirectory: sessions).isEmpty)
+            try append(row("task_started", id: thread, turn: "new-turn"), to: files.current)
+            let proof = try XCTUnwrap(tracker.observeUnique([thread: previous], protectedIDs: [thread],
+                                                          sessionsDirectory: sessions)[thread])
+            var information = stat()
+            XCTAssertEqual(lstat(files.current.path, &information), 0)
+            XCTAssertEqual(proof.modifiedSeconds, Int64(information.st_mtimespec.tv_sec))
+            XCTAssertEqual(proof.modifiedNanoseconds, Int64(information.st_mtimespec.tv_nsec))
+            XCTAssertEqual(proof.size, UInt64(information.st_size))
+        }
+    }
+
     func testFreshStartCompletingBeforeDeliveryDoesNotCloseOldCard() throws {
         try withRoot { root in
             let files = try setup(root)

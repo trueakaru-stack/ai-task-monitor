@@ -104,15 +104,23 @@ struct CodexTaskReader {
                 guard fresh.path == file.standardizedFileURL.path,
                       (attributes[.systemNumber] as? NSNumber)?.uint64Value == fresh.device,
                       (attributes[.systemFileNumber] as? NSNumber)?.uint64Value == fresh.inode,
-                      (attributes[.size] as? NSNumber)?.uint64Value == fresh.size,
-                      modified == fresh.modified else {
+                      (attributes[.size] as? NSNumber)?.uint64Value == fresh.size else {
                     result.isPartial = true
                     continue
                 }
             }
             if let observedSince, modified < observedSince && !previouslyObserved.contains(id) { continue }
             let tailLimit = 4_194_304
-            let tail = try FileHelpers.tail(of: file, maximumBytes: tailLimit)
+            let tail: String
+            if let fresh {
+                guard let checked = try Self.freshTail(of: file, proof: fresh, maximumBytes: tailLimit) else {
+                    result.isPartial = true
+                    continue
+                }
+                tail = checked
+            } else {
+                tail = try FileHelpers.tail(of: file, maximumBytes: tailLimit)
+            }
             let cached = try? lifecycleCache.previous(for: file, attributes: attributes, maximumAppend: UInt64(tailLimit))
             if recovered != nil && cached == nil {
                 result.isPartial = true
@@ -318,6 +326,30 @@ struct CodexTaskReader {
 
     func isRunning(tail: String, observedSince: Date? = nil) -> Bool {
         CodexLifecycleState.parse(tail).isRunning(observedSince: observedSince)
+    }
+
+    /// Compare the raw filesystem timestamp, not two independently rounded
+    /// Date representations, and read the same file descriptor that was checked.
+    private static func freshTail(of url: URL, proof: CodexRolloutHint, maximumBytes: Int) throws -> String? {
+        guard let seconds = proof.modifiedSeconds, let nanoseconds = proof.modifiedNanoseconds else { return nil }
+        let descriptor = url.path.withCString { open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) }
+        guard descriptor >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        func matches() -> Bool {
+            var info = stat()
+            guard fstat(descriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+                  info.st_size >= 0 else { return false }
+            return UInt64(bitPattern: Int64(info.st_dev)) == proof.device &&
+                UInt64(info.st_ino) == proof.inode && UInt64(info.st_size) == proof.size &&
+                Int64(info.st_mtimespec.tv_sec) == seconds && Int64(info.st_mtimespec.tv_nsec) == nanoseconds
+        }
+        guard matches() else { return nil }
+        let count = Int(min(proof.size, UInt64(maximumBytes)))
+        try handle.seek(toOffset: proof.size - UInt64(count))
+        let data = try handle.read(upToCount: count) ?? Data()
+        guard data.count == count, matches() else { return nil }
+        return String(decoding: data, as: UTF8.self)
     }
 
     /// A recovered card can close only on a terminal for the same visible
