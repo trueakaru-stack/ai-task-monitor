@@ -63,7 +63,7 @@ The [project license](LICENSE) allows free use, including internal business use,
 | ![Windows expanded, dark](screenshots/expanded-dark.png) | ![Windows compact, dark](screenshots/compact-dark.png) | ![Windows settings, dark](screenshots/settings-dark.png) |
 | ![Windows expanded, light](screenshots/expanded-light.png) | ![Windows compact, light](screenshots/compact-light.png) | ![Windows settings, light](screenshots/settings-light.png) |
 
-### macOS 0.3.10
+### macOS 0.3.11
 
 | Развёрнуто / Expanded | Компактно / Compact | Настройки / Settings |
 | --- | --- | --- |
