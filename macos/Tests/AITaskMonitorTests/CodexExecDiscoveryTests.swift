@@ -100,13 +100,15 @@ final class CodexExecDiscoveryTests: XCTestCase {
     private func subagentRollout(_ root: URL, id: String, parent: String, metadataID: String? = nil,
                                  nestedParent: String? = nil, outerPath: String = "/root/research",
                                  nestedPath: String = "/root/research", outerName: String? = "Sparrow",
-                                 nestedName: String? = "Sparrow", sourceOverride: String? = nil) throws {
+                                 nestedName: String? = "Sparrow", sourceOverride: String? = nil,
+                                 threadSource: Any? = nil) throws {
         var spawn: [String: Any] = ["parent_thread_id": nestedParent ?? parent, "agent_path": nestedPath]
         if let nestedName { spawn["agent_nickname"] = nestedName }
         var payload: [String: Any] = ["id": metadataID ?? id, "parent_thread_id": parent,
             "agent_path": outerPath, "source": ["subagent": ["thread_spawn": spawn]]]
         if let outerName { payload["agent_nickname"] = outerName }
         if let sourceOverride { payload["source"] = sourceOverride }
+        if let threadSource { payload["thread_source"] = threadSource }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let timestamp = formatter.string(from: Date())
@@ -187,6 +189,56 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertTrue(result.tasks.contains { $0.id == second })
         XCTAssertNil(result.subagentParents[second])
         reader.waitForAmbiguousObservationForTests()
+    }
+
+    func testThreadSourceMustAgreeWithSubagentMetadata() throws {
+        let cases: [(Any?, Bool)] = [(nil, true), (NSNull(), true), ("subagent", true),
+                                     ("user", false), ("guardian_review", false), ("unknown", false), (42, false)]
+        for (classification, accepted) in cases {
+          for indexed in [false, true] {
+            let root = try makeRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            try indexRows(root, indexed ? [(first, "Parent"), (second, "Child")] : [(first, "Parent")])
+            _ = try rollout(root, fileID: first)
+            try subagentRollout(root, id: second, parent: first, threadSource: classification)
+            let reader = CodexTaskReader(codexHome: root)
+            _ = try reader.readSnapshot()
+            reader.waitForAmbiguousObservationForTests()
+            let snapshot = try reader.readSnapshot()
+            XCTAssertTrue(snapshot.tasks.contains { $0.id == second })
+            XCTAssertEqual(snapshot.subagentParents[second] == first, accepted)
+            if !indexed && !accepted {
+                let child = try XCTUnwrap(snapshot.tasks.first { $0.id == second })
+                XCTAssertTrue(child.isUnconfirmed)
+                XCTAssertFalse(child.isActive)
+                XCTAssertNil(snapshot.subagentParents[second])
+            }
+            reader.waitForAmbiguousObservationForTests()
+          }
+        }
+    }
+
+    func testStringSourceWithSubagentClassificationRemainsSeparate() throws {
+        for source in ["cli", "vscode"] {
+          for indexed in [false, true] {
+            let root = try makeRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            try indexRows(root, indexed ? [(first, "Parent"), (second, "Child")] : [(first, "Parent")])
+            _ = try rollout(root, fileID: first)
+            try subagentRollout(root, id: second, parent: first, sourceOverride: source, threadSource: "subagent")
+            let reader = CodexTaskReader(codexHome: root)
+            _ = try reader.readSnapshot()
+            reader.waitForAmbiguousObservationForTests()
+            let snapshot = try reader.readSnapshot()
+            let child = try XCTUnwrap(snapshot.tasks.first { $0.id == second }, "\(source), indexed=\(indexed)")
+            if !indexed { XCTAssertTrue(child.isUnconfirmed) }
+            XCTAssertNil(snapshot.subagentParents[second])
+            let visible = CodexTaskGrouping.project(snapshot.tasks, parents: snapshot.subagentParents, titles: snapshot.subagentTitles)
+            XCTAssertTrue(visible.contains { $0.id == first })
+            XCTAssertTrue(visible.contains { $0.id == second })
+            reader.waitForAmbiguousObservationForTests()
+          }
+        }
     }
 
     func testDuplicateMetadataKeysNeverCreateRelationship() throws {

@@ -978,7 +978,11 @@ struct CodexTaskReader {
         var subagent: SubagentReference?
     }
 
-    private func subagentReference(_ payload: [String: Any], id: String) -> SubagentReference? {
+    private func subagentReference(_ payload: [String: Any], id: String,
+                                   requireCompatibleThreadSource: Bool = true) -> SubagentReference? {
+        if requireCompatibleThreadSource, let threadSource = payload["thread_source"], !(threadSource is NSNull) {
+            guard let value = threadSource as? String, value == "subagent" else { return nil }
+        }
         guard id.utf8.count == 36, UUID(uuidString: id) != nil,
               let source = payload.object("source"), let subagent = source.object("subagent"),
               let spawn = subagent.object("thread_spawn") else { return nil }
@@ -1083,7 +1087,13 @@ struct CodexTaskReader {
         }
         guard payload.string("id") == id else { return nil }
         let subagent = subagentReference(payload, id: id)
-        guard ["exec", "vscode"].contains(payload.string("source")) || subagent != nil else { return nil }
+        // A conflicting analytics classification prevents grouping, but the
+        // independently identified child can still be shown as unconfirmed.
+        let unconfirmedSubagent = subagent == nil &&
+            subagentReference(payload, id: id, requireCompatibleThreadSource: false) != nil
+        let source = payload.string("source")
+        let classifiedCLIChild = source == "cli" && payload.string("thread_source") == "subagent"
+        guard ["exec", "vscode"].contains(source) || classifiedCLIChild || subagent != nil || unconfirmedSubagent else { return nil }
         let end = try handle.seekToEnd()
         let count = min(end, UInt64(262_144))
         try handle.seek(toOffset: end - count)

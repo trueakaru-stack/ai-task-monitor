@@ -38,8 +38,11 @@ final class CodexGroupingVisualTests: XCTestCase {
             for dark in [false, true] {
                 for compact in [false, true] {
                   for disclosureOpen in [false, true] {
-                    let title = tr("Очень длинное название родительской задачи для проверки обрезки и подсказки",
-                                   "A very long parent task title for checking truncation and its tooltip")
+                   for longTitle in [false, true] {
+                    let title = longTitle
+                        ? tr("Очень длинное название родительской задачи для проверки обрезки и подсказки",
+                             "A very long parent task title for checking truncation and its tooltip")
+                        : tr("Проверка загрузки событий", "Checking event loading")
                     let parentTask = MonitoredTask(id: rootID, provider: .codex, title: title,
                         activity: tr("Проверяю сохранение основного действия", "Checking that the parent activity stays visible"),
                         isActive: true, progress: 50, progressKind: .exact,
@@ -87,7 +90,7 @@ final class CodexGroupingVisualTests: XCTestCase {
                     let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
                     hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
                     let bytes = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                    let name = "grouped-\(language.rawValue)-\(dark ? "dark" : "light")-\(compact ? "compact" : "expanded")-\(disclosureOpen ? "open" : "closed").png"
+                    let name = "grouped-\(language.rawValue)-\(dark ? "dark" : "light")-\(compact ? "compact" : "expanded")-\(disclosureOpen ? "open" : "closed")-\(longTitle ? "long" : "normal").png"
                     let destination = output.appendingPathComponent(name).path
                     guard destination.hasPrefix(output.path + "/") else { throw CocoaError(.fileWriteNoPermission) }
                     let descriptor = destination.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600)) }
@@ -96,6 +99,7 @@ final class CodexGroupingVisualTests: XCTestCase {
                     try handle.write(contentsOf: bytes)
                     try handle.close()
                     window.close()
+                   }
                   }
                 }
             }

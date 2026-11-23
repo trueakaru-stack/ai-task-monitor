@@ -44,6 +44,10 @@ struct TaskCardView: View {
                 ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 12)
                     .padding(.top, 4)
             }
+            if let status = task.codexAgentStatusLabel {
+                Text(status).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                    .padding(.top, 4)
+            }
             if let agents = task.codexAgents, !agents.isEmpty {
                 CodexAgentList(task: task, agents: agents, compact: false)
             }
@@ -101,7 +105,7 @@ struct CodexAgentDisclosureButton: View {
     let compact: Bool
 
     var body: some View {
-        if let label = task.codexAgentCountLabel(includingStatus: !compact) {
+        if let label = task.codexAgentCountLabel(includingStatus: false) {
             Button { store.toggleCodexGroup(task.id) } label: {
                 HStack(spacing: 4) {
                     Text(" " + label).font(.system(size: 16, weight: .semibold)).lineLimit(1)
@@ -152,9 +156,9 @@ struct CodexAgentList: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(OverlayScrollerProbe().frame(width: 0, height: 0))
+                .background(OverlayScrollerProbe(alwaysVisible: true).frame(width: 0, height: 0))
             }
-            .frame(height: min(CGFloat(agents.count) * 60, 116))
+            .frame(height: min(CGFloat(agents.count) * 60, 180))
             .padding(.top, 12)
         }
     }
