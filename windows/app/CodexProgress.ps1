@@ -50,6 +50,7 @@
  [switch]$PreviewRelatedAgentsUiTest,
  [switch]$PreviewRelatedAgentsExpanded,
  [switch]$PreviewRelatedAgentsNamedTitle,
+ [switch]$PreviewRelatedAgentsLongActivity,
  [switch]$PreviewRelatedAgentsShowcase,
  [switch]$PreviewRelatedAgentsSelectClaude,
  [ValidateSet('','partial-data','partial-connection','partial-both','unavailable')][string]$PreviewSourceWarning = '',
@@ -154,6 +155,7 @@ if(($PreviewPlanUnconfirmed -or $PreviewPlanUiTest) -and (-not $SnapshotFile -or
 if($PreviewRelatedAgents -and (-not $SnapshotFile -or $PreviewScenario -ne 'planned' -or $(if($PreviewRelatedAgentsShowcase){$PreviewActiveTasks -ne 2}else{$PreviewActiveTasks -ne 1}))){throw 'Agent grouping previews require synthetic planned tasks and a snapshot.'}
 if($PreviewRelatedAgentsExpanded -and -not $PreviewRelatedAgents){throw 'Expanded agent previews require synthetic grouped agents.'}
 if($PreviewRelatedAgentsNamedTitle -and -not $PreviewRelatedAgents){throw 'A named agent preview requires synthetic grouped agents.'}
+if($PreviewRelatedAgentsLongActivity -and (-not $PreviewRelatedAgents -or $CompactMode)){throw 'Long agent activity requires an expanded synthetic agent preview.'}
 if($PreviewRelatedAgentsShowcase -and -not $PreviewRelatedAgents){throw 'The agent showcase requires synthetic grouped agents.'}
 if($PreviewRelatedAgentsSelectClaude -and (-not $PreviewRelatedAgentsShowcase -or -not $CompactMode)){throw 'Claude selection requires a compact synthetic agent showcase.'}
 if($PreviewRelatedAgentsUiTest -and (-not $PreviewRelatedAgents -or -not $PreviewOffscreen -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:GITHUB_ACTIONS -cne 'true')){throw 'Agent grouping UI checks require a disposable hosted Windows preview.'}
@@ -4439,7 +4441,19 @@ function Add-Card($task) {
  $c1=New-Object Windows.Controls.ColumnDefinition; $c1.Width=New-Object Windows.GridLength(1,"Star"); $c2=New-Object Windows.Controls.ColumnDefinition; $c2.Width=[Windows.GridLength]::Auto; $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2)
  $titleStack=New-Object Windows.Controls.StackPanel
  $title=New-TaskTitleLine $task 14 $true;$titleStack.Children.Add($title)|Out-Null
- $activityText=Localized-TaskActivity $task; $activity=Text $activityText 12 $script:palette.Activity; $activity.MaxWidth=390; $activity.HorizontalAlignment="Left"; $activity.Height=34; $activity.MaxHeight=34; $activity.TextTrimming="CharacterEllipsis"; if($activityText){Add-ConditionalHint $activity $activityText "wrap"}
+ $activityText=Localized-TaskActivity $task; $activity=Text $activityText 12 $script:palette.Activity; $activity.MaxWidth=390; $activity.HorizontalAlignment="Left"; $activity.MaxHeight=34; $activity.TextTrimming="CharacterEllipsis"
+ $hasRelated=[int](Prop $task 'RelatedAgentCount' 0) -gt 0
+ if($hasRelated){
+  [Windows.Automation.AutomationProperties]::SetAutomationId($activity,'related-parent-activity')
+  if($stepCount -gt 0){
+   $baseCardHeight=[double]$card.Height
+   $activity.Add_SizeChanged(({param($sender,$eventArgs)
+    $nextHeight=$baseCardHeight-34+[Math]::Min(34,[Math]::Max(0,$sender.ActualHeight))
+    if([Math]::Abs($card.Height-$nextHeight) -gt 0.25){$card.Height=$nextHeight}
+   }).GetNewClosure())
+  }
+ }else{$activity.Height=34}
+ if($activityText){Add-ConditionalHint $activity $activityText "wrap"}
  $activityRow=New-Object Windows.Controls.Grid; $activityRow.Margin=New-Object Windows.Thickness(0,5,14,0)
  $activityMarkColumn=New-Object Windows.Controls.ColumnDefinition; $activityMarkColumn.Width=New-Object Windows.GridLength(22); $activityTextColumn=New-Object Windows.Controls.ColumnDefinition; $activityTextColumn.Width=New-Object Windows.GridLength(1,"Star"); $activityRow.ColumnDefinitions.Add($activityMarkColumn); $activityRow.ColumnDefinitions.Add($activityTextColumn)
  if($activityText){$indicator=New-ActivityIndicator ([bool]$task.Active);$indicator.Margin=New-Object Windows.Thickness(0,7,6,0);$indicator.VerticalAlignment="Top";$indicator.HorizontalAlignment="Left";$activityRow.Children.Add($indicator)|Out-Null}
@@ -5281,6 +5295,7 @@ function Update-View {
     $second='10000000-0000-0000-0000-000000000003';$nested='10000000-0000-0000-0000-000000000004'
     $rootTask=$allTasks[0].PSObject.Copy();$rootTask.Id=$parent
     $rootTask.Title=if($PreviewRelatedAgentsNamedTitle -or $PreviewRelatedAgentsShowcase){Preview-Text 'Проверка загрузки событий' 'Check event loading'}else{Preview-Text 'Проверить корректность отображения длинного названия основной задачи в компактном и полном режиме' 'Check a long parent task title in compact and expanded views'}
+    if($PreviewRelatedAgentsLongActivity){$rootTask.Activity=Preview-Text 'Проверяю обработку событий, загрузку данных, повторные запросы, сохранение результатов, сообщения об ошибках и отображение состояния на разных экранах приложения' 'Checking event handling, data loading, retries, saved results, error messages and status display across the application screens'}
     if($PreviewRelatedAgentsShowcase){
      $rootTask.Activity=Preview-Text 'Проверяю обработку событий' 'Checking event processing'
      $rootTask.Steps=@(
@@ -5572,6 +5587,7 @@ if ($SnapshotFile) {
     if($kind -eq 'count' -and $parent.Tag -ceq 'related-agent-count'){return $parent}
     if($kind -eq 'status' -and $parent.Tag -ceq 'related-agent-status'){return $parent}
     if($kind -eq 'action' -and [Windows.Automation.AutomationProperties]::GetAutomationId($parent) -ceq 'related-agent-action'){return $parent}
+    if($kind -eq 'activity' -and [Windows.Automation.AutomationProperties]::GetAutomationId($parent) -ceq 'related-parent-activity'){return $parent}
     if($kind -eq 'progress' -and $parent.Text -ceq (Progress-Label $script:lastAllTasks[0])){return $parent}
    }
    for($index=0;$index -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$index++){
@@ -5592,6 +5608,19 @@ if ($SnapshotFile) {
   if($PreviewRelatedAgentsNamedTitle){
    $measure=Text $title.Text 16 $script:palette.Primary 'SemiBold';$measure.Measure([Windows.Size]::new([double]::PositiveInfinity,[double]::PositiveInfinity))
    Write-Output ('Named title width: actual='+[Math]::Round($title.ActualWidth,2)+'; natural='+[Math]::Round($measure.DesiredSize.Width,2))
+  }
+  if(-not $CompactMode){
+   $parentActivity=Find-RelatedPreview $surface 'activity'
+   if($null -eq $parentActivity -or $parentActivity.ActualHeight -gt 34.5){throw 'Related task activity exceeds two lines.'}
+   if($PreviewRelatedAgentsLongActivity){
+    Update-ConditionalHint $parentActivity
+    if($parentActivity.ActualHeight -lt 25 -or $parentActivity.ToolTip -isnot [Windows.Controls.ToolTip] -or
+       [string]$parentActivity.ToolTip.Content -cne [string]$parentActivity.Text){throw 'A long related activity lost its two-line view or full hint.'}
+   }else{
+    $activityBottom=$parentActivity.TranslatePoint([Windows.Point]::new(0,$parentActivity.ActualHeight),$surface).Y
+    $statusTop=$status.TranslatePoint([Windows.Point]::new(0,0),$surface).Y
+    if($parentActivity.ActualHeight -gt 20 -or $statusTop-$activityBottom -gt 6){throw 'A one-line related activity left a large empty gap.'}
+   }
   }
   if($compactDotsPanel.Visibility -ne [Windows.Visibility]::Collapsed){throw 'Hidden related agents must not create extra task dots.'}
   $id=[string]$script:lastAllTasks[0].Id;$mode=if($CompactMode){'compact'}else{'expanded'};$key=$mode+'|'+$id
