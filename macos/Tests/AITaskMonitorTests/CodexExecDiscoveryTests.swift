@@ -550,10 +550,12 @@ final class CodexExecDiscoveryTests: XCTestCase {
         var previous: Set<String> = []
         var lastTasks: [MonitoredTask] = []
         var found = false
-        for _ in 0..<20 {
+        var trace: [String] = []
+        for round in 0..<20 {
             let snapshot = try reader.readSnapshot(previouslyObserved: previous)
             previous.formUnion(snapshot.tasks.map(\.id))
             lastTasks = TaskSnapshotMerger.merge(previous: lastTasks, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
+            trace.append("\(round):visible=\(snapshot.tasks.contains { $0.id == second }),sweep=\(snapshot.didCompleteUnindexedSweep),file=\(snapshot.verifiedActivityFiles[second] != nil),link=\(snapshot.subagentParents[second] == first),root=\(snapshot.confirmedSubagentRoots.contains(first))")
             reader.waitForAmbiguousObservationForTests()
             if snapshot.subagentParents[second] == first {
                 let grouped = CodexTaskGrouping.project(lastTasks, parents: snapshot.subagentParents, titles: snapshot.subagentTitles, confirmedRoots: snapshot.confirmedSubagentRoots)
@@ -562,7 +564,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
                 break
             }
         }
-        XCTAssertTrue(found, "A completed sweep should verify the unindexed path")
+        XCTAssertTrue(found, "A completed sweep should verify the unindexed path: \(trace.joined(separator: "; "))")
         guard found else { return }
         for _ in 0..<3 {
             try append("agent_reasoning", to: child)
