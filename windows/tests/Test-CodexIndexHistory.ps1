@@ -3,7 +3,7 @@ $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens = $null; $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw 'The application source failed to parse.' }
-$definitions = foreach ($name in @('Prop', 'Lock-State', 'Codex-Uncertain', 'Plan-Progress', 'Codex-IndexCandidates', 'Codex-SubagentMetadata', 'Codex-ReadSubagentMetadata', 'Codex-UnindexedCandidates', 'Codex-Tasks')) {
+$definitions = foreach ($name in @('Prop', 'Lock-State', 'Codex-Uncertain', 'Plan-Progress', 'Codex-IndexCandidates', 'Codex-SubagentMetadata', 'Codex-ReadSubagentMetadata', 'Codex-UnindexedCandidates', 'Group-CodexTasks', 'Codex-Tasks')) {
     $node = $ast.Find({ param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name }, $true)
     if ($null -eq $node) {
         if ($name -eq 'Codex-IndexCandidates') { continue }

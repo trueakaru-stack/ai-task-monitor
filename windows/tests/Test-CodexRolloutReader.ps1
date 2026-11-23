@@ -55,6 +55,25 @@ try{
  $result=[AITaskMonitor.CodexTitles.RolloutReader]::ReadNow($fixtureRoot,[string[]]@($firstId,$wrongId,$hugeId))
  Require ($result.Success -and $result.Paths[$firstId] -ceq $first -and -not $result.Paths.ContainsKey($wrongId) -and -not $result.Paths.ContainsKey($hugeId)) 'Extended path, owner or bounded header validation failed.'
  Require ((Hash-File $dbPath) -ceq $dbHash -and (Hash-File ($dbPath+'-wal')) -ceq $walHash) 'The reader changed the fixture database or WAL.'
+ $childId='10000000-0000-0000-0000-000000000004';$badChild='10000000-0000-0000-0000-000000000005';$partialChild='10000000-0000-0000-0000-000000000006'
+ $child=Write-FixtureSession $folder $childId;$bad=Write-FixtureSession $folder $badChild;$partial=Write-FixtureSession $folder $partialChild
+ $spawn=@{parent_thread_id=$firstId;agent_nickname='reader';agent_path='/root/reader'}
+ $childMetadata=@{type='session_meta';payload=@{id=$childId;parent_thread_id=$firstId;agent_nickname='reader';agent_path='/root/reader';source=@{subagent=@{thread_spawn=$spawn}}}}|ConvertTo-Json -Compress -Depth 8
+ [IO.File]::WriteAllText($child,($childMetadata+"`n"),[Text.UTF8Encoding]::new($false))
+ $badMetadata=@{type='session_meta';payload=@{id=$badChild;parent_thread_id=$firstId;agent_nickname='reader';agent_path='/root/reader';source=@{subagent=@{thread_spawn=@{parent_thread_id=$wrongId;agent_nickname='reader';agent_path='/root/reader'}}}}}|ConvertTo-Json -Compress -Depth 8
+ [IO.File]::WriteAllText($bad,($badMetadata+"`n"),[Text.UTF8Encoding]::new($false))
+ $partialMetadata=@{type='session_meta';payload=@{id=$partialChild;source=@{subagent=@{}}}}|ConvertTo-Json -Compress -Depth 8
+ [IO.File]::WriteAllText($partial,($partialMetadata+"`n"),[Text.UTF8Encoding]::new($false))
+ foreach($row in @(@($childId,$child),@($badChild,$bad),@($partialChild,$partial))){$database.Execute(('INSERT INTO threads VALUES('+(@((Quote-Sql $row[0]),(Quote-Sql $row[1]),"'paginated'",'0') -join ',')+');'))}
+ $links=[AITaskMonitor.CodexTitles.RolloutReader]::ReadNow($fixtureRoot,[string[]]@($childId,$badChild,$partialChild))
+ Require ($links.Success -and $links.Paths.ContainsKey($childId) -and $links.ParentReferences[$childId].ParentThreadId -ceq $firstId -and
+ -not $links.ParentReferences[$childId].Conflict -and $links.Paths.ContainsKey($badChild) -and $links.ParentReferences[$badChild].Conflict -and
+ $links.ParentReferences[$partialChild].Conflict) 'Verified parent metadata or conflicting metadata was misclassified.'
+ $metaReader=[AITaskMonitor.CodexTitles.RolloutReader]::new();$metaWatch=[Diagnostics.Stopwatch]::StartNew()
+ try{
+  do{$meta=$metaReader.Snapshot($fixtureRoot,[string[]]@($childId,$badChild));if($meta.ParentReferences.Count -eq 2){break};Start-Sleep -Milliseconds 25}while($metaWatch.ElapsedMilliseconds -lt 10000)
+  Require ($meta.ParentReferences[$childId].ParentThreadId -ceq $firstId -and $meta.ParentReferences[$badChild].Conflict) 'The background reader did not publish verified parent links.'
+ }finally{$metaReader.Dispose()}
  $normalizer=[AITaskMonitor.CodexTitles.RolloutReader].GetMethod('NormalizeLocal',[Reflection.BindingFlags]'Static,NonPublic')
  $rejected=$false;try{$null=$normalizer.Invoke($null,@('\\?\UNC\server\share\session'))}catch{$rejected=$true}
  Require $rejected 'An extended UNC path was accepted.'

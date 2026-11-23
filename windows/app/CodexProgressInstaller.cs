@@ -42,6 +42,7 @@ internal static class CodexProgressInstaller
                 Extract(installGuard, "ClaudeLoopChannel.cs", Path.Combine(stageDirectory, "ClaudeLoopChannel.cs"));
                 Extract(installGuard, "ClaudeReaderCore.ps1", Path.Combine(stageDirectory, "ClaudeReaderCore.ps1"));
                 Extract(installGuard, "ClaudeRetention.cs", Path.Combine(stageDirectory, "ClaudeRetention.cs"));
+                Extract(installGuard, "CodexRecentEventObserver.cs", Path.Combine(stageDirectory, "CodexRecentEventObserver.cs"));
                 Extract(installGuard, "SafeUninstall.cs", Path.Combine(stageDirectory, "SafeUninstall.cs"));
                 Extract(installGuard, "AppShellIdentity.cs", Path.Combine(stageDirectory, "AppShellIdentity.cs"));
                 Extract(installGuard, "Configure-ClaudeIntegration.ps1", Path.Combine(stageDirectory, "Configure-ClaudeIntegration.ps1"));

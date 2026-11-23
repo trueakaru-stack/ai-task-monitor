@@ -24,7 +24,7 @@ if($LASTEXITCODE -ne 0){throw 'The MSIX package could not be unpacked.'}
 if($manifest.Package.Identity.Name -cne $identity -or $manifest.Package.Identity.Publisher -cne $publisher -or
    $manifest.Package.Identity.Version -cne '1.0.0.0' -or $manifest.Package.Identity.ProcessorArchitecture -cne 'x64' -or
    $manifest.Package.Properties.PublisherDisplayName -cne $publisherDisplay){throw 'The MSIX package identity is incorrect.'}
-foreach($name in @('CodexProgress.ps1','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','ClaudeLoopChannel.cs','Configure-ClaudeIntegration.ps1','Configure-OpenCodeIntegration.ps1','StoreClaudeHook.ps1','ReleaseUpdates.ps1','AI task monitor.exe','AITaskMonitor.Runtime.dll','store-channel.marker','LICENSE','assets\app-icon.ico','assets\StoreLogo.png','assets\Square44x44Logo.png','assets\Square150x150Logo.png')){
+foreach($name in @('CodexProgress.ps1','CodexRecentEventObserver.cs','ClaudeTaskHook.ps1','ClaudeLoopClient.ps1','ClaudeLoopChannel.cs','Configure-ClaudeIntegration.ps1','Configure-OpenCodeIntegration.ps1','StoreClaudeHook.ps1','ReleaseUpdates.ps1','AI task monitor.exe','AITaskMonitor.Runtime.dll','store-channel.marker','LICENSE','assets\app-icon.ico','assets\StoreLogo.png','assets\Square44x44Logo.png','assets\Square150x150Logo.png')){
  if(-not (Test-Path -LiteralPath (Join-Path $unpack $name) -PathType Leaf)){throw ('Missing MSIX content: '+$name)}
 }
 $appRoot=Join-Path $PSScriptRoot '..\app'

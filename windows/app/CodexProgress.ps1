@@ -46,6 +46,8 @@
  [ValidateRange(0,5000)][int]$PreviewStartupDelayMilliseconds = 0,
  [ValidateRange(-1,6)][int]$PreviewActiveTasks = -1,
  [switch]$PreviewManyProviders,
+ [switch]$PreviewRelatedAgents,
+ [switch]$PreviewRelatedAgentsUiTest,
  [ValidateSet('','partial-data','partial-connection','partial-both','unavailable')][string]$PreviewSourceWarning = '',
  [ValidateSet('deepseek','codex')][string]$PreviewWarningProvider = 'deepseek',
  [switch]$PreviewTabsUiTest,
@@ -145,6 +147,8 @@ if($PreferencesFile){
 }
 if($PreviewLanguageUiTest -and (-not $PreferencesFile -or -not $SnapshotFile -or $PreviewActiveTasks -lt 1)){throw 'Language UI tests require isolated preferences and synthetic tasks.'}
 if(($PreviewPlanUnconfirmed -or $PreviewPlanUiTest) -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or $PreviewScenario -ne 'planned')){throw 'Plan UI tests require one synthetic planned task and a snapshot.'}
+if($PreviewRelatedAgents -and (-not $SnapshotFile -or $PreviewActiveTasks -ne 1 -or $PreviewScenario -ne 'planned')){throw 'Agent grouping previews require one synthetic planned task and a snapshot.'}
+if($PreviewRelatedAgentsUiTest -and (-not $PreviewRelatedAgents -or -not $PreviewOffscreen -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:GITHUB_ACTIONS -cne 'true')){throw 'Agent grouping UI checks require a disposable hosted Windows preview.'}
 if($PreviewOffscreen -and (-not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw "Offscreen previews require synthetic tasks and a snapshot."}
 if(($PreviewAbout -or $PreviewAboutUiTest) -and (-not $PreviewAbout -or -not $SnapshotFile -or $PreviewActiveTasks -lt 0)){throw "About previews require synthetic tasks and a snapshot."}
 if($PreviewClipboardUiTest -and -not $PreviewAboutUiTest){throw 'Clipboard UI testing requires the isolated About preview.'}
@@ -367,16 +371,21 @@ namespace AITaskMonitor.CodexTitles {
   }
  }
 
+ public sealed class CodexParentReference {
+  public string ParentThreadId,AgentNickname;
+  public bool Conflict;
+ }
  public sealed class RolloutSnapshot {
   public bool Success;
   public long StartedTicks;
   public Dictionary<string,string> Paths=new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
   public Dictionary<string,long> CheckedTicks=new Dictionary<string,long>(StringComparer.OrdinalIgnoreCase);
+  public Dictionary<string,CodexParentReference> ParentReferences=new Dictionary<string,CodexParentReference>(StringComparer.OrdinalIgnoreCase);
  }
 
  // SQLite and rollout-header reads are restricted to a bounded background worker.
  public sealed class RolloutReader : IDisposable {
-  private sealed class Entry { public string Revision,Path; public long StartedTicks; }
+  private sealed class Entry { public string Revision,Path; public long StartedTicks; public CodexParentReference Parent; }
   private readonly object gate=new object();
   private readonly CancellationTokenSource stop=new CancellationTokenSource();
   private readonly Dictionary<string,Entry> entries=new Dictionary<string,Entry>(StringComparer.OrdinalIgnoreCase);
@@ -418,7 +427,9 @@ namespace AITaskMonitor.CodexTitles {
        string current,path;
        if(!wanted.TryGetValue(item.Key,out current) || !String.Equals(current,item.Value,StringComparison.Ordinal)) continue;
        value.Paths.TryGetValue(item.Key,out path);
-       entries[item.Key]=new Entry {Revision=current,Path=value.Success ? path : null,StartedTicks=value.StartedTicks};
+       CodexParentReference parent=null;
+       if(value.Success)value.ParentReferences.TryGetValue(item.Key,out parent);
+       entries[item.Key]=new Entry {Revision=current,Path=value.Success ? path : null,StartedTicks=value.StartedTicks,Parent=parent};
       }
      } catch { }
      pending=null;
@@ -448,6 +459,7 @@ namespace AITaskMonitor.CodexTitles {
     var result=new RolloutSnapshot {Success=true};
     foreach(var item in entries) {
      if(!String.IsNullOrEmpty(item.Value.Path))result.Paths[item.Key]=item.Value.Path;
+     if(item.Value.Parent!=null)result.ParentReferences[item.Key]=item.Value.Parent;
      result.CheckedTicks[item.Key]=item.Value.StartedTicks;
     }
     return result;
@@ -481,13 +493,16 @@ namespace AITaskMonitor.CodexTitles {
        rc=sqlite.Step(query);if(rc==101)continue;if(rc!=100)return result;
        string path=sqlite.Column(query,0),mode=sqlite.Column(query,1),archived=sqlite.Column(query,2);
        if(sqlite.Step(query)!=101)return result;
-       if(archived=="0" && (mode=="paginated" || mode=="legacy") && ValidatePath(root,id,path))result.Paths[id]=NormalizeLocal(path);
+       CodexParentReference parent;
+       if(archived=="0" && (mode=="paginated" || mode=="legacy") && ValidatePath(root,id,path,out parent)){
+        result.Paths[id]=NormalizeLocal(path);if(parent!=null)result.ParentReferences[id]=parent;
+       }
       }
       result.Success=true;
      } finally {if(query!=IntPtr.Zero)sqlite.Finalize(query);if(db!=IntPtr.Zero)sqlite.Close(db);GC.KeepAlive(progress);}
     }
-   } catch {result.Paths.Clear();result.Success=false;}
-   finally {if(!result.Success)result.Paths.Clear();}
+   } catch {result.Paths.Clear();result.ParentReferences.Clear();result.Success=false;}
+   finally {if(!result.Success){result.Paths.Clear();result.ParentReferences.Clear();}}
    return result;
   }
   private static string NormalizeLocal(string path) {
@@ -496,7 +511,8 @@ namespace AITaskMonitor.CodexTitles {
    if(path.Length<3 || !Char.IsLetter(path[0]) || path[1]!=':' || (path[2]!='\\' && path[2]!='/'))throw new ArgumentException("Expected local drive path.");
    return Path.GetFullPath(path);
   }
-  private static bool ValidatePath(string home,string id,string path) {
+  private static bool ValidatePath(string home,string id,string path,out CodexParentReference parent) {
+   parent=null;
    try {
     string root=NormalizeLocal(Path.Combine(home,"sessions")).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar)+Path.DirectorySeparatorChar;
     string full=NormalizeLocal(path);
@@ -525,8 +541,34 @@ namespace AITaskMonitor.CodexTitles {
     var record=type.GetMethod("DeserializeObject").Invoke(Activator.CreateInstance(type),new object[]{line}) as IDictionary<string,object>;
     object kind,payload,recorded; if(record==null || !record.TryGetValue("type",out kind) || !(kind is string) || (string)kind!="session_meta" || !record.TryGetValue("payload",out payload))return false;
     var meta=payload as IDictionary<string,object>;
-    return meta!=null && meta.TryGetValue("id",out recorded) && recorded is string && String.Equals((string)recorded,id,StringComparison.OrdinalIgnoreCase);
+    if(meta==null || !meta.TryGetValue("id",out recorded) || !(recorded is string) || !String.Equals((string)recorded,id,StringComparison.OrdinalIgnoreCase))return false;
+    parent=ReadParent(meta,id);
+    return true;
    } catch {return false;}
+  }
+  private static IDictionary<string,object> Object(IDictionary<string,object> source,string key) {
+   object value;return source!=null && source.TryGetValue(key,out value) ? value as IDictionary<string,object> : null;
+  }
+  private static string StringValue(IDictionary<string,object> source,string key) {
+   object value;return source!=null && source.TryGetValue(key,out value) ? value as string : null;
+  }
+  private static CodexParentReference ReadParent(IDictionary<string,object> meta,string id) {
+   var source=Object(meta,"source");
+   var spawn=Object(Object(source,"subagent"),"thread_spawn");
+   string parent=StringValue(meta,"parent_thread_id"),name=StringValue(meta,"agent_nickname"),path=StringValue(meta,"agent_path");
+   bool hasHint=meta.ContainsKey("parent_thread_id") || meta.ContainsKey("agent_nickname") || meta.ContainsKey("agent_path") ||
+                (source!=null && source.ContainsKey("subagent"));
+   if(!hasHint)return null;
+   Guid parentId,childId;
+   if(spawn==null || !Guid.TryParseExact(parent,"D",out parentId) || !Guid.TryParseExact(id,"D",out childId) || parentId==childId ||
+      String.IsNullOrWhiteSpace(name) || name.Length>256 || name.IndexOfAny(new char[]{'\r','\n','\0'})>=0 ||
+      !String.Equals(parent,StringValue(spawn,"parent_thread_id"),StringComparison.Ordinal) ||
+      !String.Equals(name,StringValue(spawn,"agent_nickname"),StringComparison.Ordinal) ||
+      !String.Equals(path,StringValue(spawn,"agent_path"),StringComparison.Ordinal) ||
+      String.IsNullOrEmpty(path) || Encoding.UTF8.GetByteCount(path)>1024 ||
+      !System.Text.RegularExpressions.Regex.IsMatch(path,@"^/root/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$"))return new CodexParentReference {Conflict=true};
+   foreach(char c in name)if(c<32 || c==127)return new CodexParentReference {Conflict=true};
+   return new CodexParentReference {ParentThreadId=parent,AgentNickname=name.Trim()};
   }
   public void Dispose(){stop.Cancel();}
  }
@@ -535,6 +577,13 @@ namespace AITaskMonitor.CodexTitles {
  }
  $script:codexTitleReader=[AITaskMonitor.CodexTitles.Reader]::new()
  $script:codexRolloutReader=[AITaskMonitor.CodexTitles.RolloutReader]::new()
+}catch{}
+$script:codexRecentEventObserver=$null
+try{
+ if(-not ('AITaskMonitor.CodexObservation.CodexRecentEventObserver' -as [type])){
+  Add-Type -Path (Join-Path $PSScriptRoot 'CodexRecentEventObserver.cs') -ErrorAction Stop
+ }
+ $script:codexRecentEventObserver=[AITaskMonitor.CodexObservation.CodexRecentEventObserver]::new($sessionsDirectory)
 }catch{}
 $script:lastClaudeTasks = @()
 $script:sourceErrors = @()
@@ -2401,7 +2450,7 @@ function Thread-State([string]$id,[bool]$AllowPriorWithoutLock=$false) {
  $lock=if($hasStart){Lock-State (Join-Path $lockDirectory "$id.lock")}else{"missing"}
  if($lock -eq "unavailable"){throw "Codex session lock cannot be checked."}
  $state=if($lifecycle -eq "task_complete"){"completed"}elseif($lifecycle -eq "turn_aborted"){"interrupted"}else{"unknown"}
- return [PSCustomObject]@{State=$state;HasStartMarker=$hasStart;UpdatedUtc=$file.LastWriteTimeUtc;StartKey=$startKey;StartedUtc=$startedUtc;LockState=$lock}
+ return [PSCustomObject]@{State=$state;HasStartMarker=$hasStart;AmbiguousTerminal=($lifecycle -eq 'uncertain_terminal');UpdatedUtc=$file.LastWriteTimeUtc;StartKey=$startKey;StartedUtc=$startedUtc;LockState=$lock}
 }
 
 function Codex-Uncertain([string]$id,$threadState) {
@@ -3299,10 +3348,61 @@ function Codex-UnindexedCandidates([bool]$HasIndexedHistory=$false) {
  return $items
 }
 
+function Group-CodexTasks($tasks,$links,$titles) {
+ $uuid='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+ $local=@{};$other=New-Object 'Collections.Generic.List[object]'
+ foreach($task in @($tasks)){
+  $id=[string](Prop $task 'Id' '')
+  if([string](Prop $task 'Provider' '') -cne 'codex' -or [string](Prop $task 'Source' '') -ceq 'Codex Cloud' -or $id -notmatch $uuid){$other.Add($task);continue}
+  if([bool](Prop $task 'TerminalConfirmed' $false)){continue}
+  if(-not $local.ContainsKey($id)){$local[$id]=$task}
+ }
+ $groups=@{};$members=@{}
+ foreach($id in @($local.Keys)){
+  if(-not $links.ContainsKey($id)){continue}
+  $cursor=$id;$seen=@{};$valid=$true
+  while($links.ContainsKey($cursor)){
+   if($seen.ContainsKey($cursor)){$valid=$false;break}
+   $seen[$cursor]=$true;$reference=$links[$cursor]
+   $parent=[string](Prop $reference 'ParentThreadId' '')
+   if([bool](Prop $reference 'Conflict' $false) -or $parent -notmatch $uuid -or [string]::Equals($parent,$cursor,[StringComparison]::OrdinalIgnoreCase)){$valid=$false;break}
+   $cursor=$parent
+  }
+  if(-not $valid -or [string]::Equals($cursor,$id,[StringComparison]::OrdinalIgnoreCase)){continue}
+  if(-not $groups.ContainsKey($cursor)){$groups[$cursor]=@{}}
+  $groups[$cursor][$id]=$true;$members[$id]=$cursor
+ }
+ $result=New-Object 'Collections.Generic.List[object]'
+ foreach($id in @($local.Keys)){
+  if($members.ContainsKey($id)){continue}
+  $task=$local[$id]
+  if($groups.ContainsKey($id)){
+   $task=$task.PSObject.Copy();$unknown=$false
+   $agentIds=[string[]]@($groups[$id].Keys);[Array]::Sort($agentIds,[StringComparer]::OrdinalIgnoreCase)
+   $agents=New-Object 'Collections.Generic.List[object]'
+   foreach($member in $agentIds){$agents.Add($local[$member]);if(-not [bool](Prop $local[$member] 'Active' $false)){$unknown=$true}}
+   $task|Add-Member -NotePropertyMembers @{RelatedAgentCount=$agentIds.Length;RelatedAgentsUnconfirmed=$unknown;RelatedAgentIds=$agentIds;RelatedAgents=$agents.ToArray()} -Force
+  }
+  $result.Add($task)
+ }
+ foreach($parent in @($groups.Keys)){
+  if($local.ContainsKey($parent)){continue}
+  $title=if($titles.ContainsKey($parent)){[string]$titles[$parent]}else{''};$generated=[string]::IsNullOrWhiteSpace($title)
+  if($generated){$title='Задача Codex'}
+  $agentIds=[string[]]@($groups[$parent].Keys);[Array]::Sort($agentIds,[StringComparer]::OrdinalIgnoreCase)
+  $agents=New-Object 'Collections.Generic.List[object]';foreach($member in $agentIds){$agents.Add($local[$member])}
+  $result.Add([PSCustomObject]@{Id=$parent;Title=$title;TitleGenerated=$generated;Activity='Статус не подтверждён';ActivityGenerated=$true;ActivityObserved=$false;Active=$false;Paused=$false;Progress=$null;ProgressKind='none';ProgressBasis='task';Provider='codex';ProviderName='Codex';Status='Статус не подтверждён';Updated=[DateTime]::MinValue;Started=[DateTime]::MinValue;StartKey='';Steps=@();Source='Оценка активности';PlanConfirmed=$false;RelatedAgentCount=$agentIds.Length;RelatedAgentsUnconfirmed=$true;RelatedAgentIds=$agentIds;RelatedAgents=$agents.ToArray()})
+ }
+ foreach($task in $other){$result.Add($task)}
+ return @($result.ToArray())
+}
+
 function Codex-Tasks {
  $script:codexSourcePartial=$false
  $script:codexDiscoveryFailed=$false
  $script:codexTerminated=@{}
+ $script:codexUnconfirmedEndings=@{}
+ $script:codexGroupLinks=@{};$script:codexGroupTitles=@{}
  $indexAvailable=Test-Path -LiteralPath $sessionIndex -PathType Leaf -ErrorAction Stop
  if (-not $indexAvailable -and -not (Test-Path -LiteralPath $codexHome -PathType Container -ErrorAction Stop)) {
   $cursorVariable=Get-Variable -Scope Script -Name unindexedCursor -ErrorAction SilentlyContinue
@@ -3334,8 +3434,8 @@ function Codex-Tasks {
   $script:unindexedPaths[$id]=[string]$candidate.path
  }
  $rolloutReader=Get-Variable -Scope Script -Name codexRolloutReader -ErrorAction SilentlyContinue
+ $snapshot=$null
  if($null -ne $rolloutReader){
-  $snapshot=$null
   if($null -ne $rolloutReader.Value -and $sessions.Count -gt 0){
    try{
     $ids=[string[]]@($sessions|ForEach-Object {[string](Prop $_ 'id' '')})
@@ -3346,16 +3446,24 @@ function Codex-Tasks {
   Update-CodexRolloutPaths $snapshot $sessions
  }
  $codexTitles=$null
- $parentTitles=@{};$subagentRefs=@{}
+ $parentTitles=@{};$subagentRefs=@{};$groupLinks=@{}
+ $verifiedReferences=Prop $snapshot 'ParentReferences'
  foreach($session in $sessions){
   $parentId=[string](Prop $session 'id' '');$parentTitle=[string](Prop $session 'thread_name' '')
   if($parentId -and -not [string]::IsNullOrWhiteSpace($parentTitle) -and $parentTitle -cne 'Guardian review' -and -not [bool](Prop $session 'titleGenerated' $false)){$parentTitles[$parentId]=$parentTitle}
   $referenceParent=[string](Prop $session 'parentThreadId' '');$referenceName=[string](Prop $session 'agentNickname' '')
-  if($referenceParent -and $referenceName){$subagentRefs[$parentId]=[PSCustomObject]@{ParentThreadId=$referenceParent;AgentNickname=$referenceName}}
+  if($referenceParent -and $referenceName){
+   $subagentRefs[$parentId]=[PSCustomObject]@{ParentThreadId=$referenceParent;AgentNickname=$referenceName}
+   if([bool](Prop $session 'unindexed' $false)){$groupLinks[$parentId]=$subagentRefs[$parentId]}
+  }
   elseif($parentId -and -not [bool](Prop $session 'unindexed' $false) -and
          ([bool](Prop $session 'titleGenerated' $false) -or [string]::IsNullOrWhiteSpace($parentTitle))){
    $reference=Codex-ReadSubagentMetadata $parentId
-   if($null -ne $reference){$subagentRefs[$parentId]=$reference}
+   if($null -ne $reference){$subagentRefs[$parentId]=$reference;$groupLinks[$parentId]=$reference}
+  }
+  if($null -ne $verifiedReferences -and $verifiedReferences.ContainsKey($parentId)){
+   $verified=$verifiedReferences[$parentId];$groupLinks[$parentId]=$verified
+   if(-not [bool](Prop $verified 'Conflict' $false)){$subagentRefs[$parentId]=$verified}
   }
  }
  $titleReader=Get-Variable -Scope Script -Name codexTitleReader -ErrorAction SilentlyContinue
@@ -3409,25 +3517,41 @@ function Codex-Tasks {
   $unindexed=[bool](Prop $session 'unindexed' $false)
   if($title -eq "Guardian review"){continue}
   $threadState = Thread-State $id $unindexed
+  $recentObserved=$false
   if($null -ne $rolloutReader){
    $currentPath=Session-File $id
+   $observer=Get-Variable -Scope Script -Name codexRecentEventObserver -ErrorAction SilentlyContinue
+   if($threadState.State -eq 'unknown' -and -not $threadState.HasStartMarker -and
+      $null -ne $observer -and $null -ne $observer.Value -and
+      $script:codexRolloutPaths.ContainsKey($id) -and
+      [string]::Equals([string]$script:codexRolloutPaths[$id],$currentPath,[StringComparison]::OrdinalIgnoreCase)){
+    try{$recentObserved=[bool]$observer.Value.Snapshot($id,$currentPath).HasEvent}catch{}
+   }
    if($script:codexObservedStarts.ContainsKey($id) -and
       -not [string]::Equals([string]$script:codexObservedStarts[$id].Path,$currentPath,[StringComparison]::OrdinalIgnoreCase)){
     # A fallback path is not evidence that the observed rollout was replaced.
     # Preserve its start and let Source-Snapshot retain the prior card until
     # a newly verified path is available.
-    if(-not $script:codexRolloutPaths.ContainsKey($id)){continue}
+    if(-not $script:codexRolloutPaths.ContainsKey($id)){
+     if($threadState.State -in @('completed','interrupted') -or [bool](Prop $threadState 'AmbiguousTerminal' $false)){$script:codexUnconfirmedEndings[$id]=$true}
+     continue
+    }
     [void]$script:codexObservedStarts.Remove($id);[void]$script:codexTerminalChecks.Remove($id)
    }
-   if($threadState.State -in @('completed','interrupted')){
-    if(-not (Confirm-CodexTerminal $id $threadState $currentPath)){continue}
-    [void]$script:codexObservedStarts.Remove($id);[void]$script:codexTerminalChecks.Remove($id)
+   if($threadState.State -in @('completed','interrupted') -or [bool](Prop $threadState 'AmbiguousTerminal' $false)){
+    # A database path and a matching historical turn do not establish that a
+    # newer rollout has not taken over. Keep any previously seen card unknown.
+    if(-not ($recentObserved -and $threadState.State -eq 'unknown' -and [bool](Prop $threadState 'AmbiguousTerminal' $false))){
+     $script:codexUnconfirmedEndings[$id]=$true
+     continue
+    }
    }elseif($currentPath -and $threadState.State -eq 'unknown' -and $threadState.HasStartMarker -and $threadState.StartKey){
     $script:codexObservedStarts[$id]=[PSCustomObject]@{Path=$currentPath;StartKey=[string]$threadState.StartKey}
     [void]$script:codexTerminalChecks.Remove($id)
    }
   }
   if($threadState.State -in @('completed','interrupted')){$script:codexTerminated[$id]=$true}
+  if($recentObserved){$script:observedCodex[$id]=$true}
   $eventActive = $threadState.State -eq "active"
   $uncertain = Codex-Uncertain $id $threadState
   if($threadState.State -in @("interrupted","unobserved")){
@@ -3437,7 +3561,8 @@ function Codex-Tasks {
    }
    continue
   }
-  $override = if ($manual.ContainsKey($id)) { $manual[$id] } elseif ($manual.ContainsKey("title:$title")) { $manual["title:$title"] } else { $null }
+  $observationOnly=$uncertain -and -not $threadState.HasStartMarker
+  $override = if($observationOnly){$null}elseif ($manual.ContainsKey($id)) { $manual[$id] } elseif ($manual.ContainsKey("title:$title")) { $manual["title:$title"] } else { $null }
   $paused = $false; $steps = @(); $source = "Оценка активности"; $planConfirmed=$true
   if ($null -ne $override) {
    $title = [string](Prop $override "title" $title)
@@ -3447,7 +3572,7 @@ function Codex-Tasks {
    if ($steps.Count -gt 0) { $source = "План задачи" }
   }
   $uncertain=$uncertain -and -not $paused
-  if ($steps.Count -eq 0 -and ($eventActive -or $uncertain)) {
+  if ($steps.Count -eq 0 -and ($eventActive -or ($uncertain -and -not $observationOnly))) {
    $steps = @(Codex-Plan $id)
    if ($steps.Count -gt 0) {
     $source = "План Codex"
@@ -3479,7 +3604,7 @@ function Codex-Tasks {
   $started=[DateTime](Prop $threadState "StartedUtc" ([DateTime]::MinValue))
   $activityGenerated=$uncertain;$activityObserved=$false
   $activity = if($uncertain){
-   $observed=Codex-ObservedActivity $id $startKey
+   $observed=if($observationOnly){''}else{Codex-ObservedActivity $id $startKey}
    if($observed){$activityObserved=$true;$activityGenerated=$false;$observed}else{"Статус не подтверждён"}
   }elseif($running){$currentActivity=Codex-Activity $id;if($currentActivity){$currentActivity}else{$activityGenerated=$true;"Выполняется"}}else{""}
   if($unindexed -and -not $running -and -not $paused -and $status -notin @('Статус не подтверждён','Ожидает подтверждения')){
@@ -3488,8 +3613,11 @@ function Codex-Tasks {
   }
   $items.Add([PSCustomObject]@{ Id=$id; Title=$title; TitleGenerated=$titleGenerated; Activity=$activity; ActivityGenerated=$activityGenerated; ActivityObserved=$activityObserved; Active=$running; Paused=$paused; Progress=$progress; ProgressKind=$progressKind; ProgressBasis=$progressBasis; Provider="codex"; ProviderName="Codex"; Status=$status; Updated=$updated; Started=$started; StartKey=$startKey; Steps=$steps; Source=$source; PlanConfirmed=$planConfirmed })
  }
- $runningItems = @($items | Where-Object Active | Sort-Object Updated -Descending)
- $trackedItems = @($items | Where-Object { -not $_.Active -and ($_.Status -in @("Статус не подтверждён","Ожидает подтверждения") -or $_.Paused) } | Sort-Object Updated -Descending)
+ if($null -ne $codexTitles){foreach($parentId in @($codexTitles.Keys)){if(-not $parentTitles.ContainsKey($parentId)){$parentTitles[$parentId]=[string]$codexTitles[$parentId]}}}
+ $script:codexGroupLinks=$groupLinks;$script:codexGroupTitles=$parentTitles
+ $visible=@($items.ToArray())
+ $runningItems = @($visible | Where-Object Active | Sort-Object Updated -Descending)
+ $trackedItems = @($visible | Where-Object { -not $_.Active -and ($_.Status -in @("Статус не подтверждён","Ожидает подтверждения") -or $_.Paused) } | Sort-Object Updated -Descending)
  return @($runningItems + $trackedItems)
 }
 
@@ -3607,12 +3735,24 @@ function Source-Snapshot {
    foreach($task in $previousCodex){
     $id=[string]$task.Id
     if($id -and -not $seenCodex.ContainsKey($id) -and ($null -eq $terminated -or $null -eq $terminated.Value -or -not $terminated.Value.ContainsKey($id))){
-     $codex+=@(Unconfirmed-Tasks @($task));$seenCodex[$id]=$true
+     $retained=@(Unconfirmed-Tasks @($task))
+     $endings=Get-Variable -Scope Script -Name codexUnconfirmedEndings -ErrorAction SilentlyContinue
+     if($retained.Count -gt 0 -and $null -ne $endings -and $null -ne $endings.Value -and $endings.Value.ContainsKey($id)){
+      # A past operation is not current activity after an ambiguous ending.
+      $retained[0].Activity='Статус не подтверждён'
+      if($null -ne $retained[0].PSObject.Properties['ActivityObserved']){$retained[0].ActivityObserved=$false}
+     }
+     $codex+=$retained;$seenCodex[$id]=$true
     }
    }
   }
   $script:lastCodexTasks=$codex
  }catch{[void]$unavailable.Add("Codex");$codex=@(Unconfirmed-Tasks $script:lastCodexTasks)}
+ $links=Get-Variable -Scope Script -Name codexGroupLinks -ErrorAction SilentlyContinue
+ $titles=Get-Variable -Scope Script -Name codexGroupTitles -ErrorAction SilentlyContinue
+ if($null -ne $links -and $null -ne $links.Value -and $links.Value.Count -gt 0 -and $null -ne $titles -and $null -ne $titles.Value){
+  $codex=@(Group-CodexTasks $codex $links.Value $titles.Value)
+ }
  try{
   $connectionState=if($ClaudeEventFile){"connected"}else{Claude-ConnectionState}
   if($connectionState -eq "connected"){$claude=@(Claude-Tasks);$script:lastClaudeTasks=$claude}
@@ -3912,11 +4052,25 @@ function Plan-StepCount([int]$count) {
  return "$count $word"
 }
 
-function Localized-TaskTitle($task) {
+function Localized-TaskTitle($task,[switch]$BaseOnly,[switch]$SuffixOnly) {
  $title=[string](Prop $task 'Title' '')
- if([string](Prop $task 'Provider' '') -eq 'claude' -and $title -ceq 'Задача Claude Code'){return (Tr $title)}
- if([string](Prop $task 'Provider' '') -eq 'codex' -and [bool](Prop $task 'TitleGenerated' $false)){return (Tr $title)}
- return $title
+ if(([string](Prop $task 'Provider' '') -eq 'claude' -and $title -ceq 'Задача Claude Code') -or
+    ([string](Prop $task 'Provider' '') -eq 'codex' -and [bool](Prop $task 'TitleGenerated' $false))){$title=Tr $title}
+ if($BaseOnly){return $title}
+ $agentSuffix=''
+ $count=[int](Prop $task 'RelatedAgentCount' 0)
+ if($count -gt 0){
+  if($script:resolvedLanguage -eq 'en'){$word=if($count -eq 1){'agent'}else{'agents'};$unknown='status unconfirmed'}
+  else{
+   $lastHundred=$count%100;$lastDigit=$count%10
+   $word=if($lastHundred -ge 11 -and $lastHundred -le 14){'агентов'}elseif($lastDigit -eq 1){'агент'}elseif($lastDigit -ge 2 -and $lastDigit -le 4){'агента'}else{'агентов'}
+   $unknown='статус не подтверждён'
+  }
+  $suffix="$count $word";if([bool](Prop $task 'RelatedAgentsUnconfirmed' $false)){$suffix+=", $unknown"}
+  $agentSuffix=" ($suffix)"
+ }
+ if($SuffixOnly){return $agentSuffix}
+ return $title+$agentSuffix
 }
 
 function Localized-TaskActivity($task) {
@@ -4073,6 +4227,31 @@ function New-ActivityIndicator([bool]$active) {
  return $track
 }
 
+function New-TaskTitleLine($task,[double]$rightMargin,[bool]$fixedHeight) {
+ $baseTitle=Localized-TaskTitle $task -BaseOnly
+ $suffix=Localized-TaskTitle $task -SuffixOnly
+ $displayTitle=Localized-TaskTitle $task
+ $title=Text $baseTitle 16 $script:palette.Primary 'SemiBold'
+ $title.TextWrapping='NoWrap';$title.TextTrimming='CharacterEllipsis';$title.MaxWidth=390
+ Add-ConditionalHint $title $baseTitle 'line'
+ [Windows.Automation.AutomationProperties]::SetName($title,$displayTitle)
+ if($PreviewRelatedAgents -and (($CompactMode -and -not $fixedHeight) -or (-not $CompactMode -and $fixedHeight))){$script:previewHintTarget=$title}
+ if(-not $suffix){
+  $title.Margin=New-Object Windows.Thickness(0,0,$rightMargin,0)
+  if($fixedHeight){$title.Height=22;$title.HorizontalAlignment='Left'}
+  return $title
+ }
+ $line=New-Object Windows.Controls.Grid;$line.Margin=New-Object Windows.Thickness(0,0,$rightMargin,0);$line.MaxWidth=390
+ if($fixedHeight){$line.Height=22}
+ $nameColumn=New-Object Windows.Controls.ColumnDefinition;$nameColumn.Width=New-Object Windows.GridLength(1,'Star')
+ $countColumn=New-Object Windows.Controls.ColumnDefinition;$countColumn.Width=[Windows.GridLength]::Auto
+ $line.ColumnDefinitions.Add($nameColumn);$line.ColumnDefinitions.Add($countColumn)
+ $count=Text $suffix 16 $script:palette.Primary 'SemiBold';$count.TextWrapping='NoWrap';$count.Tag='related-agent-count'
+ [Windows.Controls.Grid]::SetColumn($count,1)
+ $line.Children.Add($title)|Out-Null;$line.Children.Add($count)|Out-Null
+ return $line
+}
+
 function Add-Card($task) {
  $stepCount=@($task.Steps).Count
  $hideClaudePlanState=([string]$task.Provider -in @("claude","codex") -and (-not [bool](Prop $task "PlanConfirmed" $true) -or [string](Prop $task "Status" "") -eq "Статус не подтверждён"))
@@ -4088,8 +4267,7 @@ function Add-Card($task) {
  $header=New-Object Windows.Controls.Grid
  $c1=New-Object Windows.Controls.ColumnDefinition; $c1.Width=New-Object Windows.GridLength(1,"Star"); $c2=New-Object Windows.Controls.ColumnDefinition; $c2.Width=[Windows.GridLength]::Auto; $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2)
  $titleStack=New-Object Windows.Controls.StackPanel
- $displayTitle=Localized-TaskTitle $task
- $title=Text $displayTitle 16 $script:palette.Primary "SemiBold"; $title.Margin=New-Object Windows.Thickness(0,0,14,0); $title.Height=22; $title.MaxWidth=390; $title.HorizontalAlignment="Left"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $title $displayTitle "line"; $titleStack.Children.Add($title)|Out-Null
+ $title=New-TaskTitleLine $task 14 $true;$titleStack.Children.Add($title)|Out-Null
  $activityText=Localized-TaskActivity $task; $activity=Text $activityText 12 $script:palette.Activity; $activity.MaxWidth=390; $activity.HorizontalAlignment="Left"; $activity.Height=34; $activity.MaxHeight=34; $activity.TextTrimming="CharacterEllipsis"; if($activityText){Add-ConditionalHint $activity $activityText "wrap"}
  $activityRow=New-Object Windows.Controls.Grid; $activityRow.Margin=New-Object Windows.Thickness(0,5,14,0)
  $activityMarkColumn=New-Object Windows.Controls.ColumnDefinition; $activityMarkColumn.Width=New-Object Windows.GridLength(22); $activityTextColumn=New-Object Windows.Controls.ColumnDefinition; $activityTextColumn.Width=New-Object Windows.GridLength(1,"Star"); $activityRow.ColumnDefinitions.Add($activityMarkColumn); $activityRow.ColumnDefinitions.Add($activityTextColumn)
@@ -4124,8 +4302,7 @@ function Add-CompactTask($task) {
  $c1=New-Object Windows.Controls.ColumnDefinition; $c1.Width=New-Object Windows.GridLength(1,"Star")
  $c2=New-Object Windows.Controls.ColumnDefinition; $c2.Width=[Windows.GridLength]::Auto
  $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2)
- $displayTitle=Localized-TaskTitle $task
- $title=Text $displayTitle 16 $script:palette.Primary "SemiBold"; $title.TextWrapping="NoWrap"; $title.TextTrimming="CharacterEllipsis"; $title.Margin=New-Object Windows.Thickness(0,0,10,0); Add-ConditionalHint $title $displayTitle "line"; [Windows.Automation.AutomationProperties]::SetName($title,$displayTitle)
+ $title=New-TaskTitleLine $task 10 $false
  $progressLabel=Progress-Label $task
  $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.VerticalAlignment="Center"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip=Tr "Приблизительная оценка"}
  [Windows.Controls.Grid]::SetColumn($title,0); [Windows.Controls.Grid]::SetColumn($percent,1)
@@ -4186,6 +4363,12 @@ function Sync-CompactDots($tasks) {
 }
 
 function Prioritize-Tasks($tasks,$previous,[string]$selectedId) {
+ $remappedSelection=$false
+ if($selectedId -and -not @($tasks|Where-Object {[string]$_.Id -ceq $selectedId}).Count){
+  foreach($task in @($tasks)){
+   if(@(Prop $task 'RelatedAgentIds' @()) -ccontains $selectedId){$selectedId=[string]$task.Id;$remappedSelection=$true;break}
+  }
+ }
  $previousById=@{}; $present=@{}; $activated=New-Object Collections.Generic.List[object]
  foreach($task in @($previous)){$previousById[[string]$task.Id]=$task}
  foreach($task in @($tasks)){
@@ -4217,7 +4400,7 @@ function Prioritize-Tasks($tasks,$previous,[string]$selectedId) {
  }, @{
   Expression={[DateTime](Prop $_ "Updated" ([DateTime]::MinValue))};Descending=$true
  })
- if($activatedByStart.Count -gt 0){$selectedId=[string]$activatedByStart[$activatedByStart.Count-1].Id}
+ if($activatedByStart.Count -gt 0 -and -not $remappedSelection){$selectedId=[string]$activatedByStart[$activatedByStart.Count-1].Id}
  elseif(-not @($ordered | Where-Object {[string]$_.Id -eq $selectedId}).Count){$selectedId=if($ordered.Count){[string]$ordered[0].Id}else{""}}
  return [PSCustomObject]@{Tasks=$ordered;SelectedId=$selectedId}
 }
@@ -4893,6 +5076,22 @@ function Update-View {
     $previewObserved=($previewIsUnconfirmed -and $PreviewSourceWarning -and $PreviewWarningProvider -eq 'codex')
     $allTasks += [PSCustomObject]@{Id="preview-$i";Title=$previewTitles[$i];Activity=$previewActivity;ActivityGenerated=($PreviewManyProviders -and $i -ge 2);ActivityObserved=[bool]$previewObserved;Active=(-not $previewIsUnconfirmed);Paused=$false;Progress=$previewValue;ProgressKind=$previewKind;Provider=$previewProviders[$i];ProviderName=$previewProviderNames[$i];Status=$previewStatus;Updated=$previewTime;Started=$previewTime;StartKey="preview-$i";Steps=$previewSteps;Source="Предпросмотр";PlanConfirmed=(-not ($PreviewPlanUnconfirmed -and $i -eq 0))}
    }
+   if($PreviewRelatedAgents){
+    $parent='10000000-0000-0000-0000-000000000001';$first='10000000-0000-0000-0000-000000000002'
+    $second='10000000-0000-0000-0000-000000000003';$nested='10000000-0000-0000-0000-000000000004'
+    $rootTask=$allTasks[0].PSObject.Copy();$rootTask.Id=$parent
+    $rootTask.Title=Preview-Text 'Проверить корректность отображения длинного названия основной задачи в компактном и полном режиме' 'Check a long parent task title in compact and expanded views'
+    $previewTasks=@($rootTask)
+    foreach($agentId in @($first,$second,$nested)){
+     $agent=$rootTask.PSObject.Copy();$agent.Id=$agentId;$agent.Active=$false;$agent.Status='Статус не подтверждён'
+     $agent.Activity='Статус не подтверждён';$agent.Progress=$null;$agent.ProgressKind='none';$agent.Steps=@();$agent.PlanConfirmed=$false
+     $previewTasks+=@($agent)
+    }
+    $previewLinks=@{};$previewLinks[$first]=[PSCustomObject]@{ParentThreadId=$parent};$previewLinks[$second]=[PSCustomObject]@{ParentThreadId=$parent};$previewLinks[$nested]=[PSCustomObject]@{ParentThreadId=$first}
+    $previewTitlesById=@{};$previewTitlesById[$parent]=$rootTask.Title
+    $allTasks=@(Group-CodexTasks $previewTasks $previewLinks $previewTitlesById)
+    if($allTasks.Count -ne 1 -or [int]$allTasks[0].RelatedAgentCount -ne 3){throw 'Synthetic grouping preview failed.'}
+   }
    if($PreviewCloudTask -and $script:codexCloudModulesAvailable){
     $fixture=[PSCustomObject]@{Id='codex-cloud:synthetic';Title=(Preview-Text 'Тестовая облачная задача' 'Synthetic cloud task');State='pending';Updated=[DateTimeOffset]::UtcNow}
     $allTasks+=@(ConvertTo-CodexCloudMonitorTasks @($fixture) (Tr 'Облако: ') (Tr 'Задача Codex') 'Статус не подтверждён')
@@ -4916,7 +5115,7 @@ function Update-View {
   Render-ProviderTabs $allTasks
   $tasks=@(Filtered-Tasks $allTasks)
   $script:lastTasks=$tasks
-  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+$script:sourceCodexIncomplete+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$(Prop $_ 'ActivityObserved' $false):$stepState`:$loopState"})-join"|")
+  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+$script:sourceCodexIncomplete+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$(Prop $_ 'RelatedAgentCount' 0):$(Prop $_ 'RelatedAgentsUnconfirmed' $false):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$(Prop $_ 'ActivityObserved' $false):$stepState`:$loopState"})-join"|")
   if($next -ne $script:fingerprint){
    $script:fingerprint=$next; $tasksPanel.Children.Clear()
    if($script:sourceErrors.Count -gt 0){$warning=Text (Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
@@ -5111,6 +5310,7 @@ $menu=New-Object Windows.Forms.ContextMenuStrip; $script:trayShowMenu=$menu.Item
 $timer=New-Object Windows.Threading.DispatcherTimer; $timer.Interval=[TimeSpan]::FromSeconds(2); $timer.Add_Tick({Refresh-SystemTheme;Refresh-ActivityMotion;Update-View;if(-not $SnapshotFile -and $PreviewActiveTasks -lt 0){Schedule-ClaudeRetention;Invoke-UpdateCheckTick}}); $timer.Start(); $window.Add_Closed({$timer.Stop();$cursorVariable=Get-Variable -Scope Script -Name unindexedCursor -ErrorAction SilentlyContinue;if($null -ne $cursorVariable -and $null -ne $cursorVariable.Value -and $null -ne $cursorVariable.Value.Enumerator){try{$cursorVariable.Value.Enumerator.Dispose()}catch{}};if($script:claudeRetentionAvailable){[AITaskMonitor.Claude.Retention]::WaitForStop(2000)};Stop-UpdateCheck;if($null -ne $script:claudeLoopChannel){try{$script:claudeLoopChannel.Dispose()}catch{};$script:claudeLoopChannel=$null};if($null -ne $script:externalProviderController){try{Stop-ExternalProviderController $script:externalProviderController}catch{}};if($script:kimiModulesAvailable){Stop-KimiMonitorController $script:kimiController};if($script:hermesModulesAvailable -and -not $PreviewSources){try{Stop-HermesMonitorController $script:hermesController}catch{}};if($script:codexCloudModulesAvailable){Set-CodexCloudControllerEnabled $script:codexCloudController $false};$script:claudeLoopStates.Clear();$tray.Visible=$false;$tray.Dispose();if($null -ne $script:applicationIcon){$script:applicationIcon.Dispose()}})
 $window.Add_Closed({if($null -ne $script:codexTitleReader){$script:codexTitleReader.Dispose()}})
 $window.Add_Closed({if($null -ne $script:codexRolloutReader){$script:codexRolloutReader.Dispose()}})
+$window.Add_Closed({if($null -ne $script:codexRecentEventObserver){$script:codexRecentEventObserver.Dispose()}})
 if($script:codexCloudModulesAvailable -and -not $SnapshotFile -and $PreviewActiveTasks -lt 0 -and (Load-CodexCloudEnabled)){Set-CodexCloudControllerEnabled $script:codexCloudController $true}
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
@@ -5142,6 +5342,29 @@ if($PreviewUpdate){$script:availableUpdate=[PSCustomObject]@{Version='0.3.0-alph
 if ($SnapshotFile) {
  if($PreviewOffscreen){$window.WindowStartupLocation="Manual";$window.Left=-10000;$window.Top=-10000;$window.ShowActivated=$false;$window.ShowInTaskbar=$false}
  $window.Show(); $window.UpdateLayout()
+ if($PreviewRelatedAgentsUiTest){
+  function Find-RelatedPreview($parent,[string]$kind){
+   if($parent -is [Windows.Controls.TextBlock] -and $parent.IsVisible){
+    if($kind -eq 'count' -and $parent.Tag -ceq 'related-agent-count'){return $parent}
+    if($kind -eq 'progress' -and $parent.Text -ceq (Progress-Label $script:lastAllTasks[0])){return $parent}
+   }
+   for($index=0;$index -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$index++){
+    $found=Find-RelatedPreview ([Windows.Media.VisualTreeHelper]::GetChild($parent,$index)) $kind
+    if($null -ne $found){return $found}
+   }
+   return $null
+  }
+  $surface=if($CompactMode){$compactTasksPanel}else{$tasksPanel}
+  $count=Find-RelatedPreview $surface 'count';$progress=Find-RelatedPreview $surface 'progress';$title=$script:previewHintTarget
+  if($script:lastAllTasks.Count -ne 1 -or $script:lastAllTasks[0].RelatedAgentCount -ne 3 -or $script:showProviderLabels -or
+     $null -eq $count -or $count.ActualWidth -le 0 -or $count.ActualWidth+0.5 -lt $count.DesiredSize.Width -or
+     $null -eq $progress -or -not (Progress-Label $script:lastAllTasks[0]) -or $null -eq $title -or -not $title.IsVisible -or
+     $title.TextTrimming -ne [Windows.TextTrimming]::CharacterEllipsis){throw 'The related-agent title, count or progress is not visible.'}
+  Update-ConditionalHint $title
+  if($title.ToolTip -isnot [Windows.Controls.ToolTip] -or [string]$title.ToolTip.Content -cne [string]$title.Text){throw 'The truncated title hover hint is missing.'}
+  if($compactDotsPanel.Visibility -ne [Windows.Visibility]::Collapsed){throw 'Hidden related agents must not create extra task dots.'}
+  Write-Output 'Related agents UI: grouped card, visible count, progress, single source and truncated-title hint verified.'
+ }
  if($PreviewCompactSwitchUiTest){
   function Find-CompactPreviewText($parent,[string]$expected){
    if($parent -is [Windows.Controls.TextBlock] -and $parent.IsVisible -and $parent.Text -ceq $expected){return $true}
