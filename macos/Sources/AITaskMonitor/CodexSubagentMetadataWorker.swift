@@ -25,14 +25,16 @@ final class CodexSubagentMetadataWorker {
         let file: URL
         let stamp: Stamp
         let parentID: String?
+        let isConfirmedRoot: Bool
         let headerDigest: Data?
         let observedAt: TimeInterval
 
-        init(file: URL, stamp: Stamp, parentID: String?, headerDigest: Data? = nil,
+        init(file: URL, stamp: Stamp, parentID: String?, isConfirmedRoot: Bool = false, headerDigest: Data? = nil,
              observedAt: TimeInterval = ProcessInfo.processInfo.systemUptime) {
             self.file = file
             self.stamp = stamp
             self.parentID = parentID
+            self.isConfirmedRoot = isConfirmedRoot
             self.headerDigest = headerDigest
             self.observedAt = observedAt
         }

@@ -59,6 +59,11 @@ struct CodexAgentDetail: Identifiable, Codable, Equatable {
     var loopWarning: LoopWarning?
 }
 
+struct CodexFileIdentity: Codable, Equatable {
+    let device: UInt64
+    let inode: UInt64
+}
+
 struct MonitoredTask: Identifiable, Codable, Equatable {
     let id: String
     var provider: TaskProvider
@@ -80,6 +85,9 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
     var codexAgentsUnconfirmed: Bool? = nil
     var codexAgents: [CodexAgentDetail]? = nil
     var lastKnownActivity: String? = nil
+    var lastActivityIdentityConfirmed: Bool? = nil
+    var lastActivityFileIdentity: CodexFileIdentity? = nil
+    var usesDerivedCodexParentTitle: Bool? = nil
 
     func codexAgentCountLabel(includingStatus: Bool) -> String? {
         guard let count = codexAgentCount, count > 0 else { return nil }
@@ -99,7 +107,17 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
 
     var codexAgentCountLabel: String? { codexAgentCountLabel(includingStatus: true) }
     var codexAgentStatusLabel: String? {
-        codexAgentsUnconfirmed == true ? tr("Статус агентов не подтверждён", "Agent status unconfirmed") : nil
+        guard codexAgentsUnconfirmed == true else { return nil }
+        if codexAgentCount == 1 { return tr("Статус агента не подтверждён", "Agent status unconfirmed") }
+        return tr("Статус агентов не подтверждён", "Agent status unconfirmed")
+    }
+
+    var displayedActivity: String {
+        guard provider == .codex, isUnconfirmed,
+              ["Статус не подтверждён", "Status unconfirmed"].contains(activity),
+              lastActivityIdentityConfirmed == true,
+              let last = lastKnownActivity, !last.isEmpty else { return activity }
+        return tr("Статус не подтверждён. Последнее: \(last)", "Status unconfirmed. Last: \(last)")
     }
 
     var planStatusNote: String? {
@@ -192,6 +210,16 @@ struct TaskFocusTracker {
 }
 
 enum TaskSnapshotMerger {
+    static func confirmCodexActivities(_ tasks: [MonitoredTask], files: [String: CodexFileIdentity]) -> [MonitoredTask] {
+        tasks.map { task in
+            guard task.provider == .codex, task.isUnconfirmed, let identity = task.lastActivityFileIdentity,
+                  files[task.id] == identity else { return task }
+            var confirmed = task
+            confirmed.lastActivityIdentityConfirmed = true
+            return confirmed
+        }
+    }
+
     static func merge(previous: [MonitoredTask], current: [MonitoredTask], terminalIDs: Set<String>) -> [MonitoredTask] {
         let currentIDs = Set(current.map(\.id))
         var result = current
@@ -200,6 +228,11 @@ enum TaskSnapshotMerger {
             if uncertain.provider == .codex && uncertain.lastKnownActivity == nil &&
                 !task.activity.isEmpty && !["Статус не подтверждён", "Status unconfirmed", "Выполняется", "Working"].contains(task.activity) {
                 uncertain.lastKnownActivity = task.activity
+            }
+            if uncertain.provider == .codex { uncertain.lastActivityIdentityConfirmed = false }
+            if uncertain.provider == .codex && uncertain.usesDerivedCodexParentTitle == true {
+                uncertain.title = tr("Задача Codex", "Codex task")
+                uncertain.usesDerivedCodexParentTitle = false
             }
             uncertain.isActive = false
             uncertain.isUnconfirmed = true

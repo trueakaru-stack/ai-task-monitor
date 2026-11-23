@@ -7,17 +7,20 @@ enum CodexTaskGrouping {
         let displayIDBySourceID: [String: String]
     }
 
-    static func project(_ source: [MonitoredTask], parents: [String: String], titles: [String: String]) -> [MonitoredTask] {
-        makeProjection(source, parents: parents, titles: titles).tasks
+    static func project(_ source: [MonitoredTask], parents: [String: String], titles: [String: String],
+                        confirmedRoots: Set<String> = []) -> [MonitoredTask] {
+        makeProjection(source, parents: parents, titles: titles, confirmedRoots: confirmedRoots).tasks
     }
 
-    static func makeProjection(_ source: [MonitoredTask], parents: [String: String], titles: [String: String]) -> Projection {
+    static func makeProjection(_ source: [MonitoredTask], parents: [String: String], titles: [String: String],
+                               confirmedRoots: Set<String> = []) -> Projection {
         let visible = source.filter { $0.isActive || $0.isUnconfirmed || $0.isWaiting }
         let eligible = visible.filter { $0.provider == .codex && UUID(uuidString: $0.id) != nil }
         guard eligible.count <= 512, parents.count <= 2_048 else {
             return Projection(tasks: visible, displayIDBySourceID: [:])
         }
         let byID = Dictionary(grouping: eligible, by: { $0.id.lowercased() })
+        let roots = Set(confirmedRoots.filter { UUID(uuidString: $0) != nil }.map { $0.lowercased() })
         let conflicts = Set(byID.compactMap { id, values in
             values.dropFirst().allSatisfy { $0 == values[0] } ? nil : id
         })
@@ -43,12 +46,13 @@ enum CodexTaskGrouping {
             var current = child
             var visited: Set<String> = [child]
             for _ in 0..<128 {
-                guard !conflicts.contains(current), !linkConflicts.contains(current), let parent = parentByID[current],
+                guard !roots.contains(current), !conflicts.contains(current), !linkConflicts.contains(current), let parent = parentByID[current],
                       !conflicts.contains(parent), !linkConflicts.contains(parent), visited.insert(parent).inserted else { return nil }
                 if parentByID[parent] != nil {
                     current = parent
                     continue
                 }
+                guard roots.contains(parent) else { return nil }
                 if byID[parent] != nil { return parent }
                 guard let title = titleByID[parent],
                       !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -73,7 +77,8 @@ enum CodexTaskGrouping {
         func details(for childIDs: Set<String>) -> [CodexAgentDetail] {
             childIDs.sorted().compactMap { id in
                 guard let child = byID[id]?.first else { return nil }
-                let activity = child.lastKnownActivity ?? child.activity
+                let activity = (!child.isUnconfirmed || child.lastActivityIdentityConfirmed == true)
+                    ? (child.lastKnownActivity ?? child.activity) : child.activity
                 return CodexAgentDetail(id: child.id, title: child.title, activity: activity,
                                         isActive: child.isActive && !child.isUnconfirmed,
                                         isUnconfirmed: child.isUnconfirmed, loopWarning: child.loopWarning)

@@ -8,9 +8,12 @@ struct CodexTaskSnapshot {
     var interruptedIDs: Set<String> = []
     var toolEvents: [String: [CodexToolEvent]] = [:]
     var subagentParents: [String: String] = [:]
+    var confirmedSubagentRoots: Set<String> = []
+    var verifiedActivityFiles: [String: CodexFileIdentity] = [:]
     var subagentCandidates: Set<String> = []
     var subagentTitles: [String: String] = [:]
     var isPartial = false
+    var didCompleteUnindexedSweep = false
 }
 
 struct CodexTaskReader {
@@ -32,6 +35,14 @@ struct CodexTaskReader {
         }
     }
 
+    private struct CandidateSubagentTitle {
+        let parentID: String
+        let title: String
+        let device: UInt64
+        let inode: UInt64
+        let headerDigest: Data
+    }
+
     let codexHome: URL
     private let fileManager = FileManager.default
     private let lifecycleCache = CodexLifecycleCache()
@@ -42,11 +53,14 @@ struct CodexTaskReader {
     private let subagentMetadata = CodexSubagentMetadataWorker()
     private let afterDiscoveryForTests: (() -> Void)?
     private let beforeTerminalRecheckForTests: (() -> Void)?
+    private let afterIndexedAttributesForTests: ((String) -> Void)?
 
     init(codexHome: URL? = nil, afterDiscoveryForTests: (() -> Void)? = nil,
-         beforeTerminalRecheckForTests: (() -> Void)? = nil) {
+         beforeTerminalRecheckForTests: (() -> Void)? = nil,
+         afterIndexedAttributesForTests: ((String) -> Void)? = nil) {
         self.afterDiscoveryForTests = afterDiscoveryForTests
         self.beforeTerminalRecheckForTests = beforeTerminalRecheckForTests
+        self.afterIndexedAttributesForTests = afterIndexedAttributesForTests
         if let codexHome {
             self.codexHome = codexHome
         } else if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
@@ -81,13 +95,14 @@ struct CodexTaskReader {
         }
 
         let indexedIDs = Set(sessions.keys)
-        let extra: (ids: Set<String>, fastFiles: [String: URL], verifiedFiles: [String: URL], isPartial: Bool)
+        let extra: (ids: Set<String>, fastFiles: [String: URL], verifiedFiles: [String: URL],
+                    freshlyVerifiedFiles: [String: URL], isPartial: Bool, didCompleteSweep: Bool)
         do {
             extra = try unindexedOwners(excluding: indexedIDs, now: now, observedSince: observedSince,
                                         previouslyObserved: previouslyObserved)
         } catch {
             guard !indexedIDs.isEmpty else { throw error }
-            extra = ([], [:], [:], true)
+            extra = ([], [:], [:], [:], true, false)
         }
         let discovered = try sessionFiles(for: indexedIDs, now: now, observedSince: observedSince,
                                           previouslyObserved: previouslyObserved)
@@ -102,7 +117,9 @@ struct CodexTaskReader {
         let files = discovered.files
         afterDiscoveryForTests?()
         var result = CodexTaskSnapshot()
+        result.didCompleteUnindexedSweep = extra.didCompleteSweep
         var visibleMetadataStamps: [String: CodexSubagentMetadataWorker.Stamp] = [:]
+        var candidateSubagentTitles: [String: CandidateSubagentTitle] = [:]
         var indexedEndings: [String: (file: URL, identity: TerminalFileIdentity, interrupted: Bool, toolEvents: [CodexToolEvent]?)] = [:]
         result.isPartial = indexFailure != nil || discovered.isPartial || extra.isPartial || extraFiles.isPartial
         let uncertain = ambiguousRollouts.poll(
@@ -124,6 +141,11 @@ struct CodexTaskReader {
             }
             let attributes = try fileManager.attributesOfItem(atPath: file.path)
             guard let modified = attributes[.modificationDate] as? Date else { throw CocoaError(.fileReadUnknown) }
+            guard let expectedStamp = CodexSubagentMetadataWorker.Stamp(attributes) else {
+                result.isPartial = true
+                continue
+            }
+            afterIndexedAttributesForTests?(id)
             if let recovered {
                 guard recovered.path == file.standardizedFileURL.path,
                       (attributes[.systemNumber] as? NSNumber)?.uint64Value == recovered.device,
@@ -151,8 +173,10 @@ struct CodexTaskReader {
                 }
                 tail = checked
             } else {
-                tail = try FileHelpers.tail(of: file, maximumBytes: tailLimit)
+                do { tail = try readIndexedTail(file, expected: expectedStamp, maximumBytes: tailLimit) }
+                catch { result.isPartial = true; continue }
             }
+            guard currentIdentity(of: file, matches: expectedStamp) else { result.isPartial = true; continue }
             let cached = try? lifecycleCache.previous(for: file, attributes: attributes, maximumAppend: UInt64(tailLimit))
             if recovered != nil && cached == nil {
                 result.isPartial = true
@@ -220,6 +244,7 @@ struct CodexTaskReader {
             }
 
             let plan = try planCache.read(from: file)
+            guard currentIdentity(of: file, matches: expectedStamp) else { result.isPartial = true; continue }
             if let fresh, !ambiguousRollouts.acceptFresh(id, hint: fresh) {
                 result.isPartial = true
                 continue
@@ -232,10 +257,11 @@ struct CodexTaskReader {
             let recoveredUnconfirmed = fresh != nil || recovered != nil || state.terminalUncertain || tail.utf8.last != 0x0a
             let progress = recoveredUnconfirmed ? nil : MonitoredTask.progress(for: steps)
             let unconfirmed = recoveredUnconfirmed || now.timeIntervalSince(modified) >= 7_200
-            var displayTitle = title
-            if displayTitle.isEmpty, let record = try? readUnindexedSession(file, id: id),
-               let derived = subagentTitle(record.subagent, sessions: sessions) {
-                displayTitle = derived
+            if title.isEmpty, let record = try? readUnindexedSession(file, id: id),
+               record.device == expectedStamp.device, record.inode == expectedStamp.inode,
+               let reference = record.subagent, let derived = subagentTitle(reference, sessions: sessions) {
+                candidateSubagentTitles[id] = CandidateSubagentTitle(parentID: reference.parentID, title: derived,
+                    device: record.device, inode: record.inode, headerDigest: record.headerDigest)
             }
             if !state.turnID.isEmpty,
                let device = (attributes[.systemNumber] as? NSNumber)?.uint64Value,
@@ -248,7 +274,7 @@ struct CodexTaskReader {
             result.tasks.append(MonitoredTask(
                 id: id,
                 provider: .codex,
-                title: displayTitle.isEmpty ? tr("Задача Codex", "Codex task") : displayTitle,
+                title: title.isEmpty ? tr("Задача Codex", "Codex task") : title,
                 activity: unconfirmed ? tr("Статус не подтверждён", "Status unconfirmed") : (activity.isEmpty ? tr("Выполняется", "Working") : activity),
                 isActive: !unconfirmed,
                 progress: progress,
@@ -259,7 +285,9 @@ struct CodexTaskReader {
                 startedAt: state.startedAt ?? .distantPast,
                 startKey: state.startKey,
                 planConfirmed: !recoveredUnconfirmed && plan.confirmed,
-                lastKnownActivity: activity.isEmpty ? nil : activity
+                lastKnownActivity: activity.isEmpty ? nil : activity,
+                lastActivityIdentityConfirmed: true,
+                lastActivityFileIdentity: CodexFileIdentity(device: expectedStamp.device, inode: expectedStamp.inode)
             ))
             visibleMetadataStamps[id] = CodexSubagentMetadataWorker.Stamp(attributes)
         }
@@ -307,6 +335,12 @@ struct CodexTaskReader {
             guard let file = available[id] else { continue }
             do {
                 guard let record = try readUnindexedSession(file, id: id) else { continue }
+                guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
+                      let stamp = CodexSubagentMetadataWorker.Stamp(attributes),
+                      stamp.device == record.device, stamp.inode == record.inode else {
+                    result.isPartial = true
+                    continue
+                }
                 recognizedUnindexedSource = true
                 var lateWithWriterFile = false
                 if let observedSince, record.modified < observedSince && !previouslyObserved.contains(id) {
@@ -332,7 +366,7 @@ struct CodexTaskReader {
                         // a full sweep to confirm the same previously seen file.
                         guard case .absent = writerLockStatus(for: id),
                               previouslyObserved.contains(id),
-                              extra.verifiedFiles[id]?.standardizedFileURL == file.standardizedFileURL,
+                              extra.freshlyVerifiedFiles[id]?.standardizedFileURL == file.standardizedFileURL,
                               execDiscovery.matchesObserved(id: id, file: file, device: record.device,
                                                             inode: record.inode, startKey: state.startKey) else {
                             result.isPartial = true
@@ -365,12 +399,16 @@ struct CodexTaskReader {
                 let steps = plan.steps
                 let detail = parseActivity(from: record.tail, sessionID: id)
                 let status = tr("Статус не подтверждён", "Status unconfirmed")
+                if let reference = record.subagent, let derived = subagentTitle(reference, sessions: sessions) {
+                    candidateSubagentTitles[id] = CandidateSubagentTitle(parentID: reference.parentID, title: derived,
+                        device: record.device, inode: record.inode, headerDigest: record.headerDigest)
+                }
                 execDiscovery.remember(id: id, file: file, device: record.device, inode: record.inode,
                                        startKey: state.startKey)
                 result.tasks.append(MonitoredTask(
                     id: id,
                     provider: .codex,
-                    title: subagentTitle(record.subagent, sessions: sessions) ?? tr("Задача Codex", "Codex task"),
+                    title: tr("Задача Codex", "Codex task"),
                     activity: detail.isEmpty ? status : status + ": " + detail,
                     isActive: false,
                     progress: nil,
@@ -381,11 +419,11 @@ struct CodexTaskReader {
                     startedAt: state.startedAt ?? .distantPast,
                     startKey: state.startKey,
                     planConfirmed: plan.confirmed,
-                    lastKnownActivity: detail.isEmpty ? nil : detail
+                    lastKnownActivity: detail.isEmpty ? nil : detail,
+                    lastActivityIdentityConfirmed: true,
+                    lastActivityFileIdentity: CodexFileIdentity(device: record.device, inode: record.inode)
                 ))
-                if let attributes = try? fileManager.attributesOfItem(atPath: file.path) {
-                    visibleMetadataStamps[id] = CodexSubagentMetadataWorker.Stamp(attributes)
-                }
+                visibleMetadataStamps[id] = stamp
             } catch {
                 // A changing, inaccessible or linked file is not evidence that
                 // a previously observed task finished.
@@ -396,20 +434,21 @@ struct CodexTaskReader {
         var metadataCandidates = files
         if !extraFiles.didHitLimit {
             metadataCandidates.merge(extraFiles.files) { first, _ in first }
-        } else {
-            // A completed bounded history sweep may retain a unique path for
-            // a previously observed unindexed session. It is usable only
-            // while the current fast path and file identity still match.
-            for (id, file) in extra.verifiedFiles {
-                guard extra.fastFiles[id]?.standardizedFileURL == file.standardizedFileURL,
-                      let stamp = visibleMetadataStamps[id],
-                      execDiscovery.matchesVerified(id: id, file: file, device: stamp.device, inode: stamp.inode) else { continue }
-                metadataCandidates[id] = file
-            }
+        }
+        // A completed bounded history sweep may retain a unique path for a
+        // previously observed session, even when it was not selected in this
+        // page. It remains usable only while path and file identity match.
+        for (id, file) in extra.verifiedFiles {
+            guard extra.fastFiles[id]?.standardizedFileURL == file.standardizedFileURL else { continue }
+            let stamp = visibleMetadataStamps[id] ?? (try? fileManager.attributesOfItem(atPath: file.path))
+                .flatMap { CodexSubagentMetadataWorker.Stamp($0) }
+            guard let stamp, execDiscovery.matchesVerified(id: id, file: file, device: stamp.device, inode: stamp.inode) else { continue }
+            metadataCandidates[id] = file
         }
         let visibleIDs = Set(result.tasks.map(\.id).filter { UUID(uuidString: $0) != nil })
         result.subagentCandidates = visibleIDs
-        let metadata = subagentMetadata.poll(candidates: metadataCandidates, visibleIDs: visibleIDs) { id, file in
+        let knownIDs = visibleIDs.union(previouslyObserved.filter { UUID(uuidString: $0) != nil })
+        let metadata = subagentMetadata.poll(candidates: metadataCandidates, visibleIDs: knownIDs) { id, file in
             let before = try self.fileManager.attributesOfItem(atPath: file.path)
             guard let stamp = CodexSubagentMetadataWorker.Stamp(before) else { throw CocoaError(.fileReadUnknown) }
             let metadata = try self.readSubagentParent(file, id: id)
@@ -419,8 +458,8 @@ struct CodexTaskReader {
                   current.size >= stamp.size, current.modified >= stamp.modified,
                   metadata.device == current.device, metadata.inode == current.inode,
                   metadata.size <= current.size else { throw CocoaError(.fileReadUnknown) }
-            return CodexSubagentMetadataWorker.Observation(file: file, stamp: current,
-                                                           parentID: metadata.parentID, headerDigest: metadata.headerDigest)
+            return CodexSubagentMetadataWorker.Observation(file: file, stamp: current, parentID: metadata.parentID,
+                                                           isConfirmedRoot: metadata.isConfirmedRoot, headerDigest: metadata.headerDigest)
         }
         var verifiedMetadata: Set<String> = []
         var checkedAncestors = 0
@@ -428,6 +467,8 @@ struct CodexTaskReader {
             guard let observation = metadata[id] else { continue }
             let current: CodexSubagentMetadataWorker.Stamp?
             if visibleIDs.contains(id) {
+                guard let stamp = visibleMetadataStamps[id], let file = metadataCandidates[id],
+                      currentIdentity(of: file, matches: stamp) else { result.isPartial = true; continue }
                 current = visibleMetadataStamps[id]
             } else {
                 guard checkedAncestors < 32 else { result.isPartial = true; continue }
@@ -445,7 +486,16 @@ struct CodexTaskReader {
                 ProcessInfo.processInfo.systemUptime - observation.observedAt <= 10
             guard checked || appending else { continue }
             verifiedMetadata.insert(id)
+            result.verifiedActivityFiles[id] = CodexFileIdentity(device: current.device, inode: current.inode)
             if let parent = observation.parentID { result.subagentParents[id] = parent }
+            if observation.isConfirmedRoot { result.confirmedSubagentRoots.insert(id.lowercased()) }
+            if let candidate = candidateSubagentTitles[id], observation.parentID == candidate.parentID,
+               observation.stamp.device == candidate.device, observation.stamp.inode == candidate.inode,
+               observation.headerDigest == candidate.headerDigest,
+               let index = result.tasks.firstIndex(where: { $0.id == id }) {
+                result.tasks[index].title = candidate.title
+                result.tasks[index].usesDerivedCodexParentTitle = true
+            }
         }
         // Pending metadata alone does not make the separately visible tasks
         // unavailable. Once a relationship is used, disclose incomplete
@@ -841,9 +891,11 @@ struct CodexTaskReader {
     /// Each refresh examines at most 256 recent-day entries and 256 entries
     /// from a progressing history scan. Partial scans do not claim completeness.
     private func unindexedOwners(excluding indexedIDs: Set<String>, now: Date, observedSince: Date?,
-                                 previouslyObserved: Set<String>) throws -> (ids: Set<String>, fastFiles: [String: URL], verifiedFiles: [String: URL], isPartial: Bool) {
+                                 previouslyObserved: Set<String>) throws -> (ids: Set<String>, fastFiles: [String: URL],
+                                     verifiedFiles: [String: URL], freshlyVerifiedFiles: [String: URL],
+                                     isPartial: Bool, didCompleteSweep: Bool) {
         let directory = codexHome.appendingPathComponent("sessions", isDirectory: true)
-        if Self.pathIsMissing(directory) { return ([], [:], [:], false) }
+        if Self.pathIsMissing(directory) { return ([], [:], [:], [:], false, true) }
         let excluded = Set(indexedIDs.map { $0.lowercased() })
         var modifiedByOwner: [String: Date] = [:]
         var fastVariants: [String: [String: URL]] = [:]
@@ -912,20 +964,18 @@ struct CodexTaskReader {
         let page = try execDiscovery.nextHistoryPage(directory: directory, limit: 256, previouslyObserved: previouslyObserved)
         if !page.complete { partial = true }
         for url in page.urls { consider(url, fast: true) }
-        let ordered = modifiedByOwner.sorted { first, second in
-            let firstObserved = previouslyObserved.contains(first.key)
-            let secondObserved = previouslyObserved.contains(second.key)
-            if firstObserved != secondObserved { return firstObserved }
-            if first.value != second.value { return first.value > second.value }
-            return first.key < second.key
-        }
-        if ordered.count > 16 { partial = true }
-        let selected = Set(ordered.prefix(16).map(\.key))
+        let ordered = modifiedByOwner.sorted {
+            $0.value == $1.value ? $0.key < $1.key : $0.value > $1.value
+        }.map(\.key)
+        let existing = ordered.filter { previouslyObserved.contains($0) }
+        let unseen = ordered.filter { !previouslyObserved.contains($0) }
+        if existing.count + unseen.count > 16 { partial = true }
+        let selected = execDiscovery.selectFair(existing: existing, unseen: unseen, limit: 16)
         var fastFiles: [String: URL] = [:]
         // A partial page can yield a verified session record, but only as an
         // unconfirmed card. Terminal events still require a complete scan.
         do {
-            for id in selected {
+            for id in selected.union(page.verifiedFiles.keys) {
                 let lowerID = id.lowercased()
                 if unknownStems.contains(where: { $0 == lowerID || $0.hasSuffix("-" + lowerID) || $0.contains("-" + lowerID + "_") }) {
                     partial = true
@@ -945,7 +995,7 @@ struct CodexTaskReader {
                 fastFiles[id] = file
             }
         }
-        return (selected, fastFiles, page.verifiedFiles, partial)
+        return (selected, fastFiles, page.verifiedFiles, page.complete ? page.verifiedFiles : [:], partial, page.complete)
     }
 
     private enum WriterLockStatus {
@@ -976,11 +1026,11 @@ struct CodexTaskReader {
         var device: UInt64
         var inode: UInt64
         var subagent: SubagentReference?
+        var headerDigest: Data
     }
 
-    private func subagentReference(_ payload: [String: Any], id: String,
-                                   requireCompatibleThreadSource: Bool = true) -> SubagentReference? {
-        if requireCompatibleThreadSource, let threadSource = payload["thread_source"], !(threadSource is NSNull) {
+    private func subagentReference(_ payload: [String: Any], id: String) -> SubagentReference? {
+        if let threadSource = payload["thread_source"], !(threadSource is NSNull) {
             guard let value = threadSource as? String, value == "subagent" else { return nil }
         }
         guard id.utf8.count == 36, UUID(uuidString: id) != nil,
@@ -1000,6 +1050,8 @@ struct CodexTaskReader {
               }) else { return nil }
         let outerName = payload.string("agent_nickname")
         let innerName = spawn.string("agent_nickname")
+        if !outerName.isEmpty && !innerName.isEmpty &&
+            Array(outerName.utf8) != Array(innerName.utf8) { return nil }
         let trimmed = outerName.trimmingCharacters(in: .whitespacesAndNewlines)
         let nickname: String?
         if Array(outerName.utf8) == Array(innerName.utf8), !trimmed.isEmpty, trimmed.utf16.count <= 256,
@@ -1009,6 +1061,18 @@ struct CodexTaskReader {
             nickname = nil
         }
         return SubagentReference(parentID: parentID, nickname: nickname)
+    }
+
+    private func confirmedSubagentRoot(_ payload: [String: Any]) -> Bool {
+        guard let source = payload["source"] as? String, ["cli", "vscode", "exec", "mcp"].contains(source),
+              let classification = payload["thread_source"] as? String,
+              ["user", "agent_created_thread"].contains(classification) else { return false }
+        if let parent = payload["parent_thread_id"], !(parent is NSNull) { return false }
+        if let path = payload["agent_path"], !(path is NSNull) {
+            guard let path = path as? String, path == "/root" else { return false }
+        }
+        if let nickname = payload["agent_nickname"], !(nickname is NSNull) { return false }
+        return true
     }
 
     private func subagentTitle(_ reference: SubagentReference?, sessions: [String: [String: Any]]) -> String? {
@@ -1050,7 +1114,33 @@ struct CodexTaskReader {
         return descriptor
     }
 
-    private func readSubagentParent(_ url: URL, id: String) throws -> (parentID: String?, device: UInt64, inode: UInt64, size: UInt64, headerDigest: Data) {
+    private func currentIdentity(of url: URL, matches expected: CodexSubagentMetadataWorker.Stamp) -> Bool {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+              let current = CodexSubagentMetadataWorker.Stamp(attributes) else { return false }
+        return current.device == expected.device && current.inode == expected.inode
+    }
+
+    private func readIndexedTail(_ url: URL, expected: CodexSubagentMetadataWorker.Stamp,
+                                 maximumBytes: Int) throws -> String {
+        let descriptor = try openSessionFile(url)
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var before = stat()
+        guard fstat(descriptor, &before) == 0, before.st_size >= 0,
+              UInt64(bitPattern: Int64(before.st_dev)) == expected.device,
+              UInt64(before.st_ino) == expected.inode else { throw CocoaError(.fileReadUnknown) }
+        let length = try handle.seekToEnd()
+        let count = min(UInt64(maximumBytes), length)
+        try handle.seek(toOffset: length - count)
+        let data = try handle.read(upToCount: Int(count)) ?? Data()
+        var after = stat()
+        guard data.count == Int(count), fstat(descriptor, &after) == 0,
+              before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+              after.st_size >= 0, UInt64(after.st_size) >= length else { throw CocoaError(.fileReadUnknown) }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func readSubagentParent(_ url: URL, id: String) throws -> (parentID: String?, isConfirmedRoot: Bool, device: UInt64, inode: UInt64, size: UInt64, headerDigest: Data) {
         let descriptor = try openSessionFile(url)
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
@@ -1068,7 +1158,7 @@ struct CodexTaskReader {
         var after = stat()
         guard fstat(descriptor, &after) == 0, before.st_dev == after.st_dev, before.st_ino == after.st_ino,
               after.st_size >= before.st_size else { throw CocoaError(.fileReadUnknown) }
-        return (subagentReference(payload, id: id)?.parentID,
+        return (subagentReference(payload, id: id)?.parentID, confirmedSubagentRoot(payload),
                 UInt64(bitPattern: Int64(after.st_dev)), UInt64(after.st_ino), UInt64(after.st_size),
                 Data(SHA256.hash(data: originalHeader)))
     }
@@ -1087,10 +1177,10 @@ struct CodexTaskReader {
         }
         guard payload.string("id") == id else { return nil }
         let subagent = subagentReference(payload, id: id)
-        // A conflicting analytics classification prevents grouping, but the
-        // independently identified child can still be shown as unconfirmed.
+        // Conflicting parent metadata never becomes a relationship, but a
+        // file with this exact ID and a subagent source can remain visible.
         let unconfirmedSubagent = subagent == nil &&
-            subagentReference(payload, id: id, requireCompatibleThreadSource: false) != nil
+            payload.object("source")?.object("subagent")?.object("thread_spawn") != nil
         let source = payload.string("source")
         let classifiedCLIChild = source == "cli" && payload.string("thread_source") == "subagent"
         guard ["exec", "vscode"].contains(source) || classifiedCLIChild || subagent != nil || unconfirmedSubagent else { return nil }
@@ -1104,7 +1194,8 @@ struct CodexTaskReader {
                             Double(info.st_mtimespec.tv_nsec) / 1_000_000_000)
         return UnindexedSessionRecord(tail: String(decoding: bytes, as: UTF8.self), modified: modified,
                                       truncated: end > count, device: UInt64(bitPattern: Int64(info.st_dev)),
-                                      inode: UInt64(info.st_ino), subagent: subagent)
+                                      inode: UInt64(info.st_ino), subagent: subagent,
+                                      headerDigest: Data(SHA256.hash(data: Data(prefix[...newline]))))
     }
 
     private func sessionFiles(for ids: Set<String>, now: Date, observedSince: Date?,
@@ -1234,6 +1325,9 @@ final class CodexExecDiscoveryCache {
     private var sweepPaths: [String: Set<String>] = [:]
     private var sweepAmbiguous: Set<String> = []
     private var verified: [String: Observation] = [:]
+    private var verifiedAt: TimeInterval?
+    private var existingCursor: String?
+    private var unseenCursor: String?
 
     func noteIndexAvailable() {
         lock.lock()
@@ -1245,6 +1339,27 @@ final class CodexExecDiscoveryCache {
         lock.lock()
         defer { lock.unlock() }
         return seenIndex
+    }
+
+    func selectFair(existing: [String], unseen: [String], limit: Int) -> Set<String> {
+        guard limit > 0 else { return [] }
+        lock.lock()
+        defer { lock.unlock() }
+        let old = existing, fresh = unseen
+        var oldCount = min(old.count, fresh.isEmpty ? limit : (limit + 1) / 2)
+        var newCount = min(fresh.count, limit - oldCount)
+        oldCount += min(old.count - oldCount, limit - oldCount - newCount)
+        newCount += min(fresh.count - newCount, limit - oldCount - newCount)
+        func pick(_ items: [String], count: Int, cursor: inout String?) -> [String] {
+            guard !items.isEmpty, count > 0 else { return [] }
+            let start = cursor.flatMap { items.firstIndex(of: $0).map { ($0 + 1) % items.count } } ?? 0
+            let selected = (0..<count).map { items[(start + $0) % items.count] }
+            cursor = selected.last
+            return selected
+        }
+        let selectedOld = pick(old, count: oldCount, cursor: &existingCursor)
+        let selectedNew = pick(fresh, count: newCount, cursor: &unseenCursor)
+        return Set(selectedOld + selectedNew)
     }
 
     func files(for ids: Set<String>) -> [String: URL] {
@@ -1297,6 +1412,10 @@ final class CodexExecDiscoveryCache {
         guard limit > 0 else { throw CocoaError(.fileReadUnknown) }
         lock.lock()
         defer { lock.unlock() }
+        if let verifiedAt, ProcessInfo.processInfo.systemUptime - verifiedAt > 60 {
+            verified.removeAll()
+            self.verifiedAt = nil
+        }
         let attributes: [FileAttributeKey: Any]
         do { attributes = try FileManager.default.attributesOfItem(atPath: directory.path) }
         catch {
@@ -1407,6 +1526,7 @@ final class CodexExecDiscoveryCache {
                           initial.file.standardizedFileURL == file.standardizedFileURL else { continue }
                     verified[id] = initial
                 }
+                verifiedAt = verified.isEmpty ? nil : ProcessInfo.processInfo.systemUptime
                 return (urls, true, verified.mapValues(\.file))
             }
             if let url = item as? URL {

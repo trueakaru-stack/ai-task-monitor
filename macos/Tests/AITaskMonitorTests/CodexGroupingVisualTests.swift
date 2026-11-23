@@ -38,9 +38,10 @@ final class CodexGroupingVisualTests: XCTestCase {
             for dark in [false, true] {
                 for compact in [false, true] {
                   for disclosureOpen in [false, true] {
-                   for scenario in ["normal", "long", "demo"] {
+                   for scenario in ["normal", "long", "demo", "unavailable"] {
                     for selected in (compact && scenario == "demo" ? [0, 1] : [0]) {
                     if selected == 1 && disclosureOpen { continue }
+                    if scenario == "unavailable" && disclosureOpen { continue }
                     let demo = scenario == "demo"
                     let title = scenario == "long"
                         ? tr("Очень длинное название родительской задачи для проверки обрезки и подсказки",
@@ -67,18 +68,28 @@ final class CodexGroupingVisualTests: XCTestCase {
                             activity: tr("Статус не подтверждён", "Status unconfirmed"), isActive: false, progress: nil,
                             progressKind: .none, steps: [], updatedAt: Date(), isUnconfirmed: true,
                             lastKnownActivity: demo ? exampleActions[offset] :
-                                tr("Последнее проверенное действие \(offset + 1)", "Last observed action \(offset + 1)"))
+                                tr("Последнее проверенное действие \(offset + 1)", "Last observed action \(offset + 1)"),
+                            lastActivityIdentityConfirmed: true)
                     }
-                    let grouped = CodexTaskGrouping.project([parentTask] + children,
-                        parents: [ids[0]: rootID, ids[1]: rootID, ids[2]: ids[0]], titles: [rootID: title])
+                    let unavailable = MonitoredTask(id: rootID, provider: .codex, title: tr("Проверка загрузки событий", "Checking event loading"),
+                        activity: tr("Статус не подтверждён", "Status unconfirmed"), isActive: false, progress: nil,
+                        progressKind: .none, steps: [], updatedAt: Date(), isUnconfirmed: true,
+                        lastKnownActivity: tr("Проверка обработки ошибок", "Checking error handling"),
+                        lastActivityIdentityConfirmed: true)
+                    let grouped = scenario == "unavailable" ? [unavailable] : CodexTaskGrouping.project([parentTask] + children,
+                        parents: [ids[0]: rootID, ids[1]: rootID, ids[2]: ids[0]], titles: [rootID: title], confirmedRoots: [rootID])
                     let item = try XCTUnwrap(grouped.first)
                     XCTAssertEqual(grouped.count, 1)
-                    XCTAssertEqual(item.codexAgentCount, 3)
-                    XCTAssertEqual(item.title, title)
-                    XCTAssertEqual(item.progress, parentTask.progress)
-                    XCTAssertEqual(item.codexAgents?.count, 3)
-                    XCTAssertEqual(item.codexAgents?.first?.activity,
-                                   demo ? exampleActions[0] : tr("Последнее проверенное действие 1", "Last observed action 1"))
+                    if scenario == "unavailable" {
+                        XCTAssertTrue(item.displayedActivity.contains(tr("Последнее:", "Last:")))
+                    } else {
+                        XCTAssertEqual(item.codexAgentCount, 3)
+                        XCTAssertEqual(item.title, title)
+                        XCTAssertEqual(item.progress, parentTask.progress)
+                        XCTAssertEqual(item.codexAgents?.count, 3)
+                        XCTAssertEqual(item.codexAgents?.first?.activity,
+                                       demo ? exampleActions[0] : tr("Последнее проверенное действие 1", "Last observed action 1"))
+                    }
                     let claude = MonitoredTask(id: "claude:synthetic", provider: .claude,
                         title: tr("Обновить настройки уведомлений", "Update notification settings"),
                         activity: tr("Проверяю работу уведомлений", "Checking notifications"),

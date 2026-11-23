@@ -132,6 +132,7 @@ final class TaskStore: ObservableObject {
     private var codexParentConflicts: Set<String> = []
     private var codexParentTitles: [String: String] = [:]
     private var codexParentsForDisplay: [String: String] = [:]
+    private var codexRootsForDisplay: Set<String> = []
     private var previousClaude: [MonitoredTask] = []
     private var claudeRetainedTitlesOverflow = false
     private var previousExternal: [MonitoredTask] = []
@@ -942,9 +943,11 @@ final class TaskStore: ObservableObject {
             interruptedIDs.formUnion(snapshot.interruptedIDs)
             codexToolEvents = snapshot.toolEvents
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
+            previousCodex = TaskSnapshotMerger.confirmCodexActivities(previousCodex, files: snapshot.verifiedActivityFiles)
         } catch {
             unavailable.append(.codex)
             codexParentsForDisplay = [:]
+            codexRootsForDisplay = []
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
         }
         do {
@@ -1069,7 +1072,8 @@ final class TaskStore: ObservableObject {
         diagnosticTasks = combined
         let isLocalCodex: (MonitoredTask) -> Bool = { $0.provider == .codex && UUID(uuidString: $0.id) != nil }
         let projection = CodexTaskGrouping.makeProjection(combined.filter(isLocalCodex),
-                                                          parents: codexParentsForDisplay, titles: codexParentTitles)
+                                                          parents: codexParentsForDisplay, titles: codexParentTitles,
+                                                          confirmedRoots: codexRootsForDisplay)
         combined = projection.tasks + combined.filter { !isLocalCodex($0) }
         let selectedID = previousTasks.indices.contains(compactIndex) ? previousTasks[compactIndex].id : nil
         var mappedSelection = selectedID.flatMap { projection.displayIDBySourceID[$0.lowercased()] }
@@ -1090,6 +1094,7 @@ final class TaskStore: ObservableObject {
     }
 
     private func updateCodexParentEvidence(_ snapshot: CodexTaskSnapshot) {
+        codexRootsForDisplay = snapshot.confirmedSubagentRoots
         var current: [String: String] = [:]
         for (child, parent) in snapshot.subagentParents {
             let key = child.lowercased(), value = parent.lowercased()

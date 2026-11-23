@@ -142,7 +142,7 @@ jobs:
           set -euo pipefail
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
           task_policy="$AITM_TEST_TASK_ROOT/profile-offline.sb"
-          for spec in 'CodexTaskGroupingTests:10' 'CodexSubagentMetadataWorkerTests:3' 'CodexExecDiscoveryTests/testVerifiedParentIDReachesSnapshotForIndexedAndUnindexedChild:1' 'CodexExecDiscoveryTests/testIndexedChildWithConflictingParentMetadataHasNoLink:1' 'CodexExecDiscoveryTests/testThreadSourceMustAgreeWithSubagentMetadata:1' 'CodexExecDiscoveryTests/testStringSourceWithSubagentClassificationRemainsSeparate:1' 'CodexExecDiscoveryTests/testDuplicateMetadataKeysNeverCreateRelationship:1' 'CodexExecDiscoveryTests/testReplacementAtSamePathInvalidatesCachedRelationship:1' 'CodexExecDiscoveryTests/testAppendsKeepVerifiedGroupWithoutPartialWarning:1' 'CodexExecDiscoveryTests/testLargeHistoryEventuallyGroupsUnindexedChildAndRejectsConflict:1' 'CodexExecDiscoveryTests/testRewrittenHeaderOnSameInodeInvalidatesRelationship:1' 'CodexExecDiscoveryTests/testIndexedCompletedIntermediateIsDiscoveredForActiveGrandchild:1' 'CodexExecDiscoveryTests/testUnavailableOldIntermediateLeavesGrandchildSeparate:1' 'CodexExecDiscoveryTests/testTaskStoreGroupsVerifiedChildAndKeepsSelectionAndDisclosure:1'; do
+          for spec in 'CodexTaskGroupingTests:12' 'CodexSubagentMetadataWorkerTests:3' 'CodexExecDiscoveryTests/testVerifiedParentIDReachesSnapshotForIndexedAndUnindexedChild:1' 'CodexExecDiscoveryTests/testIndexedChildWithConflictingParentMetadataHasNoLink:1' 'CodexExecDiscoveryTests/testConflictingNicknameKeepsSeparateCard:1' 'CodexExecDiscoveryTests/testUnknownIntermediateMetadataNeverCreatesRoot:1' 'CodexExecDiscoveryTests/testOnlyExplicitCompatibleRootMetadataEnablesGrouping:1' 'CodexExecDiscoveryTests/testThreadSourceMustAgreeWithSubagentMetadata:1' 'CodexExecDiscoveryTests/testStringSourceWithSubagentClassificationRemainsSeparate:1' 'CodexExecDiscoveryTests/testDuplicateMetadataKeysNeverCreateRelationship:1' 'CodexExecDiscoveryTests/testReplacementAtSamePathInvalidatesCachedRelationship:1' 'CodexExecDiscoveryTests/testReplacementBetweenIndexedAttributesAndTailCannotMixRelationship:1' 'CodexExecDiscoveryTests/testAppendsKeepVerifiedGroupWithoutPartialWarning:1' 'CodexExecDiscoveryTests/testLargeHistoryEventuallyGroupsUnindexedChildAndRejectsConflict:1' 'CodexExecDiscoveryTests/testNewUnindexedAssistantIsNotStarvedBySixteenRetainedSessions:1' 'CodexExecDiscoveryTests/testRewrittenHeaderOnSameInodeInvalidatesRelationship:1' 'CodexExecDiscoveryTests/testCachedUniquePathDoesNotConfirmTerminalDuringNextIncompleteSweep:1' 'CodexExecDiscoveryTests/testPagedHistoryDuplicatePreventsFalseCompletion:1' 'CodexExecDiscoveryTests/testIndexedCompletedIntermediateIsDiscoveredForActiveGrandchild:1' 'CodexExecDiscoveryTests/testUnavailableOldIntermediateLeavesGrandchildSeparate:1' 'CodexExecDiscoveryTests/testTaskStoreGroupsVerifiedChildAndKeepsSelectionAndDisclosure:1'; do
             suite="${spec%:*}"
             count="${spec##*:}"
             log="$AITM_TEST_TASK_ROOT/grouping-${count}-$(printf '%s' "$suite" | /usr/bin/shasum | cut -c 1-12).log"
@@ -290,13 +290,31 @@ jobs:
           #!/bin/bash
           set -euo pipefail
           test "$1" = build
-          exec "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" "$@" \
+          exec "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" "$@" --disable-sandbox --manifest-cache none \
             --cache-path "$AITM_RELEASE_ROOT/swift-cache" --config-path "$AITM_RELEASE_ROOT/swift-config" \
             --security-path "$AITM_RELEASE_ROOT/swift-security"
           SCRIPT
           chmod 700 "$task_bin/swift"
           task_run="$task_root/run-isolated"
           task_path="$task_bin:$AITM_TASK_PATH"
+          if AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >/dev/null 2>&1; then
+            echo 'Release sandbox unexpectedly allowed runner-profile access.' >&2
+            exit 1
+          fi
+          "$AITM_TEST_NODE_BIN" -e 'const net=require("node:net"),fs=require("node:fs"); const s=net.createServer(c=>c.end()); s.listen(0,"127.0.0.1",()=>fs.writeFileSync(process.argv[1],String(s.address().port)));' "$task_root/probe-port" &
+          probe_pid=$!
+          trap 'kill "$probe_pid" 2>/dev/null || true; wait "$probe_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..100}; do test -s "$task_root/probe-port" && break; sleep 0.1; done
+          test -s "$task_root/probe-port"
+          task_port="$(cat "$task_root/probe-port")"
+          /usr/bin/nc -z -G 2 127.0.0.1 "$task_port"
+          if AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/nc -z -G 2 127.0.0.1 "$task_port" >/dev/null 2>&1; then
+            echo 'Release sandbox unexpectedly allowed network access.' >&2
+            exit 1
+          fi
+          kill "$probe_pid"
+          wait "$probe_pid" 2>/dev/null || true
+          trap - EXIT
           cd "$task_source"
           AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
             "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/build-app.sh

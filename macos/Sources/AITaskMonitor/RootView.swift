@@ -184,8 +184,8 @@ struct RootView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         if let label = task.progressLabel { Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit() }
                     }
-                    if !task.activity.isEmpty {
-                        ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 11.5)
+                    if !task.displayedActivity.isEmpty {
+                        ActivityStatusRow(text: task.displayedActivity, isActive: task.isActive, fontSize: 11.5)
                             .padding(.top, 2)
                     }
                     if let status = task.codexAgentStatusLabel {

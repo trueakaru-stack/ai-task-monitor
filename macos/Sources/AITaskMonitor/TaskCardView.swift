@@ -40,8 +40,8 @@ struct TaskCardView: View {
                         .monospacedDigit()
                 }
             }
-            if !task.activity.isEmpty {
-                ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 12)
+            if !task.displayedActivity.isEmpty {
+                ActivityStatusRow(text: task.displayedActivity, isActive: task.isActive, fontSize: 12)
                     .padding(.top, 4)
             }
             if let status = task.codexAgentStatusLabel {
