@@ -3,7 +3,7 @@ name: Publish verified installer
 on:
   push:
     branches: [main]
-    paths: [release-publication.json]
+    paths: [release-publication.json, .github/workflows/publish-verified-installer.yml]
 
 permissions:
   actions: read
@@ -186,6 +186,15 @@ jobs:
             verified_sum_line="${verified_sum_lines[0]%$'\r'}"
             test "$verified_sum_line" = "$(sha256sum -- "${verified_apps[0]}" | cut -d ' ' -f 1)  AI Task Monitor.app.zip"
             cmp -- "${verified_apps[0]}" "${bundles[0]}"
+            published_assets="$RUNNER_TEMP/macos-published-assets"
+            mkdir "$published_assets"
+            cp -- "${bundles[0]}" "$published_assets/AI.Task.Monitor.app.zip"
+            cmp -- "${bundles[0]}" "$published_assets/AI.Task.Monitor.app.zip"
+            printf '%s  %s\n%s  %s\n' \
+              "$(sha256sum -- "${assets[0]}" | cut -d ' ' -f 1)" "$asset" \
+              "$(sha256sum -- "$published_assets/AI.Task.Monitor.app.zip" | cut -d ' ' -f 1)" 'AI.Task.Monitor.app.zip' \
+              > "$published_assets/$checksum"
+            uploads=("${assets[0]}" "$published_assets/$checksum" "$published_assets/AI.Task.Monitor.app.zip")
           fi
           jq -er '.notes' "$config" > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -239,3 +248,123 @@ jobs:
           fi
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/v0.2.13" | jq -j '.body' > "$RUNNER_TEMP/windows-notes-result.md"
           cmp "$RUNNER_TEMP/windows-notes-new.md" "$RUNNER_TEMP/windows-notes-result.md"
+
+  repair-macos-checksum:
+    if: contains(github.event.head_commit.message, '[repair-macos-checksum]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify tested binaries and correct published checksum names
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'trueakaru-stack/ai-task-monitor'
+          tag=v0.3.12
+          candidate=7489d44700563264582f90957f351d82d423afaa
+          production=a87284fdc0744fc6643cad3eed689155cf1efdb3
+          dmg_sha=5e353bc9a8bb834d3fdeae1a6edcd2d63e3f72ba018f4cc79fb6a924c18a96c2
+          zip_sha=a11f6030509e98a5cd87d01f0b4c728be5fb1c61781ae534f655f0a1ee37fce6
+          old_sum_sha=396a7887d1beafafe37ff15dcc543ede5597ef18d7e25322ba2ecd4cf0bff962
+          old_backup_name=SHA256SUMS-macOS-original-backup.txt
+          new_staging_name=SHA256SUMS-macOS-corrected-staging.txt
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq '.object.sha')" = "$production"
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/45260994339")"
+          test "$(jq -r '.head_sha' <<< "$run")" = "$candidate"
+          test "$(jq -r '.path' <<< "$run")" = '.github/workflows/macos-card-candidate4-20261116.yml'
+          test "$(jq -r '.status' <<< "$run")" = completed
+          test "$(jq -r '.conclusion' <<< "$run")" = success
+          verified="$RUNNER_TEMP/macos-checksum-source"
+          mkdir "$verified"
+          gh run download 45260994339 --repo "$GITHUB_REPOSITORY" \
+            --name "macos-0.3.12-candidate-$candidate" --dir "$verified"
+          mapfile -d '' dmgs < <(find "$verified" -type f -name 'AITaskMonitor-macOS-0.3.12.dmg' -print0)
+          mapfile -d '' zips < <(find "$verified" -type f -name 'AI Task Monitor.app.zip' -print0)
+          mapfile -d '' sources < <(find "$verified" -type f -name 'source-commit.txt' -print0)
+          test "${#dmgs[@]}" = 1 && test "${#zips[@]}" = 1 && test "${#sources[@]}" = 1
+          test "$(tr -d '\r\n' < "${sources[0]}")" = "$candidate"
+          test "$(sha256sum -- "${dmgs[0]}" | cut -d ' ' -f 1)" = "$dmg_sha"
+          test "$(sha256sum -- "${zips[0]}" | cut -d ' ' -f 1)" = "$zip_sha"
+          release_json="$RUNNER_TEMP/macos-release.json"
+          refresh_release() { gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" > "$release_json"; }
+          check_binaries() {
+            test "$(jq -r '.id' "$release_json")" = 455991549
+            jq -e --arg digest "sha256:$dmg_sha" '[.assets[] | select(.name == "AITaskMonitor-macOS-0.3.12.dmg" and .digest == $digest)] | length == 1' "$release_json" >/dev/null
+            jq -e --arg digest "sha256:$zip_sha" '[.assets[] | select(.name == "AI.Task.Monitor.app.zip" and .digest == $digest)] | length == 1' "$release_json" >/dev/null
+          }
+          refresh_release
+          check_binaries
+          fix_dir="$RUNNER_TEMP/macos-checksum-fix"
+          mkdir "$fix_dir"
+          printf '%s  %s\n%s  %s\n' "$dmg_sha" 'AITaskMonitor-macOS-0.3.12.dmg' \
+            "$zip_sha" 'AI.Task.Monitor.app.zip' > "$fix_dir/SHA256SUMS-macOS.txt"
+          corrected_sha="$(sha256sum -- "$fix_dir/SHA256SUMS-macOS.txt" | cut -d ' ' -f 1)"
+          test "$corrected_sha" = 71a2d88d8dfa1bb10c77750cb7f6ce564e099bb07cd340bbe308da2d3b4c2cf0
+          count_assets() { jq --arg name "$1" '[.assets[] | select(.name == $name)] | length' "$release_json"; }
+          asset_digest() { jq -r --arg name "$1" '[.assets[] | select(.name == $name) | .digest][0] // ""' "$release_json"; }
+          for name in SHA256SUMS-macOS.txt "$old_backup_name" "$new_staging_name"; do
+            count="$(count_assets "$name")"
+            test "$count" = 0 || test "$count" = 1
+          done
+          current_sha="$(asset_digest SHA256SUMS-macOS.txt)"
+          old_backup_sha="$(asset_digest "$old_backup_name")"
+          new_staging_sha="$(asset_digest "$new_staging_name")"
+          test -z "$current_sha" || test "$current_sha" = "sha256:$old_sum_sha" || test "$current_sha" = "sha256:$corrected_sha"
+          test -z "$old_backup_sha" || test "$old_backup_sha" = "sha256:$old_sum_sha"
+          test -z "$new_staging_sha" || test "$new_staging_sha" = "sha256:$corrected_sha"
+          if test "$current_sha" != "sha256:$corrected_sha"; then
+            if test -z "$current_sha"; then test "$old_backup_sha" = "sha256:$old_sum_sha"; else test -z "$old_backup_sha"; fi
+            if test -z "$new_staging_sha"; then
+              cp "$fix_dir/SHA256SUMS-macOS.txt" "$fix_dir/$new_staging_name"
+              gh release upload "$tag" "$fix_dir/$new_staging_name" --repo "$GITHUB_REPOSITORY"
+            fi
+            refresh_release
+            check_binaries
+            jq -e --arg name "$new_staging_name" --arg digest "sha256:$corrected_sha" '[.assets[] | select(.name == $name and .digest == $digest)] | length == 1' "$release_json" >/dev/null
+            mkdir "$fix_dir/staging-download"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$new_staging_name" --dir "$fix_dir/staging-download"
+            cmp "$fix_dir/SHA256SUMS-macOS.txt" "$fix_dir/staging-download/$new_staging_name"
+            if test "$current_sha" = "sha256:$old_sum_sha"; then
+              jq -e --arg digest "sha256:$old_sum_sha" '[.assets[] | select(.name == "SHA256SUMS-macOS.txt" and .digest == $digest)] | length == 1' "$release_json" >/dev/null
+              test "$(count_assets "$old_backup_name")" = 0
+              old_id="$(jq -r '.assets[] | select(.name == "SHA256SUMS-macOS.txt") | .id' "$release_json")"
+              renamed="$(gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/assets/$old_id" -f "name=$old_backup_name")"
+              test "$(jq -r '.name' <<< "$renamed")" = "$old_backup_name"
+              test "$(jq -r '.digest' <<< "$renamed")" = "sha256:$old_sum_sha"
+            fi
+            refresh_release
+            check_binaries
+            test "$(count_assets SHA256SUMS-macOS.txt)" = 0
+            jq -e --arg name "$old_backup_name" --arg digest "sha256:$old_sum_sha" '[.assets[] | select(.name == $name and .digest == $digest)] | length == 1' "$release_json" >/dev/null
+            jq -e --arg name "$new_staging_name" --arg digest "sha256:$corrected_sha" '[.assets[] | select(.name == $name and .digest == $digest)] | length == 1' "$release_json" >/dev/null
+            new_id="$(jq -r --arg name "$new_staging_name" '.assets[] | select(.name == $name) | .id' "$release_json")"
+            renamed="$(gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/assets/$new_id" -f 'name=SHA256SUMS-macOS.txt')"
+            test "$(jq -r '.name' <<< "$renamed")" = SHA256SUMS-macOS.txt
+            test "$(jq -r '.digest' <<< "$renamed")" = "sha256:$corrected_sha"
+          fi
+          refresh_release
+          check_binaries
+          jq -e --arg digest "sha256:$corrected_sha" '[.assets[] | select(.name == "SHA256SUMS-macOS.txt" and .digest == $digest)] | length == 1' "$release_json" >/dev/null
+          mkdir "$fix_dir/downloaded"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern 'SHA256SUMS-macOS.txt' --dir "$fix_dir/downloaded"
+          cmp "$fix_dir/SHA256SUMS-macOS.txt" "$fix_dir/downloaded/SHA256SUMS-macOS.txt"
+          mkdir "$fix_dir/release-check"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'AITaskMonitor-macOS-0.3.12.dmg' --pattern 'AI.Task.Monitor.app.zip' \
+            --pattern 'SHA256SUMS-macOS.txt' --dir "$fix_dir/release-check"
+          (cd "$fix_dir/release-check" && sha256sum -c SHA256SUMS-macOS.txt)
+          for name in "$old_backup_name" "$new_staging_name"; do
+            if test "$(count_assets "$name")" = 1; then
+              expected="sha256:$old_sum_sha"
+              if test "$name" = "$new_staging_name"; then expected="sha256:$corrected_sha"; fi
+              test "$(asset_digest "$name")" = "$expected"
+              remove_id="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .id' "$release_json")"
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$remove_id" >/dev/null
+            fi
+          done
+          refresh_release
+          check_binaries
+          test "$(count_assets "$old_backup_name")" = 0
+          test "$(count_assets "$new_staging_name")" = 0
+          jq -e --arg digest "sha256:$corrected_sha" '[.assets[] | select(.name == "SHA256SUMS-macOS.txt" and .digest == $digest)] | length == 1' "$release_json" >/dev/null
