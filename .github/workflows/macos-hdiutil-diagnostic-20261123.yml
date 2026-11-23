@@ -136,6 +136,10 @@ jobs:
             test -L "$expected/Applications"
             test "$(/usr/bin/readlink "$expected/Applications")" = /Applications
           }
+          # The hybrid has no free blocks by default. Reserve disposable space
+          # in the synthetic staging directory before creating the image.
+          run_logged create-padding /bin/dd if=/dev/zero of="$task_root/temp/app-stage/.aitm-padding" bs=1048576 count=16
+          test "$(run_isolated /usr/bin/stat -f %z "$task_root/temp/app-stage/.aitm-padding")" = 16777216
           run_logged hybrid /usr/bin/hdiutil makehybrid -hfs -hfs-volume-name 'AI Task Monitor' \
             -o "$task_root/temp/hybrid.dmg" "$task_root/temp/app-stage"
           test -s "$task_root/temp/hybrid.dmg"
@@ -150,6 +154,17 @@ jobs:
           check_mount "$task_root/logs/attach-rw.log" "$rw_mount"
           rw_app="$rw_mount/AI Task Monitor.app"
           test -z "$(run_isolated /usr/bin/find "$rw_app" -type l -print -quit)"
+          test -f "$rw_mount/.aitm-padding"
+          test ! -L "$rw_mount/.aitm-padding"
+          test "$(run_isolated /usr/bin/stat -f %z "$rw_mount/.aitm-padding")" = 16777216
+          run_logged free-before /bin/df -Pk "$rw_mount"
+          run_isolated /bin/rm "$rw_mount/.aitm-padding"
+          test ! -e "$rw_mount/.aitm-padding"
+          run_logged free-after /bin/df -Pk "$rw_mount"
+          free_kb="$(/usr/bin/awk 'END {print $4}' "$task_root/logs/free-after.log")"
+          [[ "$free_kb" =~ ^[0-9]+$ ]]
+          test "$free_kb" -ge 1024
+          echo "Freed image space: $free_kb KiB available."
           run_isolated /usr/bin/touch "$rw_mount/.aitm-write-probe"
           run_isolated /bin/rm "$rw_mount/.aitm-write-probe"
           if run_isolated /usr/bin/codesign --verify --deep --strict --verbose=2 "$rw_app" >"$task_root/logs/signature-before.log" 2>&1; then
