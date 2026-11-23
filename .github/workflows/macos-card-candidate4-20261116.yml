@@ -295,13 +295,45 @@ jobs:
           task_swift="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
           task_options=(--disable-sandbox --manifest-cache none --cache-path "$AITM_RELEASE_ROOT/swift-cache"
                         --config-path "$AITM_RELEASE_ROOT/swift-config" --security-path "$AITM_RELEASE_ROOT/swift-security")
-          "$task_swift" build -c release --triple arm64-apple-macosx13.0 "${task_options[@]}"
-          "$task_swift" build -c release --triple x86_64-apple-macosx13.0 "${task_options[@]}"
-          task_arm="$("$task_swift" build -c release --triple arm64-apple-macosx13.0 --show-bin-path "${task_options[@]}")"
-          task_x64="$("$task_swift" build -c release --triple x86_64-apple-macosx13.0 --show-bin-path "${task_options[@]}")"
-          test -f "$task_arm/AITaskMonitor" && test -f "$task_x64/AITaskMonitor"
           mkdir -p .build/apple/Products/Release
-          /usr/bin/xcrun lipo -create "$task_arm/AITaskMonitor" "$task_x64/AITaskMonitor" -output .build/apple/Products/Release/AITaskMonitor
+          run_swiftpm() {
+            "$task_swift" build -c release --triple "$1" "${task_options[@]}" 2>&1 | tee "$AITM_RELEASE_ROOT/swiftpm-$1.log"
+          }
+          if run_swiftpm arm64-apple-macosx13.0 && run_swiftpm x86_64-apple-macosx13.0; then
+            task_arm="$("$task_swift" build -c release --triple arm64-apple-macosx13.0 --show-bin-path "${task_options[@]}")"
+            task_x64="$("$task_swift" build -c release --triple x86_64-apple-macosx13.0 --show-bin-path "${task_options[@]}")"
+            test -f "$task_arm/AITaskMonitor" && test -f "$task_x64/AITaskMonitor"
+            task_arm_binary="$task_arm/AITaskMonitor"
+            task_x64_binary="$task_x64/AITaskMonitor"
+            printf '%s\n' 'SwiftPM release build, separately for arm64 and x86_64.' > "$AITM_RELEASE_ROOT/release-artifacts/build-method.txt"
+          else
+            if ! grep -Eq 'permission to save the file .*output-file-map[.]json' "$AITM_RELEASE_ROOT"/swiftpm-*.log; then
+              echo 'SwiftPM failed for a different reason; refusing the fallback.' >&2
+              exit 1
+            fi
+            echo 'SwiftPM build failed under the restricted environment; trying direct swiftc release builds.' >&2
+            shopt -s nullglob
+            task_sources=(Sources/AITaskMonitor/*.swift)
+            test "${#task_sources[@]}" -gt 0
+            task_all_count="$(/usr/bin/find Sources/AITaskMonitor -type f -name '*.swift' -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+            test "${#task_sources[@]}" = "$task_all_count"
+            test -z "$(/usr/bin/find Sources/AITaskMonitor -type l -print)"
+            task_swiftc="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+            mkdir -p "$AITM_RELEASE_ROOT/swiftc-arm64" "$AITM_RELEASE_ROOT/swiftc-x86_64"
+            task_arm_binary="$AITM_RELEASE_ROOT/swiftc-arm64/AITaskMonitor"
+            task_x64_binary="$AITM_RELEASE_ROOT/swiftc-x86_64/AITaskMonitor"
+            task_flags=(-O -whole-module-optimization -swift-version 5 -D SWIFT_PACKAGE -module-name AITaskMonitor -sdk "$SDKROOT")
+            "$task_swiftc" "${task_flags[@]}" -target arm64-apple-macosx13.0 "${task_sources[@]}" -o "$task_arm_binary"
+            "$task_swiftc" "${task_flags[@]}" -target x86_64-apple-macosx13.0 "${task_sources[@]}" -o "$task_x64_binary"
+            {
+              printf '%s\n' 'Direct swiftc release builds; differs from the standard SwiftPM build.'
+              printf '%s\n' 'Targets: arm64-apple-macosx13.0 and x86_64-apple-macosx13.0.'
+              printf '%s\n' 'Flags: -O -whole-module-optimization -swift-version 5 -D SWIFT_PACKAGE -module-name AITaskMonitor.'
+              printf 'Swift sources: %s\n' "${#task_sources[@]}"
+              "$task_swiftc" --version
+            } > "$AITM_RELEASE_ROOT/release-artifacts/build-method.txt"
+          fi
+          /usr/bin/xcrun lipo -create "$task_arm_binary" "$task_x64_binary" -output .build/apple/Products/Release/AITaskMonitor
           /usr/bin/xcrun lipo -verify_arch arm64 x86_64 .build/apple/Products/Release/AITaskMonitor
           SCRIPT
           chmod 700 "$task_bin/swift"
@@ -353,6 +385,8 @@ jobs:
           else
             echo 'Foundation atomic-write probe did not compile in the restricted environment.'
           fi
+          echo 'Sandbox messages for the synthetic atomic-write probe, when available:'
+          /usr/bin/log show --last 2m --style compact --predicate 'eventMessage CONTAINS "atomic-probe-bin" AND eventMessage CONTAINS "deny"' 2>/dev/null | /usr/bin/tail -n 8 || true
           cd "$task_source"
           AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
             "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" "CFFIXED_USER_HOME=$task_root/synthetic-home" /bin/bash ./scripts/build-app.sh
