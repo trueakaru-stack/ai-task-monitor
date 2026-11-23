@@ -173,9 +173,9 @@ jobs:
           test ! -e "$task_stage"
           (cd "$task_control" && /usr/bin/shasum -a 256 -c controls.sha256)
           echo 'Unlinked the one-link synthetic backing image and removed all staged control originals.'
+          { printf 'AITM_TEST_TASK_ROOT=%s\n' "$task_root"; printf 'AITM_TEST_CONTROL_ROOT=%s\n' "$task_control"; printf 'AITM_TEST_DENIED_FILE=%s\n' "$task_marker"; printf 'AITM_TEST_PROFILE=%s\n' "$task_profile_dir"; printf 'AITM_TEST_NODE_ROOT=%s\n' "$task_node_root"; printf 'AITM_TEST_PYTHON_ROOT=%s\n' "$task_python_root"; printf 'AITM_TASK_PATH=%s\n' "$task_path"; printf 'AITM_TEST_NODE_BIN=%s\n' "$task_node"; printf 'AITM_TEST_PYTHON_BIN=%s\n' "$task_python"; } >> "$GITHUB_ENV"
           task_control_attached=''
           trap - EXIT
-          { printf 'AITM_TEST_TASK_ROOT=%s\n' "$task_root"; printf 'AITM_TEST_CONTROL_ROOT=%s\n' "$task_control"; printf 'AITM_TEST_DENIED_FILE=%s\n' "$task_marker"; printf 'AITM_TEST_PROFILE=%s\n' "$task_profile_dir"; printf 'AITM_TEST_NODE_ROOT=%s\n' "$task_node_root"; printf 'AITM_TEST_PYTHON_ROOT=%s\n' "$task_python_root"; printf 'AITM_TASK_PATH=%s\n' "$task_path"; printf 'AITM_TEST_NODE_BIN=%s\n' "$task_node"; printf 'AITM_TEST_PYTHON_BIN=%s\n' "$task_python"; } >> "$GITHUB_ENV"
       - name: Verify sandbox blocks runner profile
         shell: bash
         run: |
@@ -205,7 +205,7 @@ jobs:
           if /bin/ln "$task_probe" "$task_root/temp/control-probe-hardlink" >"$task_root/temp/control-hardlink-host.log" 2>&1; then
             echo 'Host unexpectedly hard-linked the read-only control inode across devices.' >&2; exit 1
           fi
-          grep -Eiq 'cross-device link|different file systems' "$task_root/temp/control-hardlink-host.log"
+          grep -Eiq 'cross-device link|different file systems|read-only file system' "$task_root/temp/control-hardlink-host.log"
           test ! -e "$task_root/temp/control-probe-hardlink"
           "$task_run" /usr/bin/touch "$task_root/temp/control-positive"
           for task_policy in "$task_control/profile.sb" "$task_control/profile-offline.sb"; do
