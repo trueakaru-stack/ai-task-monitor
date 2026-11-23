@@ -7,6 +7,7 @@
 AI Task Monitor — бесплатное приложение для Windows 11 и macOS, которое помогает следить за локальными задачами Codex и Claude Code в одном окне.
 
 - Показывает доступные задачи и сведения о действиях; неподтверждённый статус отмечает отдельно.
+- Объединяет помощников Codex в карточке родительской задачи, когда связь подтверждена. Список помощников и их доступных действий можно раскрыть; неподтверждённое состояние помечается. Такой помощник может оставаться в счётчике после завершения до обновления состояния или перезапуска монитора.
 - Если агент опубликовал план, отображает его этапы и долю выполненных этапов. Одновременно в карточке видно до пяти этапов; остальные можно прокрутить.
 - Без плана показывает доступную активность; процент не выводится, если данных для оценки недостаточно. Приблизительная оценка помечается знаком `≈`.
 - Компактное окно можно держать поверх других окон и переключать задачи; настройки доступны в развёрнутом режиме. В macOS окно становится активным при наведении.
@@ -33,6 +34,7 @@ AI Task Monitor — бесплатное приложение для Windows 11 
 AI Task Monitor is a free Windows 11 and macOS app for following local Codex and Claude Code tasks in one window.
 
 - Shows available tasks and activity, marking unconfirmed status separately.
+- Groups Codex assistants under their parent task when the relationship is confirmed. Their list and available activity can be expanded, with unconfirmed status marked. An unconfirmed assistant may remain in the count after finishing until its state is refreshed or the monitor restarts.
 - When an agent publishes a plan, shows its steps and the share of completed steps. Up to five steps are visible per card; the rest can be scrolled.
 - Without a plan, shows available activity and omits the percentage when there is not enough information to estimate it. Estimated values use `≈`.
 - A compact window can stay above other windows and switch between tasks; settings are available in the expanded view. On macOS, hovering over the window activates it.
@@ -56,12 +58,17 @@ The [project license](LICENSE) allows free use, including internal business use,
 
 ## Скриншоты / Screenshots
 
-### Windows 0.2.12
+### Windows 0.2.13
 
 | Развёрнуто / Expanded | Компактно / Compact | Настройки / Settings |
 | --- | --- | --- |
 | ![Windows expanded, dark](screenshots/expanded-dark.png) | ![Windows compact, dark](screenshots/compact-dark.png) | ![Windows settings, dark](screenshots/settings-dark.png) |
 | ![Windows expanded, light](screenshots/expanded-light.png) | ![Windows compact, light](screenshots/compact-light.png) | ![Windows settings, light](screenshots/settings-light.png) |
+
+| Помощники / Assistants | Помощники компактно / Compact assistants | Claude Code компактно / Compact Claude Code |
+| --- | --- | --- |
+| ![Windows assistants, dark](screenshots/windows-agents-dark.png) | ![Windows compact assistants, dark](screenshots/windows-compact-agents-dark.png) | ![Windows compact Claude Code, dark](screenshots/windows-compact-claude-dark.png) |
+| ![Windows assistants, light](screenshots/windows-agents-light.png) | ![Windows compact assistants, light](screenshots/windows-compact-agents-light.png) | ![Windows compact Claude Code, light](screenshots/windows-compact-claude-light.png) |
 
 ### macOS 0.3.11
 

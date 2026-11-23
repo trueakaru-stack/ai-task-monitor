@@ -1,0 +1,185 @@
+name: Publish verified installer
+
+on:
+  push:
+    branches: [main]
+    paths: [release-publication.json]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    if: contains(github.event.head_commit.message, '[publish-verified]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check source, screenshots and tested artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'trueakaru-stack/ai-task-monitor'
+          config=release-publication.json
+          tag="$(jq -er '.tag' "$config")"
+          branch="$(jq -er '.platform_branch' "$config")"
+          production="$(jq -er '.production_commit' "$config")"
+          candidate="$(jq -er '.candidate_commit' "$config")"
+          run_id="$(jq -er '.workflow_run_id | tostring' "$config")"
+          artifact="$(jq -er '.artifact' "$config")"
+          asset="$(jq -er '.asset' "$config")"
+          checksum="$(jq -er '.checksum' "$config")"
+          title="$(jq -er '.title' "$config")"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$production" =~ ^[0-9a-f]{40}$ && "$candidate" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$run_id" =~ ^[0-9]+$ && "$artifact" =~ ^[A-Za-z0-9._-]+$ ]]
+          case "$branch:$asset:$checksum" in
+            windows:AITaskMonitorSetup.exe:SHA256SUMS-windows.txt) ;;
+            macos:AITaskMonitor-macOS-*.dmg:SHA256SUMS-macOS.txt) ;;
+            *) echo 'Unexpected platform or asset names.' >&2; exit 1 ;;
+          esac
+          [[ "$asset" =~ ^[A-Za-z0-9._-]+$ && "$checksum" =~ ^[A-Za-z0-9._-]+$ ]]
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id")"
+          test "$(jq -r '.head_sha' <<< "$run")" = "$candidate"
+          test "$(jq -r '.status' <<< "$run")" = completed
+          test "$(jq -r '.conclusion' <<< "$run")" = success
+          jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100")"
+          check_step() {
+            jq -e --arg job "$1" --arg step "$2" \
+              '[.jobs[] | select(.name == $job and .status == "completed" and .conclusion == "success") | .steps[]? | select(.name == $step and .conclusion == "success")] | length == 1' \
+              <<< "$jobs" >/dev/null
+          }
+          if [[ "$branch" == windows ]]; then
+            test "$(jq -r '.path' <<< "$run")" = '.github/workflows/windows-codex-passive-20261116.yml'
+            test "$artifact" = "verified-windows-setup-$candidate"
+            check_step 'isolated-codex (checks)' 'Preserve candidate installer'
+            check_step 'isolated-codex (screenshots-active)' 'Preserve synthetic screenshots'
+            check_step 'isolated-codex (screenshots-related)' 'Preserve synthetic screenshots'
+            check_step 'isolated-codex (screenshots-showcase)' 'Preserve synthetic screenshots'
+            check_step 'isolated-codex (screenshots-empty)' 'Preserve synthetic screenshots'
+            uninstall_id="$(jq -er '.uninstall_workflow_run_id | tostring' "$config")"
+            [[ "$uninstall_id" =~ ^[0-9]+$ ]]
+            uninstall="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$uninstall_id")"
+            test "$(jq -r '.path' <<< "$uninstall")" = '.github/workflows/legacy-uninstall-check-20261116.yml'
+            test "$(jq -r '.head_sha' <<< "$uninstall")" = "$candidate"
+            test "$(jq -r '.status' <<< "$uninstall")" = completed
+            test "$(jq -r '.conclusion' <<< "$uninstall")" = success
+            original_jobs="$jobs"
+            jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$uninstall_id/jobs?per_page=100")"
+            check_step 'test' 'Run legacy uninstaller only against isolated fixtures'
+            check_step 'test' 'Save the exact verified setup'
+            jobs="$original_jobs"
+            package_run_id="$uninstall_id"
+            revision_name=SOURCE-REVISION.txt
+            screenshot_artifact=windows-codex-passive-screenshots-showcase
+            screenshot_prefix=screenshots/
+          else
+            test "$(jq -r '.path' <<< "$run")" = '.github/workflows/macos-card-candidate4-20261116.yml'
+            check_step 'isolated (macos-15, /Applications/Xcode_16.1.app/Contents/Developer)' 'Save synthetic grouping preview'
+            check_step 'isolated (macos-15, /Applications/Xcode_16.1.app/Contents/Developer)' 'Save isolated macOS candidate'
+            check_step 'isolated (macos-26, /Applications/Xcode.app/Contents/Developer)' 'Save synthetic grouping preview'
+            package_run_id="$run_id"
+            revision_name=source-commit.txt
+            screenshot_artifact=codex-grouping-synthetic-preview-macos-15
+            screenshot_prefix=screenshots/macos-
+          fi
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq '.object.sha')" = "$production"
+          candidate_tree="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$candidate" --jq '.tree.sha')"
+          production_tree="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$production" --jq '.tree.sha')"
+          test "$candidate_tree" = "$production_tree"
+          version="${tag#v}"
+          if [[ "$branch" == windows ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/contents/windows/app/VersionInfo.cs?ref=$production" --jq '.content' | base64 -d > "$RUNNER_TEMP/version-source"
+            grep -Fq "AssemblyInformationalVersion(\"$version\")" "$RUNNER_TEMP/version-source"
+          else
+            test "$asset" = "AITaskMonitor-macOS-$version.dmg"
+            test "$artifact" = "macos-$version-candidate-$candidate"
+            gh api "repos/$GITHUB_REPOSITORY/contents/macos/Info.plist?ref=$production" --jq '.content' | base64 -d > "$RUNNER_TEMP/version-source"
+            grep -Fq "<key>AITaskMonitorReleaseVersion</key><string>$version</string>" "$RUNNER_TEMP/version-source"
+          fi
+          jq -e '.screenshots | type == "object" and length >= 4 and all(to_entries[]; (.value | type) == "object" and (.value.artifact_file | type) == "string" and (.value.sha256 | type) == "string")' "$config" >/dev/null
+          for required in expanded-dark expanded-light compact-dark compact-light; do
+            if [[ "$branch" == windows ]]; then
+              case "$required" in
+                expanded-dark) original=showcase-dark-ru-expanded-closed.png ;;
+                expanded-light) original=showcase-light-ru-expanded-closed.png ;;
+                compact-dark) original=showcase-dark-ru-compact-closed.png ;;
+                compact-light) original=showcase-light-ru-compact-closed.png ;;
+              esac
+            else
+              case "$required" in
+                expanded-dark) original=grouped-ru-dark-expanded-closed-demo-codex.png ;;
+                expanded-light) original=grouped-ru-light-expanded-closed-demo-codex.png ;;
+                compact-dark) original=grouped-ru-dark-compact-closed-demo-codex.png ;;
+                compact-light) original=grouped-ru-light-compact-closed-demo-codex.png ;;
+              esac
+            fi
+            jq -e --arg file "$screenshot_prefix$required.png" --arg original "$original" '.screenshots[$file].artifact_file == $original' "$config" >/dev/null
+          done
+          screenshot_output="$RUNNER_TEMP/verified-screenshots"
+          mkdir "$screenshot_output"
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "$screenshot_artifact" --dir "$screenshot_output"
+          jq -er '.screenshots | to_entries[] | [.key,.value.artifact_file,.value.sha256] | @tsv' "$config" > "$RUNNER_TEMP/screenshot-list.tsv"
+          test -s "$RUNNER_TEMP/screenshot-list.tsv"
+          while IFS=$'\t' read -r screenshot original digest; do
+            [[ "$screenshot" =~ ^screenshots/[A-Za-z0-9._-]+\.png$ && "$original" =~ ^[A-Za-z0-9._-]+\.png$ && "$digest" =~ ^[0-9a-f]{64}$ ]]
+            test -f "$screenshot" && test ! -L "$screenshot"
+            printf '%s  %s\n' "$digest" "$screenshot" | sha256sum -c -
+            grep -Fq "($screenshot)" README.md
+            mapfile -d '' originals < <(find "$screenshot_output" -type f -name "$original" -print0)
+            test "${#originals[@]}" = 1
+            cmp "$screenshot" "${originals[0]}"
+          done < "$RUNNER_TEMP/screenshot-list.tsv"
+          output="$RUNNER_TEMP/verified-installer"
+          mkdir "$output"
+          gh run download "$package_run_id" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir "$output"
+          mapfile -d '' assets < <(find "$output" -type f -name "$asset" -print0)
+          mapfile -d '' sums < <(find "$output" -type f -name "$checksum" -print0)
+          mapfile -d '' sources < <(find "$output" -type f -name "$revision_name" -print0)
+          test "${#assets[@]}" = 1 && test "${#sums[@]}" = 1 && test "${#sources[@]}" = 1
+          test "$(tr -d '\r\n' < "${sources[0]}")" = "$candidate"
+          test "$(dirname "${assets[0]}")" = "$(dirname "${sums[0]}")"
+          test "$(dirname "${assets[0]}")" = "$(dirname "${sources[0]}")"
+          uploads=("${assets[0]}" "${sums[0]}")
+          binaries=("${assets[0]}")
+          if [[ "$branch" == macos ]]; then
+            mapfile -d '' bundles < <(find "$output" -type f -name 'AI Task Monitor.app.zip' -print0)
+            test "${#bundles[@]}" = 1
+            test "$(dirname "${bundles[0]}")" = "$(dirname "${assets[0]}")"
+            uploads+=("${bundles[0]}")
+            binaries+=("${bundles[0]}")
+          fi
+          mapfile -t checksum_lines < "${sums[0]}"
+          test "${#checksum_lines[@]}" = "${#binaries[@]}"
+          for binary in "${binaries[@]}"; do
+            name="$(basename "$binary")"
+            matched=0
+            for line in "${checksum_lines[@]}"; do
+              line="${line%$'\r'}"
+              if [[ "${line:64:2}" == '  ' && "${line:66}" == "$name" ]]; then
+                digest="${line:0:64}"
+                [[ "$digest" =~ ^[0-9a-f]{64}$ ]]
+                test "$(sha256sum -- "$binary" | cut -d ' ' -f 1)" = "$digest"
+                matched=$((matched+1))
+              fi
+            done
+            test "$matched" = 1
+          done
+          jq -er '.notes' "$config" > "$RUNNER_TEMP/release-notes.md"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'Release already exists; refusing to replace it.' >&2
+            exit 1
+          fi
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" > "$RUNNER_TEMP/existing-tag.json" 2> "$RUNNER_TEMP/tag-error"; then
+            test "$(jq -r '.object.type' "$RUNNER_TEMP/existing-tag.json")" = commit
+            test "$(jq -r '.object.sha' "$RUNNER_TEMP/existing-tag.json")" = "$production"
+          else
+            grep -Fq '(HTTP 404)' "$RUNNER_TEMP/tag-error" || { cat "$RUNNER_TEMP/tag-error" >&2; exit 1; }
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$tag" -f "sha=$production" >/dev/null
+          fi
+          gh release create "$tag" "${uploads[@]}" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "$title" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" --latest=false

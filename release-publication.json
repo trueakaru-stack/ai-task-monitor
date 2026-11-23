@@ -1,0 +1,55 @@
+{
+  "tag": "v0.2.13",
+  "platform_branch": "windows",
+  "production_commit": "d777845ae7e66fa28ed18f565d1cbb5e5ab7060f",
+  "candidate_commit": "a26d9569f253b3664a4dc87df631f26c8b437c12",
+  "workflow_run_id": 45235204488,
+  "uninstall_workflow_run_id": 45235204861,
+  "artifact": "verified-windows-setup-a26d9569f253b3664a4dc87df631f26c8b437c12",
+  "asset": "AITaskMonitorSetup.exe",
+  "checksum": "SHA256SUMS-windows.txt",
+  "title": "AI Task Monitor 0.2.13 for Windows",
+  "notes": "## Что изменилось\n\n- Улучшено обнаружение локальных задач Codex с несколькими журналами и длинной историей.\n- Связанные помощники отображаются в карточке родительской задачи; их список и доступные действия можно раскрыть.\n- Неподтверждённое состояние отмечается отдельно. Завершившийся помощник может оставаться в счётчике до обновления состояния или перезапуска монитора.\n\n## Установка\n\nСкачайте установщик и проверьте SHA-256. Установщик не подписан доверенным сертификатом, поэтому Windows SmartScreen может показать предупреждение.\n\n## English\n\nImproved local Codex task discovery and grouped related assistants under their parent task. Unconfirmed status is marked; an assistant may remain in the count after finishing until its state refreshes or the monitor restarts.\n\nVerify the SHA-256 checksum before installing. The installer is not signed with a trusted certificate, so Windows SmartScreen may display a warning.",
+  "screenshots": {
+    "screenshots/expanded-dark.png": {
+      "artifact_file": "showcase-dark-ru-expanded-closed.png",
+      "sha256": "aa6e068b11bdce666f869214e6c94cc9c46630be1ffd550d0253d451f1e1486b"
+    },
+    "screenshots/expanded-light.png": {
+      "artifact_file": "showcase-light-ru-expanded-closed.png",
+      "sha256": "9a89e5d0a4358730029bd33b9d3e0b18bebc47dec46fbed1d2030dc52acab659"
+    },
+    "screenshots/compact-dark.png": {
+      "artifact_file": "showcase-dark-ru-compact-closed.png",
+      "sha256": "df18904c43f4370ebe9c5b2162b53ff0f8ad5bd24083813c0975429774e0d304"
+    },
+    "screenshots/compact-light.png": {
+      "artifact_file": "showcase-light-ru-compact-closed.png",
+      "sha256": "7d0f9a28dc0bb67be31d00e03736c5b6509e354192c06cc41752ea8807340e59"
+    },
+    "screenshots/windows-agents-dark.png": {
+      "artifact_file": "showcase-dark-ru-expanded-open.png",
+      "sha256": "48e4c6720e15446f10cbc95bc42aeb449d45d9652486fb0e8349641715be669e"
+    },
+    "screenshots/windows-agents-light.png": {
+      "artifact_file": "showcase-light-ru-expanded-open.png",
+      "sha256": "76f7e971f50879026ea87609b907b95731b00642ab95bf5a7ed70a01c16cd01d"
+    },
+    "screenshots/windows-compact-agents-dark.png": {
+      "artifact_file": "showcase-dark-ru-compact-open.png",
+      "sha256": "d49fbec77e5ac42c59e143dca6e8ca07c27cf4365a49d6ba1da8bec0637a8e7f"
+    },
+    "screenshots/windows-compact-agents-light.png": {
+      "artifact_file": "showcase-light-ru-compact-open.png",
+      "sha256": "cdb5f94acee446707207acac2daea2bcc3e8250eab0daba7e78fdc13044da1c8"
+    },
+    "screenshots/windows-compact-claude-dark.png": {
+      "artifact_file": "showcase-dark-ru-compact-claude.png",
+      "sha256": "e5b4299e8c25bf5e391230bc7e6135d78d07f25f51fddaeedfd2ef8d17670525"
+    },
+    "screenshots/windows-compact-claude-light.png": {
+      "artifact_file": "showcase-light-ru-compact-claude.png",
+      "sha256": "0382fc434483820f4d67913bcb28e88b0192e9cfe04e9c8469b02c5f2a1c7cd1"
+    }
+  }
+}
