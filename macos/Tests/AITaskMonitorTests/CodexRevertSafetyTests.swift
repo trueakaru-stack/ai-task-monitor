@@ -77,6 +77,9 @@ final class CodexRevertSafetyTests: XCTestCase {
     }
 
     func testOldTerminalAndNewRevisionRetainUnconfirmedAndDoNotAffectNeighbor() throws {
+        let previousLanguage = AppLanguage.previewOverride
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = previousLanguage }
         try withRoot { root in
             try writeIndex([thread, other], root: root)
             let old = root.appendingPathComponent("sessions/" + name(thread))
@@ -86,13 +89,15 @@ final class CodexRevertSafetyTests: XCTestCase {
             try appendPlan(at: old)
             try writeEvent("task_started", at: neighbor)
             let reader = CodexTaskReader(codexHome: root)
-            let before = try reader.readSnapshot()
+            defer { reader.waitForAmbiguousObservationForTests() }
+            let since = Date().addingTimeInterval(-60)
+            let before = try reader.readSnapshot(observedSince: since)
             XCTAssertEqual(Set(before.tasks.map(\.id)), Set([thread, other]))
             XCTAssertEqual(before.tasks.first { $0.id == thread }?.steps.map(\.title), ["Synthetic step"])
 
             try writeEvent("task_complete", at: old)
             try writeEvent("task_started", at: newest)
-            let during = try reader.readSnapshot(previouslyObserved: [thread, other])
+            let during = try reader.readSnapshot(observedSince: since, previouslyObserved: [thread, other])
             XCTAssertTrue(during.isPartial)
             XCTAssertFalse(during.terminalIDs.contains(thread))
             XCTAssertFalse(during.tasks.contains { $0.id == thread && $0.isActive && !$0.isUnconfirmed })
@@ -110,9 +115,14 @@ final class CodexRevertSafetyTests: XCTestCase {
             // This is only a deterministic recovery fixture, not a claim that
             // Codex normally deletes its older immutable rollout.
             try FileManager.default.removeItem(at: old)
-            let after = try reader.readSnapshot(previouslyObserved: [thread, other])
-            XCTAssertFalse(after.isPartial)
-            XCTAssertTrue(after.tasks.contains { $0.id == thread && $0.isActive && !$0.isUnconfirmed })
+            let after = try reader.readSnapshot(observedSince: since, previouslyObserved: [thread, other])
+            // The remaining path may not be the one that produced the earlier
+            // card. Keep it uncertain rather than promoting or closing it.
+            XCTAssertTrue(after.isPartial)
+            XCTAssertFalse(after.tasks.contains { $0.id == thread })
+            XCTAssertFalse(after.terminalIDs.contains(thread))
+            let stillRetained = TaskSnapshotMerger.merge(previous: merged, current: after.tasks, terminalIDs: after.terminalIDs)
+            XCTAssertTrue(try XCTUnwrap(stillRetained.first { $0.id == thread }).isUnconfirmed)
             XCTAssertTrue(after.tasks.contains { $0.id == other && $0.isActive && !$0.isUnconfirmed })
         }
     }

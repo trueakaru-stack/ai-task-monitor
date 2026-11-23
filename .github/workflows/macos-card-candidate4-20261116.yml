@@ -69,16 +69,20 @@ jobs:
           (allow file-write* (subpath (param "TASK_ROOT")))
           (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
           PROFILE
+          cat "$task_root/profile.sb" > "$task_root/profile-offline.sb"
+          printf '\n(deny network*)\n' >> "$task_root/profile-offline.sb"
           cat > "$task_root/run-isolated" <<'SCRIPT'
           #!/bin/bash
           set -euo pipefail
+          task_policy="${AITM_TEST_SANDBOX_POLICY:-$AITM_TEST_TASK_ROOT/profile.sb}"
+          case "$task_policy" in "$AITM_TEST_TASK_ROOT/profile.sb"|"$AITM_TEST_TASK_ROOT/profile-offline.sb") ;; *) exit 1;; esac
           exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 \
             CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 AITM_SYNTHETIC_REQUIRED=1 \
             "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "AITM_MACOS_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "AITM_SYNTHETIC_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "NPM_CONFIG_CACHE=$AITM_TEST_TASK_ROOT/npm-cache" \
             "NPM_CONFIG_USERCONFIG=$AITM_TEST_TASK_ROOT/npmrc" NPM_CONFIG_GLOBALCONFIG=/dev/null NPM_CONFIG_UPDATE_NOTIFIER=false \
             /usr/bin/sandbox-exec -D "TASK_PROFILE=$AITM_TEST_PROFILE" -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" \
               -D "TASK_NODE_ROOT=$AITM_TEST_NODE_ROOT" -D "TASK_PYTHON_ROOT=$AITM_TEST_PYTHON_ROOT" \
-              -f "$AITM_TEST_TASK_ROOT/profile.sb" "$@"
+              -f "$task_policy" "$@"
           SCRIPT
           chmod 700 "$task_root/run-isolated"
           { printf 'AITM_TEST_TASK_ROOT=%s\n' "$task_root"; printf 'AITM_TEST_DENIED_FILE=%s\n' "$task_marker"; printf 'AITM_TEST_PROFILE=%s\n' "$task_profile_dir"; printf 'AITM_TEST_NODE_ROOT=%s\n' "$task_node_root"; printf 'AITM_TEST_PYTHON_ROOT=%s\n' "$task_python_root"; printf 'AITM_TASK_PATH=%s\n' "$task_path"; printf 'AITM_TEST_NODE_BIN=%s\n' "$task_node"; printf 'AITM_TEST_PYTHON_BIN=%s\n' "$task_python"; } >> "$GITHUB_ENV"
@@ -114,6 +118,20 @@ jobs:
             "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
           done
           "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ParserTests/testActivityReadsCurrentSummaryWithoutExposingRawReasoning "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
+      - name: Verify Codex rollout selection offline
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          task_policy="$AITM_TEST_TASK_ROOT/profile-offline.sb"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import errno,socket; exec("try:\n s=socket.socket()\n s.connect((\"127.0.0.1\",9))\nexcept OSError as e:\n assert e.errno in (errno.EACCES,errno.EPERM), e\nelse:\n raise AssertionError(\"network was not denied\")")'
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexRolloutSelectionTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/rollout-tests.log"
+          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/rollout-tests.log"; then echo 'Rollout tests were skipped.' >&2; exit 1; fi
+          grep -Eq 'Executed 27 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/rollout-tests.log"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexRevertSafetyTests/testOldTerminalAndNewRevisionRetainUnconfirmedAndDoNotAffectNeighbor "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"
+          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"; then echo 'Existing rollout test was skipped.' >&2; exit 1; fi
+          grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"
       - name: Check guard skips without hosted test fixture
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash

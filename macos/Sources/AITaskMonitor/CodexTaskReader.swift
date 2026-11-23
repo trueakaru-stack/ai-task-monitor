@@ -16,6 +16,7 @@ struct CodexTaskReader {
     private let indexCache = CodexSessionIndexCache()
     private let execDiscovery = CodexExecDiscoveryCache()
     private let planCache = CodexPlanHistoryCache()
+    private let ambiguousRollouts = CodexAmbiguousRolloutWorker()
 
     init(codexHome: URL? = nil) {
         if let codexHome {
@@ -29,6 +30,12 @@ struct CodexTaskReader {
 
     func readTasks(now: Date = Date(), observedSince: Date? = nil) -> [MonitoredTask] {
         (try? readSnapshot(now: now, observedSince: observedSince).tasks) ?? []
+    }
+
+    // Synthetic tests use this to observe the actual asynchronous worker
+    // deterministically. The application never waits for it.
+    func waitForAmbiguousObservationForTests() {
+        ambiguousRollouts.waitUntilIdleForTests()
     }
 
     func readSnapshot(now: Date = Date(), observedSince: Date? = nil, previouslyObserved: Set<String> = []) throws -> CodexTaskSnapshot {
@@ -55,28 +62,62 @@ struct CodexTaskReader {
         }
         let discovered = try sessionFiles(for: indexedIDs, now: now, observedSince: observedSince,
                                           previouslyObserved: previouslyObserved)
-        let extraFiles: (files: [String: URL], isPartial: Bool, didHitLimit: Bool)
+        let extraFiles: (files: [String: URL], ambiguousCandidates: [String: [URL]], ambiguousIDs: Set<String>, isPartial: Bool, didHitLimit: Bool)
         do {
             extraFiles = try sessionFiles(for: extra.ids, now: now, observedSince: observedSince,
                                           previouslyObserved: previouslyObserved, maximumVisited: 256)
         } catch {
             guard !indexedIDs.isEmpty else { throw error }
-            extraFiles = ([:], true, false)
+            extraFiles = ([:], [:], [], true, false)
         }
         let files = discovered.files
         var result = CodexTaskSnapshot()
         result.isPartial = indexFailure != nil || discovered.isPartial || extra.isPartial || extraFiles.isPartial
+        let uncertain = ambiguousRollouts.poll(
+            candidates: discovered.ambiguousCandidates, ambiguousIDs: discovered.ambiguousIDs,
+            uniqueFiles: files, previouslyObserved: previouslyObserved,
+            sessionsDirectory: codexHome.appendingPathComponent("sessions", isDirectory: true),
+            observedSince: observedSince
+        )
         var recognizedUnindexedSource = false
         for session in sessions.values {
             let id = session.string("id")
             let title = session.string("thread_name")
             guard !id.isEmpty, title != "Guardian review", let file = files[id] else { continue }
+            let fresh = uncertain.freshStarts[id]
+            let recovered = fresh == nil ? uncertain.recovered[id] : nil
+            if uncertain.protects(id) && fresh == nil {
+                result.isPartial = true
+                continue
+            }
             let attributes = try fileManager.attributesOfItem(atPath: file.path)
             guard let modified = attributes[.modificationDate] as? Date else { throw CocoaError(.fileReadUnknown) }
+            if let recovered {
+                guard recovered.path == file.standardizedFileURL.path,
+                      (attributes[.systemNumber] as? NSNumber)?.uint64Value == recovered.device,
+                      (attributes[.systemFileNumber] as? NSNumber)?.uint64Value == recovered.inode else {
+                    result.isPartial = true
+                    continue
+                }
+            }
+            if let fresh {
+                guard fresh.path == file.standardizedFileURL.path,
+                      (attributes[.systemNumber] as? NSNumber)?.uint64Value == fresh.device,
+                      (attributes[.systemFileNumber] as? NSNumber)?.uint64Value == fresh.inode,
+                      (attributes[.size] as? NSNumber)?.uint64Value == fresh.size,
+                      modified == fresh.modified else {
+                    result.isPartial = true
+                    continue
+                }
+            }
             if let observedSince, modified < observedSince && !previouslyObserved.contains(id) { continue }
             let tailLimit = 4_194_304
             let tail = try FileHelpers.tail(of: file, maximumBytes: tailLimit)
             let cached = try? lifecycleCache.previous(for: file, attributes: attributes, maximumAppend: UInt64(tailLimit))
+            if recovered != nil && cached == nil {
+                result.isPartial = true
+                continue
+            }
             var historyKnown = cached?.scannedPrior == true || cached?.state.sawStart == true || cached?.state.running == true
             var state = CodexLifecycleState.parse(tail, seed: cached?.state)
             let currentSince = previouslyObserved.contains(id) ? nil : observedSince
@@ -90,7 +131,19 @@ struct CodexTaskReader {
             }
             if state.sawStart { historyKnown = true }
             try? lifecycleCache.store(for: file, attributes: attributes, state: state, scannedPrior: historyKnown)
+            if let fresh, (state.terminal || !state.running || state.turnID != fresh.turnID) {
+                result.isPartial = true
+                continue
+            }
             if state.terminal {
+                var interrupted = state.interrupted
+                if let recovered {
+                    guard let verified = Self.recoveredTerminal(in: tail, id: id, turn: recovered.turnID) else {
+                        result.isPartial = true
+                        continue
+                    }
+                    interrupted = verified
+                }
                 var recognized = false
                 if let observedSince {
                     if let ended = state.terminalDate, ended >= observedSince { recognized = true }
@@ -99,7 +152,7 @@ struct CodexTaskReader {
                 }
                 if recognized {
                     result.terminalIDs.insert(id)
-                    if state.interrupted { result.interruptedIDs.insert(id) }
+                    if interrupted { result.interruptedIDs.insert(id) }
                     if previouslyObserved.contains(id), let observedSince {
                         result.toolEvents[id] = CodexToolEventParser.parse(tail: tail, since: observedSince, now: now)
                     }
@@ -107,11 +160,27 @@ struct CodexTaskReader {
                 continue
             }
             guard state.isRunning(observedSince: currentSince) else { continue }
+            if let recovered, state.turnID != recovered.turnID {
+                guard Self.hasRecoveredStart(in: tail, id: id, turn: state.turnID),
+                      let device = (attributes[.systemNumber] as? NSNumber)?.uint64Value,
+                      let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
+                      ambiguousRollouts.updateRecovered(id, previous: recovered, current: CodexRolloutHint(
+                        path: file.standardizedFileURL.path, device: device, inode: inode, size: size,
+                        modified: modified, turnID: state.turnID
+                      )) else {
+                    result.isPartial = true
+                    continue
+                }
+            }
             if let observedSince {
                 result.toolEvents[id] = CodexToolEventParser.parse(tail: tail, since: observedSince, now: now)
             }
 
             let plan = try planCache.read(from: file)
+            if let fresh, !ambiguousRollouts.acceptFresh(id, hint: fresh) {
+                result.isPartial = true
+                continue
+            }
             let steps = plan.steps
             let activity = parseActivity(from: tail, sessionID: id)
             let progress = MonitoredTask.progress(for: steps)
@@ -120,6 +189,14 @@ struct CodexTaskReader {
             if displayTitle.isEmpty, let record = try? readUnindexedSession(file, id: id),
                let derived = subagentTitle(record.subagent, sessions: sessions) {
                 displayTitle = derived
+            }
+            if !state.turnID.isEmpty,
+               let device = (attributes[.systemNumber] as? NSNumber)?.uint64Value,
+               let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value {
+                ambiguousRollouts.noteKnown(id, hint: CodexRolloutHint(
+                    path: file.standardizedFileURL.path, device: device, inode: inode, size: size,
+                    modified: modified, turnID: state.turnID
+                ))
             }
             result.tasks.append(MonitoredTask(
                 id: id,
@@ -135,6 +212,21 @@ struct CodexTaskReader {
                 startedAt: state.startedAt ?? .distantPast,
                 startKey: state.startKey,
                 planConfirmed: plan.confirmed
+            ))
+        }
+        // During a revert, older rollouts can coexist with the new one. New
+        // complete records are evidence of a write, not proof of the selected
+        // history or of a task's current state. Never emit terminal IDs or
+        // progress from this fallback.
+        for (id, hint) in uncertain.hints where !previouslyObserved.contains(id) {
+            guard let session = sessions[id], session.string("thread_name") != "Guardian review" else { continue }
+            let title = session.string("thread_name")
+            result.tasks.append(MonitoredTask(
+                id: id, provider: .codex,
+                title: title.isEmpty ? tr("Задача Codex", "Codex task") : title,
+                activity: tr("Статус не подтверждён", "Status unconfirmed"),
+                isActive: false, progress: nil, progressKind: .none, steps: [],
+                updatedAt: hint.modified, isUnconfirmed: true, planConfirmed: false
             ))
         }
         for id in extra.ids {
@@ -226,6 +318,70 @@ struct CodexTaskReader {
 
     func isRunning(tail: String, observedSince: Date? = nil) -> Bool {
         CodexLifecycleState.parse(tail).isRunning(observedSince: observedSince)
+    }
+
+    /// A recovered card can close only on a terminal for the same visible
+    /// turn. Missing IDs and error completions are not successful finishes.
+    private static func recoveredTerminal(in tail: String, id: String, turn: String) -> Bool? {
+        guard !turn.isEmpty else { return nil }
+        var current = ""
+        var terminal: Bool?
+        var sawTerminal = false
+        var inconsistent = false
+        for line in tail.split(whereSeparator: \.isNewline) {
+            guard let record = FileHelpers.jsonObject(line), let payload = record.object("payload") else {
+                if !current.isEmpty { current = ""; terminal = nil }
+                continue
+            }
+            guard record.string("type") == "event_msg" else { continue }
+            if let thread = payload["thread_id"], (thread as? String) != id {
+                current = ""; terminal = nil
+                continue
+            }
+            let kind = payload.string("type")
+            let eventTurn = payload.string("turn_id")
+            if ["task_started", "turn_started"].contains(kind) {
+                if eventTurn == turn && sawTerminal {
+                    inconsistent = true
+                } else if eventTurn != turn {
+                    sawTerminal = false
+                    inconsistent = false
+                }
+                current = FileHelpers.isoDate(record["timestamp"]) == nil ? "" : eventTurn
+                terminal = nil
+            } else if ["task_complete", "turn_complete", "turn_aborted"].contains(kind),
+                      current == turn, eventTurn == turn,
+                      FileHelpers.isoDate(record["timestamp"]) != nil {
+                let hasError = payload["error"] != nil && !(payload["error"] is NSNull)
+                let outcome: Bool? = hasError ? nil : (kind == "turn_aborted")
+                if sawTerminal && (outcome == nil || terminal != outcome) { inconsistent = true }
+                if outcome == nil { inconsistent = true }
+                sawTerminal = true
+                terminal = outcome
+            }
+        }
+        return inconsistent ? nil : terminal
+    }
+
+    private static func hasRecoveredStart(in tail: String, id: String, turn: String) -> Bool {
+        guard !turn.isEmpty else { return false }
+        var current = ""
+        for line in tail.split(whereSeparator: \.isNewline) {
+            guard let record = FileHelpers.jsonObject(line), let payload = record.object("payload") else {
+                if !current.isEmpty { current = "" }
+                continue
+            }
+            guard record.string("type") == "event_msg" else { continue }
+            if let thread = payload["thread_id"], (thread as? String) != id { current = ""; continue }
+            let kind = payload.string("type")
+            if ["task_started", "turn_started"].contains(kind) {
+                current = FileHelpers.isoDate(record["timestamp"]) == nil ? "" : payload.string("turn_id")
+            } else if ["task_complete", "turn_complete", "turn_aborted"].contains(kind),
+                      payload.string("turn_id").isEmpty || payload.string("turn_id") == current {
+                current = ""
+            }
+        }
+        return current == turn
     }
 
     func parsePlan(from tail: String) -> [TaskStep] {
@@ -741,8 +897,8 @@ struct CodexTaskReader {
     }
 
     private func sessionFiles(for ids: Set<String>, now: Date, observedSince: Date?,
-                              previouslyObserved: Set<String>, maximumVisited: Int? = nil) throws -> (files: [String: URL], isPartial: Bool, didHitLimit: Bool) {
-        guard !ids.isEmpty else { return ([:], false, false) }
+                              previouslyObserved: Set<String>, maximumVisited: Int? = nil) throws -> (files: [String: URL], ambiguousCandidates: [String: [URL]], ambiguousIDs: Set<String>, isPartial: Bool, didHitLimit: Bool) {
+        guard !ids.isEmpty else { return ([:], [:], [], false, false) }
         let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
         var enumerationError: Error?
         guard let enumerator = fileManager.enumerator(at: sessions, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles], errorHandler: { _, error in
@@ -751,6 +907,7 @@ struct CodexTaskReader {
         }) else { throw CocoaError(.fileReadNoSuchFile) }
         let uuidIDs = ids.filter { $0.utf8.count == 36 && UUID(uuidString: $0) != nil }
         var files: [String: URL] = [:]
+        var ambiguousCandidates: [String: [URL]] = [:]
         var candidates: [String: [URL]] = [:]
         var variants: [String: [String]] = [:]
         for id in uuidIDs { variants[id.lowercased(), default: []].append(id) }
@@ -760,7 +917,7 @@ struct CodexTaskReader {
             visited += 1
             // Do not claim an unindexed task when a bounded scan cannot rule
             // out a second rollout or an ambiguous filename later in the tree.
-            if let maximumVisited, visited > maximumVisited { return ([:], true, true) }
+            if let maximumVisited, visited > maximumVisited { return ([:], [:], [], true, true) }
             let file = url.lastPathComponent
             let compressed = file.hasSuffix(".jsonl.zst")
             let suffix = compressed ? ".jsonl.zst" : ".jsonl"
@@ -812,6 +969,9 @@ struct CodexTaskReader {
                 return true
             }
             guard distinct.count == 1, let chosen = distinct.first else {
+                // Baseline even cold histories, so one later event can be
+                // observed without treating old records as new activity.
+                if maximumVisited == nil { ambiguousCandidates[owner] = distinct }
                 // Entirely old histories that have never been observed do not
                 // imply an active ambiguity. Check every variant first.
                 if !distinct.isEmpty && distinct.allSatisfy(predatesObservation) { continue }
@@ -830,7 +990,7 @@ struct CodexTaskReader {
             }
             files[owner] = chosen
         }
-        return (files, !ambiguous.isEmpty || uuidIDs.count != ids.count, false)
+        return (files, ambiguousCandidates, ambiguous, !ambiguous.isEmpty || uuidIDs.count != ids.count, false)
     }
 
 }
