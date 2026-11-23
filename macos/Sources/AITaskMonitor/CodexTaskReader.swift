@@ -1345,20 +1345,28 @@ final class CodexExecDiscoveryCache {
         guard limit > 0 else { return [] }
         lock.lock()
         defer { lock.unlock() }
-        let old = existing, fresh = unseen
+        let old = existing.sorted(), fresh = unseen.sorted()
         var oldCount = min(old.count, fresh.isEmpty ? limit : (limit + 1) / 2)
         var newCount = min(fresh.count, limit - oldCount)
         oldCount += min(old.count - oldCount, limit - oldCount - newCount)
         newCount += min(fresh.count - newCount, limit - oldCount - newCount)
         func pick(_ items: [String], count: Int, cursor: inout String?) -> [String] {
             guard !items.isEmpty, count > 0 else { return [] }
-            let start = cursor.flatMap { items.firstIndex(of: $0).map { ($0 + 1) % items.count } } ?? 0
+            let start = cursor.flatMap { last in items.firstIndex(where: { $0 > last }) } ?? 0
             let selected = (0..<count).map { items[(start + $0) % items.count] }
             cursor = selected.last
             return selected
         }
         let selectedOld = pick(old, count: oldCount, cursor: &existingCursor)
-        let selectedNew = pick(fresh, count: newCount, cursor: &unseenCursor)
+        let selectedNew: [String]
+        if unseenCursor == nil, newCount > 0, let newest = unseen.first {
+            let rest = fresh.filter { $0 != newest }
+            let additional = pick(rest, count: newCount - 1, cursor: &unseenCursor)
+            if additional.isEmpty { unseenCursor = newest }
+            selectedNew = [newest] + additional
+        } else {
+            selectedNew = pick(fresh, count: newCount, cursor: &unseenCursor)
+        }
         return Set(selectedOld + selectedNew)
     }
 

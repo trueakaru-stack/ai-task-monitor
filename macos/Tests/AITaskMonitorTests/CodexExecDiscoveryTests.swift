@@ -599,6 +599,22 @@ final class CodexExecDiscoveryTests: XCTestCase {
         }
     }
 
+    func testFairSelectionAdvancesWhenPreviouslySelectedNewIDsLeaveQueue() throws {
+        let cache = CodexExecDiscoveryCache()
+        var existing = (1...16).map { String(format: "old-%03d", $0) }
+        var unseen = (1...40).map { String(format: "new-%03d", $0) }
+        var discovered: Set<String> = []
+        for _ in 0..<10 {
+            let selected = cache.selectFair(existing: existing, unseen: unseen, limit: 16)
+            XCTAssertLessThanOrEqual(selected.count, 16)
+            let newlySeen = Set(unseen).intersection(selected)
+            discovered.formUnion(newlySeen)
+            existing.append(contentsOf: newlySeen)
+            unseen.removeAll { newlySeen.contains($0) }
+        }
+        XCTAssertEqual(discovered.count, 40)
+    }
+
     func testRewrittenHeaderOnSameInodeInvalidatesRelationship() throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }
