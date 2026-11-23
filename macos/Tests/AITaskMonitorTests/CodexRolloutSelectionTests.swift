@@ -300,6 +300,144 @@ final class CodexRolloutSelectionTests: XCTestCase {
         }
     }
 
+    func testUniqueUnscopedEndingKeepsUnconfirmedCard() throws {
+        try withRoot { root in
+            let files = try setup(root)
+            try FileManager.default.removeItem(at: files.old)
+            let reader = CodexTaskReader(codexHome: root)
+            let initial = try snapshot(reader)
+            let previous = try XCTUnwrap(initial.tasks.first { $0.id == thread && $0.isActive })
+            try append(row("task_complete", id: thread, turn: ""), to: files.current)
+            let after = try snapshot(reader, observed: [thread])
+            XCTAssertFalse(after.terminalIDs.contains(thread))
+            let merged = TaskSnapshotMerger.merge(previous: [previous], current: after.tasks, terminalIDs: after.terminalIDs)
+            let task = try XCTUnwrap(merged.first { $0.id == thread })
+            XCTAssertTrue(task.isUnconfirmed)
+            XCTAssertFalse(task.isActive)
+            XCTAssertNil(task.progress)
+            XCTAssertTrue(merged.contains { $0.id == neighbor && $0.isActive })
+        }
+    }
+
+    func testUniqueMismatchedEndingKeepsUnconfirmedCard() throws {
+        try withRoot { root in
+            let files = try setup(root)
+            try FileManager.default.removeItem(at: files.old)
+            let reader = CodexTaskReader(codexHome: root)
+            let initial = try snapshot(reader)
+            let previous = try XCTUnwrap(initial.tasks.first { $0.id == thread && $0.isActive })
+            try append(row("task_complete", id: thread, turn: "different-turn"), to: files.current)
+            let after = try snapshot(reader, observed: [thread])
+            XCTAssertFalse(after.terminalIDs.contains(thread))
+            let merged = TaskSnapshotMerger.merge(previous: [previous], current: after.tasks, terminalIDs: after.terminalIDs)
+            let task = try XCTUnwrap(merged.first { $0.id == thread })
+            XCTAssertTrue(task.isUnconfirmed)
+            XCTAssertFalse(task.isActive)
+            XCTAssertNil(task.progress)
+            XCTAssertFalse(task.planConfirmed)
+            XCTAssertTrue(merged.contains { $0.id == neighbor && $0.isActive })
+        }
+    }
+
+    func testUniqueFailedEndingDoesNotClaimSuccess() throws {
+        try withRoot { root in
+            let files = try setup(root)
+            try FileManager.default.removeItem(at: files.old)
+            let reader = CodexTaskReader(codexHome: root)
+            let initial = try snapshot(reader)
+            let previous = try XCTUnwrap(initial.tasks.first { $0.id == thread && $0.isActive })
+            try append(failedRow(id: thread, turn: "synthetic-turn"), to: files.current)
+            let after = try snapshot(reader, observed: [thread])
+            XCTAssertFalse(after.terminalIDs.contains(thread))
+            let merged = TaskSnapshotMerger.merge(previous: [previous], current: after.tasks, terminalIDs: after.terminalIDs)
+            let task = try XCTUnwrap(merged.first { $0.id == thread })
+            XCTAssertTrue(task.isUnconfirmed)
+            XCTAssertFalse(task.isActive)
+            XCTAssertNil(task.progress)
+            XCTAssertTrue(merged.contains { $0.id == neighbor && $0.isActive })
+        }
+    }
+
+    func testUniqueEndingBeforePartialTailKeepsUnconfirmedCard() throws {
+        try withRoot { root in
+            let files = try setup(root)
+            try FileManager.default.removeItem(at: files.old)
+            let reader = CodexTaskReader(codexHome: root)
+            let initial = try snapshot(reader)
+            let previous = try XCTUnwrap(initial.tasks.first { $0.id == thread && $0.isActive })
+            let following = try row("unrelated_event", id: thread)
+            let split = following.count / 2
+            var batch = try row("task_complete", id: thread)
+            batch.append(contentsOf: following.prefix(split))
+            try append(batch, to: files.current)
+            let partial = try snapshot(reader, observed: [thread])
+            XCTAssertFalse(partial.terminalIDs.contains(thread))
+            let merged = TaskSnapshotMerger.merge(previous: [previous], current: partial.tasks, terminalIDs: partial.terminalIDs)
+            let task = try XCTUnwrap(merged.first { $0.id == thread })
+            XCTAssertTrue(task.isUnconfirmed)
+            XCTAssertFalse(task.isActive)
+            XCTAssertNil(task.progress)
+            XCTAssertTrue(merged.contains { $0.id == neighbor && $0.isActive })
+
+            try append(Data(following.dropFirst(split)), to: files.current)
+            let complete = try snapshot(reader, observed: [thread])
+            XCTAssertTrue(complete.terminalIDs.contains(thread))
+        }
+    }
+
+    func testCompetingRolloutAppearingAfterDiscoveryPreventsCompletion() throws {
+        try withRoot { root in
+            let files = try setup(root)
+            try FileManager.default.removeItem(at: files.old)
+            var armed = false
+            var inserted = false
+            var injectionError: Error?
+            let reader = CodexTaskReader(codexHome: root, afterDiscoveryForTests: {
+                guard armed && !inserted else { return }
+                inserted = true
+                do { try self.create(files.old, id: self.thread, event: "unrelated_event") }
+                catch { injectionError = error }
+            })
+            let initial = try snapshot(reader)
+            let previous = try XCTUnwrap(initial.tasks.first { $0.id == thread && $0.isActive })
+            try append(row("task_complete", id: thread), to: files.current)
+            armed = true
+            let after = try reader.readSnapshot(observedSince: monitoringStartedAt, previouslyObserved: [thread])
+            XCTAssertTrue(inserted)
+            XCTAssertNil(injectionError)
+            XCTAssertFalse(after.terminalIDs.contains(thread))
+            let merged = TaskSnapshotMerger.merge(previous: [previous], current: after.tasks, terminalIDs: after.terminalIDs)
+            XCTAssertTrue(try XCTUnwrap(merged.first { $0.id == thread }).isUnconfirmed)
+            XCTAssertTrue(merged.contains { $0.id == neighbor && $0.isActive })
+            reader.waitForAmbiguousObservationForTests()
+        }
+    }
+
+    func testCompletionRecheckStopsAtBoundedScan() throws {
+        try withRoot { root in
+            let files = try setup(root)
+            try FileManager.default.removeItem(at: files.old)
+            let reader = CodexTaskReader(codexHome: root)
+            let initial = try snapshot(reader)
+            let previous = try XCTUnwrap(initial.tasks.first { $0.id == thread && $0.isActive })
+            let folder = root.appendingPathComponent("sessions")
+            for index in 0..<300 {
+                try Data().write(to: folder.appendingPathComponent("synthetic-noise-\(index).txt"))
+            }
+            try append(row("task_complete", id: thread), to: files.current)
+            let start = ProcessInfo.processInfo.systemUptime
+            let after = try reader.readSnapshot(observedSince: monitoringStartedAt, previouslyObserved: [thread])
+            let elapsed = ProcessInfo.processInfo.systemUptime - start
+            XCTAssertLessThan(elapsed, 2, "The synthetic local scan must stay bounded")
+            XCTAssertTrue(after.isPartial)
+            XCTAssertFalse(after.terminalIDs.contains(thread))
+            let merged = TaskSnapshotMerger.merge(previous: [previous], current: after.tasks, terminalIDs: after.terminalIDs)
+            XCTAssertTrue(try XCTUnwrap(merged.first { $0.id == thread }).isUnconfirmed)
+            XCTAssertTrue(merged.contains { $0.id == neighbor && $0.isActive })
+            reader.waitForAmbiguousObservationForTests()
+        }
+    }
+
     func testOlderTurnTerminalDoesNotSuppressNewTurn() throws {
         try withRoot { root in
             let files = try setup(root)
@@ -688,9 +826,18 @@ final class CodexRolloutSelectionTests: XCTestCase {
             try append(row("task_started", id: thread, turn: "new-turn"), to: files.current)
             let active = try snapshot(reader, observed: [thread])
             let current = try XCTUnwrap(active.tasks.first { $0.id == thread })
-            XCTAssertTrue(current.isActive)
-            XCTAssertFalse(current.isUnconfirmed)
+            XCTAssertFalse(current.isActive)
+            XCTAssertTrue(current.isUnconfirmed)
+            XCTAssertNil(current.progress)
+            XCTAssertFalse(current.planConfirmed)
             XCTAssertEqual(current.startKey, "turn:new-turn")
+            XCTAssertTrue(active.tasks.contains { $0.id == neighbor && $0.isActive })
+            let later = try snapshot(reader, observed: [thread])
+            let stillUnconfirmed = try XCTUnwrap(later.tasks.first { $0.id == thread })
+            XCTAssertTrue(stillUnconfirmed.isUnconfirmed)
+            XCTAssertFalse(stillUnconfirmed.isActive)
+            XCTAssertNil(stillUnconfirmed.progress)
+            XCTAssertTrue(later.tasks.contains { $0.id == neighbor && $0.isActive })
             // A delayed legacy terminal without a turn ID cannot close T2.
             try append(row("task_complete", id: thread, turn: ""), to: files.current)
             let unscoped = try snapshot(reader, observed: [thread])

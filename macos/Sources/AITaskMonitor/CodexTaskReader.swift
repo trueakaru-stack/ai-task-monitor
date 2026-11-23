@@ -17,8 +17,10 @@ struct CodexTaskReader {
     private let execDiscovery = CodexExecDiscoveryCache()
     private let planCache = CodexPlanHistoryCache()
     private let ambiguousRollouts = CodexAmbiguousRolloutWorker()
+    private let afterDiscoveryForTests: (() -> Void)?
 
-    init(codexHome: URL? = nil) {
+    init(codexHome: URL? = nil, afterDiscoveryForTests: (() -> Void)? = nil) {
+        self.afterDiscoveryForTests = afterDiscoveryForTests
         if let codexHome {
             self.codexHome = codexHome
         } else if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
@@ -71,7 +73,9 @@ struct CodexTaskReader {
             extraFiles = ([:], [:], [], true, false)
         }
         let files = discovered.files
+        afterDiscoveryForTests?()
         var result = CodexTaskSnapshot()
+        var indexedEndings: [String: (file: URL, interrupted: Bool, toolEvents: [CodexToolEvent]?)] = [:]
         result.isPartial = indexFailure != nil || discovered.isPartial || extra.isPartial || extraFiles.isPartial
         let uncertain = ambiguousRollouts.poll(
             candidates: discovered.ambiguousCandidates, ambiguousIDs: discovered.ambiguousIDs,
@@ -144,13 +148,12 @@ struct CodexTaskReader {
                 continue
             }
             if state.terminal {
-                var interrupted = state.interrupted
-                if let recovered {
-                    guard let verified = Self.recoveredTerminal(in: tail, id: id, turn: recovered.turnID) else {
-                        result.isPartial = true
-                        continue
-                    }
-                    interrupted = verified
+                // A terminal belongs to this card only when the complete
+                // tail contains a matching start and a non-error ending.
+                guard !state.terminalUncertain, tail.utf8.last == 0x0a,
+                      let interrupted = Self.recoveredTerminal(in: tail, id: id, turn: state.turnID) else {
+                    result.isPartial = true
+                    continue
                 }
                 var recognized = false
                 if let observedSince {
@@ -159,11 +162,11 @@ struct CodexTaskReader {
                     recognized = true
                 }
                 if recognized {
-                    result.terminalIDs.insert(id)
-                    if interrupted { result.interruptedIDs.insert(id) }
+                    var events: [CodexToolEvent]?
                     if previouslyObserved.contains(id), let observedSince {
-                        result.toolEvents[id] = CodexToolEventParser.parse(tail: tail, since: observedSince, now: now)
+                        events = CodexToolEventParser.parse(tail: tail, since: observedSince, now: now)
                     }
+                    indexedEndings[id] = (file, interrupted, events)
                 }
                 continue
             }
@@ -191,8 +194,12 @@ struct CodexTaskReader {
             }
             let steps = plan.steps
             let activity = parseActivity(from: tail, sessionID: id)
-            let progress = MonitoredTask.progress(for: steps)
-            let unconfirmed = now.timeIntervalSince(modified) >= 7_200
+            // Matching a new start to the previously observed file establishes
+            // its provenance, not whether the turn is still running now.
+            if state.terminalUncertain || tail.utf8.last != 0x0a { result.isPartial = true }
+            let recoveredUnconfirmed = fresh != nil || recovered != nil || state.terminalUncertain || tail.utf8.last != 0x0a
+            let progress = recoveredUnconfirmed ? nil : MonitoredTask.progress(for: steps)
+            let unconfirmed = recoveredUnconfirmed || now.timeIntervalSince(modified) >= 7_200
             var displayTitle = title
             if displayTitle.isEmpty, let record = try? readUnindexedSession(file, id: id),
                let derived = subagentTitle(record.subagent, sessions: sessions) {
@@ -219,8 +226,29 @@ struct CodexTaskReader {
                 isUnconfirmed: unconfirmed,
                 startedAt: state.startedAt ?? .distantPast,
                 startKey: state.startKey,
-                planConfirmed: plan.confirmed
+                planConfirmed: !recoveredUnconfirmed && plan.confirmed
             ))
+        }
+        if !indexedEndings.isEmpty {
+            do {
+                // One bounded rescan narrows, but cannot eliminate, a race
+                // with another rollout appearing after this verification.
+                let checked = try sessionFiles(for: Set(indexedEndings.keys), now: now, observedSince: observedSince,
+                                               previouslyObserved: previouslyObserved, maximumVisited: 256)
+                if checked.didHitLimit { result.isPartial = true }
+                for (id, ending) in indexedEndings {
+                    guard !checked.didHitLimit, !checked.ambiguousIDs.contains(id),
+                          checked.files[id]?.standardizedFileURL == ending.file.standardizedFileURL else {
+                        result.isPartial = true
+                        continue
+                    }
+                    result.terminalIDs.insert(id)
+                    if ending.interrupted { result.interruptedIDs.insert(id) }
+                    if let events = ending.toolEvents { result.toolEvents[id] = events }
+                }
+            } catch {
+                result.isPartial = true
+            }
         }
         // During a revert, older rollouts can coexist with the new one. New
         // complete records are evidence of a write, not proof of the selected
@@ -274,13 +302,17 @@ struct CodexTaskReader {
                             continue
                         }
                     }
-                    guard state.sawStart else { result.isPartial = true; continue }
+                    guard state.sawStart, !state.terminalUncertain, record.tail.utf8.last == 0x0a,
+                          let interrupted = Self.recoveredTerminal(in: record.tail, id: id, turn: state.turnID) else {
+                        result.isPartial = true
+                        continue
+                    }
                     let recognized = observedSince.map { since in
                         state.terminalDate.map { $0 >= since } ?? false
                     } ?? true
                     if recognized {
                         result.terminalIDs.insert(id)
-                        if state.interrupted { result.interruptedIDs.insert(id) }
+                        if interrupted { result.interruptedIDs.insert(id) }
                         if previouslyObserved.contains(id), let observedSince {
                             result.toolEvents[id] = CodexToolEventParser.parse(tail: record.tail, since: observedSince, now: now)
                         }

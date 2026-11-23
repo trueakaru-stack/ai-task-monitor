@@ -11,6 +11,7 @@ struct CodexLifecycleState {
     var lastActiveEvent: Date?
     var latestEvent: Date?
     var sawStart = false
+    var terminalUncertain = false
 
     mutating func consume(_ record: [String: Any]) {
         guard record.string("type") == "event_msg", let payload = record.object("payload") else { return }
@@ -22,6 +23,7 @@ struct CodexLifecycleState {
         case "task_started", "turn_started":
             running = true
             terminal = false
+            terminalUncertain = false
             terminalDate = nil
             interrupted = false
             turnID = eventTurnID
@@ -31,7 +33,14 @@ struct CodexLifecycleState {
             lastActiveEvent = nil
             sawStart = true
         case "task_complete", "turn_complete", "turn_aborted":
-            if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { return }
+            if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID {
+                terminalUncertain = true
+                return
+            }
+            if turnID.isEmpty || eventTurnID.isEmpty || date == nil ||
+                (payload["error"] != nil && !(payload["error"] is NSNull)) {
+                terminalUncertain = true
+            }
             running = false
             terminal = true
             terminalDate = date

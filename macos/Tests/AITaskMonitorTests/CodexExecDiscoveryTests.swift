@@ -241,6 +241,45 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertTrue(completed.terminalIDs.contains(first))
     }
 
+    func testUnindexedUncertainEndingsDoNotClaimSuccess() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        for scenario in ["missing-turn", "other-turn", "error", "partial"] {
+            let root = try makeRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let since = Date().addingTimeInterval(-60)
+            let file = try rollout(root, fileID: first)
+            _ = try rollout(root, fileID: second)
+            let reader = CodexTaskReader(codexHome: root)
+            let before = try reader.readSnapshot(observedSince: since)
+            XCTAssertTrue(before.tasks.contains { $0.id == first && $0.isUnconfirmed })
+            XCTAssertTrue(before.tasks.contains { $0.id == second && $0.isUnconfirmed })
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            var payload: [String: Any] = ["type": "task_complete", "turn_id": "fixture-turn"]
+            if scenario == "missing-turn" { payload["turn_id"] = "" }
+            if scenario == "other-turn" { payload["turn_id"] = "other-turn" }
+            if scenario == "error" { payload["error"] = ["message": "Synthetic error"] }
+            var bytes = try JSONSerialization.data(withJSONObject: ["timestamp": formatter.string(from: Date()),
+                                                                    "type": "event_msg", "payload": payload])
+            bytes.append(0x0a)
+            if scenario == "partial" { bytes.append(contentsOf: Data("{\"type\":".utf8)) }
+            let handle = try FileHandle(forWritingTo: file)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: bytes)
+            try handle.close()
+
+            let after = try reader.readSnapshot(observedSince: since, previouslyObserved: [first, second])
+            XCTAssertFalse(after.terminalIDs.contains(first), scenario)
+            let merged = TaskSnapshotMerger.merge(previous: before.tasks, current: after.tasks, terminalIDs: after.terminalIDs)
+            let task = try XCTUnwrap(merged.first { $0.id == first }, scenario)
+            XCTAssertTrue(task.isUnconfirmed, scenario)
+            XCTAssertFalse(task.isActive, scenario)
+            XCTAssertNil(task.progress, scenario)
+            XCTAssertTrue(merged.contains { $0.id == second && $0.isUnconfirmed }, scenario)
+        }
+    }
+
     func testIndexedAndUnindexedTasksAppearTogether() throws {
         let root = try makeRoot()
         let observedSince = Date().addingTimeInterval(-1)
