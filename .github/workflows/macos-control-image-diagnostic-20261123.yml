@@ -105,8 +105,8 @@ jobs:
             if test "$task_control_attached" = yes; then /usr/bin/hdiutil detach "$task_control" >/dev/null 2>&1 || true; fi
           }
           trap cleanup_control_bootstrap EXIT
-          /usr/bin/hdiutil attach -plist -readonly -nobrowse -noautoopen -mountpoint "$task_control" "$task_image" > "$task_control_parent/attach.plist"
           task_control_attached=yes
+          /usr/bin/hdiutil attach -plist -readonly -nobrowse -noautoopen -mountpoint "$task_control" "$task_image" > "$task_control_parent/attach.plist"
           task_mount_found=0
           for task_index in {0..15}; do
             task_value="$(/usr/libexec/PlistBuddy -c "Print :system-entities:$task_index:mount-point" "$task_control_parent/attach.plist" 2>/dev/null || true)"
@@ -117,6 +117,27 @@ jobs:
           done
           test "$task_mount_found" = 1
           test "$(/usr/bin/stat -f %d "$task_control")" != "$(/usr/bin/stat -f %d "$task_root")"
+          /usr/bin/hdiutil info -plist > "$task_control_parent/image-info.plist"
+          task_image_match=0
+          for task_image_index in {0..63}; do
+            task_image_path="$(/usr/libexec/PlistBuddy -c "Print :images:$task_image_index:image-path" "$task_control_parent/image-info.plist" 2>/dev/null || true)"
+            if test "$task_image_path" = "$task_image"; then
+              test "$(/usr/libexec/PlistBuddy -c "Print :images:$task_image_index:writeable" "$task_control_parent/image-info.plist")" = false
+              task_matching_mounts=0
+              for task_entity in {0..15}; do
+                task_mount_path="$(/usr/libexec/PlistBuddy -c "Print :images:$task_image_index:system-entities:$task_entity:mount-point" "$task_control_parent/image-info.plist" 2>/dev/null || true)"
+                if test "$task_mount_path" = "$task_control"; then task_matching_mounts=$((task_matching_mounts + 1)); fi
+              done
+              test "$task_matching_mounts" = 1
+              task_image_match=$((task_image_match + 1))
+            fi
+          done
+          test "$task_image_match" = 1
+          if /usr/bin/touch "$task_control/.readonly-probe" >"$task_control_parent/readonly.log" 2>&1; then
+            echo 'The control image was not mounted read-only.' >&2; exit 1
+          fi
+          grep -Eiq 'read-only file system' "$task_control_parent/readonly.log"
+          test ! -e "$task_control/.readonly-probe"
           for task_file in profile.sb profile-offline.sb run-isolated controls.sha256 synthetic-control-probe; do
             test -f "$task_stage/$task_file" && test ! -L "$task_stage/$task_file"
             test "$(/usr/bin/stat -f %l "$task_stage/$task_file")" = 1
@@ -126,7 +147,24 @@ jobs:
           test -x "$task_control/run-isolated"
           (cd "$task_control" && /usr/bin/shasum -a 256 -c controls.sha256)
           test "$(/usr/bin/stat -f '%d:%i:%l' "$task_image")" = "$task_image_identity"
-          /bin/rm "$task_image"
+          /usr/bin/perl -e '
+            use strict;
+            use warnings;
+            use Fcntl qw(O_RDONLY O_NOFOLLOW :mode);
+            my $path = shift;
+            sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or die "open failed: $!";
+            my @fd_before = stat($fh);
+            my @path_before = lstat($path);
+            die "unexpected image identity" unless @fd_before && @path_before
+              && S_ISREG($fd_before[2]) && $fd_before[0] == $path_before[0]
+              && $fd_before[1] == $path_before[1] && $fd_before[3] == 1 && $path_before[3] == 1;
+            unlink($path) == 1 or die "unlink failed: $!";
+            my @fd_after = stat($fh);
+            die "backing inode still has links or changed" unless @fd_after
+              && $fd_after[0] == $fd_before[0] && $fd_after[1] == $fd_before[1] && $fd_after[3] == 0;
+            close($fh) or die "close failed: $!";
+            print "Verified the same read-only descriptor has zero links after unlink.\n";
+          ' "$task_image"
           test ! -e "$task_image" && test ! -L "$task_image"
           for task_file in profile.sb profile-offline.sb run-isolated controls.sha256 synthetic-control-probe; do
             /bin/rm "$task_stage/$task_file"
