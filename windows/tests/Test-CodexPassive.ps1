@@ -337,7 +337,7 @@ try{
  Require ((Source-WarningText @('Codex','DeepSeek Harness') @() @('Codex','DeepSeek Harness') $false $true) -ceq 'Часть данных недоступна: DeepSeek Harness' -and
   (Source-WarningText @('Codex','DeepSeek Harness') @() @('Codex','DeepSeek Harness') $false) -ceq 'Часть данных недоступна: Codex, DeepSeek Harness') 'Compact filtering changed another source or the expanded warning.'
  $script:resolvedLanguage='en'
- Require ((Localized-CompactTaskActivity $observed) -ceq 'Status unconfirmed: Проверяю окно') 'Compact activity did not preserve the source language or uncertainty.'
+ Require ((Localized-CompactTaskActivity $observed) -ceq 'Status unconfirmed. Last: Проверяю окно') 'Compact activity did not preserve the source language or uncertainty.'
  Require ((Source-WarningText @('Codex') @() @() $true) -ceq 'The Codex task list may be incomplete' -and
   (Source-WarningText @('Codex') @() @('Codex') $false) -ceq 'Some data is unavailable: Codex') 'Codex coverage and read failures were conflated in English.'
  Require ((Source-WarningText @('Codex') @() @('Codex') $false $true) -ceq '' -and
