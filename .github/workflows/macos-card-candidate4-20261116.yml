@@ -285,7 +285,7 @@ jobs:
           task_root="$AITM_TEST_TASK_ROOT"
           task_source="$task_root/source/macos"
           task_bin="$task_root/release-tools"
-          mkdir -p "$task_bin" "$task_root/release-artifacts" "$task_root/dmg-mount"
+          mkdir -p "$task_bin" "$task_root/release-artifacts" "$task_root/dmg-mount" "$task_root/synthetic-home" "$task_root/atomic-probe"
           cat > "$task_bin/swift" <<'SCRIPT'
           #!/bin/bash
           set -euo pipefail
@@ -327,9 +327,35 @@ jobs:
           kill "$probe_pid"
           wait "$probe_pid" 2>/dev/null || true
           trap - EXIT
+          cat > "$task_root/atomic-probe.swift" <<'SWIFT'
+          import Foundation
+          let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+          let file = directory.appendingPathComponent(UUID().uuidString + ".json")
+          do {
+              try Data("synthetic".utf8).write(to: file, options: .atomic)
+              try FileManager.default.removeItem(at: file)
+              print("Atomic Foundation write succeeded")
+          } catch {
+              let failure = error as NSError
+              let underlying = failure.userInfo[NSUnderlyingErrorKey] as? NSError
+              print("Atomic Foundation write failed: \(failure.domain) \(failure.code); underlying \(underlying?.domain ?? "none") \(underlying?.code ?? 0)")
+              exit(1)
+          }
+          SWIFT
+          task_swiftc="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+          if AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
+            "CFFIXED_USER_HOME=$task_root/synthetic-home" "$task_swiftc" "$task_root/atomic-probe.swift" -o "$task_root/atomic-probe-bin"; then
+            echo 'Foundation atomic write without synthetic home:'
+            AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" "$task_root/atomic-probe-bin" "$task_root/atomic-probe" || true
+            echo 'Foundation atomic write with synthetic home:'
+            AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
+              "CFFIXED_USER_HOME=$task_root/synthetic-home" "$task_root/atomic-probe-bin" "$task_root/atomic-probe" || true
+          else
+            echo 'Foundation atomic-write probe did not compile in the restricted environment.'
+          fi
           cd "$task_source"
           AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
-            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/build-app.sh
+            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" "CFFIXED_USER_HOME=$task_root/synthetic-home" /bin/bash ./scripts/build-app.sh
           task_app="$task_source/dist/AI Task Monitor.app"
           test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = 0.3.12
           test "$(/usr/bin/plutil -extract AITaskMonitorReleaseVersion raw -o - "$task_app/Contents/Info.plist")" = 0.3.12

@@ -799,13 +799,22 @@ final class CodexExecDiscoveryTests: XCTestCase {
         let store = TaskStore(codexReader: reader,
                               claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("unused")),
                               previewTasks: [])
-        try indexRows(root, [(first, "Parent"), (second, "Child"), (revision, "Neighbor")])
+        let neighbor2 = "f19127f4-35ae-7c73-9e72-a10123456789"
+        let neighbor3 = "f29127f4-35ae-7c73-9e72-a10123456789"
+        try indexRows(root, [(first, "Parent"), (revision, "Neighbor"), (neighbor2, "Neighbor 2"), (neighbor3, "Neighbor 3")])
         _ = try rollout(root, fileID: first)
-        try subagentRollout(root, id: second, parent: first)
         _ = try rollout(root, fileID: revision)
+        _ = try rollout(root, fileID: neighbor2)
+        _ = try rollout(root, fileID: neighbor3)
         store.refresh()
-        XCTAssertEqual(store.tasks.count, 3)
+        XCTAssertEqual(store.tasks.count, 4)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(store.tasks.firstIndex { $0.id == first }), 3)
+        try indexRows(root, [(first, "Parent"), (second, "Child"), (revision, "Neighbor"), (neighbor2, "Neighbor 2"), (neighbor3, "Neighbor 3")])
+        try subagentRollout(root, id: second, parent: first)
+        store.refresh()
+        XCTAssertEqual(store.tasks.count, 5)
         store.compactIndex = try XCTUnwrap(store.tasks.firstIndex { $0.id == second })
+        XCTAssertLessThan(store.compactIndex, 3)
         reader.waitForAmbiguousObservationForTests()
         var found = false
         for _ in 0..<8 {
@@ -818,9 +827,15 @@ final class CodexExecDiscoveryTests: XCTestCase {
         }
         XCTAssertTrue(found)
         XCTAssertEqual(store.tasks[store.compactIndex].id, first)
-        XCTAssertEqual(store.count(for: .all), 2)
-        XCTAssertEqual(store.count(for: .codex), 2)
+        XCTAssertLessThan(store.compactIndex, 3)
+        XCTAssertEqual(store.count(for: .all), 4)
+        XCTAssertEqual(store.count(for: .codex), 4)
         XCTAssertTrue(store.tasks.contains { $0.id == revision })
+        XCTAssertTrue(store.tasks.contains { $0.id == neighbor2 })
+        XCTAssertTrue(store.tasks.contains { $0.id == neighbor3 })
+        store.refresh()
+        XCTAssertEqual(store.tasks[store.compactIndex].id, first)
+        XCTAssertLessThan(store.compactIndex, 3)
         store.toggleCodexGroup(first)
         XCTAssertTrue(store.isCodexGroupExpanded(first))
         XCTAssertTrue(store.isCodexGroupExpanded("codex-group:" + first))

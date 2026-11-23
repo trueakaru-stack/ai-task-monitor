@@ -174,6 +174,11 @@ struct TaskFocusTracker {
 
     init() {}
 
+    mutating func prioritize(_ id: String) {
+        nextPriority += 1
+        priorities[id] = nextPriority
+    }
+
     mutating func reconcile(current: [MonitoredTask], previous: [MonitoredTask], selectedID: String?, monitoringStartedAt: Date = .distantFuture) -> (tasks: [MonitoredTask], selectedID: String?) {
         let previousByID = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         let present = Set(current.map(\.id))

@@ -1084,9 +1084,19 @@ final class TaskStore: ObservableObject {
         let focus = taskFocus.reconcile(current: combined, previous: previousTasks,
                                         selectedID: mappedSelection ?? selectedID, monitoringStartedAt: monitoringStartedAt)
         combined = focus.tasks
+        var chosen = focus.selectedID
+        if let mappedSelection, mappedSelection != selectedID,
+           let position = combined.firstIndex(where: { $0.id == mappedSelection }) {
+            // The compact carousel only exposes its first three cards. Carry
+            // the user's selected child to its displayed group before pruning.
+            taskFocus.prioritize(mappedSelection)
+            if position >= 3 {
+                let selectedTask = combined.remove(at: position)
+                combined.insert(selectedTask, at: 0)
+            }
+            chosen = mappedSelection
+        }
         tasks = combined
-        let carriedSelection = mappedSelection != selectedID ? mappedSelection : nil
-        let chosen = carriedSelection.flatMap { id in combined.prefix(3).contains(where: { $0.id == id }) ? id : nil } ?? focus.selectedID
         compactIndex = chosen.flatMap { id in combined.firstIndex { $0.id == id } } ?? 0
         if let provider = selectedProvider.provider, !providers.contains(provider) { selectedProvider = .all }
         recordChanges(previousTasks: previousDiagnosticTasks, previousUnavailable: previousUnavailable,
