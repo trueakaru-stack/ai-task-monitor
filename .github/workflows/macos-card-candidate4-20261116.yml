@@ -2,7 +2,7 @@ name: Synthetic macOS capacity regressions
 on:
   push:
     branches: ['macos', 'codex/macos-kimi-scope-fix-20261116', 'codex/macos-activity-ci-20261123', 'codex/macos-icon-fallback-ci-20261123']
-    paths: ['.github/workflows/macos-build.yml', '.github/workflows/macos-card-candidate4-20261116.yml', '.github/macos-icon-fallback-20261123/**', 'macos/**']
+    paths: ['.github/workflows/macos-build.yml', '.github/workflows/macos-card-candidate4-20261116.yml', '.github/macos-icon-fallback-20261123/**', '.github/macos-image-fallback-20261123/**', 'macos/**']
 permissions:
   contents: read
 jobs:
@@ -124,6 +124,33 @@ jobs:
           AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/diff -qr "$task_probe/Fixture.app" "$task_probe/extracted/Fixture.app"
           AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /bin/test -x "$task_probe/extracted/Fixture.app/Contents/MacOS/Fixture"
           AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /bin/test -L "$task_probe/extracted/Fixture.app/Contents/Resources/example-link"
+      - name: Verify isolated image path guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_TEST_TASK_ROOT"
+          task_run="$task_root/run-isolated"
+          task_policy="$task_root/profile-offline.sb"
+          task_helper="$task_root/source/.github/macos-image-fallback-20261123/create-hybrid-ci.sh"
+          task_app="$task_root/source/macos/dist/AI Task Monitor.app"
+          task_output="$task_root/source/macos/dist/AITaskMonitor-macOS-0.3.12.dmg"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /bin/bash -n "$task_helper"
+          if AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/env "AITM_RELEASE_ROOT=$task_root" \
+            /bin/bash "$task_helper" "$task_app" >"$task_root/temp/image-guard-count.log" 2>&1; then
+            echo 'Image guard accepted the wrong argument count.' >&2; exit 1
+          fi
+          grep -F 'Expected app and image paths.' "$task_root/temp/image-guard-count.log"
+          if AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/env "AITM_RELEASE_ROOT=$task_root" \
+            /bin/bash "$task_helper" "$task_root/temp/other.app" "$task_output" >"$task_root/temp/image-guard-input.log" 2>&1; then
+            echo 'Image guard accepted the wrong app path.' >&2; exit 1
+          fi
+          grep -F 'Unexpected app or image path.' "$task_root/temp/image-guard-input.log"
+          if AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/env "AITM_RELEASE_ROOT=$task_root" \
+            /bin/bash "$task_helper" "$task_app" "$task_root/temp/other.dmg" >"$task_root/temp/image-guard-output.log" 2>&1; then
+            echo 'Image guard accepted the wrong output path.' >&2; exit 1
+          fi
+          grep -F 'Unexpected app or image path.' "$task_root/temp/image-guard-output.log"
+          test ! -e "$task_root/temp/other.dmg"
       - name: Build synthetic regression tests
         id: build
         shell: bash
@@ -509,30 +536,12 @@ jobs:
           task_run="$task_root/run-isolated"
           task_path="$task_root/release-tools:$AITM_TASK_PATH"
           task_app="$task_source/dist/AI Task Monitor.app"
-          task_icon_sha=ec9ba4d716b1988dfad213127d9d2dffbb37e188199f8c7576d4325774e78e67
-          test "$(git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
-          cd "$task_source"
-          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
-            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/create-dmg.sh
           task_dmg="$task_source/dist/AITaskMonitor-macOS-0.3.12.dmg"
+          test "$(git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
+            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" \
+            /bin/bash "$task_root/source/.github/macos-image-fallback-20261123/create-hybrid-ci.sh" "$task_app" "$task_dmg"
           (cd "$task_source/dist" && /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt)
-          /usr/bin/hdiutil verify "$task_dmg"
-          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/hdiutil attach \
-            -readonly -nobrowse -noautoopen -mountpoint "$task_root/dmg-mount" "$task_dmg"
-          trap 'hdiutil detach "$task_root/dmg-mount" >/dev/null 2>&1 || true' EXIT
-          test -d "$task_root/dmg-mount/AI Task Monitor.app"
-          test -L "$task_root/dmg-mount/Applications"
-          test "$(readlink "$task_root/dmg-mount/Applications")" = /Applications
-          test "$(find "$task_root/dmg-mount" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 2
-          /usr/bin/cmp "$task_app/Contents/MacOS/AITaskMonitor" "$task_root/dmg-mount/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
-          /usr/bin/diff -qr "$task_app" "$task_root/dmg-mount/AI Task Monitor.app"
-          /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_root/dmg-mount/AI Task Monitor.app"
-          if test -f "$task_root/release-artifacts/icon-fallback-used"; then
-            task_icon_actual="$(/usr/bin/shasum -a 256 "$task_root/dmg-mount/AI Task Monitor.app/Contents/Resources/AppIcon.icns")"
-            test "${task_icon_actual%% *}" = "$task_icon_sha"
-          fi
-          /usr/bin/hdiutil detach "$task_root/dmg-mount"
-          trap - EXIT
           /bin/cp "$task_root/validated-app/AI Task Monitor.app.zip" "$task_root/release-artifacts/AI Task Monitor.app.zip"
           /bin/cp "$task_dmg" "$task_source/dist/SHA256SUMS-macOS.txt" "$task_root/release-artifacts/"
           (cd "$task_root/release-artifacts" && /usr/bin/shasum -a 256 'AI Task Monitor.app.zip' >> SHA256SUMS-macOS.txt && /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt)
