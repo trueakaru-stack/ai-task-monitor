@@ -126,7 +126,7 @@ final class ParserTests: XCTestCase {
         let old = #"{"type":"event_msg","payload":{"type":"agent_reasoning","text":"Old action"}}"#
         let response = #"{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"**Checking screenshot stability**\n\nPRIVATE_REASONING"}],"content":[{"text":"PRIVATE_RAW_CONTENT"}]}}"#
         let completed = #"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","summary_text":["**Check build**"]}}}"#
-        let commentary = #"{"type":"response_item","payload":{"type":"message","phase":"commentary","content":[{"type":"output_text","text":"Preparing check"}]}}"#
+        let commentary = #"{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Preparing check"}]}}"#
         let start = #"{"type":"event_msg","payload":{"type":"task_started","turn_id":"new-turn"}}"#
         XCTAssertEqual(reader.parseActivity(from: old + "\n" + response), "Checking screenshot stability")
         XCTAssertEqual(reader.parseActivity(from: response + "\n" + completed), "Check build")

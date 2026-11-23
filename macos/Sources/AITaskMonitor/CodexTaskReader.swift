@@ -336,9 +336,12 @@ struct CodexTaskReader {
                        rawDescription.utf16.count <= 4_096 {
                         description = FileHelpers.normalized(rawDescription, limit: 4_096)
                     }
+                    let result = item.object("result")
+                    let errorFlag = result?["isError"]
+                    let successfulResult = (item["result"] == nil || result != nil) &&
+                                           (errorFlag == nil || (errorFlag as? Bool) == false)
                     let completed = item.string("status") == "completed" &&
-                                    (item["error"] == nil || item["error"] is NSNull) &&
-                                    (item.object("result")?["isError"] as? Bool) != true && !description.isEmpty
+                                    (item["error"] == nil || item["error"] is NSNull) && successfulResult && !description.isEmpty
                     if validID {
                         let firstRecord = seenFigmaIDs.insert(id).inserted
                         if seenFigmaIDs.count > 4_096 {
@@ -352,7 +355,8 @@ struct CodexTaskReader {
                         }
                     }
                 }
-                if couldMatch && itemType != "Reasoning" && itemType != "AgentMessage" && !duplicateFigma {
+                if couldMatch && !duplicateFigma &&
+                   (!matches || (itemType != "Reasoning" && itemType != "AgentMessage")) {
                     latestOtherItemIndex = lineIndex
                 }
             }
@@ -411,7 +415,7 @@ struct CodexTaskReader {
                     latestCommentaryIndex = lineIndex
                 }
             } else if recordType == "response_item", kind == "message", payload.string("phase") == "commentary",
-                      (payload.string("role").isEmpty || payload.string("role") == "assistant") {
+                      payload.string("role") == "assistant" {
                 for part in payload.array("content") where part.string("type") == "output_text" {
                     let text = part.string("text")
                     if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -420,6 +424,8 @@ struct CodexTaskReader {
                     }
                 }
             } else if kind == "item_completed", let item = payload.object("item") {
+                if let sessionID, !sessionID.isEmpty,
+                   (eventThreadID != sessionID || eventTurnID != turnID || turnID.isEmpty) { continue }
                 if item.string("type") == "Reasoning" {
                     for part in (item["summary_text"] as? [String] ?? []) where !part.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { summary = part }
                 } else if item.string("type") == "AgentMessage", item.string("phase") == "commentary" {

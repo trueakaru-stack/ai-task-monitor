@@ -679,7 +679,7 @@ final class ExternalCapacityRegressionTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path).count, 48)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path).count, 56)
     }
     #endif
 }

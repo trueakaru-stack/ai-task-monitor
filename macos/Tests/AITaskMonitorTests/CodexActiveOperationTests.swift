@@ -146,6 +146,15 @@ final class CodexActiveOperationTests: XCTestCase {
         let userCommentary = try record("response_item", ["type": "message", "role": "user", "phase": "commentary",
             "content": [["type": "output_text", "text": "PRIVATE_USER_TEXT"]]])
         XCTAssertEqual(activity([start, fallback, userCommentary]), "Fallback summary")
+        let unknownRoles: [Any] = [NSNull(), 4, ""]
+        for role in unknownRoles {
+            let unknown = try record("response_item", ["type": "message", "role": role, "phase": "commentary",
+                "content": [["type": "output_text", "text": "PRIVATE_UNKNOWN_TEXT"]]])
+            XCTAssertEqual(activity([start, fallback, unknown]), "Fallback summary")
+        }
+        let roleless = try record("response_item", ["type": "message", "phase": "commentary",
+            "content": [["type": "output_text", "text": "PRIVATE_ROLELESS_TEXT"]]])
+        XCTAssertEqual(activity([start, fallback, roleless]), "Fallback summary")
         let blankSummary = try record("event_msg", ["type": "agent_reasoning", "text": "   "])
         XCTAssertEqual(activity([start, fallback, blankSummary]), "Fallback summary")
     }
@@ -319,5 +328,37 @@ final class CodexActiveOperationTests: XCTestCase {
         XCTAssertEqual(activity([start, fallback, action], sessionID: "session-a"), "Fallback summary")
         let previous = try figma("previous")
         XCTAssertEqual(activity([start, fallback, previous, action], sessionID: "session-a"), "Fallback summary")
+    }
+
+    func testUnboundCompletedMessagesDoNotOverrideCurrentActivity() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let start = try started(), fallback = try summary(), action = try figma()
+        let items: [[String: Any]] = [
+            ["type": "Reasoning", "summary_text": ["UNBOUND_SUMMARY"]],
+            ["type": "AgentMessage", "phase": "commentary", "content": [["type": "Text", "text": "UNBOUND_MESSAGE"]]]
+        ]
+        for item in items {
+            for identity in [["thread_id": "session-a"], ["turn_id": "turn-a"], [:]] {
+                var payload: [String: Any] = ["type": "item_completed", "item": item]
+                for (key, value) in identity { payload[key] = value }
+                XCTAssertEqual(activity([start, fallback, action, try record("event_msg", payload)], sessionID: "session-a"),
+                               "Fallback summary")
+            }
+        }
+    }
+
+    func testMalformedFigmaErrorFlagIsNotSuccessful() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let start = try started(), fallback = try summary()
+        let invalidValues: [Any] = ["true", "false", NSNull(), ["unexpected": true]]
+        for value in invalidValues {
+            let item: [String: Any] = ["id": "figma-invalid", "type": "McpToolCall", "server": "codex_apps",
+                "tool": "figma.use_figma", "status": "completed", "arguments": ["description": "Not confirmed"],
+                "result": ["isError": value]]
+            let event = try record("event_msg", ["type": "item_completed", "thread_id": "session-a", "turn_id": "turn-a", "item": item])
+            XCTAssertEqual(activity([start, fallback, event], sessionID: "session-a"), "Fallback summary")
+        }
     }
 }
