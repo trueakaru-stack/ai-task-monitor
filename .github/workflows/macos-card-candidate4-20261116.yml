@@ -105,6 +105,25 @@ jobs:
           cd "$AITM_TEST_TASK_ROOT/source/macos"
           AITM_TEST_SANDBOX_POLICY="$AITM_TEST_TASK_ROOT/profile-offline.sb" "$AITM_TEST_TASK_ROOT/run-isolated" \
             /bin/bash "$AITM_TEST_TASK_ROOT/source/.github/macos-icon-fallback-20261123/test-iconutil-guard.sh" "$AITM_TEST_TASK_ROOT/source"
+      - name: Verify isolated ZIP roundtrip
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_probe="$(/usr/bin/mktemp -d "$AITM_TEST_TASK_ROOT/temp/archive-probe.XXXXXXXX")"
+          case "$task_probe" in "$AITM_TEST_TASK_ROOT"/temp/archive-probe.*) ;; *) exit 1;; esac
+          mkdir -p "$task_probe/Fixture.app/Contents/MacOS" "$task_probe/Fixture.app/Contents/Resources" "$task_probe/extracted"
+          printf '#!/bin/sh\nexit 0\n' > "$task_probe/Fixture.app/Contents/MacOS/Fixture"
+          chmod 700 "$task_probe/Fixture.app/Contents/MacOS/Fixture"
+          printf 'synthetic\n' > "$task_probe/Fixture.app/Contents/Resources/example.txt"
+          /bin/ln -s example.txt "$task_probe/Fixture.app/Contents/Resources/example-link"
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          task_policy="$AITM_TEST_TASK_ROOT/profile-offline.sb"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$task_probe/Fixture.app" "$task_probe/fixture.zip"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/unzip -t "$task_probe/fixture.zip" > "$task_probe/zip-check.txt"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/ditto -x -k "$task_probe/fixture.zip" "$task_probe/extracted"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/diff -qr "$task_probe/Fixture.app" "$task_probe/extracted/Fixture.app"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /bin/test -x "$task_probe/extracted/Fixture.app/Contents/MacOS/Fixture"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /bin/test -L "$task_probe/extracted/Fixture.app/Contents/Resources/example-link"
       - name: Build synthetic regression tests
         id: build
         shell: bash
@@ -280,7 +299,8 @@ jobs:
           path: ${{ runner.temp }}/aitm-card-tests.*/temp/render-*/renders/*.png
           if-no-files-found: error
           retention-days: 30
-      - name: Build and inspect isolated macOS candidate
+      - name: Build and inspect isolated macOS app
+        id: app_candidate
         if: ${{ success() && matrix.runner == 'macos-15' }}
         shell: bash
         run: |
@@ -452,6 +472,46 @@ jobs:
           fi
           AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
             "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/smoke-test.sh "$task_app"
+          mkdir -p "$task_root/validated-app" "$task_root/app-roundtrip"
+          task_app_zip="$task_root/temp/AI Task Monitor.app.zip"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$task_app" "$task_app_zip"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/unzip -t "$task_app_zip" > "$task_root/validated-app/zip-check.txt"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/ditto -x -k "$task_app_zip" "$task_root/app-roundtrip"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/diff -qr "$task_app" "$task_root/app-roundtrip/AI Task Monitor.app"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_root/app-roundtrip/AI Task Monitor.app"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /bin/test -x "$task_root/app-roundtrip/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
+          AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
+            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/smoke-test.sh "$task_root/app-roundtrip/AI Task Monitor.app"
+          /bin/mv "$task_app_zip" "$task_root/validated-app/AI Task Monitor.app.zip"
+          /bin/cp "$task_root/release-artifacts/build-method.txt" "$task_root/release-artifacts/signature.txt" \
+            "$task_root/release-artifacts/load-commands-arm64.txt" "$task_root/release-artifacts/load-commands-x86_64.txt" "$task_root/validated-app/"
+          if test -f "$task_root/release-artifacts/icon-fallback-used"; then
+            /bin/cp "$task_root/release-artifacts/icon-fallback-used" "$task_root/validated-app/"
+          fi
+          (cd "$task_root/validated-app" && /usr/bin/shasum -a 256 'AI Task Monitor.app.zip' > SHA256-APP.txt && /usr/bin/shasum -a 256 -c SHA256-APP.txt)
+          printf '%s\n' "$GITHUB_SHA" > "$task_root/validated-app/source-commit.txt"
+      - name: Save isolated verified app
+        if: ${{ !cancelled() && steps.app_candidate.outcome == 'success' && matrix.runner == 'macos-15' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-0.3.12-diagnostic-app-${{ github.sha }}
+          path: ${{ runner.temp }}/aitm-card-tests.*/validated-app/*
+          if-no-files-found: error
+          retention-days: 7
+      - name: Create and inspect isolated macOS image
+        id: dmg_candidate
+        if: ${{ !cancelled() && steps.app_candidate.outcome == 'success' && matrix.runner == 'macos-15' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_TEST_TASK_ROOT"
+          task_source="$task_root/source/macos"
+          task_run="$task_root/run-isolated"
+          task_path="$task_root/release-tools:$AITM_TASK_PATH"
+          task_app="$task_source/dist/AI Task Monitor.app"
+          task_icon_sha=ec9ba4d716b1988dfad213127d9d2dffbb37e188199f8c7576d4325774e78e67
+          test "$(git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          cd "$task_source"
           AITM_TEST_SANDBOX_POLICY="$task_root/profile-offline.sb" "$task_run" /usr/bin/env \
             "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/create-dmg.sh
           task_dmg="$task_source/dist/AITaskMonitor-macOS-0.3.12.dmg"
@@ -473,12 +533,12 @@ jobs:
           fi
           /usr/bin/hdiutil detach "$task_root/dmg-mount"
           trap - EXIT
-          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$task_app" "$task_root/release-artifacts/AI Task Monitor.app.zip"
+          /bin/cp "$task_root/validated-app/AI Task Monitor.app.zip" "$task_root/release-artifacts/AI Task Monitor.app.zip"
           /bin/cp "$task_dmg" "$task_source/dist/SHA256SUMS-macOS.txt" "$task_root/release-artifacts/"
           (cd "$task_root/release-artifacts" && /usr/bin/shasum -a 256 'AI Task Monitor.app.zip' >> SHA256SUMS-macOS.txt && /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt)
           printf '%s\n' "$GITHUB_SHA" > "$task_root/release-artifacts/source-commit.txt"
       - name: Save isolated macOS candidate
-        if: ${{ success() && matrix.runner == 'macos-15' }}
+        if: ${{ !cancelled() && steps.dmg_candidate.outcome == 'success' && matrix.runner == 'macos-15' }}
         uses: actions/upload-artifact@v4
         with:
           name: macos-0.3.12-candidate-${{ github.sha }}
