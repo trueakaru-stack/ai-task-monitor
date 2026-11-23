@@ -119,6 +119,23 @@ try{
  Start-Sleep -Milliseconds 300
  $afterAppend=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity)
  Require ($afterAppend.Complete -and $afterAppend.RootsAgree) 'An ordinary selected-root append invalidated the group.'
+ $unrelatedCompressed=Join-Path $folder 'rollout-2026-11-23T10-00-00-13000000-0000-0000-0000-000000000099.jsonl.zst'
+ [IO.File]::WriteAllBytes($unrelatedCompressed,[byte[]]@(1,2,3));Start-Sleep -Milliseconds 300
+ $otherProof=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity)
+ Require ($otherProof.Complete -and $otherProof.RootsAgree) 'An unrelated compressed rollout invalidated the root.'
+ [IO.File]::Delete($unrelatedCompressed)
+ $compressed=$dualOld+'.zst';$priorChecks=$afterAppend.CheckCount
+ [IO.File]::WriteAllBytes($compressed,[byte[]]@(1,2,3))
+ $rootClock.Restart()
+ do{$rootProof=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity);if(-not $rootProof.Complete){break};Start-Sleep -Milliseconds 30}while($rootClock.ElapsedMilliseconds -lt 3000)
+ Require (-not $rootProof.Complete) 'A compressed rollout did not invalidate the prior agreement.'
+ $rootClock.Restart()
+ do{$rootProof=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity);if($rootProof.CheckCount -gt $priorChecks){break};Start-Sleep -Milliseconds 30}while($rootClock.ElapsedMilliseconds -lt 15000)
+ Require ($rootProof.CheckCount -gt $priorChecks -and -not $rootProof.Complete) 'An unreadable compressed rollout was ignored.'
+ $priorChecks=$rootProof.CheckCount;[IO.File]::Delete($compressed);$rootClock.Restart()
+ do{$rootProof=$rootReader.Snapshot($dualRootId,$dualNew,$dualIdentity);if($rootProof.CheckCount -gt $priorChecks -and $rootProof.Complete -and $rootProof.RootsAgree){break};Start-Sleep -Milliseconds 30}while($rootClock.ElapsedMilliseconds -lt 15000)
+ Require ($rootProof.Complete -and $rootProof.RootsAgree) 'The root scan did not recover after the compressed rollout was removed.'
+ $afterAppend=$rootProof
  $conflictHeader=@{type='session_meta';payload=@{id=$dualRootId;source='vscode';thread_source='subagent'}}|ConvertTo-Json -Compress
  $priorChecks=$afterAppend.CheckCount
  [IO.File]::WriteAllText($dualOld,($conflictHeader+"`n"),[Text.UTF8Encoding]::new($false))

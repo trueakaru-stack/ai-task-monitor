@@ -759,6 +759,9 @@ namespace AITaskMonitor.CodexObservation
                         }
                         if ((attributes & FileAttributes.Directory) != 0) { directories.Push(item); continue; }
                         if (!MatchesThreadFile(Path.GetFileName(item), id)) continue;
+                        // Compressed rollouts are not decoded here. Their mere
+                        // presence makes the set of root headers incomplete.
+                        if (item.EndsWith(".jsonl.zst", StringComparison.OrdinalIgnoreCase)) return incomplete;
                         if (versions.Count >= MaximumVersions) return incomplete;
                         object[] args = new object[] { home, id, item, null };
                         if (!(bool)validate.Invoke(null, args) || args[3] == null) return incomplete;
@@ -787,6 +790,7 @@ namespace AITaskMonitor.CodexObservation
 
         private static bool MatchesThreadFile(string name, string id)
         {
+            if (name.EndsWith(".jsonl.zst", StringComparison.OrdinalIgnoreCase)) name = name.Substring(0, name.Length - 4);
             if (!name.StartsWith("rollout-", StringComparison.OrdinalIgnoreCase)) return false;
             string prefix = "-" + id; int at = name.LastIndexOf(prefix, StringComparison.OrdinalIgnoreCase);
             if (at < 0) return false;
@@ -839,7 +843,8 @@ namespace AITaskMonitor.CodexObservation
         private void InvalidateChangedPath(string path, bool contentOnly)
         {
             string name = Path.GetFileName(path);
-            bool journal = name.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase);
+            bool journal = name.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase) ||
+                           name.EndsWith(".jsonl.zst", StringComparison.OrdinalIgnoreCase);
             if (!journal && contentOnly) return;
             lock (gate)
             {
