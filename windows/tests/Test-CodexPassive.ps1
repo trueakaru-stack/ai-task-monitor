@@ -14,7 +14,7 @@ $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'The monitor source failed to parse.'}
 $names=@('Prop','Tr','Localized-TaskTitle','Localized-TaskActivity','Localized-CompactTaskActivity','Source-WarningText','Lock-State','Find-PriorLifecycle','Thread-State','Codex-Uncertain','Session-File',
- 'Session-Workspace','Progress-Files','Manual-Tasks','Read-TailText','Codex-Plan','Codex-CurrentToolActivity','Codex-Activity','Read-ObservedCodexTail','Codex-ObservedActivity',
+ 'Session-Workspace','Progress-Files','Manual-Tasks','Read-TailText','Codex-Plan','Codex-TurnStartIndex','Codex-ContainsIdentifier','Codex-CurrentToolActivity','Codex-FigmaCompleted','Codex-FirstFigmaCompletion','Codex-Activity','Read-ObservedCodexTail','Codex-ObservedActivity',
  'Plan-Progress','Codex-IndexCandidates','Codex-SubagentMetadata','Codex-ReadSubagentMetadata','Codex-UnindexedCandidates','Codex-Tasks','Unconfirmed-Tasks','Source-Snapshot')
 $definitions=foreach($name in $names){
  $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true)

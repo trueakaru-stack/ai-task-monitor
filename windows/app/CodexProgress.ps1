@@ -57,6 +57,7 @@
  [ValidateRange(0,2500)][int]$PreviewMotionDelayMilliseconds = 0,
  [switch]$PreviewMotionUiTest,
  [switch]$PreviewOffscreen,
+ [switch]$PreviewCompactSwitchUiTest,
  [switch]$PreviewUnconfirmed,
  [switch]$PreviewPlanUnconfirmed,
  [switch]$PreviewPlanUiTest,
@@ -69,6 +70,28 @@
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
+if($PreviewCompactSwitchUiTest){
+ if($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:GITHUB_ACTIONS -cne 'true' -or
+    -not $env:RUNNER_TEMP -or -not $SnapshotFile -or -not $PreferencesFile -or -not $DiagnosticDirectory -or
+    -not $PreviewOffscreen -or -not $CompactMode -or $PreviewActiveTasks -ne 2){
+  throw 'Compact switch UI checks require a hosted Windows runner, synthetic tasks and isolated preview paths.'
+ }
+ $hostedTemp=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')+'\'
+ foreach($name in @('USERPROFILE','APPDATA','LOCALAPPDATA','TEMP','TMP')){
+  $value=[Environment]::GetEnvironmentVariable($name,'Process')
+  if(-not $value -or -not ([IO.Path]::GetFullPath($value).TrimEnd('\')+'\').StartsWith($hostedTemp,[StringComparison]::OrdinalIgnoreCase)){
+   throw 'Compact switch UI checks require an isolated hosted-runner profile.'
+  }
+ }
+ foreach($value in @($SnapshotFile,$PreferencesFile,$DiagnosticDirectory)){
+  if(-not ([IO.Path]::GetFullPath($value)).StartsWith($hostedTemp,[StringComparison]::OrdinalIgnoreCase)){
+   throw 'Compact switch UI outputs must remain within the hosted-runner temporary directory.'
+  }
+ }
+ if($env:CODEX_HOME -and -not ([IO.Path]::GetFullPath($env:CODEX_HOME).TrimEnd('\')+'\').StartsWith($hostedTemp,[StringComparison]::OrdinalIgnoreCase)){
+  throw 'Compact switch UI checks cannot use a Codex profile outside the hosted-runner temporary directory.'
+ }
+}
 if($PreviewLoopUiTest){
  if($PreviewActiveTasks -lt 1 -or -not $PreviewLoopWarning -or -not $SnapshotFile -or -not $DiagnosticDirectory){throw "Loop UI tests require synthetic tasks, a snapshot, and an isolated diagnostic directory."}
  $previewDataPath=[IO.Path]::GetFullPath($DiagnosticDirectory)
@@ -2526,19 +2549,33 @@ function Codex-Plan([string]$id) {
  return @($latest)
 }
 
-function Codex-CurrentToolActivity([string[]]$lines,[string]$turnId) {
- if(-not $turnId){return ''}
- $startIndex=-1
+function Codex-TurnStartIndex([string[]]$lines,[string]$turnId) {
+ if(-not $turnId){return -1}
  for($index=$lines.Count-1;$index -ge 0;$index--){
   $line=$lines[$index]
   if($line -notmatch '"(task_started|turn_started)"' -or [Text.Encoding]::UTF8.GetByteCount($line) -gt 1048576){continue}
   try{$boundary=ConvertFrom-Json -InputObject $line -ErrorAction Stop}catch{continue}
   $boundaryPayload=Prop $boundary 'payload'
   if([string](Prop $boundary 'type' '') -ceq 'event_msg' -and [string](Prop $boundaryPayload 'type' '') -in @('task_started','turn_started')){
-   if([string](Prop $boundaryPayload 'turn_id' '') -ceq $turnId){$startIndex=$index}
-   break
+   if([string](Prop $boundaryPayload 'turn_id' '') -ceq $turnId){return $index}
+   return -1
   }
  }
+ return -1
+}
+
+function Codex-ContainsIdentifier([string]$line,[string]$id) {
+ if($line.Contains($id)){return $true}
+ if(-not $line.Contains('\u')){return $false}
+ $decoded=[regex]::Replace($line,'\\u([0-9a-fA-F]{4})',{
+  param($match) return [string][char][Convert]::ToInt32($match.Groups[1].Value,16)
+ })
+ return $decoded.Contains($id)
+}
+
+function Codex-CurrentToolActivity([string[]]$lines,[string]$turnId) {
+ if(-not $turnId){return ''}
+ $startIndex=Codex-TurnStartIndex $lines $turnId
  if($startIndex -lt 0){return ''}
  # Keep this UI-thread check bounded even for a very long current turn.
  # A call that started outside this window falls back to the observed summary.
@@ -2594,15 +2631,7 @@ function Codex-CurrentToolActivity([string[]]$lines,[string]$turnId) {
  if($insideTurn -and $reliable -and $windowStart -gt $startIndex -and $active.Count){
   foreach($id in @($active.Keys)){
    for($index=$startIndex+1;$index -lt $windowStart;$index++){
-    $earlier=$lines[$index]
-    $matched=$earlier.Contains($id)
-    if(-not $matched -and $earlier.Contains('\u')){
-     $decoded=[regex]::Replace($earlier,'\\u([0-9a-fA-F]{4})',{
-      param($match) return [string][char][Convert]::ToInt32($match.Groups[1].Value,16)
-     })
-     $matched=$decoded.Contains($id)
-    }
-    if($matched){[void]$active.Remove($id);break}
+    if(Codex-ContainsIdentifier $lines[$index] $id){[void]$active.Remove($id);break}
    }
   }
  }
@@ -2611,6 +2640,48 @@ function Codex-CurrentToolActivity([string[]]$lines,[string]$turnId) {
   if($current.Count){return [string]$current[0].Title}
  }
  return ''
+}
+
+function Codex-FigmaCompleted($payload,[string]$id,[string]$turnId) {
+ if(-not $turnId -or [string](Prop $payload 'type' '') -cne 'item_completed' -or
+    [string](Prop $payload 'thread_id' '') -cne $id -or [string](Prop $payload 'turn_id' '') -cne $turnId){return $null}
+ $item=Prop $payload 'item'
+ $itemId=[string](Prop $item 'id' '')
+ if([string](Prop $item 'type' '') -cne 'McpToolCall' -or [string](Prop $item 'server' '') -cne 'codex_apps' -or
+    [string](Prop $item 'tool' '') -cne 'figma.use_figma' -or [string](Prop $item 'status' '') -cne 'completed' -or
+    $itemId -cnotmatch '^[A-Za-z0-9_-]{1,256}$' -or $null -ne (Prop $item 'error') -or
+    [bool](Prop (Prop $item 'result') 'isError' $false)){return $null}
+ $arguments=Prop $item 'arguments';$description=Prop $arguments 'description'
+ if($arguments -isnot [PSCustomObject] -or $description -isnot [string] -or
+    $description.Length -gt 4096 -or [string]::IsNullOrWhiteSpace($description)){return $null}
+ return [PSCustomObject]@{Id=$itemId;Description=[regex]::Replace($description.Trim(),'\s+',' ')}
+}
+
+function Codex-FirstFigmaCompletion([string[]]$lines,[int]$startIndex,[string]$id,[string]$turnId) {
+ if($startIndex -lt 0 -or -not $turnId){return $null}
+ $first=New-Object 'Collections.Generic.Dictionary[string,int]' ([StringComparer]::Ordinal)
+ $descriptions=New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
+ $conflicts=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+ $lastUnreadable=-1
+ for($index=$startIndex+1;$index -lt $lines.Count;$index++){
+  $line=$lines[$index]
+  if([string]::IsNullOrWhiteSpace($line)){continue}
+  if([Text.Encoding]::UTF8.GetByteCount($line) -gt 1048576){$lastUnreadable=$index;continue}
+  try{$record=ConvertFrom-Json -InputObject $line -ErrorAction Stop}catch{$lastUnreadable=$index;continue}
+  $payload=Prop $record 'payload'
+  if($record -isnot [PSCustomObject] -or $payload -isnot [PSCustomObject]){$lastUnreadable=$index;continue}
+  if([string](Prop $record 'type' '') -cne 'event_msg'){continue}
+  if([string](Prop $payload 'type' '') -cne 'item_completed'){continue}
+  $eventThread=[string](Prop $payload 'thread_id' '');$eventTurn=[string](Prop $payload 'turn_id' '')
+  if(($eventThread -and $eventThread -cne $id) -or ($eventTurn -and $eventTurn -cne $turnId)){continue}
+  $itemId=[string](Prop (Prop $payload 'item') 'id' '')
+  if($itemId -cnotmatch '^[A-Za-z0-9_-]{1,256}$'){continue}
+  $completed=Codex-FigmaCompleted $payload $id $turnId
+  $description=if($null -ne $completed){[string]$completed.Description}else{''}
+  if(-not $first.ContainsKey($itemId)){$first.Add($itemId,$index);$descriptions.Add($itemId,$description)}
+  elseif($descriptions[$itemId] -cne $description){[void]$conflicts.Add($itemId)}
+ }
+ return [PSCustomObject]@{First=$first;Conflicts=$conflicts;LastUnreadable=$lastUnreadable}
 }
 
 function Codex-Activity([string]$id) {
@@ -2628,33 +2699,56 @@ function Codex-Activity([string]$id) {
     $startIndex=$index;$turnId=[string](Prop $payload "turn_id" "");break
    }
   }
-  $currentTool=Codex-CurrentToolActivity $lines $turnId
+  $currentTool=Codex-CurrentToolActivity $lines $turnId;$laterAction=$false;$figmaScan=$null;$figmaScanned=$false
   if($currentTool){return $currentTool}
   for($index=$lines.Count-1;$index -gt $startIndex;$index--){
    $line=$lines[$index]
-   if($line.Length -gt 1048576 -or $line -notmatch '"(agent_reasoning|reasoning|Reasoning|commentary)"'){continue}
+   if($line.Length -gt 1048576 -or $line -notmatch '"(agent_reasoning|reasoning|Reasoning|commentary|item_completed)"'){continue}
    try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
    $payload=Prop $record "payload"
    $recordType=[string](Prop $record "type" ""); $kind=[string](Prop $payload "type" "")
    $eventTurn=[string](Prop $payload "turn_id" "")
-   if($turnId -and $eventTurn -and $turnId -ne $eventTurn){continue}
+   if($turnId -and $eventTurn -and $turnId -cne $eventTurn){continue}
+   $eventThread=[string](Prop $payload 'thread_id' '')
+   if($eventThread -and $eventThread -cne $id){continue}
+   $eventRole=[string](Prop $payload 'role' '')
+   if($eventRole -and $eventRole -cne 'assistant'){continue}
+   if($recordType -eq 'event_msg' -and $kind -eq 'item_completed' -and
+      (-not $eventThread -or $eventThread -ceq $id) -and (-not $eventTurn -or $eventTurn -ceq $turnId)){
+    $completedItem=Prop $payload 'item';$completedType=[string](Prop $completedItem 'type' '')
+    if($completedType -notin @('Reasoning','AgentMessage')){
+     $figma=Codex-FigmaCompleted $payload $id $turnId
+     if($null -ne $figma){
+      if(-not $figmaScanned){$figmaScan=Codex-FirstFigmaCompletion $lines $startIndex $id $turnId;$figmaScanned=$true}
+      if($null -eq $figmaScan -or -not $figmaScan.First.ContainsKey([string]$figma.Id)){continue}
+      if($figmaScan.Conflicts.Contains([string]$figma.Id)){$laterAction=$true;continue}
+      if($figmaScan.First[[string]$figma.Id] -ne $index){continue}
+      if(-not $laterAction -and -not $latestCommentary -and $figmaScan.LastUnreadable -le $index){$prefix=if($script:resolvedLanguage -eq 'en'){'Last Figma action: '}else{'Последнее действие в Figma: '};return $prefix+$figma.Description}
+     }
+     $laterAction=$true
+    }
+   }
    $summary=""
    if($recordType -eq "event_msg" -and $kind -eq "agent_reasoning"){
     $summary=[string](Prop $payload "text" "")
+   }elseif(-not $latestCommentary -and $recordType -eq 'event_msg' -and $kind -eq 'agent_message' -and [string](Prop $payload 'phase' '') -eq 'commentary'){
+    $text=[string](Prop $payload 'message' '');if($text.Trim()){$latestCommentary=$text}
    }elseif($recordType -eq "response_item" -and $kind -eq "reasoning"){
     foreach($part in @(Prop $payload "summary" @())){
      if([string](Prop $part "type" "") -eq "summary_text" -and [string](Prop $part "text" "")){$summary=[string](Prop $part "text" "")}
     }
-   }elseif($kind -eq "item_completed"){
+   }elseif($recordType -ceq 'event_msg' -and $kind -ceq 'item_completed' -and $turnId -and $eventTurn -ceq $turnId -and $eventThread -ceq $id){
     $item=Prop $payload "item"
     if([string](Prop $item "type" "") -eq "Reasoning"){
      foreach($part in @(Prop $item "summary_text" @())){if($part -is [string] -and $part.Trim()){$summary=[string]$part}}
     }elseif(-not $latestCommentary -and [string](Prop $item "type" "") -eq "AgentMessage" -and [string](Prop $item "phase" "") -eq "commentary"){
-     foreach($part in @(Prop $item "content" @())){if([string](Prop $part "type" "") -eq "Text"){$latestCommentary=[string](Prop $part "text" "")}}
+     $itemRole=[string](Prop $item 'role' '')
+     if(-not $itemRole -or $itemRole -ceq 'assistant'){foreach($part in @(Prop $item "content" @())){if([string](Prop $part "type" "") -eq "Text"){$text=[string](Prop $part "text" "");if($text.Trim()){$latestCommentary=$text}}}}
     }
-   }elseif(-not $latestCommentary -and $kind -eq "message" -and [string](Prop $payload "phase" "") -eq "commentary"){
-    foreach($part in @(Prop $payload "content" @())){if([string](Prop $part "type" "") -eq "output_text"){$latestCommentary=[string](Prop $part "text" "")}}
+   }elseif(-not $latestCommentary -and $recordType -eq 'response_item' -and $kind -eq "message" -and [string](Prop $payload "phase" "") -eq "commentary" -and [string](Prop $payload 'role' '') -ceq 'assistant'){
+    foreach($part in @(Prop $payload "content" @())){if([string](Prop $part "type" "") -eq "output_text"){$text=[string](Prop $part "text" "");if($text.Trim()){$latestCommentary=$text}}}
    }
+   if($latestCommentary){return [regex]::Replace($latestCommentary.Trim(),'\s+',' ')}
    if($summary){
     $firstLine=@($summary -split "`r?`n" | Where-Object {$_.Trim()} | Select-Object -First 1)
     if($firstLine.Count -gt 0){
@@ -2718,23 +2812,44 @@ function Codex-ObservedActivity([string]$id,[string]$startKey) {
   $turn=if($startKey.StartsWith('turn:',[StringComparison]::Ordinal)){$startKey.Substring(5)}else{''}
   $currentTool=Codex-CurrentToolActivity $lines $turn
   if($currentTool){return $currentTool}
-  for($index=$lines.Count-1;$index -ge 0;$index--){
+  $startIndex=Codex-TurnStartIndex $lines $turn;$laterAction=$false;$figmaScan=$null;$figmaScanned=$false
+  for($index=$lines.Count-1;$index -gt $startIndex;$index--){
    $line=$lines[$index]
    if($line.Length -gt 1048576 -or $line -notmatch '"(item_completed|agent_message|commentary)"'){continue}
    try{$record=$line|ConvertFrom-Json -ErrorAction Stop}catch{continue}
    $payload=Prop $record 'payload';$recordType=[string](Prop $record 'type' '');$kind=[string](Prop $payload 'type' '')
    $message=''
+   $eventThread=[string](Prop $payload 'thread_id' '');$eventTurn=[string](Prop $payload 'turn_id' '')
+   if(($eventThread -and $eventThread -cne $id) -or ($turn -and $eventTurn -and $eventTurn -cne $turn)){continue}
+   $eventRole=[string](Prop $payload 'role' '')
+   if($eventRole -and $eventRole -cne 'assistant'){continue}
+   if($recordType -eq 'event_msg' -and $kind -eq 'item_completed' -and
+      (-not $eventThread -or $eventThread -ceq $id) -and (-not $eventTurn -or $eventTurn -ceq $turn)){
+    $actionItem=Prop $payload 'item';$actionType=[string](Prop $actionItem 'type' '')
+    if($actionType -notin @('Reasoning','AgentMessage')){
+     $figma=Codex-FigmaCompleted $payload $id $turn
+     if($null -ne $figma){
+      if(-not $figmaScanned){$figmaScan=Codex-FirstFigmaCompletion $lines $startIndex $id $turn;$figmaScanned=$true}
+      if($null -eq $figmaScan -or -not $figmaScan.First.ContainsKey([string]$figma.Id)){continue}
+      if($figmaScan.Conflicts.Contains([string]$figma.Id)){$laterAction=$true;continue}
+      if($figmaScan.First[[string]$figma.Id] -ne $index){continue}
+      if(-not $laterAction -and $figmaScan.LastUnreadable -le $index){$prefix=if($script:resolvedLanguage -eq 'en'){'Last Figma action: '}else{'Последнее действие в Figma: '};return $prefix+$figma.Description}
+     }
+     $laterAction=$true
+    }
+   }
    if($recordType -eq 'event_msg' -and $kind -eq 'item_completed' -and $turn -and
       [string](Prop $payload 'thread_id' '') -eq $id -and [string](Prop $payload 'turn_id' '') -ceq $turn){
     $item=Prop $payload 'item';$itemType=[string](Prop $item 'type' '')
     if($itemType -eq 'Reasoning'){
      foreach($part in @(Prop $item 'summary_text' @())){if($part -is [string] -and $part.Trim()){$message=[string]$part}}
     }elseif($itemType -eq 'AgentMessage' -and [string](Prop $item 'phase' '') -eq 'commentary'){
-     foreach($part in @(Prop $item 'content' @())){if([string](Prop $part 'type' '') -eq 'Text'){$message=[string](Prop $part 'text' '')}}
+     $itemRole=[string](Prop $item 'role' '')
+     if(-not $itemRole -or $itemRole -ceq 'assistant'){foreach($part in @(Prop $item 'content' @())){if([string](Prop $part 'type' '') -eq 'Text'){$message=[string](Prop $part 'text' '')}}}
     }
    }elseif($recordType -eq 'event_msg' -and $kind -eq 'agent_message' -and [string](Prop $payload 'phase' '') -eq 'commentary'){
     $message=[string](Prop $payload 'message' '')
-   }elseif($recordType -eq 'response_item' -and $kind -eq 'message' -and [string](Prop $payload 'role' '') -eq 'assistant' -and [string](Prop $payload 'phase' '') -eq 'commentary'){
+   }elseif($recordType -eq 'response_item' -and $kind -eq 'message' -and [string](Prop $payload 'role' '') -ceq 'assistant' -and [string](Prop $payload 'phase' '') -eq 'commentary'){
     foreach($part in @(Prop $payload 'content' @())){if([string](Prop $part 'type' '') -eq 'output_text'){$message=[string](Prop $part 'text' '')}}
    }
    if($message){
@@ -4782,6 +4897,78 @@ if($PreviewUpdate){$script:availableUpdate=[PSCustomObject]@{Version='0.3.0-alph
 if ($SnapshotFile) {
  if($PreviewOffscreen){$window.WindowStartupLocation="Manual";$window.Left=-10000;$window.Top=-10000;$window.ShowActivated=$false;$window.ShowInTaskbar=$false}
  $window.Show(); $window.UpdateLayout()
+ if($PreviewCompactSwitchUiTest){
+  function Find-CompactPreviewText($parent,[string]$expected){
+   if($parent -is [Windows.Controls.TextBlock] -and $parent.IsVisible -and $parent.Text -ceq $expected){return $true}
+   for($childIndex=0;$childIndex -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$childIndex++){
+    if(Find-CompactPreviewText ([Windows.Media.VisualTreeHelper]::GetChild($parent,$childIndex)) $expected){return $true}
+   }
+   return $false
+  }
+  function Get-CompactPreviewRenderDigest {
+   $window.UpdateLayout()
+   $width=[Math]::Max(1,[int][Math]::Ceiling($window.ActualWidth));$height=[Math]::Max(1,[int][Math]::Ceiling($window.ActualHeight))
+   $bitmap=[Windows.Media.Imaging.RenderTargetBitmap]::new($width,$height,96,96,[Windows.Media.PixelFormats]::Pbgra32)
+   $bitmap.Render($window);$pixels=[byte[]]::new($width*$height*4);$bitmap.CopyPixels($pixels,$width*4,0)
+   $hash=[Security.Cryptography.SHA256]::Create()
+   try{return [Convert]::ToBase64String($hash.ComputeHash($pixels))}finally{$hash.Dispose()}
+  }
+  if(-not $window.IsVisible -or -not $compactView.IsVisible -or $compactTasksPanel.ActualWidth -le 0 -or
+     $compactTasksPanel.ActualHeight -le 0 -or $compactDotsPanel.Children.Count -ne 2){
+   throw 'The compact preview or its two task buttons was not rendered.'
+  }
+  $initialId=[string]$script:compactTaskId
+  $initialButton=@($compactDotsPanel.Children|Where-Object {[string]$_.Tag -ceq $initialId})
+  $otherButton=@($compactDotsPanel.Children|Where-Object {[string]$_.Tag -cne $initialId})
+  if($initialButton.Count -ne 1 -or $otherButton.Count -ne 1){throw 'The compact preview has an ambiguous selection.'}
+  $firstDot=$compactDotsPanel.Children[0];$secondDot=$compactDotsPanel.Children[1]
+  $otherId=[string]$otherButton[0].Tag
+  $initialTask=@($script:lastAllTasks|Where-Object {[string]$_.Id -ceq $initialId})
+  $otherTask=@($script:lastAllTasks|Where-Object {[string]$_.Id -ceq $otherId})
+  if($initialTask.Count -ne 1 -or $otherTask.Count -ne 1){throw 'The compact preview tasks are unavailable.'}
+  $initialTitle=Localized-TaskTitle $initialTask[0];$otherTitle=Localized-TaskTitle $otherTask[0]
+  if($initialTitle -ceq $otherTitle -or -not (Find-CompactPreviewText $compactTasksPanel $initialTitle)){
+   throw 'The initial compact task title was not rendered.'
+  }
+  $beforeDigest=Get-CompactPreviewRenderDigest
+  $script:fingerprint='';Update-View;$window.UpdateLayout()
+  if($compactDotsPanel.Children.Count -ne 2 -or -not [object]::ReferenceEquals($firstDot,$compactDotsPanel.Children[0]) -or
+     -not [object]::ReferenceEquals($secondDot,$compactDotsPanel.Children[1]) -or $script:compactTaskId -cne $initialId){
+   throw 'A compact refresh replaced task buttons or changed the selection.'
+  }
+  $watch=[Diagnostics.Stopwatch]::StartNew()
+  $otherButton[0].RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+  $watch.Stop();$firstHandlerMs=$watch.Elapsed.TotalMilliseconds
+  $window.UpdateLayout()
+  if($script:compactTaskId -cne $otherId -or -not (Find-CompactPreviewText $compactTasksPanel $otherTitle) -or
+     (Find-CompactPreviewText $compactTasksPanel $initialTitle) -or
+     $otherButton[0].Content.Background.Color -ne (Brush $script:accentHex).Color -or
+     $initialButton[0].Content.Background.Color -ne (Brush $script:palette.Scroll).Color){
+   throw 'The scripted Click did not render the other compact task and selected dot.'
+  }
+  $afterDigest=Get-CompactPreviewRenderDigest
+  if($beforeDigest -ceq $afterDigest){throw 'The compact rendering did not change after the scripted Click.'}
+  $script:fingerprint='';Update-View;$window.UpdateLayout()
+  if($script:compactTaskId -cne $otherId -or $compactDotsPanel.Children.Count -ne 2 -or
+     -not [object]::ReferenceEquals($firstDot,$compactDotsPanel.Children[0]) -or
+     -not [object]::ReferenceEquals($secondDot,$compactDotsPanel.Children[1])){
+   throw 'A compact refresh did not preserve the scripted selection and task buttons.'
+  }
+  $watch=[Diagnostics.Stopwatch]::StartNew()
+  $initialButton[0].RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+  $watch.Stop();$secondHandlerMs=$watch.Elapsed.TotalMilliseconds
+  $window.UpdateLayout()
+  if($script:compactTaskId -cne $initialId -or -not (Find-CompactPreviewText $compactTasksPanel $initialTitle) -or
+     (Find-CompactPreviewText $compactTasksPanel $otherTitle) -or
+     $initialButton[0].Content.Background.Color -ne (Brush $script:accentHex).Color -or
+     $otherButton[0].Content.Background.Color -ne (Brush $script:palette.Scroll).Color -or
+     $compactDotsPanel.Children.Count -ne 2 -or -not [object]::ReferenceEquals($firstDot,$compactDotsPanel.Children[0]) -or
+     -not [object]::ReferenceEquals($secondDot,$compactDotsPanel.Children[1])){
+   throw 'The scripted Click did not restore the initial compact task and selected dot.'
+  }
+  $measurement=[ordered]@{scriptedClicks=2;firstHandlerMs=[Math]::Round($firstHandlerMs,2);secondHandlerMs=[Math]::Round($secondHandlerMs,2);buttonsPreserved=$true;renderingChanged=$true}
+  Write-Output ('CompactSwitchUi: '+($measurement|ConvertTo-Json -Compress))
+ }
  if($PreviewProviderLabelsUiTest){
   function Find-ProviderLabel($parent,[string]$expected){
    if($parent -is [Windows.Controls.TextBlock] -and $parent.Text -ceq $expected -and $parent.IsVisible){return $parent}
