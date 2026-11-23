@@ -114,42 +114,87 @@ jobs:
             fi
             tail -n 50 "$task_root/logs/$mode.log"
           done
-          echo 'hdiutil makehybrid diagnostic without raw-device permissions'
-          if run_isolated /usr/bin/hdiutil makehybrid -hfs -hfs-volume-name 'AI Task Monitor' \
-            -o "$task_root/temp/hybrid.dmg" "$task_root/temp/app-stage" >"$task_root/logs/hybrid.log" 2>&1; then
-            test -s "$task_root/temp/hybrid.dmg"
-            echo 'Hybrid image created; converting to UDZO.'
-            if run_isolated /usr/bin/hdiutil convert "$task_root/temp/hybrid.dmg" -format UDZO \
-              -o "$task_root/temp/hybrid-udzo.dmg" >"$task_root/logs/hybrid-convert.log" 2>&1; then
-              test -s "$task_root/temp/hybrid-udzo.dmg"
-              run_isolated /usr/bin/hdiutil verify "$task_root/temp/hybrid-udzo.dmg" >"$task_root/logs/hybrid-verify.log" 2>&1
-              mkdir -p "$task_root/temp/hybrid-mount"
-              if run_isolated /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen \
-                -mountpoint "$task_root/temp/hybrid-mount" "$task_root/temp/hybrid-udzo.dmg" >"$task_root/logs/hybrid-attach.log" 2>&1; then
-                trap 'run_isolated /usr/bin/hdiutil detach "$task_root/temp/hybrid-mount" >/dev/null 2>&1 || true' EXIT
-                test -d "$task_root/temp/hybrid-mount/AI Task Monitor.app"
-                test -L "$task_root/temp/hybrid-mount/Applications"
-                test "$(readlink "$task_root/temp/hybrid-mount/Applications")" = /Applications
-                test "$(find "$task_root/temp/hybrid-mount" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 2
-                run_isolated /usr/bin/diff -qr "$task_app" "$task_root/temp/hybrid-mount/AI Task Monitor.app"
-                run_isolated /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_root/temp/hybrid-mount/AI Task Monitor.app"
-                task_icon_actual="$(/usr/bin/shasum -a 256 "$task_root/temp/hybrid-mount/AI Task Monitor.app/Contents/Resources/AppIcon.icns")"
-                test "${task_icon_actual%% *}" = ec9ba4d716b1988dfad213127d9d2dffbb37e188199f8c7576d4325774e78e67
-                run_isolated /usr/bin/hdiutil detach "$task_root/temp/hybrid-mount"
-                trap - EXIT
-                echo 'Hybrid image contents, icon and strict signature verified.'
-              else
-                echo 'Hybrid image could not be mounted in the restricted environment.'
-                cat "$task_root/logs/hybrid-attach.log"
-              fi
-            else
-              echo 'Hybrid image conversion failed.'
-              cat "$task_root/logs/hybrid-convert.log"
+          # This diagnostic changes only an image in the disposable task directory.
+          # It never authorizes writes to raw disk devices or changes the installer.
+          run_logged() {
+            local name="$1"; shift
+            echo "Running $name"
+            if ! run_isolated "$@" >"$task_root/logs/$name.log" 2>&1; then
+              cat "$task_root/logs/$name.log" >&2
+              return 1
             fi
-          else
-            echo 'Hybrid image creation failed.'
-            cat "$task_root/logs/hybrid.log"
+          }
+          check_mount() {
+            local plist="$1" expected="$2" index value found=false
+            for index in {0..15}; do
+              value="$(/usr/libexec/PlistBuddy -c "Print :system-entities:$index:mount-point" "$plist" 2>/dev/null || true)"
+              if test "$value" = "$expected"; then found=true; fi
+            done
+            test "$found" = true
+            test -d "$expected/AI Task Monitor.app"
+            test ! -L "$expected/AI Task Monitor.app"
+            test -L "$expected/Applications"
+            test "$(/usr/bin/readlink "$expected/Applications")" = /Applications
+          }
+          run_logged hybrid /usr/bin/hdiutil makehybrid -hfs -hfs-volume-name 'AI Task Monitor' \
+            -o "$task_root/temp/hybrid.dmg" "$task_root/temp/app-stage"
+          test -s "$task_root/temp/hybrid.dmg"
+          run_logged convert-rw /usr/bin/hdiutil convert "$task_root/temp/hybrid.dmg" -format UDRW \
+            -o "$task_root/temp/hybrid-rw.dmg"
+          test -s "$task_root/temp/hybrid-rw.dmg"
+          rw_mount="$task_root/temp/hybrid-rw-mount"
+          mkdir "$rw_mount"
+          trap 'run_isolated /usr/bin/hdiutil detach "$rw_mount" >/dev/null 2>&1 || true' EXIT
+          run_logged attach-rw /usr/bin/hdiutil attach -plist -readwrite -nobrowse -noautoopen \
+            -mountpoint "$rw_mount" "$task_root/temp/hybrid-rw.dmg"
+          check_mount "$task_root/logs/attach-rw.log" "$rw_mount"
+          rw_app="$rw_mount/AI Task Monitor.app"
+          test -z "$(run_isolated /usr/bin/find "$rw_app" -type l -print -quit)"
+          run_isolated /usr/bin/touch "$rw_mount/.aitm-write-probe"
+          run_isolated /bin/rm "$rw_mount/.aitm-write-probe"
+          if run_isolated /usr/bin/codesign --verify --deep --strict --verbose=2 "$rw_app" >"$task_root/logs/signature-before.log" 2>&1; then
+            echo 'The mounted synthetic app unexpectedly passed the negative control.' >&2; exit 1
           fi
+          if ! grep -F 'Disallowed xattr com.apple.FinderInfo' "$task_root/logs/signature-before.log" >/dev/null; then
+            cat "$task_root/logs/signature-before.log" >&2; exit 1
+          fi
+          run_isolated /usr/bin/find "$rw_app" -xdev \( -type f -o -type d \) -print0 >"$task_root/temp/mounted-entries"
+          count=0
+          while IFS= read -r -d '' entry; do
+            case "$entry" in "$rw_app"|"$rw_app"/*) ;; *) echo 'Entry escaped the verified mount.' >&2; exit 1;; esac
+            if run_isolated /usr/bin/xattr -p com.apple.FinderInfo "$entry" >/dev/null 2>&1; then
+              run_isolated /usr/bin/xattr -d com.apple.FinderInfo "$entry"
+              count=$((count + 1))
+            fi
+          done <"$task_root/temp/mounted-entries"
+          test "$count" -gt 0
+          echo "Removed FinderInfo from $count synthetic entries."
+          run_logged diff-rw /usr/bin/diff -qr "$task_app" "$rw_app"
+          run_logged signature-rw /usr/bin/codesign --verify --deep --strict --verbose=2 "$rw_app"
+          run_logged detach-rw /usr/bin/hdiutil detach "$rw_mount"
+          trap - EXIT
+          run_logged convert-udzo /usr/bin/hdiutil convert "$task_root/temp/hybrid-rw.dmg" -format UDZO \
+            -o "$task_root/temp/hybrid-verified.dmg"
+          test -s "$task_root/temp/hybrid-verified.dmg"
+          run_logged verify-udzo /usr/bin/hdiutil verify "$task_root/temp/hybrid-verified.dmg"
+          ro_mount="$task_root/temp/hybrid-ro-mount"
+          mkdir "$ro_mount"
+          trap 'run_isolated /usr/bin/hdiutil detach "$ro_mount" >/dev/null 2>&1 || true' EXIT
+          run_logged attach-ro /usr/bin/hdiutil attach -plist -readonly -nobrowse -noautoopen \
+            -mountpoint "$ro_mount" "$task_root/temp/hybrid-verified.dmg"
+          check_mount "$task_root/logs/attach-ro.log" "$ro_mount"
+          ro_app="$ro_mount/AI Task Monitor.app"
+          test "$(run_isolated /usr/bin/find "$ro_mount" -mindepth 1 -maxdepth 1 | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 2
+          test -x "$ro_app/Contents/MacOS/AITaskMonitor"
+          run_logged diff-ro /usr/bin/diff -qr "$task_app" "$ro_app"
+          run_logged signature-ro /usr/bin/codesign --verify --deep --strict --verbose=2 "$ro_app"
+          task_icon_actual="$(run_isolated /usr/bin/shasum -a 256 "$ro_app/Contents/Resources/AppIcon.icns")"
+          test "${task_icon_actual%% *}" = ec9ba4d716b1988dfad213127d9d2dffbb37e188199f8c7576d4325774e78e67
+          run_logged copy-app /usr/bin/ditto "$ro_app" "$task_root/temp/copied.app"
+          run_logged signature-copied /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_root/temp/copied.app"
+          run_logged detach-ro /usr/bin/hdiutil detach "$ro_mount"
+          trap - EXIT
+          echo 'Read-write cleanup and strict signatures passed on the synthetic image and copied app.'
           for probe in "$marker" "$task_root/denied-link"; do
             if run_isolated /bin/cat "$probe" >/dev/null 2>&1 || run_isolated /usr/bin/touch "$probe" >/dev/null 2>&1; then
               echo 'Profile access became available.' >&2; exit 1
