@@ -140,6 +140,10 @@ jobs:
           # in the synthetic staging directory before creating the image.
           run_logged create-padding /bin/dd if=/dev/zero of="$task_root/temp/app-stage/.aitm-padding" bs=1048576 count=16
           test "$(run_isolated /usr/bin/stat -f %z "$task_root/temp/app-stage/.aitm-padding")" = 16777216
+          # Apple's documented per-volume marker is tested only on this image.
+          run_isolated /bin/mkdir "$task_root/temp/app-stage/.fseventsd"
+          run_isolated /usr/bin/touch "$task_root/temp/app-stage/.fseventsd/no_log"
+          test "$(run_isolated /usr/bin/stat -f %z "$task_root/temp/app-stage/.fseventsd/no_log")" = 0
           run_logged hybrid /usr/bin/hdiutil makehybrid -hfs -hfs-volume-name 'AI Task Monitor' \
             -o "$task_root/temp/hybrid.dmg" "$task_root/temp/app-stage"
           test -s "$task_root/temp/hybrid.dmg"
@@ -188,9 +192,8 @@ jobs:
           echo "Removed FinderInfo from $count synthetic entries."
           run_logged diff-rw /usr/bin/diff -qr "$task_app" "$rw_app"
           run_logged signature-rw /usr/bin/codesign --verify --deep --strict --verbose=2 "$rw_app"
-          # FSEvents may create a private directory while this disposable image
-          # is writable. Inspect every direct child before removing anything;
-          # refuse links, subdirectories, unknown names and other devices.
+          # Remove only our empty marker and its empty directory. Any other
+          # FSEvents entry is a diagnostic failure and is never deleted.
           event_dir="$rw_mount/.fseventsd"
           if test -e "$event_dir" || test -L "$event_dir"; then
             test -d "$event_dir"
@@ -204,13 +207,15 @@ jobs:
             while IFS= read -r -d '' entry; do
               case "$entry" in "$event_dir"/*) ;; *) echo 'Event entry escaped its directory.' >&2; exit 1;; esac
               entry_name="${entry#"$event_dir"/}"
-              [[ "$entry_name" =~ ^([0-9a-f]{16}|fseventsd-uuid|no_log)$ ]]
+              test "$entry_name" = no_log
               test -f "$entry"
               test ! -L "$entry"
               test "$(run_isolated /usr/bin/stat -f %d "$entry")" = "$image_device"
+              test "$(run_isolated /usr/bin/stat -f %z "$entry")" = 0
               event_count=$((event_count + 1))
-              test "$event_count" -le 128
+              test "$event_count" -le 1
             done <"$task_root/temp/event-entries"
+            test "$event_count" = 1
             while IFS= read -r -d '' entry; do
               test ! -L "$event_dir"
               test ! -L "$entry"
@@ -218,7 +223,9 @@ jobs:
             done <"$task_root/temp/event-entries"
             test ! -L "$event_dir"
             run_isolated /bin/rmdir "$event_dir"
-            echo "Removed $event_count verified temporary FSEvents files."
+            echo 'Removed only the verified empty no_log marker.'
+          else
+            echo 'The synthetic no_log marker disappeared before inspection.' >&2; exit 1
           fi
           run_logged list-rw-clean /usr/bin/find "$rw_mount" -mindepth 1 -maxdepth 1 -print
           cat "$task_root/logs/list-rw-clean.log"
@@ -236,6 +243,10 @@ jobs:
             -mountpoint "$ro_mount" "$task_root/temp/hybrid-verified.dmg"
           run_logged list-ro-root /bin/ls -la "$ro_mount"
           cat "$task_root/logs/list-ro-root.log"
+          if test -d "$ro_mount/.fseventsd" && test ! -L "$ro_mount/.fseventsd"; then
+            run_logged list-ro-fsevents /bin/ls -la "$ro_mount/.fseventsd"
+            cat "$task_root/logs/list-ro-fsevents.log"
+          fi
           run_logged read-ro-link /usr/bin/readlink "$ro_mount/Applications"
           cat "$task_root/logs/read-ro-link.log"
           echo 'Checking final mount identity and expected entries.'
