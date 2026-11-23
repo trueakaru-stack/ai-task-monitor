@@ -38,23 +38,36 @@ final class CodexGroupingVisualTests: XCTestCase {
             for dark in [false, true] {
                 for compact in [false, true] {
                   for disclosureOpen in [false, true] {
-                   for longTitle in [false, true] {
-                    let title = longTitle
+                   for scenario in ["normal", "long", "demo"] {
+                    for selected in (compact && scenario == "demo" ? [0, 1] : [0]) {
+                    if selected == 1 && disclosureOpen { continue }
+                    let demo = scenario == "demo"
+                    let title = scenario == "long"
                         ? tr("Очень длинное название родительской задачи для проверки обрезки и подсказки",
                              "A very long parent task title for checking truncation and its tooltip")
                         : tr("Проверка загрузки событий", "Checking event loading")
                     let parentTask = MonitoredTask(id: rootID, provider: .codex, title: title,
-                        activity: tr("Проверяю сохранение основного действия", "Checking that the parent activity stays visible"),
+                        activity: demo ? tr("Проверяю обработку событий", "Checking event processing") :
+                            tr("Проверяю сохранение основного действия", "Checking that the parent activity stays visible"),
                         isActive: true, progress: 50, progressKind: .exact,
-                        steps: [TaskStep(title: tr("Первый этап", "First step"), status: .done),
-                                TaskStep(title: tr("Второй этап", "Second step"), status: .active)],
+                        steps: demo ? [TaskStep(title: tr("Изучить обработку событий", "Review event processing"), status: .done),
+                                       TaskStep(title: tr("Проверить загрузку данных", "Check data loading"), status: .done),
+                                       TaskStep(title: tr("Проверить обработку ошибок", "Check error handling"), status: .active),
+                                       TaskStep(title: tr("Сравнить результаты", "Compare results"), status: .pending)] :
+                            [TaskStep(title: tr("Первый этап", "First step"), status: .done),
+                             TaskStep(title: tr("Второй этап", "Second step"), status: .active)],
                         updatedAt: Date())
+                    let agentNames = ["Curie", "Averroes", "Noether"]
+                    let exampleActions = [tr("Проверка обработки ошибок", "Checking error handling"),
+                                          tr("Проверка загрузки данных", "Checking data loading"),
+                                          tr("Сравнение результатов проверок", "Comparing check results")]
                     let children = ids.enumerated().map { offset, id in
                         MonitoredTask(id: id, provider: .codex,
-                            title: tr("Помощник \(offset + 1)", "Assistant \(offset + 1)"),
+                            title: demo ? agentNames[offset] : tr("Помощник \(offset + 1)", "Assistant \(offset + 1)"),
                             activity: tr("Статус не подтверждён", "Status unconfirmed"), isActive: false, progress: nil,
                             progressKind: .none, steps: [], updatedAt: Date(), isUnconfirmed: true,
-                            lastKnownActivity: tr("Последнее проверенное действие \(offset + 1)", "Last observed action \(offset + 1)"))
+                            lastKnownActivity: demo ? exampleActions[offset] :
+                                tr("Последнее проверенное действие \(offset + 1)", "Last observed action \(offset + 1)"))
                     }
                     let grouped = CodexTaskGrouping.project([parentTask] + children,
                         parents: [ids[0]: rootID, ids[1]: rootID, ids[2]: ids[0]], titles: [rootID: title])
@@ -65,14 +78,20 @@ final class CodexGroupingVisualTests: XCTestCase {
                     XCTAssertEqual(item.progress, parentTask.progress)
                     XCTAssertEqual(item.codexAgents?.count, 3)
                     XCTAssertEqual(item.codexAgents?.first?.activity,
-                                   tr("Последнее проверенное действие 1", "Last observed action 1"))
+                                   demo ? exampleActions[0] : tr("Последнее проверенное действие 1", "Last observed action 1"))
+                    let claude = MonitoredTask(id: "claude:synthetic", provider: .claude,
+                        title: tr("Обновить настройки уведомлений", "Update notification settings"),
+                        activity: tr("Проверяю работу уведомлений", "Checking notifications"),
+                        isActive: true, progress: nil, progressKind: .none, steps: [], updatedAt: Date())
                     let store = TaskStore(codexReader: CodexTaskReader(codexHome: resolved.appendingPathComponent("missing-codex")),
                                           claudeReader: ClaudeTaskReader(eventFile: resolved.appendingPathComponent("missing-claude")),
-                                          previewTasks: grouped)
+                                          previewTasks: demo ? grouped + [claude] : grouped)
                     store.isCompact = compact
+                    store.compactIndex = selected
                     if disclosureOpen { store.toggleCodexGroup(rootID) }
                     XCTAssertEqual(store.isCodexGroupExpanded(rootID), disclosureOpen)
-                    XCTAssertEqual(store.count(for: .all), 1)
+                    XCTAssertEqual(store.count(for: .all), demo ? 2 : 1)
+                    XCTAssertEqual(store.tasks[selected].provider, selected == 1 ? .claude : .codex)
                     let size = compact ? NSSize(width: 372, height: disclosureOpen ? 340 : 182) : NSSize(width: 560, height: 700)
                     let view = RootView().environmentObject(store).environment(\.colorScheme, dark ? .dark : .light)
                     let hosting = NSHostingView(rootView: view)
@@ -90,7 +109,7 @@ final class CodexGroupingVisualTests: XCTestCase {
                     let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
                     hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
                     let bytes = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                    let name = "grouped-\(language.rawValue)-\(dark ? "dark" : "light")-\(compact ? "compact" : "expanded")-\(disclosureOpen ? "open" : "closed")-\(longTitle ? "long" : "normal").png"
+                    let name = "grouped-\(language.rawValue)-\(dark ? "dark" : "light")-\(compact ? "compact" : "expanded")-\(disclosureOpen ? "open" : "closed")-\(scenario)-\(selected == 1 ? "claude" : "codex").png"
                     let destination = output.appendingPathComponent(name).path
                     guard destination.hasPrefix(output.path + "/") else { throw CocoaError(.fileWriteNoPermission) }
                     let descriptor = destination.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600)) }
@@ -99,6 +118,7 @@ final class CodexGroupingVisualTests: XCTestCase {
                     try handle.write(contentsOf: bytes)
                     try handle.close()
                     window.close()
+                    }
                    }
                   }
                 }
