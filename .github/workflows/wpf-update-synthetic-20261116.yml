@@ -1,10 +1,24 @@
 name: Synthetic WPF update-host verification
 on:
   push:
-    branches: ['windows', 'codex/wpf-update-synthetic-20261116']
+    branches: ['windows', 'codex/wpf-update-synthetic-20261116', 'codex/wpf-update-sdk-20261123']
 permissions:
   contents: read
 jobs:
+  path-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+    steps:
+      - name: Verify test launchers from the exact source revision
+        shell: bash
+        run: |
+          set -eu
+          git -c credential.helper= -c core.hooksPath=/dev/null init --quiet .
+          git -c credential.helper= -c core.hooksPath=/dev/null fetch --no-tags --depth=1 "https://github.com/${GITHUB_REPOSITORY}.git" "${GITHUB_SHA}"
+          git -c credential.helper= -c core.hooksPath=/dev/null checkout --quiet --detach FETCH_HEAD
+          python3 -B windows/tests/Test-DotnetPathSafety.py
   synthetic-update-host:
     runs-on: windows-2025
     timeout-minutes: 15
