@@ -30,8 +30,19 @@ final class CodexActiveOperationTests: XCTestCase {
         try record("response_item", ["type": "function_call_output", "call_id": id, "output": "PRIVATE_OUTPUT"])
     }
 
-    private func activity(_ records: [String]) -> String {
-        reader.parseActivity(from: records.joined(separator: "\n"))
+    private func activity(_ records: [String], sessionID: String? = nil) -> String {
+        reader.parseActivity(from: records.joined(separator: "\n"), sessionID: sessionID)
+    }
+
+    private func figma(_ id: String = "figma-1", thread: String = "session-a", turn: String = "turn-a",
+                       status: String = "completed", server: String = "codex_apps", tool: String = "figma.use_figma",
+                       description: String = "Updated Figma", hasError: Bool = false,
+                       resultIsError: Bool = false) throws -> String {
+        var item: [String: Any] = ["id": id, "type": "McpToolCall", "server": server, "tool": tool, "status": status,
+            "arguments": ["description": description, "code": "PRIVATE_JS", "file_key": "PRIVATE_FILE"],
+            "result": ["text": "PRIVATE_OUTPUT", "isError": resultIsError]]
+        if hasError { item["error"] = ["message": "PRIVATE_ERROR"] }
+        return try record("event_msg", ["type": "item_completed", "thread_id": thread, "turn_id": turn, "item": item])
     }
 
     func testConfirmedOperationOverridesSummaryOnlyUntilItsOutput() throws {
@@ -130,7 +141,11 @@ final class CodexActiveOperationTests: XCTestCase {
         let final = try record("event_msg", ["type": "agent_message", "phase": "final_answer", "message": "FINAL_ANSWER"])
         XCTAssertEqual(activity([start, commentary, blank, final]), "Agent update")
         let fallback = try summary()
-        XCTAssertEqual(activity([start, fallback, commentary]), "Fallback summary")
+        XCTAssertEqual(activity([start, fallback, commentary]), "Agent update")
+        XCTAssertEqual(activity([start, commentary, fallback]), "Fallback summary")
+        let userCommentary = try record("response_item", ["type": "message", "role": "user", "phase": "commentary",
+            "content": [["type": "output_text", "text": "PRIVATE_USER_TEXT"]]])
+        XCTAssertEqual(activity([start, fallback, userCommentary]), "Fallback summary")
         let blankSummary = try record("event_msg", ["type": "agent_reasoning", "text": "   "])
         XCTAssertEqual(activity([start, fallback, blankSummary]), "Fallback summary")
     }
@@ -201,5 +216,108 @@ final class CodexActiveOperationTests: XCTestCase {
         let escapedMention = #"{"type":"event_msg","payload":{"type":"token_count","note":"call-\u0061"}}"#
         XCTAssertEqual(activity([start, fallback, escapedMention] + Array(repeating: filler, count: 512) + [open]), "Fallback summary")
 
+    }
+
+    func testLatestFigmaDescriptionIsLabeledAndLosesToNewerNarration() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let start = try started(), fallback = try summary(), action = try figma()
+        XCTAssertEqual(activity([start, fallback, action], sessionID: "session-a"), "Last Figma action: Updated Figma")
+        XCTAssertEqual(activity([start, action, fallback], sessionID: "session-a"), "Fallback summary")
+        let commentary = try record("event_msg", ["type": "agent_message", "phase": "commentary", "message": "Newer commentary"])
+        XCTAssertEqual(activity([start, action, commentary], sessionID: "session-a"), "Newer commentary")
+        XCTAssertEqual(activity([start, fallback, action, commentary], sessionID: "session-a"), "Newer commentary")
+        let newer = try figma("figma-2", description: "Another action")
+        XCTAssertEqual(activity([start, action, commentary, newer], sessionID: "session-a"), "Last Figma action: Another action")
+        AppLanguage.previewOverride = .ru
+        XCTAssertEqual(activity([start, fallback, action], sessionID: "session-a"), "Последнее действие в Figma: Updated Figma")
+    }
+
+    func testOpenCUACallHasPriorityOverCompletedFigma() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let start = try started(), fallback = try summary(), open = try call("cua-1", title: "Current CUA")
+        let action = try figma(), end = try output("cua-1")
+        XCTAssertEqual(activity([start, fallback, open, action], sessionID: "session-a"), "Current CUA")
+        XCTAssertEqual(activity([start, fallback, open, action, end], sessionID: "session-a"), "Last Figma action: Updated Figma")
+    }
+
+    func testFigmaNeedsMatchingThreadAndTurnAndOnlyAcceptsSuccessfulTarget() throws {
+        let start = try started(), fallback = try summary()
+        let wrongThread = try figma(thread: "other-session")
+        let wrongTurn = try figma(turn: "other-turn")
+        let failed = try figma(status: "failed")
+        let inProgress = try figma(status: "inProgress")
+        let failedWithError = try figma(hasError: true)
+        let otherServer = try figma(server: "another_app")
+        let otherTool = try figma(tool: "figma.other")
+        let missingID = try figma("")
+        let slashID = try figma("figma/1")
+        let emojiID = try figma("figma-😀")
+        let oversizedID = try figma(String(repeating: "A", count: 257))
+        let blankDescription = try figma(description: " \n ")
+        let tooLong = try figma(description: String(repeating: "A", count: 4_097))
+        for invalid in [wrongThread, wrongTurn, failed, inProgress, failedWithError, otherServer, otherTool, missingID, slashID, emojiID, oversizedID, blankDescription, tooLong] {
+            XCTAssertEqual(activity([start, fallback, invalid], sessionID: "session-a"), "Fallback summary")
+        }
+        let action = try figma()
+        XCTAssertEqual(activity([start, fallback, action]), "Fallback summary")
+        XCTAssertEqual(activity([fallback, action], sessionID: "session-a"), "Fallback summary")
+        XCTAssertEqual(activity([try started(""), fallback, action], sessionID: "session-a"), "Fallback summary")
+    }
+
+    func testDuplicateFigmaCompletionCannotOverrideNewerSummary() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let start = try started(), action = try figma(), fallback = try summary()
+        XCTAssertEqual(activity([start, fallback, action, action], sessionID: "session-a"), "Last Figma action: Updated Figma")
+        XCTAssertEqual(activity([start, action, fallback, action], sessionID: "session-a"), "Fallback summary")
+        let later = try figma("figma-2", description: "Fresh Figma action")
+        XCTAssertEqual(activity([start, action, fallback, action, later], sessionID: "session-a"), "Last Figma action: Fresh Figma action")
+        let changed = try figma("figma-1", description: "Conflicting duplicate")
+        XCTAssertEqual(activity([start, fallback, action, changed], sessionID: "session-a"), "Fallback summary")
+        let failed = try figma("figma-1", status: "failed")
+        XCTAssertEqual(activity([start, fallback, failed, action], sessionID: "session-a"), "Fallback summary")
+        XCTAssertEqual(activity([start, fallback, action, failed], sessionID: "session-a"), "Fallback summary")
+        XCTAssertEqual(activity([start, fallback, failed, action, later], sessionID: "session-a"), "Last Figma action: Fresh Figma action")
+    }
+
+    func testLaterOtherToolOrFigmaErrorHidesPriorFigmaAction() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let start = try started(), fallback = try summary(), action = try figma()
+        let other = try record("event_msg", ["type": "item_completed", "thread_id": "session-a", "turn_id": "turn-a",
+            "item": ["type": "CommandExecution", "id": "command-1", "command": "PRIVATE_COMMAND"]])
+        XCTAssertEqual(activity([start, fallback, action, other], sessionID: "session-a"), "Fallback summary")
+        XCTAssertEqual(activity([start, fallback, other, action], sessionID: "session-a"), "Last Figma action: Updated Figma")
+        let foreign = try record("event_msg", ["type": "item_completed", "thread_id": "other-session", "turn_id": "turn-a",
+            "item": ["type": "CommandExecution", "id": "command-2"]])
+        XCTAssertEqual(activity([start, fallback, action, foreign], sessionID: "session-a"), "Last Figma action: Updated Figma")
+        let error = try figma("figma-error", hasError: true)
+        XCTAssertEqual(activity([start, fallback, action, error], sessionID: "session-a"), "Fallback summary")
+        let invalidID = try figma("figma/invalid")
+        XCTAssertEqual(activity([start, fallback, action, invalidID], sessionID: "session-a"), "Fallback summary")
+        for identity in [["thread_id": "session-a"], ["turn_id": "turn-a"], [:]] {
+            var payload: [String: Any] = ["type": "item_completed", "item": ["type": "CommandExecution", "id": "unknown"]]
+            for (key, value) in identity { payload[key] = value }
+            let unbound = try record("event_msg", payload)
+            XCTAssertEqual(activity([start, fallback, action, unbound], sessionID: "session-a"), "Fallback summary")
+        }
+        let foreignWithoutTurn = try record("event_msg", ["type": "item_completed", "thread_id": "other-session",
+            "item": ["type": "CommandExecution", "id": "foreign"]])
+        XCTAssertEqual(activity([start, fallback, action, foreignWithoutTurn], sessionID: "session-a"), "Last Figma action: Updated Figma")
+    }
+
+    func testUnreadableEventPreventsClaimingFigmaIsLatest() throws {
+        let start = try started(), fallback = try summary(), action = try figma()
+        XCTAssertEqual(activity([start, fallback, action, "{broken"], sessionID: "session-a"), "Fallback summary")
+    }
+
+    func testCompletedFigmaWithResultErrorUsesFallback() throws {
+        let start = try started(), fallback = try summary()
+        let action = try figma(status: "completed", resultIsError: true)
+        XCTAssertEqual(activity([start, fallback, action], sessionID: "session-a"), "Fallback summary")
+        let previous = try figma("previous")
+        XCTAssertEqual(activity([start, fallback, previous, action], sessionID: "session-a"), "Fallback summary")
     }
 }

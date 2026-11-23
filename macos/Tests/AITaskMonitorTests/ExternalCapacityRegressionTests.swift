@@ -617,18 +617,18 @@ final class ExternalCapacityRegressionTests: XCTestCase {
             AppLanguage.previewOverride = language
             for dark in [false, true] {
                 for compact in [false, true] {
-                    for kind in ["reference", "partial", "partial-empty", "full", "mixed", "mixed-long"] {
-                        let provider: TaskProvider = kind == "reference" ? .codex : (kind == "full" ? .opencode : .deepseek)
+                    for kind in ["reference", "reference-empty", "partial", "partial-empty", "full", "mixed", "mixed-long"] {
+                        let provider: TaskProvider = kind.hasPrefix("reference") ? .codex : (kind == "full" ? .opencode : .deepseek)
                         let item = MonitoredTask(id: provider.rawValue + ":synthetic", provider: provider,
                             title: tr("Проверка задачи", "Synthetic task"),
-                            activity: tr("Статус не подтверждён", "Status unconfirmed"), isActive: false,
+                            activity: kind.hasPrefix("reference") ? tr("Последнее действие в Figma: Проверка компонентов", "Last Figma action: Checking components") : tr("Статус не подтверждён", "Status unconfirmed"), isActive: false,
                             progress: nil, progressKind: .none, steps: [], updatedAt: Date(), isUnconfirmed: true)
-                        let initial = kind == "partial-empty" ? [] : [item]
+                        let initial = ["reference-empty", "partial-empty"].contains(kind) ? [] : [item]
                         let store = TaskStore(codexReader: CodexTaskReader(codexHome: URL(fileURLWithPath: path + "/fake-codex")),
                                               claudeReader: ClaudeTaskReader(eventFile: URL(fileURLWithPath: path + "/fake-events")),
                                               previewTasks: initial)
                         switch kind {
-                        case "reference":
+                        case "reference", "reference-empty":
                             store.setPreviewCodexPartial()
                         case "partial", "partial-empty":
                             store.testSetExternalAvailability(previous: initial, unavailable: [.deepseek], partiallyUnavailable: [.deepseek])
