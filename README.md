@@ -56,7 +56,7 @@ The [project license](LICENSE) allows free use, including internal business use,
 
 ## Скриншоты / Screenshots
 
-### Windows 0.2.11
+### Windows 0.2.12
 
 | Развёрнуто / Expanded | Компактно / Compact | Настройки / Settings |
 | --- | --- | --- |
