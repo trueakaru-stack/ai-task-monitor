@@ -126,6 +126,10 @@ final class TaskStore: ObservableObject {
     private var updateCoordinator: ReleaseUpdateCoordinator?
     private let monitoringStartedAt = Date()
     private var previousCodex: [MonitoredTask] = []
+    private var codexParentEvidence: [String: String] = [:]
+    private var codexParentConflicts: Set<String> = []
+    private var codexParentTitles: [String: String] = [:]
+    private var codexParentsForDisplay: [String: String] = [:]
     private var previousClaude: [MonitoredTask] = []
     private var claudeRetainedTitlesOverflow = false
     private var previousExternal: [MonitoredTask] = []
@@ -908,6 +912,7 @@ final class TaskStore: ObservableObject {
             if !exists && sawCodexHome { throw CocoaError(.fileReadNoSuchFile) }
             if exists { sawCodexHome = true }
             let snapshot = try codexReader.readSnapshot(observedSince: monitoringStartedAt, previouslyObserved: Set(previousCodex.map(\.id)))
+            updateCodexParentEvidence(snapshot)
             codexPartial = snapshot.isPartial
             terminalIDs.formUnion(snapshot.terminalIDs)
             interruptedIDs.formUnion(snapshot.interruptedIDs)
@@ -915,6 +920,7 @@ final class TaskStore: ObservableObject {
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
         } catch {
             unavailable.append(.codex)
+            codexParentsForDisplay = [:]
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
         }
         do {
@@ -1043,6 +1049,32 @@ final class TaskStore: ObservableObject {
         if let provider = selectedProvider.provider, !providers.contains(provider) { selectedProvider = .all }
         recordChanges(previousTasks: previousTasks, previousUnavailable: previousUnavailable,
                       terminalIDs: terminalIDs, interruptedIDs: interruptedIDs, toolInputs: toolInputs)
+    }
+
+    private func updateCodexParentEvidence(_ snapshot: CodexTaskSnapshot) {
+        var current: [String: String] = [:]
+        for (child, parent) in snapshot.subagentParents {
+            let key = child.lowercased(), value = parent.lowercased()
+            guard !codexParentConflicts.contains(key) else { continue }
+            if let old = codexParentEvidence[key], old != value {
+                codexParentConflicts.insert(key)
+                codexParentEvidence.removeValue(forKey: key)
+                continue
+            }
+            guard codexParentEvidence[key] != nil || codexParentEvidence.count < 512 else { continue }
+            codexParentEvidence[key] = value
+            current[key] = value
+        }
+        for (id, title) in snapshot.subagentTitles {
+            let key = id.lowercased()
+            if codexParentTitles[key] != nil || codexParentTitles.count < 512 { codexParentTitles[key] = title }
+        }
+        let visible = Set(snapshot.subagentCandidates.map { $0.lowercased() }).union(
+            previousCodex.filter { !snapshot.terminalIDs.contains($0.id) }.map { $0.id.lowercased() }
+        )
+        codexParentsForDisplay = codexParentEvidence.filter { child, parent in
+            !codexParentConflicts.contains(child) && (!visible.contains(child) || current[child] == parent)
+        }
     }
 
     private static func externalScope(_ task: MonitoredTask) -> String? {

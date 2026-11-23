@@ -135,6 +135,38 @@ jobs:
           AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexRevertSafetyTests/testOldTerminalAndNewRevisionRetainUnconfirmedAndDoNotAffectNeighbor "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"
           if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"; then echo 'Existing rollout test was skipped.' >&2; exit 1; fi
           grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"
+      - name: Verify synthetic Codex grouping
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_TASK_ROOT/run-isolated"
+          task_policy="$AITM_TEST_TASK_ROOT/profile-offline.sb"
+          for spec in 'CodexTaskGroupingTests:8' 'CodexSubagentMetadataWorkerTests:2' 'CodexExecDiscoveryTests/testVerifiedParentIDReachesSnapshotForIndexedAndUnindexedChild:1' 'CodexExecDiscoveryTests/testIndexedChildWithConflictingParentMetadataHasNoLink:1'; do
+            suite="${spec%:*}"
+            count="${spec##*:}"
+            log="$AITM_TEST_TASK_ROOT/grouping-${count}-$(printf '%s' "$suite" | /usr/bin/shasum | cut -c 1-12).log"
+            AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"
+            if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log"; then echo 'Grouping test was skipped.' >&2; exit 1; fi
+            grep -Eq "Executed $count tests?, with 0 failures" "$log"
+          done
+      - name: Render synthetic grouping preview
+        id: grouping_render
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_policy="$AITM_TEST_TASK_ROOT/profile-offline.sb"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_TASK_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexGroupingVisualTests/testRenderSyntheticGroupedParent "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/grouping-render.log"
+          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/grouping-render.log"; then echo 'Grouping render was skipped.' >&2; exit 1; fi
+          grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/grouping-render.log"
+      - name: Save synthetic grouping preview
+        if: ${{ !cancelled() && steps.grouping_render.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-grouping-synthetic-preview-${{ matrix.runner }}
+          path: ${{ runner.temp }}/aitm-card-tests.*/temp/grouping-renders/*.png
+          if-no-files-found: error
       - name: Check guard skips without hosted test fixture
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash

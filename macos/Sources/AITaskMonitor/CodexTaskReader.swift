@@ -6,6 +6,9 @@ struct CodexTaskSnapshot {
     var terminalIDs: Set<String> = []
     var interruptedIDs: Set<String> = []
     var toolEvents: [String: [CodexToolEvent]] = [:]
+    var subagentParents: [String: String] = [:]
+    var subagentCandidates: Set<String> = []
+    var subagentTitles: [String: String] = [:]
     var isPartial = false
 }
 
@@ -35,6 +38,7 @@ struct CodexTaskReader {
     private let execDiscovery = CodexExecDiscoveryCache()
     private let planCache = CodexPlanHistoryCache()
     private let ambiguousRollouts = CodexAmbiguousRolloutWorker()
+    private let subagentMetadata = CodexSubagentMetadataWorker()
     private let afterDiscoveryForTests: (() -> Void)?
     private let beforeTerminalRecheckForTests: (() -> Void)?
 
@@ -59,6 +63,7 @@ struct CodexTaskReader {
     // deterministically. The application never waits for it.
     func waitForAmbiguousObservationForTests() {
         ambiguousRollouts.waitUntilIdleForTests()
+        subagentMetadata.waitUntilIdleForTests()
     }
 
     func readSnapshot(now: Date = Date(), observedSince: Date? = nil, previouslyObserved: Set<String> = []) throws -> CodexTaskSnapshot {
@@ -96,6 +101,7 @@ struct CodexTaskReader {
         let files = discovered.files
         afterDiscoveryForTests?()
         var result = CodexTaskSnapshot()
+        var visibleMetadataStamps: [String: CodexSubagentMetadataWorker.Stamp] = [:]
         var indexedEndings: [String: (file: URL, identity: TerminalFileIdentity, interrupted: Bool, toolEvents: [CodexToolEvent]?)] = [:]
         result.isPartial = indexFailure != nil || discovered.isPartial || extra.isPartial || extraFiles.isPartial
         let uncertain = ambiguousRollouts.poll(
@@ -253,6 +259,7 @@ struct CodexTaskReader {
                 startKey: state.startKey,
                 planConfirmed: !recoveredUnconfirmed && plan.confirmed
             ))
+            visibleMetadataStamps[id] = CodexSubagentMetadataWorker.Stamp(attributes)
         }
         if !indexedEndings.isEmpty {
             beforeTerminalRecheckForTests?()
@@ -373,6 +380,9 @@ struct CodexTaskReader {
                     startKey: state.startKey,
                     planConfirmed: plan.confirmed
                 ))
+                if let attributes = try? fileManager.attributesOfItem(atPath: file.path) {
+                    visibleMetadataStamps[id] = CodexSubagentMetadataWorker.Stamp(attributes)
+                }
             } catch {
                 // A changing, inaccessible or linked file is not evidence that
                 // a previously observed task finished.
@@ -380,6 +390,46 @@ struct CodexTaskReader {
             }
         }
         if let indexFailure, !recognizedUnindexedSource { throw indexFailure }
+        var metadataCandidates = files
+        if !extraFiles.didHitLimit {
+            metadataCandidates.merge(extraFiles.files) { first, _ in first }
+        }
+        let visibleIDs = Set(result.tasks.map(\.id).filter { UUID(uuidString: $0) != nil })
+        result.subagentCandidates = visibleIDs
+        let metadata = subagentMetadata.poll(candidates: metadataCandidates, visibleIDs: visibleIDs) { id, file in
+            let before = try self.fileManager.attributesOfItem(atPath: file.path)
+            guard let stamp = CodexSubagentMetadataWorker.Stamp(before) else { throw CocoaError(.fileReadUnknown) }
+            let metadata = try self.readSubagentParent(file, id: id)
+            let after = try self.fileManager.attributesOfItem(atPath: file.path)
+            guard CodexSubagentMetadataWorker.Stamp(after) == stamp,
+                  metadata.device == stamp.device, metadata.inode == stamp.inode,
+                  metadata.size == stamp.size else { throw CocoaError(.fileReadUnknown) }
+            return CodexSubagentMetadataWorker.Observation(file: file, stamp: stamp, parentID: metadata.parentID)
+        }
+        var verifiedMetadata: Set<String> = []
+        var checkedAncestors = 0
+        for id in metadata.keys.sorted() {
+            guard let observation = metadata[id] else { continue }
+            let current: CodexSubagentMetadataWorker.Stamp?
+            if visibleIDs.contains(id) {
+                current = visibleMetadataStamps[id]
+            } else {
+                guard checkedAncestors < 32 else { result.isPartial = true; continue }
+                checkedAncestors += 1
+                current = (try? fileManager.attributesOfItem(atPath: observation.file.path))
+                    .flatMap { CodexSubagentMetadataWorker.Stamp($0) }
+            }
+            guard current == observation.stamp else { continue }
+            verifiedMetadata.insert(id)
+            if let parent = observation.parentID { result.subagentParents[id] = parent }
+        }
+        if !visibleIDs.subtracting(verifiedMetadata).isEmpty { result.isPartial = true }
+        for parent in Set(result.subagentParents.values) {
+            guard let title = sessions[parent]?.string("thread_name"),
+                  !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  title != "Guardian review" else { continue }
+            result.subagentTitles[parent] = title
+        }
         result.tasks.sort { $0.updatedAt > $1.updatedAt }
         return result
     }
@@ -936,10 +986,9 @@ struct CodexTaskReader {
         return title + " " + tr("(агент \(nickname))", "(agent \(nickname))")
     }
 
-    /// Open only regular files beneath the sessions directory, without
-    /// following links in any enumerated component. A live session keeps writing
-    /// the same descriptor while this bounded snapshot is read.
-    private func readUnindexedSession(_ url: URL, id: String) throws -> UnindexedSessionRecord? {
+    /// Open only regular files beneath the sessions directory without following
+    /// links in any enumerated component.
+    private func openSessionFile(_ url: URL) throws -> Int32 {
         let directory = codexHome.appendingPathComponent("sessions", isDirectory: true).standardizedFileURL.path
         let path = url.standardizedFileURL.path
         guard path.hasPrefix(directory + "/") else { throw CocoaError(.fileReadUnknown) }
@@ -965,6 +1014,35 @@ struct CodexTaskReader {
             Darwin.close(descriptor)
             throw CocoaError(.fileReadUnknown)
         }
+        return descriptor
+    }
+
+    private func readSubagentParent(_ url: URL, id: String) throws -> (parentID: String?, device: UInt64, inode: UInt64, size: UInt64) {
+        let descriptor = try openSessionFile(url)
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var before = stat()
+        guard fstat(descriptor, &before) == 0, before.st_size >= 0 else { throw CocoaError(.fileReadUnknown) }
+        let prefix = try handle.read(upToCount: 65_536) ?? Data()
+        guard let newline = prefix.firstIndex(of: 0x0a),
+              let header = try? JSONSerialization.jsonObject(with: Data(prefix[..<newline])) as? [String: Any],
+              header.string("type") == "session_meta", let payload = header.object("payload"),
+              payload.string("id") == id else { throw CocoaError(.fileReadCorruptFile) }
+        var after = stat()
+        guard fstat(descriptor, &after) == 0, before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+              before.st_size == after.st_size,
+              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
+              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else { throw CocoaError(.fileReadUnknown) }
+        return (subagentReference(payload, id: id)?.parentID,
+                UInt64(bitPattern: Int64(before.st_dev)), UInt64(before.st_ino), UInt64(before.st_size))
+    }
+
+    /// A live session keeps writing the same descriptor while this bounded
+    /// snapshot is read.
+    private func readUnindexedSession(_ url: URL, id: String) throws -> UnindexedSessionRecord? {
+        let descriptor = try openSessionFile(url)
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
         let prefix = try handle.read(upToCount: 65_536) ?? Data()
@@ -980,6 +1058,7 @@ struct CodexTaskReader {
         let count = min(end, UInt64(262_144))
         try handle.seek(toOffset: end - count)
         let bytes = try handle.read(upToCount: Int(count)) ?? Data()
+        var info = stat()
         guard bytes.count == Int(count), fstat(descriptor, &info) == 0 else { throw CocoaError(.fileReadUnknown) }
         let modified = Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec) +
                             Double(info.st_mtimespec.tv_nsec) / 1_000_000_000)

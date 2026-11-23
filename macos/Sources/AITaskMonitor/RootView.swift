@@ -174,8 +174,15 @@ struct RootView: View {
                             .padding(.bottom, 6)
                     }
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
-                            .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
+                        HStack(alignment: .firstTextBaseline, spacing: 0) {
+                            TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
+                                .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
+                            if let agents = task.codexAgentCountLabel {
+                                Text(" " + agents).font(.system(size: 16, weight: .semibold))
+                                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         if let label = task.progressLabel { Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit() }
                     }
                     if !task.activity.isEmpty {

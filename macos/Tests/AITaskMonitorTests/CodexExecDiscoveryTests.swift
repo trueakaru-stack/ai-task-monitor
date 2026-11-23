@@ -153,6 +153,42 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertEqual(try reader.readSnapshot().tasks.first { $0.id == second }?.title, "Parent task (agent Sparrow)")
     }
 
+    func testVerifiedParentIDReachesSnapshotForIndexedAndUnindexedChild() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        for indexed in [false, true] {
+            let root = try makeRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let rows = indexed ? [(first, "Parent task"), (second, "Child task")] : [(first, "Parent task")]
+            try indexRows(root, rows)
+            try subagentRollout(root, id: second, parent: first)
+            let reader = CodexTaskReader(codexHome: root)
+            var result = try reader.readSnapshot()
+            for _ in 0..<4 where result.subagentParents[second] == nil {
+                reader.waitForAmbiguousObservationForTests()
+                result = try reader.readSnapshot()
+            }
+            XCTAssertEqual(result.subagentParents[second], first, "indexed=\(indexed)")
+            XCTAssertEqual(result.subagentTitles[first], "Parent task", "indexed=\(indexed)")
+            XCTAssertTrue(result.tasks.contains { $0.id == second }, "indexed=\(indexed)")
+            reader.waitForAmbiguousObservationForTests()
+        }
+    }
+
+    func testIndexedChildWithConflictingParentMetadataHasNoLink() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try indexRows(root, [(first, "Parent"), (second, "Child")])
+        try subagentRollout(root, id: second, parent: first, nestedParent: revision)
+        let reader = CodexTaskReader(codexHome: root)
+        _ = try reader.readSnapshot()
+        reader.waitForAmbiguousObservationForTests()
+        let result = try reader.readSnapshot()
+        XCTAssertTrue(result.tasks.contains { $0.id == second })
+        XCTAssertNil(result.subagentParents[second])
+        reader.waitForAmbiguousObservationForTests()
+    }
+
     func testMissingParentOrUnconfirmedNicknameKeepsGenericTitle() throws {
         AppLanguage.previewOverride = .en
         defer { AppLanguage.previewOverride = nil }

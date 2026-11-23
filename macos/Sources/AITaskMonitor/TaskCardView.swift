@@ -26,8 +26,15 @@ struct TaskCardView: View {
                     .padding(.bottom, 3)
             }
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
-                    .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
+                        .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
+                    if let agents = task.codexAgentCountLabel {
+                        Text(" " + agents).font(.system(size: 16, weight: .semibold))
+                            .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if let label = task.progressLabel, !hidesUnconfirmedProgress {
                     Text(label)
                         .font(.system(size: 16, weight: .semibold))

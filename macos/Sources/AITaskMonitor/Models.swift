@@ -67,6 +67,24 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
     var startKey: String = ""
     var planConfirmed: Bool = true
     var progressBasis: ProgressBasis? = nil
+    var codexAgentCount: Int? = nil
+    var codexAgentsUnconfirmed: Bool? = nil
+
+    var codexAgentCountLabel: String? {
+        guard let count = codexAgentCount, count > 0 else { return nil }
+        let lastHundred = count % 100, last = count % 10
+        let russian: String
+        if (11...14).contains(lastHundred) { russian = "агентов" }
+        else if last == 1 { russian = "агент" }
+        else if (2...4).contains(last) { russian = "агента" }
+        else { russian = "агентов" }
+        let english = count == 1 ? "agent" : "agents"
+        if codexAgentsUnconfirmed == true {
+            return tr("(\(count) \(russian), статус не подтверждён)",
+                      "(\(count) \(english), status unconfirmed)")
+        }
+        return tr("(\(count) \(russian))", "(\(count) \(english))")
+    }
 
     var planStatusNote: String? {
         guard !steps.isEmpty else { return nil }
