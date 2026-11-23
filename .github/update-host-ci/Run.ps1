@@ -40,6 +40,20 @@ try {
     $config = Join-Path $root 'NuGet.Config'
     [IO.File]::WriteAllText($config, '<configuration><packageSources><clear /></packageSources></configuration>', [Text.UTF8Encoding]::new($false))
     $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
+    $repositoryDirectory = [IO.DirectoryInfo]::new($repositoryRoot)
+    $sourceRoot = $repositoryDirectory.Parent
+    Check ($repositoryDirectory.Exists -and $repositoryDirectory.Name -ceq 'source' -and
+        $null -ne $sourceRoot -and $null -ne $sourceRoot.Parent -and
+        $sourceRoot.Name.StartsWith('aitm-update-source-', [StringComparison]::Ordinal) -and
+        [string]::Equals($sourceRoot.Parent.FullName, $runnerTemp, [StringComparison]::OrdinalIgnoreCase)) 'Source checkout must be inside its dedicated runner-temp directory.'
+    foreach ($directory in @($repositoryDirectory, $sourceRoot)) {
+        Check ($directory.Exists -and (($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) 'Source checkout has a redirected directory.'
+    }
+    # Select .NET 10 for this disposable checkout, even if the runner also has a newer SDK.
+    $sdkSettings = '{"sdk":{"version":"10.0.100","rollForward":"latestFeature","allowPrerelease":false}}'
+    $sdkSettingsBytes = [Text.UTF8Encoding]::new($false).GetBytes($sdkSettings)
+    $sdkSettingsFile = [IO.File]::Open((Join-Path $sourceRoot.FullName 'global.json'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $sdkSettingsFile.Write($sdkSettingsBytes, 0, $sdkSettingsBytes.Length) } finally { $sdkSettingsFile.Dispose() }
     $artifacts = Join-Path $root 'artifacts'
 
     function Invoke-Isolated([string[]]$arguments) {
