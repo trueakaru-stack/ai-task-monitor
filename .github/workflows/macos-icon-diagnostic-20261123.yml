@@ -1,0 +1,148 @@
+name: Isolated macOS icon diagnostic
+on:
+  push:
+    branches: ['codex/macos-activity-ci-20261123']
+    paths: ['.github/workflows/macos-icon-diagnostic-20261123.yml']
+permissions:
+  contents: read
+jobs:
+  icon:
+    runs-on: macos-26
+    timeout-minutes: 8
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      AITM_ICON_SOURCE_SHA: 57a938fc875bbcc5d227058ca30c687c45b7c381
+    steps:
+      - name: Compare iconutil with and without dirhelper access
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          case "$RUNNER_TEMP" in /Users/runner/*) ;; *) echo 'Unexpected runner temp.' >&2; exit 1;; esac
+          task_root="$(/usr/bin/mktemp -d "$RUNNER_TEMP/aitm-icon-check.XXXXXXXX")"
+          marker="$(/usr/bin/mktemp "$RUNNER_TEMP/aitm-icon-profile.XXXXXXXX")"
+          printf 'synthetic-marker\n' > "$marker"
+          mkdir -p "$task_root/source" "$task_root/hooks" "$task_root/template" "$task_root/temp" "$task_root/synthetic-home"
+          cd "$task_root"
+          git -c credential.helper= -c core.hooksPath="$task_root/hooks" -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
+          git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$AITM_ICON_SOURCE_SHA"
+          git -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$task_root/source" rev-parse HEAD)" = "$AITM_ICON_SOURCE_SHA"
+          cat > "$task_root/allow-helper.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath (param "TASK_PROFILE")))
+          (allow file-read-metadata)
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          PROFILE
+          cp "$task_root/allow-helper.sb" "$task_root/deny-helper.sb"
+          printf '\n(deny mach-lookup (global-name "com.apple.bsd.dirhelper"))\n' >> "$task_root/deny-helper.sb"
+          run_isolated() {
+            local policy="$1"; shift
+            /usr/bin/env -i PATH=/usr/bin:/bin "TMPDIR=$task_root/temp/" "CFFIXED_USER_HOME=$task_root/synthetic-home" \
+              "CLANG_MODULE_CACHE_PATH=$task_root/temp/clang-cache" "DEVELOPER_DIR=$DEVELOPER_DIR" XCRUN_NO_CACHE=1 \
+              /usr/bin/sandbox-exec -D TASK_PROFILE=/Users/runner -D "TASK_ROOT=$task_root" -f "$policy" "$@"
+          }
+          cat "$marker" >/dev/null
+          /bin/ln -s "$marker" "$task_root/profile-link"
+          for policy in "$task_root/deny-helper.sb" "$task_root/allow-helper.sb"; do
+            if run_isolated "$policy" /bin/cat "$marker" >/dev/null 2>&1 || run_isolated "$policy" /bin/cat "$task_root/profile-link" >/dev/null 2>&1; then
+              echo 'Profile read unexpectedly allowed.' >&2; exit 1
+            fi
+            if run_isolated "$policy" /usr/bin/touch "$marker" >/dev/null 2>&1 || run_isolated "$policy" /usr/bin/touch "$task_root/profile-link" >/dev/null 2>&1; then
+              echo 'Profile write unexpectedly allowed.' >&2; exit 1
+            fi
+            run_isolated "$policy" /usr/bin/touch "$task_root/temp/allowed-write"
+          done
+          /usr/bin/env node -e 'const n=require("node:net"),f=require("node:fs");n.createServer(c=>c.end()).listen(0,"127.0.0.1",function(){f.writeFileSync(process.argv[1],String(this.address().port))})' "$task_root/port" &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true' EXIT
+          for attempt in {1..100}; do test -s "$task_root/port" && break; sleep 0.1; done
+          test -s "$task_root/port"
+          port="$(cat "$task_root/port")"
+          [[ "$port" =~ ^[0-9]{1,5}$ ]]
+          /usr/bin/nc -vz -G 2 127.0.0.1 "$port"
+          for policy in "$task_root/deny-helper.sb" "$task_root/allow-helper.sb"; do
+            if run_isolated "$policy" /usr/bin/nc -vz -G 2 127.0.0.1 "$port" >"$task_root/network.log" 2>&1; then
+              echo 'Network unexpectedly allowed.' >&2; exit 1
+            fi
+            grep -Eiq 'operation not permitted|permission denied' "$task_root/network.log"
+          done
+          kill "$server"; wait "$server" 2>/dev/null || true; trap - EXIT
+          task_assets="$task_root/source/macos/assets/app-icon"
+          task_iconset="$task_root/temp/AppIcon.iconset"
+          mkdir -p "$task_iconset"
+          cp "$task_assets/icon-16.png" "$task_iconset/icon_16x16.png"
+          cp "$task_assets/icon-32.png" "$task_iconset/icon_16x16@2x.png"
+          cp "$task_assets/icon-32.png" "$task_iconset/icon_32x32.png"
+          cp "$task_assets/icon-64.png" "$task_iconset/icon_32x32@2x.png"
+          cp "$task_assets/icon-128.png" "$task_iconset/icon_128x128.png"
+          cp "$task_assets/icon-256.png" "$task_iconset/icon_128x128@2x.png"
+          cp "$task_assets/icon-256.png" "$task_iconset/icon_256x256.png"
+          cp "$task_assets/icon-512.png" "$task_iconset/icon_256x256@2x.png"
+          cp "$task_assets/icon-512.png" "$task_iconset/icon_512x512.png"
+          cp "$task_assets/icon-1024.png" "$task_iconset/icon_512x512@2x.png"
+          cat > "$task_root/compare-icons.swift" <<'SWIFT'
+          import Foundation
+          import CoreGraphics
+          import ImageIO
+
+          struct Pixels: Equatable {
+              let width: Int
+              let height: Int
+              let values: [UInt8]
+          }
+          func pixels(_ path: String) -> Pixels? {
+              let url = URL(fileURLWithPath: path) as CFURL
+              guard let source = CGImageSourceCreateWithURL(url, nil),
+                    let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+              let stride = image.width * 4
+              var values = [UInt8](repeating: 0, count: stride * image.height)
+              let drawn = values.withUnsafeMutableBytes { bytes -> Bool in
+                  guard let context = CGContext(data: bytes.baseAddress, width: image.width, height: image.height,
+                                                bitsPerComponent: 8, bytesPerRow: stride, space: CGColorSpaceCreateDeviceRGB(),
+                                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+                  context.interpolationQuality = .none
+                  context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+                  return true
+              }
+              return drawn ? Pixels(width: image.width, height: image.height, values: values) : nil
+          }
+          guard CommandLine.arguments.count == 3,
+                let before = pixels(CommandLine.arguments[1]), let after = pixels(CommandLine.arguments[2]),
+                before == after else { print("Decoded icon pixels differ or could not be read"); exit(1) }
+          print("Decoded pixels match: \(before.width)x\(before.height)")
+          SWIFT
+          compare_ready=0
+          for mode in deny-helper allow-helper; do
+            echo "Icon generation with $mode:"
+            if run_isolated "$task_root/$mode.sb" /usr/bin/iconutil -c icns "$task_iconset" -o "$task_root/temp/$mode.icns"; then
+              test -s "$task_root/temp/$mode.icns"
+              echo "$mode: generated"
+              if run_isolated "$task_root/$mode.sb" /usr/bin/iconutil -c iconset "$task_root/temp/$mode.icns" -o "$task_root/temp/$mode.iconset"; then
+                echo "$mode: iconset decoded"
+                if test "$compare_ready" = 0; then
+                  run_isolated "$task_root/$mode.sb" "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc" "$task_root/compare-icons.swift" -o "$task_root/compare-icons"
+                  compare_ready=1
+                fi
+                for file in "$task_iconset"/*.png; do
+                  name="$(basename "$file")"
+                  test -s "$task_root/temp/$mode.iconset/$name"
+                  run_isolated "$task_root/$mode.sb" "$task_root/compare-icons" "$file" "$task_root/temp/$mode.iconset/$name"
+                done
+              else
+                echo "$mode: iconset decode failed" >&2
+                exit 1
+              fi
+            else
+              echo "$mode: iconutil failed"
+            fi
+          done
+          echo 'Sandbox denials for iconutil:'
+          /usr/bin/log show --last 2m --style compact --predicate 'eventMessage CONTAINS "iconutil" AND eventMessage CONTAINS "deny"' 2>/dev/null | /usr/bin/tail -n 30 || true
