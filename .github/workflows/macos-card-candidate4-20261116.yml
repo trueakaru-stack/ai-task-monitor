@@ -142,7 +142,7 @@ jobs:
           set -euo pipefail
           task_run="$AITM_TEST_TASK_ROOT/run-isolated"
           task_policy="$AITM_TEST_TASK_ROOT/profile-offline.sb"
-          for spec in 'CodexTaskGroupingTests:8' 'CodexSubagentMetadataWorkerTests:2' 'CodexExecDiscoveryTests/testVerifiedParentIDReachesSnapshotForIndexedAndUnindexedChild:1' 'CodexExecDiscoveryTests/testIndexedChildWithConflictingParentMetadataHasNoLink:1'; do
+          for spec in 'CodexTaskGroupingTests:10' 'CodexSubagentMetadataWorkerTests:2' 'CodexExecDiscoveryTests/testVerifiedParentIDReachesSnapshotForIndexedAndUnindexedChild:1' 'CodexExecDiscoveryTests/testIndexedChildWithConflictingParentMetadataHasNoLink:1' 'CodexExecDiscoveryTests/testDuplicateMetadataKeysNeverCreateRelationship:1' 'CodexExecDiscoveryTests/testReplacementAtSamePathInvalidatesCachedRelationship:1' 'CodexExecDiscoveryTests/testAppendsKeepVerifiedGroupWithoutPartialWarning:1' 'CodexExecDiscoveryTests/testRewrittenHeaderOnSameInodeInvalidatesRelationship:1' 'CodexExecDiscoveryTests/testIndexedCompletedIntermediateIsDiscoveredForActiveGrandchild:1' 'CodexExecDiscoveryTests/testUnavailableOldIntermediateLeavesGrandchildSeparate:1' 'CodexExecDiscoveryTests/testTaskStoreGroupsVerifiedChildAndKeepsSelectionAndDisclosure:1'; do
             suite="${spec%:*}"
             count="${spec##*:}"
             log="$AITM_TEST_TASK_ROOT/grouping-${count}-$(printf '%s' "$suite" | /usr/bin/shasum | cut -c 1-12).log"

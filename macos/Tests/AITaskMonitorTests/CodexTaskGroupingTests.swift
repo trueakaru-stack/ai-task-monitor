@@ -30,10 +30,49 @@ final class CodexTaskGroupingTests: XCTestCase {
         var expected = parent
         expected.codexAgentCount = 3
         expected.codexAgentsUnconfirmed = true
+        expected.codexAgents = [one, two, grand].sorted { $0.id < $1.id }.map {
+            CodexAgentDetail(id: $0.id, title: $0.title, activity: $0.activity,
+                             isActive: $0.isActive && !$0.isUnconfirmed,
+                             isUnconfirmed: $0.isUnconfirmed, loopWarning: $0.loopWarning)
+        }
         XCTAssertEqual(result.first, expected)
         XCTAssertEqual(result.first?.codexAgentCountLabel, "(3 agents, status unconfirmed)")
         let reordered = CodexTaskGrouping.project(Array(original.reversed()), parents: links, titles: [:])
         XCTAssertEqual(reordered, result)
+    }
+
+    func testAssistantListUpdatesWithoutChangingParentState() throws {
+        let parent = task(root, title: "Parent")
+        var child = task(child1, title: "Assistant", active: false, uncertain: true)
+        child.activity = "Status unconfirmed"
+        child.lastKnownActivity = "Last observed action"
+        let grouped = try XCTUnwrap(CodexTaskGrouping.project([parent, child], parents: [child1: root], titles: [:]).first)
+        XCTAssertEqual(grouped.activity, parent.activity)
+        XCTAssertEqual(grouped.progress, parent.progress)
+        XCTAssertEqual(grouped.codexAgents?.first?.activity, "Last observed action")
+        XCTAssertTrue(try XCTUnwrap(grouped.codexAgents?.first?.isUnconfirmed))
+        child.lastKnownActivity = "Later observed action"
+        let updated = try XCTUnwrap(CodexTaskGrouping.project([parent, child], parents: [child1: root], titles: [:]).first)
+        XCTAssertNotEqual(grouped, updated)
+        XCTAssertEqual(updated.codexAgents?.first?.activity, "Later observed action")
+    }
+
+    func testLastKnownActionSurvivesTemporarySourceLossWithoutClaimingWork() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        var child = task(child1, title: "Assistant")
+        child.activity = "Checking files"
+        let retained = TaskSnapshotMerger.merge(previous: [child], current: [], terminalIDs: [])
+        let grouped = try XCTUnwrap(CodexTaskGrouping.project([task(root)] + retained,
+                                                             parents: [child1: root], titles: [:]).first)
+        let detail = try XCTUnwrap(grouped.codexAgents?.first)
+        XCTAssertEqual(detail.activity, "Checking files")
+        XCTAssertTrue(detail.isUnconfirmed)
+        XCTAssertFalse(detail.isActive)
+
+        child.activity = "Working"
+        let generic = try XCTUnwrap(TaskSnapshotMerger.merge(previous: [child], current: [], terminalIDs: []).first)
+        XCTAssertNil(generic.lastKnownActivity)
     }
 
     func testCompletedIntermediateStillLinksObservedGrandchild() throws {

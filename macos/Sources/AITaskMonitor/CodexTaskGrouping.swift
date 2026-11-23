@@ -70,6 +70,15 @@ enum CodexTaskGrouping {
         var result: [MonitoredTask] = []
         var emitted: Set<String> = []
         var displayIDs: [String: String] = [:]
+        func details(for childIDs: Set<String>) -> [CodexAgentDetail] {
+            childIDs.sorted().compactMap { id in
+                guard let child = byID[id]?.first else { return nil }
+                let activity = child.lastKnownActivity ?? child.activity
+                return CodexAgentDetail(id: child.id, title: child.title, activity: activity,
+                                        isActive: child.isActive && !child.isUnconfirmed,
+                                        isUnconfirmed: child.isUnconfirmed, loopWarning: child.loopWarning)
+            }
+        }
         for (child, rootID) in rootByChild {
             let target = byID[rootID]?.first?.id ?? "codex-group:" + rootID
             displayIDs[child] = target
@@ -93,6 +102,7 @@ enum CodexTaskGrouping {
             parent.codexAgentsUnconfirmed = childIDs.contains { child in
                 byID[child]?.contains(where: { $0.isUnconfirmed }) ?? false
             }
+            parent.codexAgents = details(for: childIDs)
             result.append(parent)
         }
         for (rootID, childIDs) in members where byID[rootID] == nil {
@@ -106,6 +116,7 @@ enum CodexTaskGrouping {
             parent.codexAgentsUnconfirmed = childIDs.contains { child in
                 byID[child]?.contains(where: { $0.isUnconfirmed }) ?? false
             }
+            parent.codexAgents = details(for: childIDs)
             result.append(parent)
         }
         return Projection(tasks: result.sorted { $0.updatedAt > $1.updatedAt }, displayIDBySourceID: displayIDs)

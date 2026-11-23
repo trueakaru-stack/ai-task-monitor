@@ -59,6 +59,7 @@ final class TaskStore: ObservableObject {
     @Published var showsAbout = false
     @Published var isCompact = false
     @Published var compactIndex = 0
+    @Published private(set) var expandedCodexGroupIDs: Set<String> = []
     @Published var sourceMessage = ""
     @Published private(set) var openCodeMessage = ""
     @Published private(set) var openCodeSetupInProgress = false
@@ -126,6 +127,7 @@ final class TaskStore: ObservableObject {
     private var updateCoordinator: ReleaseUpdateCoordinator?
     private let monitoringStartedAt = Date()
     private var previousCodex: [MonitoredTask] = []
+    private var diagnosticTasks: [MonitoredTask] = []
     private var codexParentEvidence: [String: String] = [:]
     private var codexParentConflicts: Set<String> = []
     private var codexParentTitles: [String: String] = [:]
@@ -165,6 +167,28 @@ final class TaskStore: ObservableObject {
     private var claudePhaseEvidence = ClaudePhaseEvidence()
     private var claudeLoopDetectors: [String: ClaudeLoopTracker] = [:]
     private var timer: Timer?
+
+    private func codexGroupKey(_ id: String) -> String {
+        let prefix = "codex-group:"
+        let lower = id.lowercased()
+        return lower.hasPrefix(prefix) ? String(lower.dropFirst(prefix.count)) : lower
+    }
+
+    func isCodexGroupExpanded(_ id: String) -> Bool {
+        expandedCodexGroupIDs.contains(codexGroupKey(id))
+    }
+
+    func toggleCodexGroup(_ id: String) {
+        let key = codexGroupKey(id)
+        if expandedCodexGroupIDs.contains(key) {
+            expandedCodexGroupIDs.remove(key)
+        } else {
+            if expandedCodexGroupIDs.count >= 512, let old = expandedCodexGroupIDs.sorted().first {
+                expandedCodexGroupIDs.remove(old)
+            }
+            expandedCodexGroupIDs.insert(key)
+        }
+    }
 
     func setOpenCodeConnected(_ connect: Bool) {
         guard !openCodeSetupInProgress else { return }
@@ -1009,7 +1033,7 @@ final class TaskStore: ObservableObject {
             detector.refresh(now: now)
             loopDetectors[id] = detector
         }
-        let knownTasks = previousTasks + combined
+        let knownTasks = diagnosticTasks + combined
         var toolInputs: [DiagnosticInput] = []
         for (id, events) in codexToolEvents {
             guard knownTasks.contains(where: { $0.provider == .codex && $0.id == id }) else { continue }
@@ -1041,13 +1065,27 @@ final class TaskStore: ObservableObject {
                 loopDetectors.removeValue(forKey: id)
             }
         }
+        let previousDiagnosticTasks = diagnosticTasks
+        diagnosticTasks = combined
+        let isLocalCodex: (MonitoredTask) -> Bool = { $0.provider == .codex && UUID(uuidString: $0.id) != nil }
+        let projection = CodexTaskGrouping.makeProjection(combined.filter(isLocalCodex),
+                                                          parents: codexParentsForDisplay, titles: codexParentTitles)
+        combined = projection.tasks + combined.filter { !isLocalCodex($0) }
         let selectedID = previousTasks.indices.contains(compactIndex) ? previousTasks[compactIndex].id : nil
-        let focus = taskFocus.reconcile(current: combined, previous: previousTasks, selectedID: selectedID, monitoringStartedAt: monitoringStartedAt)
+        var mappedSelection = selectedID.flatMap { projection.displayIDBySourceID[$0.lowercased()] }
+        if mappedSelection == nil, let selectedID, selectedID.hasPrefix("codex-group:") {
+            let root = String(selectedID.dropFirst("codex-group:".count))
+            mappedSelection = combined.first(where: { $0.provider == .codex && $0.id.lowercased() == root })?.id
+        }
+        let focus = taskFocus.reconcile(current: combined, previous: previousTasks,
+                                        selectedID: mappedSelection ?? selectedID, monitoringStartedAt: monitoringStartedAt)
         combined = focus.tasks
         tasks = combined
-        compactIndex = focus.selectedID.flatMap { id in combined.firstIndex { $0.id == id } } ?? 0
+        let carriedSelection = mappedSelection != selectedID ? mappedSelection : nil
+        let chosen = carriedSelection.flatMap { id in combined.prefix(3).contains(where: { $0.id == id }) ? id : nil } ?? focus.selectedID
+        compactIndex = chosen.flatMap { id in combined.firstIndex { $0.id == id } } ?? 0
         if let provider = selectedProvider.provider, !providers.contains(provider) { selectedProvider = .all }
-        recordChanges(previousTasks: previousTasks, previousUnavailable: previousUnavailable,
+        recordChanges(previousTasks: previousDiagnosticTasks, previousUnavailable: previousUnavailable,
                       terminalIDs: terminalIDs, interruptedIDs: interruptedIDs, toolInputs: toolInputs)
     }
 
@@ -1069,11 +1107,8 @@ final class TaskStore: ObservableObject {
             let key = id.lowercased()
             if codexParentTitles[key] != nil || codexParentTitles.count < 512 { codexParentTitles[key] = title }
         }
-        let visible = Set(snapshot.subagentCandidates.map { $0.lowercased() }).union(
-            previousCodex.filter { !snapshot.terminalIDs.contains($0.id) }.map { $0.id.lowercased() }
-        )
         codexParentsForDisplay = codexParentEvidence.filter { child, parent in
-            !codexParentConflicts.contains(child) && (!visible.contains(child) || current[child] == parent)
+            !codexParentConflicts.contains(child) && current[child] == parent
         }
     }
 
@@ -1489,12 +1524,21 @@ final class TaskStore: ObservableObject {
             return
         }
         guard var detector = loopDetectors[taskID] else {
-            if diagnosticWorker == nil, let index = tasks.firstIndex(where: { $0.id == taskID }) { tasks[index].loopWarning = nil }
+            if diagnosticWorker == nil { clearVisibleLoopWarning(for: taskID) }
             return
         }
         detector.dismiss()
         loopDetectors[taskID] = detector
-        if let index = tasks.firstIndex(where: { $0.id == taskID }) { tasks[index].loopWarning = nil }
+        clearVisibleLoopWarning(for: taskID)
+    }
+
+    private func clearVisibleLoopWarning(for taskID: String) {
+        for index in tasks.indices {
+            if tasks[index].id == taskID { tasks[index].loopWarning = nil }
+            if let child = tasks[index].codexAgents?.firstIndex(where: { $0.id == taskID }) {
+                tasks[index].codexAgents?[child].loopWarning = nil
+            }
+        }
     }
 
     private func journalID(for task: MonitoredTask) -> String? {
@@ -1506,7 +1550,7 @@ final class TaskStore: ObservableObject {
     }
 
     private func journalReferences() -> [DiagnosticTaskReference] {
-        tasks.compactMap { task in
+        diagnosticTasks.compactMap { task in
             guard let id = journalID(for: task) else { return nil }
             return DiagnosticTaskReference(source: task.provider, id: id, title: task.title)
         }
@@ -1533,9 +1577,9 @@ final class TaskStore: ObservableObject {
         guard diagnosticWorker != nil else { return }
         let now = Date()
         let oldByID = Dictionary(previousTasks.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let currentIDs = Set(tasks.map(\.id))
+        let currentIDs = Set(diagnosticTasks.map(\.id))
         var inputs = toolInputs
-        for task in tasks {
+        for task in diagnosticTasks {
             guard let id = journalID(for: task) else { continue }
             let previous = oldByID[task.id]
             if previous == nil || previous?.isActive != task.isActive || previous?.isUnconfirmed != task.isUnconfirmed {

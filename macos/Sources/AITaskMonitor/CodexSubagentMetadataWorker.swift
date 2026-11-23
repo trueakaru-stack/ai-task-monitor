@@ -25,11 +25,24 @@ final class CodexSubagentMetadataWorker {
         let file: URL
         let stamp: Stamp
         let parentID: String?
+        let headerDigest: Data?
+        let observedAt: TimeInterval
+
+        init(file: URL, stamp: Stamp, parentID: String?, headerDigest: Data? = nil,
+             observedAt: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+            self.file = file
+            self.stamp = stamp
+            self.parentID = parentID
+            self.headerDigest = headerDigest
+            self.observedAt = observedAt
+        }
     }
 
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "ai-task-monitor.codex-subagent-metadata", qos: .utility)
     private var observations: [String: Observation] = [:]
+    private var rewrittenIdentity: [String: (device: UInt64, inode: UInt64)] = [:]
+    private var identityHistoryOverflow = false
     private var order: [String] = []
     private var running = false
     private var cursor: String?
@@ -41,6 +54,7 @@ final class CodexSubagentMetadataWorker {
               load: @escaping (String, URL) throws -> Observation) -> [String: Observation] {
         lock.lock()
         defer { lock.unlock() }
+        guard !identityHistoryOverflow else { return [:] }
         var needed = visibleIDs
         // Follow only known IDs. A missing or conflicting edge never becomes
         // an inferred relationship from a name or a path.
@@ -79,12 +93,31 @@ final class CodexSubagentMetadataWorker {
                 lock.lock()
                 for id in failed { observations.removeValue(forKey: id); order.removeAll { $0 == id } }
                 for (id, entry) in updates {
+                    if let blocked = rewrittenIdentity[id] {
+                        if blocked.device == entry.stamp.device && blocked.inode == entry.stamp.inode { continue }
+                        rewrittenIdentity.removeValue(forKey: id)
+                    }
+                    if let old = observations[id], old.stamp.device == entry.stamp.device,
+                       old.stamp.inode == entry.stamp.inode, let previous = old.headerDigest,
+                       let current = entry.headerDigest, previous != current {
+                        rewrittenIdentity[id] = (entry.stamp.device, entry.stamp.inode)
+                        observations.removeValue(forKey: id)
+                        order.removeAll { $0 == id }
+                        continue
+                    }
                     order.removeAll { $0 == id }
                     order.append(id)
                     observations[id] = entry
                 }
                 while order.count > maximumCached {
                     observations.removeValue(forKey: order.removeFirst())
+                }
+                if rewrittenIdentity.count > maximumCached {
+                    // Untracked conflicts must never turn into a verified link.
+                    identityHistoryOverflow = true
+                    rewrittenIdentity.removeAll()
+                    observations.removeAll()
+                    order.removeAll()
                 }
                 running = false
                 lock.unlock()

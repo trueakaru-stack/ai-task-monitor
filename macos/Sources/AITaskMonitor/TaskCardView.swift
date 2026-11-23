@@ -29,9 +29,8 @@ struct TaskCardView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 0) {
                     TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
                         .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
-                    if let agents = task.codexAgentCountLabel {
-                        Text(" " + agents).font(.system(size: 16, weight: .semibold))
-                            .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                    if task.codexAgentCountLabel != nil {
+                        CodexAgentDisclosureButton(task: task, compact: false)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -44,6 +43,9 @@ struct TaskCardView: View {
             if !task.activity.isEmpty {
                 ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 12)
                     .padding(.top, 4)
+            }
+            if let agents = task.codexAgents, !agents.isEmpty {
+                CodexAgentList(task: task, agents: agents, compact: false)
             }
             if task.loopWarning != nil {
                 LoopWarningView(task: task, compact: false).padding(.top, 8)
@@ -90,6 +92,71 @@ struct TaskCardView: View {
         .overlay(Squircle().stroke(MonitorTheme.border, lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("\(task.provider.displayName), \(task.title)")
+    }
+}
+
+struct CodexAgentDisclosureButton: View {
+    @EnvironmentObject private var store: TaskStore
+    let task: MonitoredTask
+    let compact: Bool
+
+    var body: some View {
+        if let label = task.codexAgentCountLabel(includingStatus: !compact) {
+            Button { store.toggleCodexGroup(task.id) } label: {
+                HStack(spacing: 4) {
+                    Text(" " + label).font(.system(size: 16, weight: .semibold)).lineLimit(1)
+                    Image(systemName: store.isCodexGroupExpanded(task.id) ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 11.5, weight: .medium))
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .modifier(PointingHandCursor())
+            .accessibilityLabel(store.isCodexGroupExpanded(task.id)
+                ? tr("Скрыть помощников задачи: \(task.title)", "Hide task assistants: \(task.title)")
+                : tr("Показать помощников задачи: \(task.title)", "Show task assistants: \(task.title)"))
+            .accessibilityValue(label)
+        }
+    }
+}
+
+struct CodexAgentList: View {
+    @EnvironmentObject private var store: TaskStore
+    let task: MonitoredTask
+    let agents: [CodexAgentDetail]
+    let compact: Bool
+
+    var body: some View {
+        if store.isCodexGroupExpanded(task.id) {
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 9) {
+                    ForEach(agents) { agent in
+                        VStack(alignment: .leading, spacing: 2) {
+                            TruncatingText(text: agent.title, font: .systemFont(ofSize: 12, weight: .medium), color: .labelColor)
+                                .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
+                            if agent.isUnconfirmed {
+                                Text(tr("Статус не подтверждён", "Status unconfirmed"))
+                                    .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                            }
+                            if !agent.activity.isEmpty && agent.activity != "Статус не подтверждён" && agent.activity != "Status unconfirmed" {
+                                let text = agent.isUnconfirmed ? tr("Последнее: ", "Last: ") + agent.activity : agent.activity
+                                ActivityStatusRow(text: text, isActive: agent.isActive, fontSize: compact ? 11.5 : 12)
+                            }
+                            if let warning = agent.loopWarning {
+                                LoopWarningView(task: MonitoredTask(id: agent.id, provider: .codex, title: agent.title,
+                                    activity: agent.activity, isActive: agent.isActive, progress: nil, progressKind: .none,
+                                    steps: [], updatedAt: .distantPast, loopWarning: warning), compact: compact)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(OverlayScrollerProbe().frame(width: 0, height: 0))
+            }
+            .frame(height: min(CGFloat(agents.count) * 60, 116))
+            .padding(.top, 12)
+        }
     }
 }
 

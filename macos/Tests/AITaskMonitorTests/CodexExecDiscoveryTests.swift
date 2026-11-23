@@ -189,6 +189,222 @@ final class CodexExecDiscoveryTests: XCTestCase {
         reader.waitForAmbiguousObservationForTests()
     }
 
+    func testDuplicateMetadataKeysNeverCreateRelationship() throws {
+        for duplicate in ["id", "parent", "path", "nested-parent", "nested-path", "escaped-id"] {
+            let root = try makeRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            try indexRows(root, [(first, "Parent"), (second, "Child")])
+            _ = try rollout(root, fileID: first)
+            let extraID = duplicate == "id" ? "\"id\":\"\(first)\"," :
+                (duplicate == "escaped-id" ? "\"\\u0069d\":\"\(first)\"," : "")
+            let extraParent = duplicate == "parent" ? "\"parent_thread_id\":\"\(revision)\"," : ""
+            let extraPath = duplicate == "path" ? "\"agent_path\":\"/root/other\"," : ""
+            let extraNestedParent = duplicate == "nested-parent" ? "\"parent_thread_id\":\"\(revision)\"," : ""
+            let extraNestedPath = duplicate == "nested-path" ? "\"agent_path\":\"/root/other\"," : ""
+            let header = """
+            {"type":"session_meta","payload":{\(extraID)"id":"\(second)",\(extraParent)"parent_thread_id":"\(first)",\(extraPath)"agent_path":"/root/research","source":{"subagent":{"thread_spawn":{\(extraNestedParent)"parent_thread_id":"\(first)",\(extraNestedPath)"agent_path":"/root/research"}}}}}
+            """
+            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let event = "{\"timestamp\":\"\(timestamp)\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"fixture-turn\"}}"
+            let file = root.appendingPathComponent("sessions/2026/11/16").appendingPathComponent(rolloutName(second))
+            try writeFixture(Data((header + "\n" + event + "\n").utf8), to: file)
+            let reader = CodexTaskReader(codexHome: root)
+            _ = try reader.readSnapshot()
+            reader.waitForAmbiguousObservationForTests()
+            let result = try reader.readSnapshot()
+            XCTAssertTrue(result.tasks.contains { $0.id == second }, duplicate)
+            XCTAssertNil(result.subagentParents[second], duplicate)
+            let visible = CodexTaskGrouping.project(result.tasks, parents: result.subagentParents, titles: result.subagentTitles)
+            XCTAssertTrue(visible.contains { $0.id == first }, duplicate)
+            XCTAssertTrue(visible.contains { $0.id == second }, duplicate)
+            reader.waitForAmbiguousObservationForTests()
+        }
+    }
+
+    func testReplacementAtSamePathInvalidatesCachedRelationship() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try indexRows(root, [(first, "Parent"), (second, "Child")])
+        _ = try rollout(root, fileID: first)
+        try subagentRollout(root, id: second, parent: first)
+        let file = root.appendingPathComponent("sessions/2026/11/16").appendingPathComponent(rolloutName(second))
+        let reader = CodexTaskReader(codexHome: root)
+        _ = try reader.readSnapshot()
+        reader.waitForAmbiguousObservationForTests()
+        let original = try reader.readSnapshot()
+        XCTAssertEqual(original.subagentParents[second], first)
+        reader.waitForAmbiguousObservationForTests()
+        let before = try FileManager.default.attributesOfItem(atPath: file.path)
+        let held = root.appendingPathComponent("old-synthetic-rollout")
+        try FileManager.default.moveItem(at: file, to: held)
+        try subagentRollout(root, id: second, parent: first, nestedParent: revision)
+        if let modified = before[.modificationDate] {
+            try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: file.path)
+        }
+        let after = try FileManager.default.attributesOfItem(atPath: file.path)
+        XCTAssertNotEqual(before[.systemFileNumber] as? NSNumber, after[.systemFileNumber] as? NSNumber)
+        XCTAssertEqual(before[.size] as? NSNumber, after[.size] as? NSNumber)
+        let replaced = try reader.readSnapshot()
+        XCTAssertNil(replaced.subagentParents[second])
+        let visible = CodexTaskGrouping.project(replaced.tasks, parents: replaced.subagentParents, titles: replaced.subagentTitles)
+        XCTAssertTrue(visible.contains { $0.id == first })
+        XCTAssertTrue(visible.contains { $0.id == second })
+        reader.waitForAmbiguousObservationForTests()
+        XCTAssertNil(try reader.readSnapshot().subagentParents[second])
+        reader.waitForAmbiguousObservationForTests()
+    }
+
+    func testAppendsKeepVerifiedGroupWithoutPartialWarning() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try indexRows(root, [(first, "Parent"), (second, "Child")])
+        _ = try rollout(root, fileID: first)
+        try subagentRollout(root, id: second, parent: first)
+        let file = root.appendingPathComponent("sessions/2026/11/16").appendingPathComponent(rolloutName(second))
+        let reader = CodexTaskReader(codexHome: root)
+        _ = try reader.readSnapshot()
+        reader.waitForAmbiguousObservationForTests()
+        var snapshot = try reader.readSnapshot()
+        XCTAssertEqual(snapshot.subagentParents[second], first)
+        reader.waitForAmbiguousObservationForTests()
+        for _ in 0..<4 {
+            try append("agent_reasoning", to: file)
+            snapshot = try reader.readSnapshot()
+            XCTAssertEqual(snapshot.subagentParents[second], first)
+            XCTAssertFalse(snapshot.isPartial)
+            let grouped = CodexTaskGrouping.project(snapshot.tasks, parents: snapshot.subagentParents, titles: snapshot.subagentTitles)
+            XCTAssertEqual(grouped.first(where: { $0.id == first })?.codexAgentCount, 1)
+            reader.waitForAmbiguousObservationForTests()
+        }
+    }
+
+    func testRewrittenHeaderOnSameInodeInvalidatesRelationship() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try indexRows(root, [(first, "Parent"), (second, "Child")])
+        _ = try rollout(root, fileID: first)
+        try subagentRollout(root, id: second, parent: first)
+        let file = root.appendingPathComponent("sessions/2026/11/16").appendingPathComponent(rolloutName(second))
+        let reader = CodexTaskReader(codexHome: root)
+        _ = try reader.readSnapshot()
+        reader.waitForAmbiguousObservationForTests()
+        XCTAssertEqual(try reader.readSnapshot().subagentParents[second], first)
+        reader.waitForAmbiguousObservationForTests()
+        let before = try FileManager.default.attributesOfItem(atPath: file.path)
+        try subagentRollout(root, id: second, parent: first, nestedParent: revision)
+        try append("agent_reasoning", to: file)
+        let after = try FileManager.default.attributesOfItem(atPath: file.path)
+        XCTAssertEqual(before[.systemFileNumber] as? NSNumber, after[.systemFileNumber] as? NSNumber)
+        _ = try reader.readSnapshot()
+        reader.waitForAmbiguousObservationForTests()
+        let rechecked = try reader.readSnapshot()
+        XCTAssertNil(rechecked.subagentParents[second])
+        let visible = CodexTaskGrouping.project(rechecked.tasks, parents: rechecked.subagentParents, titles: rechecked.subagentTitles)
+        XCTAssertTrue(visible.contains { $0.id == first })
+        XCTAssertTrue(visible.contains { $0.id == second })
+        reader.waitForAmbiguousObservationForTests()
+    }
+
+    func testIndexedCompletedIntermediateIsDiscoveredForActiveGrandchild() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try indexRows(root, [(first, "Parent"), (second, "Intermediate"), (revision, "Grandchild")])
+        _ = try rollout(root, fileID: first)
+        try subagentRollout(root, id: second, parent: first)
+        let intermediate = root.appendingPathComponent("sessions/2026/11/16").appendingPathComponent(rolloutName(second))
+        try append("task_complete", to: intermediate)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: intermediate.path)
+        try subagentRollout(root, id: revision, parent: second)
+        let reader = CodexTaskReader(codexHome: root)
+        var snapshot = try reader.readSnapshot(observedSince: Date().addingTimeInterval(-60))
+        for _ in 0..<6 where snapshot.subagentParents[second] != first || snapshot.subagentParents[revision] != second {
+            reader.waitForAmbiguousObservationForTests()
+            snapshot = try reader.readSnapshot(observedSince: Date().addingTimeInterval(-60))
+        }
+        XCTAssertFalse(snapshot.tasks.contains { $0.id == second })
+        XCTAssertEqual(snapshot.subagentParents[second], first)
+        XCTAssertEqual(snapshot.subagentParents[revision], second)
+        let visible = CodexTaskGrouping.project(snapshot.tasks, parents: snapshot.subagentParents, titles: snapshot.subagentTitles)
+        XCTAssertEqual(visible.count, 1)
+        XCTAssertEqual(visible.first?.id, first)
+        XCTAssertEqual(visible.first?.codexAgentCount, 1)
+        XCTAssertEqual(visible.first?.codexAgents?.map(\.id), [revision])
+        reader.waitForAmbiguousObservationForTests()
+    }
+
+    func testUnavailableOldIntermediateLeavesGrandchildSeparate() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try indexRows(root, [(first, "Parent"), (revision, "Grandchild")])
+        _ = try rollout(root, fileID: first)
+        try subagentRollout(root, id: second, parent: first)
+        let intermediate = root.appendingPathComponent("sessions/2026/11/16").appendingPathComponent(rolloutName(second))
+        try append("task_complete", to: intermediate)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: intermediate.path)
+        try subagentRollout(root, id: revision, parent: second)
+        let reader = CodexTaskReader(codexHome: root)
+        var snapshot = try reader.readSnapshot(observedSince: Date().addingTimeInterval(-60))
+        for _ in 0..<4 {
+            reader.waitForAmbiguousObservationForTests()
+            snapshot = try reader.readSnapshot(observedSince: Date().addingTimeInterval(-60))
+        }
+        XCTAssertEqual(snapshot.subagentParents[revision], second)
+        XCTAssertNil(snapshot.subagentParents[second])
+        let visible = CodexTaskGrouping.project(snapshot.tasks, parents: snapshot.subagentParents, titles: snapshot.subagentTitles)
+        XCTAssertTrue(visible.contains { $0.id == first })
+        XCTAssertTrue(visible.contains { $0.id == revision })
+        reader.waitForAmbiguousObservationForTests()
+    }
+
+    @MainActor
+    func testTaskStoreGroupsVerifiedChildAndKeepsSelectionAndDisclosure() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reader = CodexTaskReader(codexHome: root)
+        let store = TaskStore(codexReader: reader,
+                              claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("unused")),
+                              previewTasks: [])
+        try indexRows(root, [(first, "Parent"), (second, "Child"), (revision, "Neighbor")])
+        _ = try rollout(root, fileID: first)
+        try subagentRollout(root, id: second, parent: first)
+        _ = try rollout(root, fileID: revision)
+        store.refresh()
+        XCTAssertEqual(store.tasks.count, 3)
+        store.compactIndex = try XCTUnwrap(store.tasks.firstIndex { $0.id == second })
+        reader.waitForAmbiguousObservationForTests()
+        var found = false
+        for _ in 0..<8 {
+            store.refresh()
+            reader.waitForAmbiguousObservationForTests()
+            if store.tasks.first(where: { $0.id == first })?.codexAgentCount == 1 {
+                found = true
+                break
+            }
+        }
+        XCTAssertTrue(found)
+        XCTAssertEqual(store.tasks[store.compactIndex].id, first)
+        XCTAssertEqual(store.count(for: .all), 2)
+        XCTAssertEqual(store.count(for: .codex), 2)
+        XCTAssertTrue(store.tasks.contains { $0.id == revision })
+        store.toggleCodexGroup(first)
+        XCTAssertTrue(store.isCodexGroupExpanded(first))
+        XCTAssertTrue(store.isCodexGroupExpanded("codex-group:" + first))
+        let childFile = root.appendingPathComponent("sessions/2026/11/16").appendingPathComponent(rolloutName(second))
+        try append("agent_reasoning", to: childFile)
+        for _ in 0..<8 {
+            store.refresh()
+            reader.waitForAmbiguousObservationForTests()
+            if store.tasks.first(where: { $0.id == first })?.codexAgentCount == 1 { break }
+        }
+        XCTAssertTrue(store.isCodexGroupExpanded(first))
+        let parent = try XCTUnwrap(store.tasks.first { $0.id == first })
+        XCTAssertEqual(parent.codexAgents?.first?.id, second)
+        XCTAssertTrue(store.tasks.contains { $0.id == revision })
+        reader.waitForAmbiguousObservationForTests()
+    }
+
     func testMissingParentOrUnconfirmedNicknameKeepsGenericTitle() throws {
         AppLanguage.previewOverride = .en
         defer { AppLanguage.previewOverride = nil }

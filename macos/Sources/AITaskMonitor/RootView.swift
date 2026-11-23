@@ -177,9 +177,8 @@ struct RootView: View {
                         HStack(alignment: .firstTextBaseline, spacing: 0) {
                             TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
                                 .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
-                            if let agents = task.codexAgentCountLabel {
-                                Text(" " + agents).font(.system(size: 16, weight: .semibold))
-                                    .lineLimit(1).fixedSize(horizontal: true, vertical: false)
+                            if task.codexAgentCountLabel != nil {
+                                CodexAgentDisclosureButton(task: task, compact: true)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -188,6 +187,13 @@ struct RootView: View {
                     if !task.activity.isEmpty {
                         ActivityStatusRow(text: task.activity, isActive: task.isActive, fontSize: 11.5)
                             .padding(.top, 2)
+                    }
+                    if let status = task.codexAgentStatusLabel {
+                        Text(status).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                            .padding(.top, 4)
+                    }
+                    if let agents = task.codexAgents, !agents.isEmpty {
+                        CodexAgentList(task: task, agents: agents, compact: true)
                     }
                 }
                 if let planNote = task.planStatusNote {

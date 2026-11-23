@@ -50,6 +50,15 @@ struct TaskStep: Identifiable, Codable, Equatable {
     }
 }
 
+struct CodexAgentDetail: Identifiable, Codable, Equatable {
+    let id: String
+    let title: String
+    let activity: String
+    let isActive: Bool
+    let isUnconfirmed: Bool
+    var loopWarning: LoopWarning?
+}
+
 struct MonitoredTask: Identifiable, Codable, Equatable {
     let id: String
     var provider: TaskProvider
@@ -69,8 +78,10 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
     var progressBasis: ProgressBasis? = nil
     var codexAgentCount: Int? = nil
     var codexAgentsUnconfirmed: Bool? = nil
+    var codexAgents: [CodexAgentDetail]? = nil
+    var lastKnownActivity: String? = nil
 
-    var codexAgentCountLabel: String? {
+    func codexAgentCountLabel(includingStatus: Bool) -> String? {
         guard let count = codexAgentCount, count > 0 else { return nil }
         let lastHundred = count % 100, last = count % 10
         let russian: String
@@ -79,11 +90,16 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
         else if (2...4).contains(last) { russian = "агента" }
         else { russian = "агентов" }
         let english = count == 1 ? "agent" : "agents"
-        if codexAgentsUnconfirmed == true {
+        if includingStatus && codexAgentsUnconfirmed == true {
             return tr("(\(count) \(russian), статус не подтверждён)",
                       "(\(count) \(english), status unconfirmed)")
         }
         return tr("(\(count) \(russian))", "(\(count) \(english))")
+    }
+
+    var codexAgentCountLabel: String? { codexAgentCountLabel(includingStatus: true) }
+    var codexAgentStatusLabel: String? {
+        codexAgentsUnconfirmed == true ? tr("Статус агентов не подтверждён", "Agent status unconfirmed") : nil
     }
 
     var planStatusNote: String? {
@@ -181,6 +197,10 @@ enum TaskSnapshotMerger {
         var result = current
         for task in previous where !currentIDs.contains(task.id) && !terminalIDs.contains(task.id) {
             var uncertain = task
+            if uncertain.provider == .codex && uncertain.lastKnownActivity == nil &&
+                !task.activity.isEmpty && !["Статус не подтверждён", "Status unconfirmed", "Выполняется", "Working"].contains(task.activity) {
+                uncertain.lastKnownActivity = task.activity
+            }
             uncertain.isActive = false
             uncertain.isUnconfirmed = true
             uncertain.isWaiting = false

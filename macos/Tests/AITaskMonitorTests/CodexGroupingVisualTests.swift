@@ -37,6 +37,7 @@ final class CodexGroupingVisualTests: XCTestCase {
             AppLanguage.previewOverride = language
             for dark in [false, true] {
                 for compact in [false, true] {
+                  for disclosureOpen in [false, true] {
                     let title = tr("Очень длинное название родительской задачи для проверки обрезки и подсказки",
                                    "A very long parent task title for checking truncation and its tooltip")
                     let parentTask = MonitoredTask(id: rootID, provider: .codex, title: title,
@@ -45,10 +46,12 @@ final class CodexGroupingVisualTests: XCTestCase {
                         steps: [TaskStep(title: tr("Первый этап", "First step"), status: .done),
                                 TaskStep(title: tr("Второй этап", "Second step"), status: .active)],
                         updatedAt: Date())
-                    let children = ids.map { id in
-                        MonitoredTask(id: id, provider: .codex, title: "Synthetic helper",
-                            activity: "Synthetic activity", isActive: false, progress: nil,
-                            progressKind: .none, steps: [], updatedAt: Date(), isUnconfirmed: true)
+                    let children = ids.enumerated().map { offset, id in
+                        MonitoredTask(id: id, provider: .codex,
+                            title: tr("Помощник \(offset + 1)", "Assistant \(offset + 1)"),
+                            activity: tr("Статус не подтверждён", "Status unconfirmed"), isActive: false, progress: nil,
+                            progressKind: .none, steps: [], updatedAt: Date(), isUnconfirmed: true,
+                            lastKnownActivity: tr("Последнее проверенное действие \(offset + 1)", "Last observed action \(offset + 1)"))
                     }
                     let grouped = CodexTaskGrouping.project([parentTask] + children,
                         parents: [ids[0]: rootID, ids[1]: rootID, ids[2]: ids[0]], titles: [rootID: title])
@@ -57,11 +60,17 @@ final class CodexGroupingVisualTests: XCTestCase {
                     XCTAssertEqual(item.codexAgentCount, 3)
                     XCTAssertEqual(item.title, title)
                     XCTAssertEqual(item.progress, parentTask.progress)
+                    XCTAssertEqual(item.codexAgents?.count, 3)
+                    XCTAssertEqual(item.codexAgents?.first?.activity,
+                                   tr("Последнее проверенное действие 1", "Last observed action 1"))
                     let store = TaskStore(codexReader: CodexTaskReader(codexHome: resolved.appendingPathComponent("missing-codex")),
                                           claudeReader: ClaudeTaskReader(eventFile: resolved.appendingPathComponent("missing-claude")),
                                           previewTasks: grouped)
                     store.isCompact = compact
-                    let size = compact ? NSSize(width: 372, height: 182) : NSSize(width: 560, height: 700)
+                    if disclosureOpen { store.toggleCodexGroup(rootID) }
+                    XCTAssertEqual(store.isCodexGroupExpanded(rootID), disclosureOpen)
+                    XCTAssertEqual(store.count(for: .all), 1)
+                    let size = compact ? NSSize(width: 372, height: disclosureOpen ? 340 : 182) : NSSize(width: 560, height: 700)
                     let view = RootView().environmentObject(store).environment(\.colorScheme, dark ? .dark : .light)
                     let hosting = NSHostingView(rootView: view)
                     hosting.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
@@ -78,7 +87,7 @@ final class CodexGroupingVisualTests: XCTestCase {
                     let bitmap = try XCTUnwrap(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
                     hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
                     let bytes = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                    let name = "grouped-\(language.rawValue)-\(dark ? "dark" : "light")-\(compact ? "compact" : "expanded").png"
+                    let name = "grouped-\(language.rawValue)-\(dark ? "dark" : "light")-\(compact ? "compact" : "expanded")-\(disclosureOpen ? "open" : "closed").png"
                     let destination = output.appendingPathComponent(name).path
                     guard destination.hasPrefix(output.path + "/") else { throw CocoaError(.fileWriteNoPermission) }
                     let descriptor = destination.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, mode_t(0o600)) }
@@ -87,6 +96,7 @@ final class CodexGroupingVisualTests: XCTestCase {
                     try handle.write(contentsOf: bytes)
                     try handle.close()
                     window.close()
+                  }
                 }
             }
         }

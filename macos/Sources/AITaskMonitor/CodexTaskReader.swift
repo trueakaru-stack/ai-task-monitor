@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 struct CodexTaskSnapshot {
     var tasks: [MonitoredTask] = []
@@ -257,7 +258,8 @@ struct CodexTaskReader {
                 isUnconfirmed: unconfirmed,
                 startedAt: state.startedAt ?? .distantPast,
                 startKey: state.startKey,
-                planConfirmed: !recoveredUnconfirmed && plan.confirmed
+                planConfirmed: !recoveredUnconfirmed && plan.confirmed,
+                lastKnownActivity: activity.isEmpty ? nil : activity
             ))
             visibleMetadataStamps[id] = CodexSubagentMetadataWorker.Stamp(attributes)
         }
@@ -378,7 +380,8 @@ struct CodexTaskReader {
                     isUnconfirmed: true,
                     startedAt: state.startedAt ?? .distantPast,
                     startKey: state.startKey,
-                    planConfirmed: plan.confirmed
+                    planConfirmed: plan.confirmed,
+                    lastKnownActivity: detail.isEmpty ? nil : detail
                 ))
                 if let attributes = try? fileManager.attributesOfItem(atPath: file.path) {
                     visibleMetadataStamps[id] = CodexSubagentMetadataWorker.Stamp(attributes)
@@ -401,10 +404,13 @@ struct CodexTaskReader {
             guard let stamp = CodexSubagentMetadataWorker.Stamp(before) else { throw CocoaError(.fileReadUnknown) }
             let metadata = try self.readSubagentParent(file, id: id)
             let after = try self.fileManager.attributesOfItem(atPath: file.path)
-            guard CodexSubagentMetadataWorker.Stamp(after) == stamp,
-                  metadata.device == stamp.device, metadata.inode == stamp.inode,
-                  metadata.size == stamp.size else { throw CocoaError(.fileReadUnknown) }
-            return CodexSubagentMetadataWorker.Observation(file: file, stamp: stamp, parentID: metadata.parentID)
+            guard let current = CodexSubagentMetadataWorker.Stamp(after),
+                  current.device == stamp.device, current.inode == stamp.inode,
+                  current.size >= stamp.size, current.modified >= stamp.modified,
+                  metadata.device == current.device, metadata.inode == current.inode,
+                  metadata.size <= current.size else { throw CocoaError(.fileReadUnknown) }
+            return CodexSubagentMetadataWorker.Observation(file: file, stamp: current,
+                                                           parentID: metadata.parentID, headerDigest: metadata.headerDigest)
         }
         var verifiedMetadata: Set<String> = []
         var checkedAncestors = 0
@@ -419,11 +425,24 @@ struct CodexTaskReader {
                 current = (try? fileManager.attributesOfItem(atPath: observation.file.path))
                     .flatMap { CodexSubagentMetadataWorker.Stamp($0) }
             }
-            guard current == observation.stamp else { continue }
+            guard let current else { continue }
+            let checked = current == observation.stamp
+            // While an append is being rechecked, preserve a recently verified
+            // header on the same file. A concurrent rewrite can only be
+            // detected when the background header read finishes.
+            let appending = current.device == observation.stamp.device && current.inode == observation.stamp.inode &&
+                current.size > observation.stamp.size && current.modified >= observation.stamp.modified &&
+                ProcessInfo.processInfo.systemUptime - observation.observedAt <= 10
+            guard checked || appending else { continue }
             verifiedMetadata.insert(id)
             if let parent = observation.parentID { result.subagentParents[id] = parent }
         }
-        if !visibleIDs.subtracting(verifiedMetadata).isEmpty { result.isPartial = true }
+        // Pending metadata alone does not make the separately visible tasks
+        // unavailable. Once a relationship is used, disclose incomplete
+        // metadata coverage for the other visible tasks.
+        if !result.subagentParents.isEmpty && !visibleIDs.subtracting(verifiedMetadata).isEmpty {
+            result.isPartial = true
+        }
         for parent in Set(result.subagentParents.values) {
             guard let title = sessions[parent]?.string("thread_name"),
                   !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1017,7 +1036,7 @@ struct CodexTaskReader {
         return descriptor
     }
 
-    private func readSubagentParent(_ url: URL, id: String) throws -> (parentID: String?, device: UInt64, inode: UInt64, size: UInt64) {
+    private func readSubagentParent(_ url: URL, id: String) throws -> (parentID: String?, device: UInt64, inode: UInt64, size: UInt64, headerDigest: Data) {
         let descriptor = try openSessionFile(url)
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
@@ -1025,18 +1044,19 @@ struct CodexTaskReader {
         guard fstat(descriptor, &before) == 0, before.st_size >= 0 else { throw CocoaError(.fileReadUnknown) }
         let prefix = try handle.read(upToCount: 65_536) ?? Data()
         guard let newline = prefix.firstIndex(of: 0x0a),
+              CodexUniqueJSONKeys.accepts(Data(prefix[..<newline])),
               let header = try? JSONSerialization.jsonObject(with: Data(prefix[..<newline])) as? [String: Any],
               header.string("type") == "session_meta", let payload = header.object("payload"),
               payload.string("id") == id else { throw CocoaError(.fileReadCorruptFile) }
+        let originalHeader = Data(prefix[...newline])
+        try handle.seek(toOffset: 0)
+        guard try handle.read(upToCount: originalHeader.count) == originalHeader else { throw CocoaError(.fileReadUnknown) }
         var after = stat()
         guard fstat(descriptor, &after) == 0, before.st_dev == after.st_dev, before.st_ino == after.st_ino,
-              before.st_size == after.st_size,
-              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
-              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
-              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
-              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else { throw CocoaError(.fileReadUnknown) }
+              after.st_size >= before.st_size else { throw CocoaError(.fileReadUnknown) }
         return (subagentReference(payload, id: id)?.parentID,
-                UInt64(bitPattern: Int64(before.st_dev)), UInt64(before.st_ino), UInt64(before.st_size))
+                UInt64(bitPattern: Int64(after.st_dev)), UInt64(after.st_ino), UInt64(after.st_size),
+                Data(SHA256.hash(data: originalHeader)))
     }
 
     /// A live session keeps writing the same descriptor while this bounded
