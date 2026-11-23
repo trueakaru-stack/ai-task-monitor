@@ -333,8 +333,10 @@ jobs:
               "$task_swiftc" --version
             } > "$AITM_RELEASE_ROOT/release-artifacts/build-method.txt"
           fi
-          /usr/bin/xcrun lipo -create "$task_arm_binary" "$task_x64_binary" -output .build/apple/Products/Release/AITaskMonitor
-          /usr/bin/xcrun lipo -verify_arch arm64 x86_64 .build/apple/Products/Release/AITaskMonitor
+          task_lipo="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/lipo"
+          "$task_lipo" -create "$task_arm_binary" "$task_x64_binary" -output .build/apple/Products/Release/AITaskMonitor
+          "$task_lipo" .build/apple/Products/Release/AITaskMonitor -verify_arch arm64
+          "$task_lipo" .build/apple/Products/Release/AITaskMonitor -verify_arch x86_64
           SCRIPT
           chmod 700 "$task_bin/swift"
           task_run="$task_root/run-isolated"
@@ -394,7 +396,15 @@ jobs:
           test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = 0.3.12
           test "$(/usr/bin/plutil -extract AITaskMonitorReleaseVersion raw -o - "$task_app/Contents/Info.plist")" = 0.3.12
           test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$task_app/Contents/Info.plist")" = 16
-          /usr/bin/lipo -verify_arch arm64 x86_64 "$task_app/Contents/MacOS/AITaskMonitor"
+          test "$(/usr/bin/plutil -extract LSMinimumSystemVersion raw -o - "$task_app/Contents/Info.plist")" = 13.0
+          task_binary="$task_app/Contents/MacOS/AITaskMonitor"
+          task_lipo="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/lipo"
+          task_otool="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/otool"
+          for task_arch in arm64 x86_64; do
+            "$task_lipo" "$task_binary" -verify_arch "$task_arch"
+            "$task_otool" -arch "$task_arch" -l "$task_binary" > "$task_root/release-artifacts/load-commands-$task_arch.txt"
+            grep -Eq '^[[:space:]]*minos[[:space:]]+13[.]0([.]0)?[[:space:]]*$' "$task_root/release-artifacts/load-commands-$task_arch.txt"
+          done
           /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_app"
           /usr/bin/codesign -dv --verbose=4 "$task_app" 2>&1 | tee "$task_root/release-artifacts/signature.txt"
           grep -q 'Signature=adhoc' "$task_root/release-artifacts/signature.txt"
