@@ -114,6 +114,42 @@ jobs:
             fi
             tail -n 50 "$task_root/logs/$mode.log"
           done
+          echo 'hdiutil makehybrid diagnostic without raw-device permissions'
+          if run_isolated /usr/bin/hdiutil makehybrid -hfs -hfs-volume-name 'AI Task Monitor' \
+            -o "$task_root/temp/hybrid.dmg" "$task_root/temp/app-stage" >"$task_root/logs/hybrid.log" 2>&1; then
+            test -s "$task_root/temp/hybrid.dmg"
+            echo 'Hybrid image created; converting to UDZO.'
+            if run_isolated /usr/bin/hdiutil convert "$task_root/temp/hybrid.dmg" -format UDZO \
+              -o "$task_root/temp/hybrid-udzo.dmg" >"$task_root/logs/hybrid-convert.log" 2>&1; then
+              test -s "$task_root/temp/hybrid-udzo.dmg"
+              run_isolated /usr/bin/hdiutil verify "$task_root/temp/hybrid-udzo.dmg" >"$task_root/logs/hybrid-verify.log" 2>&1
+              mkdir -p "$task_root/temp/hybrid-mount"
+              if run_isolated /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen \
+                -mountpoint "$task_root/temp/hybrid-mount" "$task_root/temp/hybrid-udzo.dmg" >"$task_root/logs/hybrid-attach.log" 2>&1; then
+                trap 'run_isolated /usr/bin/hdiutil detach "$task_root/temp/hybrid-mount" >/dev/null 2>&1 || true' EXIT
+                test -d "$task_root/temp/hybrid-mount/AI Task Monitor.app"
+                test -L "$task_root/temp/hybrid-mount/Applications"
+                test "$(readlink "$task_root/temp/hybrid-mount/Applications")" = /Applications
+                test "$(find "$task_root/temp/hybrid-mount" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 2
+                run_isolated /usr/bin/diff -qr "$task_app" "$task_root/temp/hybrid-mount/AI Task Monitor.app"
+                run_isolated /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_root/temp/hybrid-mount/AI Task Monitor.app"
+                task_icon_actual="$(/usr/bin/shasum -a 256 "$task_root/temp/hybrid-mount/AI Task Monitor.app/Contents/Resources/AppIcon.icns")"
+                test "${task_icon_actual%% *}" = ec9ba4d716b1988dfad213127d9d2dffbb37e188199f8c7576d4325774e78e67
+                run_isolated /usr/bin/hdiutil detach "$task_root/temp/hybrid-mount"
+                trap - EXIT
+                echo 'Hybrid image contents, icon and strict signature verified.'
+              else
+                echo 'Hybrid image could not be mounted in the restricted environment.'
+                cat "$task_root/logs/hybrid-attach.log"
+              fi
+            else
+              echo 'Hybrid image conversion failed.'
+              cat "$task_root/logs/hybrid-convert.log"
+            fi
+          else
+            echo 'Hybrid image creation failed.'
+            cat "$task_root/logs/hybrid.log"
+          fi
           for probe in "$marker" "$task_root/denied-link"; do
             if run_isolated /bin/cat "$probe" >/dev/null 2>&1 || run_isolated /usr/bin/touch "$probe" >/dev/null 2>&1; then
               echo 'Profile access became available.' >&2; exit 1
