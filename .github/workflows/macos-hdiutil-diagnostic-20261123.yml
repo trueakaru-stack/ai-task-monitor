@@ -1,0 +1,121 @@
+name: Isolated macOS image diagnostic
+on:
+  push:
+    branches: ['codex/macos-activity-ci-20261123']
+    paths: ['.github/workflows/macos-hdiutil-diagnostic-20261123.yml']
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      AITM_IMAGE_SOURCE_SHA: b709ae6992e963fbf81f75aad115f8c3c9708c1f
+      DEVELOPER_DIR: /Applications/Xcode_16.1.app/Contents/Developer
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Check hdiutil on disposable fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          case "$RUNNER_TEMP" in /Users/runner/*) ;; *) exit 1;; esac
+          task_root="$(/usr/bin/mktemp -d "$RUNNER_TEMP/aitm-image-check.XXXXXXXX")"
+          marker="$(/usr/bin/mktemp "$RUNNER_TEMP/aitm-image-profile.XXXXXXXX")"
+          printf 'synthetic-marker\n' > "$marker"
+          mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" "$task_root/synthetic-home" "$task_root/logs"
+          cd "$task_root"
+          task_git=(/usr/bin/env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null /usr/bin/git)
+          "${task_git[@]}" -c credential.helper= -c core.hooksPath="$task_root/hooks" -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
+          "${task_git[@]}" -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$AITM_IMAGE_SOURCE_SHA"
+          "${task_git[@]}" -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
+          test "$("${task_git[@]}" -C "$task_root/source" rev-parse HEAD)" = "$AITM_IMAGE_SOURCE_SHA"
+          cat > "$task_root/profile.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath (param "TASK_PROFILE")))
+          (allow file-read-metadata)
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny mach-lookup (global-name "com.apple.bsd.dirhelper"))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          (deny network*)
+          PROFILE
+          run_isolated() {
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin "TMPDIR=$task_root/temp/" \
+              "CFFIXED_USER_HOME=$task_root/synthetic-home" "DEVELOPER_DIR=$DEVELOPER_DIR" XCRUN_NO_CACHE=1 \
+              /usr/bin/sandbox-exec -D TASK_PROFILE=/Users/runner -D "TASK_ROOT=$task_root" -f "$task_root/profile.sb" "$@"
+          }
+          /bin/cat "$marker" >/dev/null
+          /bin/ln -s "$marker" "$task_root/denied-link"
+          for probe in "$marker" "$task_root/denied-link"; do
+            if run_isolated /bin/cat "$probe" >/dev/null 2>&1 || run_isolated /usr/bin/touch "$probe" >/dev/null 2>&1; then
+              echo 'Profile access unexpectedly allowed.' >&2; exit 1
+            fi
+          done
+          run_isolated /usr/bin/touch "$task_root/temp/allowed-write"
+          /usr/bin/env node -e 'const n=require("node:net"),f=require("node:fs");n.createServer(c=>c.end()).listen(0,"127.0.0.1",function(){f.writeFileSync(process.argv[1],String(this.address().port))})' "$task_root/port" &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true' EXIT
+          for attempt in {1..100}; do test -s "$task_root/port" && break; sleep 0.1; done
+          test -s "$task_root/port"
+          port="$(cat "$task_root/port")"
+          [[ "$port" =~ ^[0-9]{1,5}$ ]]
+          /usr/bin/nc -vz -G 2 127.0.0.1 "$port"
+          if run_isolated /usr/bin/nc -vz -G 2 127.0.0.1 "$port" >"$task_root/network.log" 2>&1; then
+            echo 'Network unexpectedly allowed.' >&2; exit 1
+          fi
+          grep -Eiq 'operation not permitted|permission denied' "$task_root/network.log"
+          kill "$server"; wait "$server" 2>/dev/null || true; trap - EXIT
+          mkdir -p "$task_root/temp/plain-stage" "$task_root/temp/link-stage" "$task_root/temp/app-stage/AI Task Monitor.app/Contents/MacOS" "$task_root/temp/app-stage/AI Task Monitor.app/Contents/Resources/integrations/kimi-plugin"
+          printf 'synthetic\n' > "$task_root/temp/plain-stage/example.txt"
+          printf 'synthetic\n' > "$task_root/temp/link-stage/example.txt"
+          /bin/ln -s /Applications "$task_root/temp/link-stage/Applications"
+          /bin/ln -s /Applications "$task_root/temp/app-stage/Applications"
+          task_app="$task_root/temp/app-stage/AI Task Monitor.app"
+          /bin/cp "$task_root/source/macos/Info.plist" "$task_app/Contents/Info.plist"
+          /bin/cp /usr/bin/true "$task_app/Contents/MacOS/AITaskMonitor"
+          /bin/cp "$task_root/source/.github/macos-icon-fallback-20261123/AppIcon.icns" "$task_app/Contents/Resources/AppIcon.icns"
+          for file in opencode-entry.js provider-events.mjs provider-observers.mjs provider-transport.mjs provider-v2-sender.mjs deepseek-integration.mjs deepseek-setup.mjs deepseek-plugin.js kimi-integration.mjs kimi-setup.mjs package.json cordis.patch.yml hermes-setup.py hermes-manager.py ruamel.yaml-0.18.16-py3-none-any.whl ruamel.yaml-LICENSE.txt provider_bundle.py hermes-entry.py hermes-plugin.yaml hermes_observer.py provider_hooks.py provider_sender.py provider_transport.py; do
+            /bin/cp "$task_root/source/macos/integrations/$file" "$task_app/Contents/Resources/integrations/$file"
+          done
+          for file in kimi.plugin.json kimi-hook.mjs kimi-observer.mjs provider-transport.mjs; do
+            /bin/cp "$task_root/source/macos/integrations/kimi-plugin/$file" "$task_app/Contents/Resources/integrations/kimi-plugin/$file"
+          done
+          run_isolated /usr/bin/codesign --force --deep --sign - "$task_app"
+          run_isolated /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_app"
+          for mode in plain link app app-hfs; do
+            case "$mode" in
+              plain) stage="$task_root/temp/plain-stage"; extra=();;
+              link) stage="$task_root/temp/link-stage"; extra=();;
+              app) stage="$task_root/temp/app-stage"; extra=();;
+              app-hfs) stage="$task_root/temp/app-stage"; extra=(-fs HFS+);;
+            esac
+            echo "hdiutil diagnostic: $mode"
+            if run_isolated /usr/bin/hdiutil create -debug -volname 'AI Task Monitor' -srcfolder "$stage" -ov -format UDZO "${extra[@]}" "$task_root/temp/$mode.dmg" >"$task_root/logs/$mode.log" 2>&1; then
+              test -s "$task_root/temp/$mode.dmg"
+              echo "$mode: created"
+            else
+              echo "$mode: failed"
+            fi
+            tail -n 50 "$task_root/logs/$mode.log"
+          done
+          for probe in "$marker" "$task_root/denied-link"; do
+            if run_isolated /bin/cat "$probe" >/dev/null 2>&1 || run_isolated /usr/bin/touch "$probe" >/dev/null 2>&1; then
+              echo 'Profile access became available.' >&2; exit 1
+            fi
+          done
+          /usr/bin/log show --last 5m --style compact --predicate 'eventMessage CONTAINS "deny" AND (eventMessage CONTAINS "hdiutil" OR eventMessage CONTAINS "diskimages")' >"$task_root/logs/sandbox.log" 2>/dev/null || true
+          tail -n 50 "$task_root/logs/sandbox.log"
+      - name: Save diagnostic logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-image-diagnostic-${{ github.sha }}
+          path: ${{ runner.temp }}/aitm-image-check.*/logs/*.log
+          if-no-files-found: warn
