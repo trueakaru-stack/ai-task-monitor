@@ -7,11 +7,11 @@ permissions:
   contents: read
 jobs:
   image:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 10
     env:
       AITM_IMAGE_SOURCE_SHA: b709ae6992e963fbf81f75aad115f8c3c9708c1f
-      DEVELOPER_DIR: /Applications/Xcode_16.1.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
