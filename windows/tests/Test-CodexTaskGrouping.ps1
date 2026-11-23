@@ -46,6 +46,14 @@ $activeAction=[PSCustomObject]@{Provider='codex';Status='running';Active=$true;P
 Require ((Related-AgentActivity $unknownAction $true) -ceq ($lastPrefix+'Observed action') -and
  (Related-AgentActivity $unknownAction $false) -ceq ($unconfirmed+'. '+$lastPrefix+'Observed action') -and
  (Related-AgentActivity $activeAction $true) -ceq 'Current action') 'Mixed current and unconfirmed agent actions were labelled incorrectly.'
+$activeAgent=Task $c1 'Active agent' $true
+$pausedAgent=Task $c2 'Paused agent';$pausedAgent.Paused=$true;$pausedAgent.Status='paused'
+$mixedKnown=@(Group-CodexTasks @($parent,$activeAgent,$pausedAgent) $links $titles)
+Require ($mixedKnown.Count -eq 1 -and $mixedKnown[0].RelatedAgentCount -eq 2 -and -not $mixedKnown[0].RelatedAgentsUnconfirmed) 'A confirmed paused agent was marked unconfirmed.'
+$mixedMissingParent=@(Group-CodexTasks @($activeAgent,$pausedAgent) $links $titles)
+Require ($mixedMissingParent.Count -eq 1 -and -not $mixedMissingParent[0].Active -and -not $mixedMissingParent[0].RelatedAgentsUnconfirmed) 'An unknown parent made confirmed agent statuses unconfirmed.'
+$mixedUnknown=@(Group-CodexTasks @($parent,$activeAgent,$pausedAgent,$nested) $links $titles)
+Require ($mixedUnknown.Count -eq 1 -and $mixedUnknown[0].RelatedAgentsUnconfirmed) 'An actually unknown agent did not mark the group unconfirmed.'
 $script:resolvedLanguage='en'
 Require ((Localized-TaskTitle $grouped[0]) -ceq 'Parent (3 agents)' -and (Related-AgentStatus $grouped[0]) -ceq 'Agent status unconfirmed') 'The English count or uncertainty label is incorrect.'
 $single=$grouped[0].PSObject.Copy();$single.RelatedAgentCount=1

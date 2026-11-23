@@ -3439,7 +3439,7 @@ function Group-CodexTasks($tasks,$links,$titles) {
    $task=$task.PSObject.Copy();$unknown=$false
    $agentIds=[string[]]@($groups[$id].Keys);[Array]::Sort($agentIds,[StringComparer]::OrdinalIgnoreCase)
    $agents=New-Object 'Collections.Generic.List[object]'
-   foreach($member in $agentIds){$agents.Add($local[$member]);if(-not [bool](Prop $local[$member] 'Active' $false)){$unknown=$true}}
+   foreach($member in $agentIds){$agents.Add($local[$member]);if(-not [bool](Prop $local[$member] 'Active' $false) -and -not [bool](Prop $local[$member] 'Paused' $false)){$unknown=$true}}
    $task|Add-Member -NotePropertyMembers @{RelatedAgentCount=$agentIds.Length;RelatedAgentsUnconfirmed=$unknown;RelatedAgentIds=$agentIds;RelatedAgents=$agents.ToArray()} -Force
   }
   $result.Add($task)
@@ -3449,8 +3449,9 @@ function Group-CodexTasks($tasks,$links,$titles) {
   $title=if($titles.ContainsKey($parent)){[string]$titles[$parent]}else{''};$generated=([string]::IsNullOrWhiteSpace($title) -or $title -ceq 'Guardian review')
   if($generated){$title='Задача Codex'}
   $agentIds=[string[]]@($groups[$parent].Keys);[Array]::Sort($agentIds,[StringComparer]::OrdinalIgnoreCase)
-  $agents=New-Object 'Collections.Generic.List[object]';foreach($member in $agentIds){$agents.Add($local[$member])}
-  $result.Add([PSCustomObject]@{Id=$parent;Title=$title;TitleGenerated=$generated;Activity='Статус не подтверждён';ActivityGenerated=$true;ActivityObserved=$false;Active=$false;Paused=$false;Progress=$null;ProgressKind='none';ProgressBasis='task';Provider='codex';ProviderName='Codex';Status='Статус не подтверждён';Updated=[DateTime]::MinValue;Started=[DateTime]::MinValue;StartKey='';Steps=@();Source='Оценка активности';PlanConfirmed=$false;RelatedAgentCount=$agentIds.Length;RelatedAgentsUnconfirmed=$true;RelatedAgentIds=$agentIds;RelatedAgents=$agents.ToArray()})
+  $agents=New-Object 'Collections.Generic.List[object]';$unknown=$false
+  foreach($member in $agentIds){$agents.Add($local[$member]);if(-not [bool](Prop $local[$member] 'Active' $false) -and -not [bool](Prop $local[$member] 'Paused' $false)){$unknown=$true}}
+  $result.Add([PSCustomObject]@{Id=$parent;Title=$title;TitleGenerated=$generated;Activity='Статус не подтверждён';ActivityGenerated=$true;ActivityObserved=$false;Active=$false;Paused=$false;Progress=$null;ProgressKind='none';ProgressBasis='task';Provider='codex';ProviderName='Codex';Status='Статус не подтверждён';Updated=[DateTime]::MinValue;Started=[DateTime]::MinValue;StartKey='';Steps=@();Source='Оценка активности';PlanConfirmed=$false;RelatedAgentCount=$agentIds.Length;RelatedAgentsUnconfirmed=$unknown;RelatedAgentIds=$agentIds;RelatedAgents=$agents.ToArray()})
  }
  foreach($task in $other){$result.Add($task)}
  return @($result.ToArray())
