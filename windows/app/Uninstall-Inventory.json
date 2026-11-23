@@ -9,6 +9,7 @@
   "ClaudeLoopChannel.cs",
   "ClaudeReaderCore.ps1",
   "ClaudeRetention.cs",
+  "CodexRecentEventObserver.cs",
   "AppShellIdentity.cs",
   "Configure-ClaudeIntegration.ps1",
   "Configure-OpenCodeIntegration.ps1",

@@ -3,7 +3,7 @@ $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Application source could not be parsed.' }
-$names = @('Prop', 'Read-TailText', 'Lock-State', 'Thread-State', 'Codex-Uncertain', 'Codex-Plan', 'Codex-TurnStartIndex', 'Codex-ContainsIdentifier', 'Codex-CurrentToolActivity', 'Codex-FigmaCompleted', 'Codex-FirstFigmaCompletion', 'Codex-Activity', 'Read-ObservedCodexTail', 'Codex-ObservedActivity', 'Plan-Progress', 'Codex-IndexCandidates', 'Codex-SubagentMetadata', 'Codex-ReadSubagentMetadata', 'Codex-UnindexedCandidates', 'Codex-Tasks', 'Prioritize-Tasks')
+$names = @('Prop', 'Read-TailText', 'Lock-State', 'Thread-State', 'Codex-Uncertain', 'Codex-Plan', 'Codex-TurnStartIndex', 'Codex-ContainsIdentifier', 'Codex-CurrentToolActivity', 'Codex-FigmaCompleted', 'Codex-FirstFigmaCompletion', 'Codex-Activity', 'Read-ObservedCodexTail', 'Codex-ObservedActivity', 'Plan-Progress', 'Codex-IndexCandidates', 'Codex-SubagentMetadata', 'Codex-ReadSubagentMetadata', 'Codex-UnindexedCandidates', 'Group-CodexTasks', 'Codex-Tasks', 'Prioritize-Tasks')
 $definitions = foreach ($name in $names) {
     $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if ($null -eq $function) { throw "Missing function: $name" }

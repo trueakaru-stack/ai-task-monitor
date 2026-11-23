@@ -1,13 +1,13 @@
 name: Synthetic legacy uninstall safety
 on:
   push:
-    branches: ['windows', 'codex/legacy-uninstall-check-20261116']
+    branches: ['windows', 'codex/legacy-uninstall-check-20261116', 'codex/windows-activity-ci-20261123']
 permissions:
   contents: read
 jobs:
   test:
     runs-on: windows-2025
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
       DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
