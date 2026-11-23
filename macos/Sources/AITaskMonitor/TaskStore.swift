@@ -798,7 +798,19 @@ final class TaskStore: ObservableObject {
     var visibleProviderFilters: [ProviderFilter] {
         ProviderFilter.allCases.filter { filter in filter == .all || filter.provider.map { providers.contains($0) } == true }
     }
-    var unavailableMessage: String {
+    var unavailableMessage: String { sourceUnavailableMessage(includeCodexPartial: true) }
+    var compactUnavailableMessage: String { sourceUnavailableMessage(includeCodexPartial: false) }
+
+    var compactEmptyMessage: String {
+        let warning = compactUnavailableMessage
+        if !warning.isEmpty { return warning }
+        if codexPartiallyUnavailable && !unavailableSources.contains(.codex) {
+            return tr("Нет отображаемых задач", "No tasks to display")
+        }
+        return tr("Активных задач нет", "No active tasks")
+    }
+
+    private func sourceUnavailableMessage(includeCodexPartial: Bool) -> String {
         var messages: [String] = []
         let partial = unavailableSources.filter { partialExternalSources.contains($0) }
         let absent = unavailableSources.filter { !partialExternalSources.contains($0) }
@@ -809,7 +821,7 @@ final class TaskStore: ObservableObject {
             let sources = partial.map(\.displayName).joined(separator: ", ")
             messages.append(tr("Часть данных ", "Some ") + sources + tr(" недоступна", " data is unavailable"))
         }
-        if codexPartiallyUnavailable && !unavailableSources.contains(.codex) {
+        if includeCodexPartial && codexPartiallyUnavailable && !unavailableSources.contains(.codex) {
             messages.append(tr("Часть данных Codex недоступна", "Some Codex data is unavailable"))
         }
         return messages.joined(separator: ". ")

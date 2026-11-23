@@ -161,7 +161,7 @@ struct RootView: View {
     private var compactContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             if store.tasks.isEmpty {
-                Text(store.unavailableMessage.isEmpty ? tr("Активных задач нет", "No active tasks") : store.unavailableMessage)
+                Text(store.compactEmptyMessage)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(MonitorTheme.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -188,8 +188,8 @@ struct RootView: View {
                         .foregroundStyle(colorScheme == .light ? MonitorTheme.primary : MonitorTheme.secondary)
                 }
                 if task.loopWarning != nil { LoopWarningView(task: task, compact: true) }
-                if !store.unavailableMessage.isEmpty {
-                    Text(store.unavailableMessage)
+                if !store.compactUnavailableMessage.isEmpty {
+                    Text(store.compactUnavailableMessage)
                         .font(.system(size: 11.5))
                         .foregroundStyle(MonitorTheme.secondary)
                         .lineLimit(2)
@@ -225,7 +225,7 @@ struct RootView: View {
     private var compactHeight: CGFloat {
         if measuredCompactContentHeight > 0 { return ceil(58 + measuredCompactContentHeight) }
         let base: CGFloat = store.tasks.count > 1 ? 182 : 156
-        let sourceExtra: CGFloat = !store.tasks.isEmpty && !store.unavailableMessage.isEmpty ? 24 : 0
+        let sourceExtra: CGFloat = !store.tasks.isEmpty && !store.compactUnavailableMessage.isEmpty ? 24 : 0
         let selected = store.tasks.isEmpty ? nil : store.tasks[min(store.compactIndex, store.tasks.count - 1)]
         let loopExtra: CGFloat = selected?.loopWarning == nil ? 0 : 64
         let planExtra: CGFloat = selected?.planStatusNote == nil ? 0 : 22

@@ -88,6 +88,125 @@ final class CodexExecDiscoveryTests: XCTestCase {
         try writeFixture(data, to: root.appendingPathComponent("session_index.jsonl"))
     }
 
+    private func indexRows(_ root: URL, _ rows: [(String, String)]) throws {
+        var data = Data()
+        for (id, title) in rows {
+            data.append(try JSONSerialization.data(withJSONObject: ["id": id, "thread_name": title]))
+            data.append(0x0a)
+        }
+        try writeFixture(data, to: root.appendingPathComponent("session_index.jsonl"))
+    }
+
+    private func subagentRollout(_ root: URL, id: String, parent: String, metadataID: String? = nil,
+                                 nestedParent: String? = nil, outerPath: String = "/root/research",
+                                 nestedPath: String = "/root/research", outerName: String? = "Sparrow",
+                                 nestedName: String? = "Sparrow", sourceOverride: String? = nil) throws {
+        var spawn: [String: Any] = ["parent_thread_id": nestedParent ?? parent, "agent_path": nestedPath]
+        if let nestedName { spawn["agent_nickname"] = nestedName }
+        var payload: [String: Any] = ["id": metadataID ?? id, "parent_thread_id": parent,
+            "agent_path": outerPath, "source": ["subagent": ["thread_spawn": spawn]]]
+        if let outerName { payload["agent_nickname"] = outerName }
+        if let sourceOverride { payload["source"] = sourceOverride }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let timestamp = formatter.string(from: Date())
+        let rows: [[String: Any]] = [
+            ["timestamp": timestamp, "type": "session_meta", "payload": payload],
+            ["timestamp": timestamp, "type": "event_msg", "payload": ["type": "task_started", "turn_id": "fixture-turn"]],
+            ["timestamp": timestamp, "type": "event_msg", "payload": ["type": "user_message", "message": "PRIVATE_ASSIGNMENT"]]
+        ]
+        var data = Data()
+        for row in rows {
+            data.append(try JSONSerialization.data(withJSONObject: row))
+            data.append(0x0a)
+        }
+        let url = root.appendingPathComponent("sessions/2026/11/16").appendingPathComponent(rolloutName(id))
+        try writeFixture(data, to: url)
+    }
+
+    func testUnindexedSubagentUsesIndexedParentAndConfirmedName() throws {
+        defer { AppLanguage.previewOverride = nil }
+        for language in [AppLanguage.ru, .en] {
+            AppLanguage.previewOverride = language
+            let root = try makeRoot()
+            try indexRows(root, [(first, "Parent task")])
+            try subagentRollout(root, id: second, parent: first)
+            let snapshot = try CodexTaskReader(codexHome: root).readSnapshot()
+            let task = try XCTUnwrap(snapshot.tasks.first { $0.id == second })
+            XCTAssertEqual(task.title, language == .ru ? "Parent task (агент Sparrow)" : "Parent task (agent Sparrow)")
+            XCTAssertFalse(task.isActive)
+            XCTAssertTrue(task.isUnconfirmed)
+            XCTAssertNil(task.progress)
+            XCTAssertFalse(task.title.contains("PRIVATE_ASSIGNMENT"))
+        }
+    }
+
+    func testIndexedChildNameTakesPriorityAndUnnamedChildUsesParent() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let root = try makeRoot()
+        try subagentRollout(root, id: second, parent: first)
+        try indexRows(root, [(first, "Parent task"), (second, "Direct child title")])
+        let reader = CodexTaskReader(codexHome: root)
+        XCTAssertEqual(try reader.readSnapshot().tasks.first { $0.id == second }?.title, "Direct child title")
+        try indexRows(root, [(first, "Parent task"), (second, "")])
+        XCTAssertEqual(try reader.readSnapshot().tasks.first { $0.id == second }?.title, "Parent task (agent Sparrow)")
+    }
+
+    func testMissingParentOrUnconfirmedNicknameKeepsGenericTitle() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let missingParent = try makeRoot()
+        try subagentRollout(missingParent, id: second, parent: first)
+        XCTAssertEqual(try CodexTaskReader(codexHome: missingParent).readSnapshot().tasks.first?.title, "Codex task")
+
+        let missingName = try makeRoot()
+        try indexRows(missingName, [(first, "Parent task")])
+        try subagentRollout(missingName, id: second, parent: first, outerName: nil, nestedName: nil)
+        XCTAssertEqual(try CodexTaskReader(codexHome: missingName).readSnapshot().tasks.first?.title, "Codex task")
+
+        let conflictingName = try makeRoot()
+        try indexRows(conflictingName, [(first, "Parent task")])
+        try subagentRollout(conflictingName, id: second, parent: first, outerName: "One", nestedName: "Two")
+        XCTAssertEqual(try CodexTaskReader(codexHome: conflictingName).readSnapshot().tasks.first?.title, "Codex task")
+
+        let unpairedName = try makeRoot()
+        try indexRows(unpairedName, [(first, "Parent task")])
+        try subagentRollout(unpairedName, id: second, parent: first, outerName: nil)
+        XCTAssertEqual(try CodexTaskReader(codexHome: unpairedName).readSnapshot().tasks.first?.title, "Codex task")
+
+        let emptyParent = try makeRoot()
+        try indexRows(emptyParent, [(first, "  ")])
+        try subagentRollout(emptyParent, id: second, parent: first)
+        XCTAssertEqual(try CodexTaskReader(codexHome: emptyParent).readSnapshot().tasks.first?.title, "Codex task")
+
+        let guardianParent = try makeRoot()
+        try indexRows(guardianParent, [(first, "Guardian review")])
+        try subagentRollout(guardianParent, id: second, parent: first)
+        XCTAssertEqual(try CodexTaskReader(codexHome: guardianParent).readSnapshot().tasks.first?.title, "Codex task")
+
+        let ordinaryExec = try makeRoot()
+        try indexRows(ordinaryExec, [(first, "Parent task")])
+        try subagentRollout(ordinaryExec, id: second, parent: first, sourceOverride: "exec")
+        XCTAssertEqual(try CodexTaskReader(codexHome: ordinaryExec).readSnapshot().tasks.first?.title, "Codex task")
+    }
+
+    func testSubagentDiscoveryRejectsConflictingIdentityAndPaths() throws {
+        for kind in ["child-id", "parent-id", "path-mismatch", "path-traversal", "self-parent"] {
+            let root = try makeRoot()
+            try indexRows(root, [(first, "Parent task")])
+            switch kind {
+            case "child-id": try subagentRollout(root, id: second, parent: first, metadataID: first)
+            case "parent-id": try subagentRollout(root, id: second, parent: first, nestedParent: revision)
+            case "path-mismatch": try subagentRollout(root, id: second, parent: first, nestedPath: "/root/other")
+            case "path-traversal": try subagentRollout(root, id: second, parent: first, outerPath: "/root/../other", nestedPath: "/root/../other")
+            default: try subagentRollout(root, id: second, parent: second)
+            }
+            let snapshot = try CodexTaskReader(codexHome: root).readSnapshot()
+            XCTAssertFalse(snapshot.tasks.contains { $0.id == second }, "Rejected metadata: \(kind)")
+        }
+    }
+
     func testExecWithoutIndexIsVisibleWithoutCreatingIndex() throws {
         let root = try makeRoot()
         let observedSince = Date().addingTimeInterval(-1)
@@ -99,6 +218,27 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertTrue(task.isUnconfirmed)
         XCTAssertNil(task.progressLabel)
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("session_index.jsonl").path))
+    }
+
+    func testVSCodeSourceWithoutIndexIsVisibleOnlyAsUnconfirmed() throws {
+        AppLanguage.previewOverride = .en
+        defer { AppLanguage.previewOverride = nil }
+        let root = try makeRoot()
+        let observedSince = Date().addingTimeInterval(-1)
+        let file = try rollout(root, fileID: first, source: "vscode")
+        let reader = CodexTaskReader(codexHome: root)
+        let snapshot = try reader.readSnapshot(observedSince: observedSince)
+        let task = try XCTUnwrap(snapshot.tasks.first { $0.id == first })
+        XCTAssertEqual(task.title, "Codex task")
+        XCTAssertFalse(task.isActive)
+        XCTAssertTrue(task.isUnconfirmed)
+        XCTAssertNil(task.progress)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("session_index.jsonl").path))
+
+        try append("task_complete", to: file)
+        let completed = try reader.readSnapshot(observedSince: observedSince, previouslyObserved: [first])
+        XCTAssertFalse(completed.tasks.contains { $0.id == first })
+        XCTAssertTrue(completed.terminalIDs.contains(first))
     }
 
     func testIndexedAndUnindexedTasksAppearTogether() throws {

@@ -66,7 +66,7 @@ struct CodexTaskReader {
         let files = discovered.files
         var result = CodexTaskSnapshot()
         result.isPartial = indexFailure != nil || discovered.isPartial || extra.isPartial || extraFiles.isPartial
-        var recognizedExecSource = false
+        var recognizedUnindexedSource = false
         for session in sessions.values {
             let id = session.string("id")
             let title = session.string("thread_name")
@@ -116,10 +116,15 @@ struct CodexTaskReader {
             let activity = parseActivity(from: tail)
             let progress = MonitoredTask.progress(for: steps)
             let unconfirmed = now.timeIntervalSince(modified) >= 7_200
+            var displayTitle = title
+            if displayTitle.isEmpty, let record = try? readUnindexedSession(file, id: id),
+               let derived = subagentTitle(record.subagent, sessions: sessions) {
+                displayTitle = derived
+            }
             result.tasks.append(MonitoredTask(
                 id: id,
                 provider: .codex,
-                title: title.isEmpty ? tr("Задача Codex", "Codex task") : title,
+                title: displayTitle.isEmpty ? tr("Задача Codex", "Codex task") : displayTitle,
                 activity: unconfirmed ? tr("Статус не подтверждён", "Status unconfirmed") : (activity.isEmpty ? tr("Выполняется", "Working") : activity),
                 isActive: !unconfirmed,
                 progress: progress,
@@ -136,8 +141,8 @@ struct CodexTaskReader {
             let available = extraFiles.didHitLimit ? extra.fastFiles : extraFiles.files
             guard let file = available[id] else { continue }
             do {
-                guard let record = try readUnindexedExec(file, id: id) else { continue }
-                recognizedExecSource = true
+                guard let record = try readUnindexedSession(file, id: id) else { continue }
+                recognizedUnindexedSource = true
                 var lateWithWriterFile = false
                 if let observedSince, record.modified < observedSince && !previouslyObserved.contains(id) {
                     switch writerLockStatus(for: id) {
@@ -196,7 +201,7 @@ struct CodexTaskReader {
                 result.tasks.append(MonitoredTask(
                     id: id,
                     provider: .codex,
-                    title: tr("Задача Codex", "Codex task"),
+                    title: subagentTitle(record.subagent, sessions: sessions) ?? tr("Задача Codex", "Codex task"),
                     activity: detail.isEmpty ? status : status + ": " + detail,
                     isActive: false,
                     progress: nil,
@@ -214,7 +219,7 @@ struct CodexTaskReader {
                 result.isPartial = true
             }
         }
-        if let indexFailure, !recognizedExecSource { throw indexFailure }
+        if let indexFailure, !recognizedUnindexedSource { throw indexFailure }
         result.tasks.sort { $0.updatedAt > $1.updatedAt }
         return result
     }
@@ -228,11 +233,46 @@ struct CodexTaskReader {
     }
 
     func parseActivity(from tail: String) -> String {
+        func decodedJSONContains(_ line: Substring, _ value: String) -> Bool {
+            guard line.contains("\\u"), let record = FileHelpers.jsonObject(line) else { return false }
+            var pending: [Any] = [record]
+            var visited = 0
+            while let item = pending.popLast() {
+                visited += 1
+                // If the decoded structure is unexpectedly large, fail closed.
+                if visited > 100_000 || pending.count > 100_000 { return true }
+                if let text = item as? String {
+                    if text.contains(value) { return true }
+                } else if let object = item as? [String: Any] {
+                    if object.keys.contains(where: { $0.contains(value) }) { return true }
+                    pending.append(contentsOf: object.values)
+                } else if let array = item as? [Any] {
+                    pending.append(contentsOf: array)
+                }
+            }
+            return false
+        }
+
         var latestSummary = ""
         var latestCommentary = ""
         var turnID = ""
-        for line in tail.split(whereSeparator: \.isNewline) {
-            guard let record = FileHelpers.jsonObject(line), let payload = record.object("payload") else { continue }
+        var hasVisibleTurnStart = false
+        var turnStartIndex: Int?
+        var activeCalls: [String: (title: String, order: Int)] = [:]
+        var seenCallIDs: Set<String> = []
+        var callOrder = 0
+        var callTrackingReliable = true
+        let lines = tail.split(whereSeparator: \.isNewline)
+        let activeWindowStart = max(0, lines.count - 512)
+        for (lineIndex, line) in lines.enumerated() {
+            guard line.utf8.count <= 1_048_576,
+                  let record = FileHelpers.jsonObject(line), let payload = record.object("payload") else {
+                if hasVisibleTurnStart {
+                    activeCalls.removeAll()
+                    callTrackingReliable = false
+                }
+                continue
+            }
             let recordType = record.string("type")
             let kind = payload.string("type")
             let eventTurnID = payload.string("turn_id")
@@ -240,26 +280,85 @@ struct CodexTaskReader {
                 turnID = eventTurnID
                 latestSummary = ""
                 latestCommentary = ""
+                hasVisibleTurnStart = !eventTurnID.isEmpty
+                turnStartIndex = hasVisibleTurnStart ? lineIndex : nil
+                activeCalls.removeAll()
+                seenCallIDs.removeAll()
+                callOrder = 0
+                callTrackingReliable = true
                 continue
             }
             if !turnID.isEmpty && !eventTurnID.isEmpty && turnID != eventTurnID { continue }
+            if recordType == "event_msg", ["task_complete", "turn_complete", "turn_aborted"].contains(kind) {
+                hasVisibleTurnStart = false
+                turnStartIndex = nil
+                activeCalls.removeAll()
+                seenCallIDs.removeAll()
+                continue
+            }
+            if hasVisibleTurnStart && callTrackingReliable && recordType == "response_item" {
+                let callID = payload.string("call_id")
+                let candidateBytes = callID.utf8
+                let candidateIDAllowed = !candidateBytes.isEmpty && candidateBytes.count <= 256 && candidateBytes.allSatisfy {
+                    (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95
+                }
+                if lineIndex < activeWindowStart {
+                    if kind == "function_call_output" && (callID.isEmpty || callID.utf8.count > 256) {
+                        activeCalls.removeAll()
+                        callTrackingReliable = false
+                    }
+                } else if kind == "function_call_output" {
+                    if callID.isEmpty || callID.utf8.count > 256 {
+                        activeCalls.removeAll()
+                        callTrackingReliable = false
+                    } else {
+                        activeCalls.removeValue(forKey: callID)
+                        seenCallIDs.insert(callID)
+                    }
+                } else if kind == "function_call", payload.string("namespace") == "mcp__cua_repl",
+                          payload.string("name") == "js", candidateIDAllowed,
+                          !seenCallIDs.contains(callID) {
+                    seenCallIDs.insert(callID)
+                    let arguments = payload.string("arguments")
+                    if arguments.utf8.count <= 1_048_576,
+                       let fields = FileHelpers.jsonObject(Substring(arguments)),
+                       let rawTitle = fields["title"] as? String,
+                       rawTitle.utf16.count <= 4_096 {
+                        let title = FileHelpers.normalized(rawTitle, limit: 4_096)
+                        if !title.isEmpty {
+                            callOrder += 1
+                            activeCalls[callID] = (title, callOrder)
+                        }
+                    }
+                }
+                if seenCallIDs.count > 4_096 {
+                    activeCalls.removeAll()
+                    callTrackingReliable = false
+                }
+            }
             var summary = ""
             if recordType == "event_msg", kind == "agent_reasoning" {
                 summary = payload.string("text")
             } else if recordType == "response_item", kind == "reasoning" {
                 for part in payload.array("summary") where part.string("type") == "summary_text" {
-                    if !part.string("text").isEmpty { summary = part.string("text") }
+                    let text = part.string("text")
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { summary = text }
                 }
+            } else if recordType == "event_msg", kind == "agent_message", payload.string("phase") == "commentary" {
+                let message = payload.string("message")
+                if !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { latestCommentary = message }
             } else if payload.string("type") == "message", payload.string("phase") == "commentary" {
                 for part in payload.array("content") where part.string("type") == "output_text" {
-                    latestCommentary = part.string("text")
+                    let text = part.string("text")
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { latestCommentary = text }
                 }
             } else if kind == "item_completed", let item = payload.object("item") {
                 if item.string("type") == "Reasoning" {
-                    for part in (item["summary_text"] as? [String] ?? []) where !part.isEmpty { summary = part }
+                    for part in (item["summary_text"] as? [String] ?? []) where !part.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { summary = part }
                 } else if item.string("type") == "AgentMessage", item.string("phase") == "commentary" {
                     for part in item.array("content") where part.string("type") == "Text" {
-                        latestCommentary = part.string("text")
+                        let text = part.string("text")
+                        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { latestCommentary = text }
                     }
                 }
             }
@@ -267,11 +366,22 @@ struct CodexTaskReader {
                 let firstLine = summary.split(whereSeparator: \.isNewline)
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .first { !$0.isEmpty } ?? ""
+                var extracted = firstLine
                 if firstLine.hasPrefix("**") {
                     let remainder = firstLine.dropFirst(2)
-                    if let end = remainder.range(of: "**") { latestSummary = String(remainder[..<end.lowerBound]) }
-                    else { latestSummary = firstLine }
-                } else { latestSummary = firstLine }
+                    if let end = remainder.range(of: "**") { extracted = String(remainder[..<end.lowerBound]) }
+                }
+                if !extracted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { latestSummary = extracted }
+            }
+        }
+        if hasVisibleTurnStart && callTrackingReliable, let turnStartIndex {
+            let earlierStart = min(turnStartIndex + 1, activeWindowStart)
+            let earlierLines = lines[earlierStart..<activeWindowStart]
+            for (callID, active) in activeCalls.sorted(by: { $0.value.order > $1.value.order }) {
+                let seenEarlier = earlierLines.contains { line in
+                    line.contains(callID) || decodedJSONContains(line, callID)
+                }
+                if !seenEarlier { return active.title }
             }
         }
         return FileHelpers.normalized(latestSummary.isEmpty ? latestCommentary : latestSummary, limit: 600)
@@ -400,7 +510,7 @@ struct CodexTaskReader {
         if ordered.count > 16 { partial = true }
         let selected = Set(ordered.prefix(16).map(\.key))
         var fastFiles: [String: URL] = [:]
-        // A partial page can yield a verified exec record, but only as an
+        // A partial page can yield a verified session record, but only as an
         // unconfirmed card. Terminal events still require a complete scan.
         do {
             for id in selected {
@@ -442,18 +552,61 @@ struct CodexTaskReader {
         return (info.st_mode & S_IFMT) == S_IFREG ? .present : .unknown
     }
 
-    private struct UnindexedExecRecord {
+    private struct SubagentReference {
+        let parentID: String
+        let nickname: String?
+    }
+
+    private struct UnindexedSessionRecord {
         var tail: String
         var modified: Date
         var truncated: Bool
         var device: UInt64
         var inode: UInt64
+        var subagent: SubagentReference?
+    }
+
+    private func subagentReference(_ payload: [String: Any], id: String) -> SubagentReference? {
+        guard id.utf8.count == 36, UUID(uuidString: id) != nil,
+              let source = payload.object("source"), let subagent = source.object("subagent"),
+              let spawn = subagent.object("thread_spawn") else { return nil }
+        let parentID = payload.string("parent_thread_id")
+        guard parentID.utf8.count == 36, UUID(uuidString: parentID) != nil,
+              parentID == spawn.string("parent_thread_id"), parentID.lowercased() != id.lowercased() else { return nil }
+        let path = payload.string("agent_path")
+        let parts = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard path.utf8.count <= 1_024, path == spawn.string("agent_path"),
+              parts.count >= 3, parts[0].isEmpty, parts[1] == "root",
+              parts.dropFirst(2).allSatisfy({ part in
+                  !part.isEmpty && part.utf8.allSatisfy {
+                      (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95
+                  }
+              }) else { return nil }
+        let outerName = payload.string("agent_nickname")
+        let innerName = spawn.string("agent_nickname")
+        let trimmed = outerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nickname: String?
+        if Array(outerName.utf8) == Array(innerName.utf8), !trimmed.isEmpty, trimmed.utf16.count <= 256,
+           !outerName.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+            nickname = trimmed
+        } else {
+            nickname = nil
+        }
+        return SubagentReference(parentID: parentID, nickname: nickname)
+    }
+
+    private func subagentTitle(_ reference: SubagentReference?, sessions: [String: [String: Any]]) -> String? {
+        guard let reference, let nickname = reference.nickname, let parent = sessions[reference.parentID] else { return nil }
+        let title = parent.string("thread_name")
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty, trimmedTitle != "Guardian review" else { return nil }
+        return title + " " + tr("(агент \(nickname))", "(agent \(nickname))")
     }
 
     /// Open only regular files beneath the sessions directory, without
-    /// following links in any enumerated component. A live CLI keeps writing
+    /// following links in any enumerated component. A live session keeps writing
     /// the same descriptor while this bounded snapshot is read.
-    private func readUnindexedExec(_ url: URL, id: String) throws -> UnindexedExecRecord? {
+    private func readUnindexedSession(_ url: URL, id: String) throws -> UnindexedSessionRecord? {
         let directory = codexHome.appendingPathComponent("sessions", isDirectory: true).standardizedFileURL.path
         let path = url.standardizedFileURL.path
         guard path.hasPrefix(directory + "/") else { throw CocoaError(.fileReadUnknown) }
@@ -487,7 +640,9 @@ struct CodexTaskReader {
               header.string("type") == "session_meta", let payload = header.object("payload") else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        guard payload.string("id") == id, payload.string("source") == "exec" else { return nil }
+        guard payload.string("id") == id else { return nil }
+        let subagent = subagentReference(payload, id: id)
+        guard ["exec", "vscode"].contains(payload.string("source")) || subagent != nil else { return nil }
         let end = try handle.seekToEnd()
         let count = min(end, UInt64(262_144))
         try handle.seek(toOffset: end - count)
@@ -495,9 +650,9 @@ struct CodexTaskReader {
         guard bytes.count == Int(count), fstat(descriptor, &info) == 0 else { throw CocoaError(.fileReadUnknown) }
         let modified = Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec) +
                             Double(info.st_mtimespec.tv_nsec) / 1_000_000_000)
-        return UnindexedExecRecord(tail: String(decoding: bytes, as: UTF8.self), modified: modified,
-                                   truncated: end > count, device: UInt64(bitPattern: Int64(info.st_dev)),
-                                   inode: UInt64(info.st_ino))
+        return UnindexedSessionRecord(tail: String(decoding: bytes, as: UTF8.self), modified: modified,
+                                      truncated: end > count, device: UInt64(bitPattern: Int64(info.st_dev)),
+                                      inode: UInt64(info.st_ino), subagent: subagent)
     }
 
     private func sessionFiles(for ids: Set<String>, now: Date, observedSince: Date?,
@@ -595,7 +750,7 @@ struct CodexTaskReader {
 
 }
 
-/// Small in-memory cache for paths that were already validated as exec
+/// Small in-memory cache for paths that were already validated as unindexed
 /// rollouts. It never writes the Codex index or stores session contents.
 final class CodexExecDiscoveryCache {
     private final class EnumerationErrors {
