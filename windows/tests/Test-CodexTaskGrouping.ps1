@@ -2,7 +2,7 @@ $ErrorActionPreference='Stop'
 $source=Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'The monitor source did not parse.'}
-$names=@('Prop','Group-CodexTasks','Localized-TaskTitle','Related-AgentStatus','Related-AgentFingerprint','Prioritize-Tasks')
+$names=@('Prop','Group-CodexTasks','Localized-TaskTitle','Localized-TaskActivity','Related-AgentActivity','Related-AgentStatus','Related-AgentFingerprint','Prioritize-Tasks')
 $definitions=foreach($name in $names){
  $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true)
  if($null -eq $node){throw "Missing function: $name"};$node.Extent.Text
@@ -39,6 +39,13 @@ Require ((Related-AgentFingerprint $grouped[0]) -cne $firstFingerprint) 'Changin
 $lastFingerprint=Related-AgentFingerprint $grouped[0]
 $grouped[0].RelatedAgents[0]|Add-Member NoteProperty ActivityIsLast $true -Force
 Require ((Related-AgentFingerprint $grouped[0]) -cne $lastFingerprint) 'Marking a related action as last did not invalidate the display fingerprint.'
+$unconfirmed=-join @(1057,1090,1072,1090,1091,1089,32,1085,1077,32,1087,1086,1076,1090,1074,1077,1088,1078,1076,1105,1085|ForEach-Object {[char]$_})
+$lastPrefix=-join @(1055,1086,1089,1083,1077,1076,1085,1077,1077,58,32|ForEach-Object {[char]$_})
+$unknownAction=[PSCustomObject]@{Provider='codex';Status=$unconfirmed;Active=$false;Paused=$false;ActivityObserved=$true;Activity='Observed action'}
+$activeAction=[PSCustomObject]@{Provider='codex';Status='running';Active=$true;Paused=$false;ActivityObserved=$false;Activity='Current action'}
+Require ((Related-AgentActivity $unknownAction $true) -ceq ($lastPrefix+'Observed action') -and
+ (Related-AgentActivity $unknownAction $false) -ceq ($unconfirmed+'. '+$lastPrefix+'Observed action') -and
+ (Related-AgentActivity $activeAction $true) -ceq 'Current action') 'Mixed current and unconfirmed agent actions were labelled incorrectly.'
 $script:resolvedLanguage='en'
 Require ((Localized-TaskTitle $grouped[0]) -ceq 'Parent (3 agents)' -and (Related-AgentStatus $grouped[0]) -ceq 'Agent status unconfirmed') 'The English count or uncertainty label is incorrect.'
 $single=$grouped[0].PSObject.Copy();$single.RelatedAgentCount=1

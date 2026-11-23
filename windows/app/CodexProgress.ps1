@@ -847,6 +847,7 @@ $script:translations=@{
  'Список задач Codex может быть неполным'='The Codex task list may be incomplete'
  'Статус не подтверждён. Из журнала: '='Status unconfirmed. From log: '
  'Статус не подтверждён. Последнее: '='Status unconfirmed. Last: '
+ 'Последнее: '='Last: '
  'Подключён'='Connected'
  'Подключён частично'='Partially connected'
  'Не подключён'='Not connected'
@@ -4385,7 +4386,19 @@ function Related-ContentHeight($task) {
  return ($status+$list)
 }
 
-function Add-RelatedAgentContent($container,$task) {
+function Related-AgentActivity($agent,[bool]$compact) {
+ if([bool](Prop $agent 'Paused' $false)){return (Tr 'На паузе')}
+ $active=[bool](Prop $agent 'Active' $false)
+ $known=[bool](Prop $agent 'ActivityObserved' $false) -or [bool](Prop $agent 'ActivityIsLast' $false)
+ $raw=[string](Prop $agent 'Activity' '')
+ if(-not $active -and -not $known){return (Tr 'Статус не подтверждён')}
+ if($compact -and -not $active -and $known -and $raw){return (Tr 'Последнее: ')+$raw}
+ $activity=Localized-TaskActivity $agent
+ if(-not $activity){return (Tr $(if($active){'Выполняется'}else{'Статус не подтверждён'}))}
+ return $activity
+}
+
+function Add-RelatedAgentContent($container,$task,[bool]$compact=$false) {
  $statusText=Related-AgentStatus $task
  if($statusText){
   $status=Text $statusText 11.5 $script:palette.Muted;$status.Margin=New-Object Windows.Thickness(0,4,0,0);$status.Tag='related-agent-status'
@@ -4401,8 +4414,7 @@ function Add-RelatedAgentContent($container,$task) {
  foreach($agent in $agents){
   $name=[string](Prop $agent 'AgentNickname' '')
   if(-not $name){$name=if($script:resolvedLanguage -eq 'en'){'Agent'}else{'Агент'}}
-  $activity=if([bool](Prop $agent 'Paused' $false)){Tr 'На паузе'}elseif(-not [bool](Prop $agent 'Active' $false) -and -not [bool](Prop $agent 'ActivityObserved' $false) -and -not [bool](Prop $agent 'ActivityIsLast' $false)){Tr 'Статус не подтверждён'}else{Localized-TaskActivity $agent}
-  if(-not $activity){$activity=if([bool](Prop $agent 'Active' $false)){Tr 'Выполняется'}else{Tr 'Статус не подтверждён'}}
+  $activity=Related-AgentActivity $agent $compact
   $text=$name+': '+$activity
   $row=Text $text 12 $script:palette.Activity;$row.Height=22;$row.TextWrapping='NoWrap';$row.TextTrimming='CharacterEllipsis';$row.VerticalAlignment='Center'
   Add-ConditionalHint $row $text 'line';[Windows.Automation.AutomationProperties]::SetAutomationId($row,'related-agent-action')
@@ -4478,7 +4490,7 @@ function Add-CompactTask($task) {
  if($CompactMode -and $PreviewActiveTasks -ge 0 -and $null -eq $script:previewHintTarget){$script:previewHintTarget=$activity}
  [Windows.Controls.Grid]::SetRow($activityRow,1); $container.Children.Add($activityRow)|Out-Null
  $warningPanel=New-Object Windows.Controls.StackPanel
- Add-RelatedAgentContent $warningPanel $task
+ Add-RelatedAgentContent $warningPanel $task $true
  $planNoteText=Plan-StatusNote $task
  if($planNoteText){$planNote=Text $planNoteText 11.5 $script:palette.Muted;$planNote.Margin=New-Object Windows.Thickness(0,4,0,0);$warningPanel.Children.Add($planNote)|Out-Null}
  Add-LoopWarning $warningPanel $task $true; [Windows.Controls.Grid]::SetRow($warningPanel,2); $container.Children.Add($warningPanel)|Out-Null
