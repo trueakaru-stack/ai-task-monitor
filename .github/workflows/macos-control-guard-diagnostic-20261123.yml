@@ -1,0 +1,168 @@
+name: Isolated macOS control protection diagnostic
+on:
+  push:
+    branches: ['codex/macos-activity-ci-20261123']
+    paths: ['.github/workflows/macos-control-guard-diagnostic-20261123.yml']
+permissions:
+  contents: read
+jobs:
+  controls:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            developer: /Applications/Xcode_16.1.app/Contents/Developer
+          - runner: macos-26
+            developer: /Applications/Xcode.app/Contents/Developer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer }}
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Prepare and verify disposable sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          task_profile_dir="$(/usr/bin/python3 -I -S -B -c 'import os,pwd; print(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))')"
+          case "$task_profile_dir" in /Users/*) ;; *) echo 'Unexpected hosted runner profile.' >&2; exit 1;; esac
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-card-tests.XXXXXXXX")"
+          task_control="$(mktemp -d "$RUNNER_TEMP/aitm-card-control.XXXXXXXX")"
+          case "$task_control" in "$task_profile_dir"/*) ;; *) echo 'Control directory is outside the runner profile.' >&2; exit 1;; esac
+          case "$task_control" in "$task_root"|"$task_root"/*) echo 'Control directory overlaps the task directory.' >&2; exit 1;; esac
+          test -d "$task_control" && test ! -L "$task_control"
+          test "$(cd -P "$task_control" && pwd -P)" = "$task_control"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
+          case "$task_marker" in "$task_profile_dir"/*) ;; *) echo 'Runner temp is outside expected profile.' >&2; exit 1;; esac
+          printf 'synthetic-only\n' > "$task_marker"
+          task_node="$(command -v node)"
+          task_node_real="$(/usr/bin/python3 -I -S -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$task_node")"
+          task_node_root="$(dirname "$(dirname "$task_node_real")")"
+          task_node_bin="$(dirname "$task_node")"
+          task_python=''
+          for name in python3 python3.14 python3.13 python3.12 python3.11; do
+            candidate="$(command -v "$name" || true)"
+            if [[ "$candidate" == /* && -x "$candidate" ]] && "$candidate" -I -S -B -c 'import sys; assert (3, 11) <= sys.version_info[:2] < (3, 15)' 2>/dev/null; then task_python="$candidate"; break; fi
+          done
+          test -n "$task_python"
+          task_python_root="$("$task_python" -I -S -B -c 'import os,sys; print(os.path.realpath(sys.base_prefix))')"
+          case "$task_node_root" in /|/Users|"$task_profile_dir") echo 'Unsafe Node root.' >&2; exit 1;; esac
+          case "$task_python_root" in /|/Users|"$task_profile_dir") echo 'Unsafe Python root.' >&2; exit 1;; esac
+          task_path="$task_node_bin:$(dirname "$task_python"):$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin:$DEVELOPER_DIR/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" "$task_root/npm-cache" "$task_root/swift-cache" "$task_root/swift-config" "$task_root/swift-security" "$task_root/clang-cache"
+          : > "$task_root/npmrc"
+          git -c credential.helper= -c core.hooksPath="$task_root/hooks" -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
+          git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          cat > "$task_control/profile.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath (param "TASK_PROFILE")))
+          (allow file-read-metadata)
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny mach-lookup (global-name "com.apple.bsd.dirhelper"))
+          (allow file-read* (subpath (param "TASK_NODE_ROOT")))
+          (allow file-read* (subpath (param "TASK_PYTHON_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          PROFILE
+          cat "$task_control/profile.sb" > "$task_control/profile-offline.sb"
+          printf '\n(deny network*)\n' >> "$task_control/profile-offline.sb"
+          cat > "$task_control/run-isolated" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          task_policy="${AITM_TEST_SANDBOX_POLICY:-$AITM_TEST_CONTROL_ROOT/profile.sb}"
+          case "$task_policy" in "$AITM_TEST_CONTROL_ROOT/profile.sb"|"$AITM_TEST_CONTROL_ROOT/profile-offline.sb") ;; *) exit 1;; esac
+          exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 \
+            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 AITM_SYNTHETIC_REQUIRED=1 \
+            "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "AITM_MACOS_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "AITM_SYNTHETIC_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "NPM_CONFIG_CACHE=$AITM_TEST_TASK_ROOT/npm-cache" \
+            "NPM_CONFIG_USERCONFIG=$AITM_TEST_TASK_ROOT/npmrc" NPM_CONFIG_GLOBALCONFIG=/dev/null NPM_CONFIG_UPDATE_NOTIFIER=false \
+            /usr/bin/sandbox-exec -D "TASK_PROFILE=$AITM_TEST_PROFILE" -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" \
+              -D "TASK_NODE_ROOT=$AITM_TEST_NODE_ROOT" -D "TASK_PYTHON_ROOT=$AITM_TEST_PYTHON_ROOT" \
+              -f "$task_policy" "$@"
+          SCRIPT
+          chmod 700 "$task_control/run-isolated"
+          (cd "$task_control" && /usr/bin/shasum -a 256 profile.sb profile-offline.sb run-isolated > controls.sha256)
+          { printf 'AITM_TEST_TASK_ROOT=%s\n' "$task_root"; printf 'AITM_TEST_CONTROL_ROOT=%s\n' "$task_control"; printf 'AITM_TEST_DENIED_FILE=%s\n' "$task_marker"; printf 'AITM_TEST_PROFILE=%s\n' "$task_profile_dir"; printf 'AITM_TEST_NODE_ROOT=%s\n' "$task_node_root"; printf 'AITM_TEST_PYTHON_ROOT=%s\n' "$task_python_root"; printf 'AITM_TASK_PATH=%s\n' "$task_path"; printf 'AITM_TEST_NODE_BIN=%s\n' "$task_node"; printf 'AITM_TEST_PYTHON_BIN=%s\n' "$task_python"; } >> "$GITHUB_ENV"
+      - name: Verify sandbox blocks runner profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_CONTROL_ROOT/run-isolated"
+          "$task_run" /usr/bin/true
+          if "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write was not denied.' >&2; exit 1; fi
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import os; assert "HOME" not in os.environ and "CODEX_HOME" not in os.environ'
+          /bin/ln -s "$AITM_TEST_DENIED_FILE" "$AITM_TEST_TASK_ROOT/denied-link"
+          if "$task_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read via link was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write via link was not denied.' >&2; exit 1; fi
+      - name: Verify sandbox cannot alter its controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_TEST_TASK_ROOT"
+          task_control="$AITM_TEST_CONTROL_ROOT"
+          task_run="$task_control/run-isolated"
+          task_probe="$task_control/synthetic-control-probe"
+          printf 'synthetic-control-probe\n' > "$task_probe"
+          task_expected="$(/usr/bin/shasum -a 256 "$task_probe")"
+          task_expected="${task_expected%% *}"
+          /bin/ln -s "$task_probe" "$task_root/temp/control-probe-symlink"
+          /bin/ln "$task_probe" "$task_root/temp/control-probe-hardlink"
+          task_inode="$(/usr/bin/stat -f '%d:%i' "$task_probe")"
+          test "$(/usr/bin/stat -f '%d:%i' "$task_root/temp/control-probe-hardlink")" = "$task_inode"
+          "$task_run" /usr/bin/touch "$task_root/temp/control-positive"
+          for task_policy in "$task_control/profile.sb" "$task_control/profile-offline.sb"; do
+            export AITM_TEST_SANDBOX_POLICY="$task_policy"
+            if "$task_run" /bin/sh -c 'printf x >> "$1"' sh "$task_probe" >"$task_root/temp/control-append.log" 2>&1; then
+              echo 'Sandbox modified the synthetic control file.' >&2; exit 1
+            fi
+            if "$task_run" /bin/rm "$task_probe" >"$task_root/temp/control-remove.log" 2>&1; then
+              echo 'Sandbox removed the synthetic control file.' >&2; exit 1
+            fi
+            if "$task_run" /bin/mv "$task_probe" "$task_control/synthetic-control-moved" >"$task_root/temp/control-move.log" 2>&1; then
+              echo 'Sandbox moved the synthetic control file.' >&2; exit 1
+            fi
+            if "$task_run" /usr/bin/touch "$task_control/synthetic-control-created" >"$task_root/temp/control-create.log" 2>&1; then
+              echo 'Sandbox created a control file.' >&2; exit 1
+            fi
+            if "$task_run" /bin/sh -c 'printf x >> "$1"' sh "$task_root/temp/control-probe-symlink" >"$task_root/temp/control-symlink.log" 2>&1; then
+              echo 'Sandbox modified the synthetic control via a symbolic link.' >&2; exit 1
+            fi
+            if "$task_run" /bin/sh -c 'printf x >> "$1"' sh "$task_root/temp/control-probe-hardlink" >"$task_root/temp/control-hardlink.log" 2>&1; then
+              echo 'Sandbox modified the synthetic control inode via a hard link.' >&2; exit 1
+            fi
+            test -f "$task_probe" && test ! -e "$task_control/synthetic-control-moved"
+            test ! -e "$task_control/synthetic-control-created"
+            test "$(/usr/bin/stat -f '%d:%i' "$task_probe")" = "$task_inode"
+            test "$(/usr/bin/stat -f '%d:%i' "$task_root/temp/control-probe-hardlink")" = "$task_inode"
+            task_actual="$(/usr/bin/shasum -a 256 "$task_probe")"
+            test "${task_actual%% *}" = "$task_expected"
+            for task_log in append remove move create symlink hardlink; do
+              grep -Eiq 'operation not permitted|permission denied' "$task_root/temp/control-$task_log.log"
+            done
+            (cd "$task_control" && /usr/bin/shasum -a 256 -c controls.sha256)
+          done
+      - name: Recheck control hashes
+        if: ${{ always() && !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${AITM_TEST_CONTROL_ROOT:-}"
+          cd "$AITM_TEST_CONTROL_ROOT"
+          /usr/bin/shasum -a 256 -c controls.sha256
+      - name: Save synthetic control logs
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: control-guard-${{ matrix.runner }}-${{ github.sha }}
+          path: ${{ runner.temp }}/aitm-card-tests.*/temp/control-*.log
+          if-no-files-found: warn
