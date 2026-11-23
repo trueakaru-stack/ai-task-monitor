@@ -278,6 +278,80 @@ final class CodexExecDiscoveryTests: XCTestCase {
         }
     }
 
+    func testLargeHistoryEventuallyGroupsUnindexedChildAndRejectsConflict() throws {
+        let root = try makeRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try indexRows(root, [(first, "Parent")])
+        _ = try rollout(root, fileID: first)
+        try subagentRollout(root, id: second, parent: first)
+        let child = root.appendingPathComponent("sessions/2026/11/16").appendingPathComponent(rolloutName(second))
+        let old = root.appendingPathComponent("sessions/2001/01/01", isDirectory: true)
+        try FileManager.default.createDirectory(at: old, withIntermediateDirectories: true)
+        for _ in 0..<320 {
+            let file = old.appendingPathComponent("rollout-2001-01-01T00-00-00-\(UUID().uuidString.lowercased()).jsonl")
+            try writeFixture(Data(), to: file)
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-600)], ofItemAtPath: file.path)
+        }
+        let reader = CodexTaskReader(codexHome: root)
+        var previous: Set<String> = []
+        var lastTasks: [MonitoredTask] = []
+        var found = false
+        for _ in 0..<20 {
+            let snapshot = try reader.readSnapshot(previouslyObserved: previous)
+            previous.formUnion(snapshot.tasks.map(\.id))
+            lastTasks = TaskSnapshotMerger.merge(previous: lastTasks, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
+            reader.waitForAmbiguousObservationForTests()
+            if snapshot.subagentParents[second] == first {
+                let grouped = CodexTaskGrouping.project(lastTasks, parents: snapshot.subagentParents, titles: snapshot.subagentTitles)
+                XCTAssertEqual(grouped.first(where: { $0.id == first })?.codexAgentCount, 1)
+                found = true
+                break
+            }
+        }
+        XCTAssertTrue(found, "A completed sweep should verify the unindexed path")
+        guard found else { return }
+        for _ in 0..<3 {
+            try append("agent_reasoning", to: child)
+            let snapshot = try reader.readSnapshot(previouslyObserved: previous)
+            XCTAssertEqual(snapshot.subagentParents[second], first)
+            reader.waitForAmbiguousObservationForTests()
+        }
+
+        let oldIdentity = root.appendingPathComponent("saved-previous-child")
+        try FileManager.default.moveItem(at: child, to: oldIdentity)
+        try subagentRollout(root, id: second, parent: first)
+        let replaced = try reader.readSnapshot(previouslyObserved: previous)
+        XCTAssertNil(replaced.subagentParents[second], "A new inode must not inherit the verified path")
+        reader.waitForAmbiguousObservationForTests()
+        var reverified = false
+        for _ in 0..<20 {
+            let snapshot = try reader.readSnapshot(previouslyObserved: previous)
+            lastTasks = TaskSnapshotMerger.merge(previous: lastTasks, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
+            reader.waitForAmbiguousObservationForTests()
+            if snapshot.subagentParents[second] == first { reverified = true; break }
+        }
+        XCTAssertTrue(reverified, "A stable replacement must be verified by a new sweep")
+        guard reverified else { return }
+
+        let competing = old.appendingPathComponent("rollout-2001-01-01T00-00-00-\(second)_\(revision).jsonl")
+        try FileManager.default.copyItem(at: child, to: competing)
+        var rejected = false
+        for _ in 0..<20 {
+            let snapshot = try reader.readSnapshot(previouslyObserved: previous)
+            lastTasks = TaskSnapshotMerger.merge(previous: lastTasks, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
+            reader.waitForAmbiguousObservationForTests()
+            if snapshot.subagentParents[second] == nil {
+                XCTAssertTrue(lastTasks.contains { $0.id == second })
+                let visible = CodexTaskGrouping.project(lastTasks, parents: snapshot.subagentParents, titles: snapshot.subagentTitles)
+                XCTAssertTrue(visible.contains { $0.id == second })
+                rejected = true
+                break
+            }
+        }
+        XCTAssertTrue(rejected, "The next sweep should invalidate a competing rollout")
+        reader.waitForAmbiguousObservationForTests()
+    }
+
     func testRewrittenHeaderOnSameInodeInvalidatesRelationship() throws {
         let root = try makeRoot()
         defer { try? FileManager.default.removeItem(at: root) }

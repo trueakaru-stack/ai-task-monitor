@@ -50,4 +50,30 @@ final class CodexSubagentMetadataWorkerTests: XCTestCase {
         lock.unlock()
         XCTAssertEqual(unique, ids.count)
     }
+
+    func testFailedReadDoesNotForgetPreviousHeaderFingerprint() throws {
+        let worker = CodexSubagentMetadataWorker()
+        let id = "019127f4-35ae-7c73-9e72-a10123456789"
+        let file = URL(fileURLWithPath: "/synthetic/one")
+        let proof = try stamp()
+        _ = worker.poll(candidates: [id: file], visibleIDs: [id]) { _, url in
+            .init(file: url, stamp: proof, parentID: id, headerDigest: Data([1]))
+        }
+        worker.waitUntilIdleForTests()
+        let prior = worker.poll(candidates: [id: file], visibleIDs: [id]) { _, _ in
+            throw CocoaError(.fileReadUnknown)
+        }
+        XCTAssertNotNil(prior[id])
+        worker.waitUntilIdleForTests()
+        let changed = worker.poll(candidates: [id: file], visibleIDs: [id]) { _, url in
+            .init(file: url, stamp: proof, parentID: id, headerDigest: Data([2]))
+        }
+        XCTAssertNil(changed[id])
+        worker.waitUntilIdleForTests()
+        let rejected = worker.poll(candidates: [id: file], visibleIDs: [id]) { _, url in
+            .init(file: url, stamp: proof, parentID: id, headerDigest: Data([2]))
+        }
+        XCTAssertNil(rejected[id])
+        worker.waitUntilIdleForTests()
+    }
 }

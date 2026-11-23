@@ -41,6 +41,7 @@ final class CodexSubagentMetadataWorker {
     private let lock = NSLock()
     private let queue = DispatchQueue(label: "ai-task-monitor.codex-subagent-metadata", qos: .utility)
     private var observations: [String: Observation] = [:]
+    private var unavailable: Set<String> = []
     private var rewrittenIdentity: [String: (device: UInt64, inode: UInt64)] = [:]
     private var identityHistoryOverflow = false
     private var order: [String] = []
@@ -75,7 +76,8 @@ final class CodexSubagentMetadataWorker {
             selected = (0..<maximumNeeded).map { ids[(start + $0) % ids.count] }
         }
         let available = observations.filter { id, entry in
-            needed.contains(id) && candidates[id]?.standardizedFileURL == entry.file.standardizedFileURL
+            !unavailable.contains(id) && needed.contains(id) &&
+                candidates[id]?.standardizedFileURL == entry.file.standardizedFileURL
         }
         if !running && !selected.isEmpty {
             running = true
@@ -91,7 +93,9 @@ final class CodexSubagentMetadataWorker {
                     catch { failed.insert(id) }
                 }
                 lock.lock()
-                for id in failed { observations.removeValue(forKey: id); order.removeAll { $0 == id } }
+                // Keep the last fingerprint for comparison after a transient
+                // failure, but never expose that observation while unavailable.
+                for id in failed where observations[id] != nil { unavailable.insert(id) }
                 for (id, entry) in updates {
                     if let blocked = rewrittenIdentity[id] {
                         if blocked.device == entry.stamp.device && blocked.inode == entry.stamp.inode { continue }
@@ -102,21 +106,26 @@ final class CodexSubagentMetadataWorker {
                        let current = entry.headerDigest, previous != current {
                         rewrittenIdentity[id] = (entry.stamp.device, entry.stamp.inode)
                         observations.removeValue(forKey: id)
+                        unavailable.remove(id)
                         order.removeAll { $0 == id }
                         continue
                     }
+                    unavailable.remove(id)
                     order.removeAll { $0 == id }
                     order.append(id)
                     observations[id] = entry
                 }
                 while order.count > maximumCached {
-                    observations.removeValue(forKey: order.removeFirst())
+                    let removed = order.removeFirst()
+                    observations.removeValue(forKey: removed)
+                    unavailable.remove(removed)
                 }
                 if rewrittenIdentity.count > maximumCached {
                     // Untracked conflicts must never turn into a verified link.
                     identityHistoryOverflow = true
                     rewrittenIdentity.removeAll()
                     observations.removeAll()
+                    unavailable.removeAll()
                     order.removeAll()
                 }
                 running = false

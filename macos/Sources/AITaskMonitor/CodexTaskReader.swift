@@ -396,6 +396,16 @@ struct CodexTaskReader {
         var metadataCandidates = files
         if !extraFiles.didHitLimit {
             metadataCandidates.merge(extraFiles.files) { first, _ in first }
+        } else {
+            // A completed bounded history sweep may retain a unique path for
+            // a previously observed unindexed session. It is usable only
+            // while the current fast path and file identity still match.
+            for (id, file) in extra.verifiedFiles {
+                guard extra.fastFiles[id]?.standardizedFileURL == file.standardizedFileURL,
+                      let stamp = visibleMetadataStamps[id],
+                      execDiscovery.matchesVerified(id: id, file: file, device: stamp.device, inode: stamp.inode) else { continue }
+                metadataCandidates[id] = file
+            }
         }
         let visibleIDs = Set(result.tasks.map(\.id).filter { UUID(uuidString: $0) != nil })
         result.subagentCandidates = visibleIDs
@@ -1193,7 +1203,7 @@ final class CodexExecDiscoveryCache {
         var value: Error?
     }
 
-    private struct Observation {
+    private struct Observation: Equatable {
         var file: URL
         var device: UInt64
         var inode: UInt64
@@ -1210,8 +1220,10 @@ final class CodexExecDiscoveryCache {
     private var historyEnumerator: FileManager.DirectoryEnumerator?
     private var historyErrors: EnumerationErrors?
     private var sweepTargets: Set<String> = []
+    private var sweepObservations: [String: Observation] = [:]
     private var sweepPaths: [String: Set<String>] = [:]
     private var sweepAmbiguous: Set<String> = []
+    private var verified: [String: Observation] = [:]
 
     func noteIndexAvailable() {
         lock.lock()
@@ -1234,14 +1246,21 @@ final class CodexExecDiscoveryCache {
     func remember(id: String, file: URL, device: UInt64, inode: UInt64, startKey: String) {
         lock.lock()
         defer { lock.unlock() }
+        let current = Observation(file: file, device: device, inode: inode, startKey: startKey)
+        if let old = observations[id], old != current {
+            verified.removeValue(forKey: id)
+            sweepObservations.removeValue(forKey: id)
+        }
         if observations[id] == nil {
             if order.count >= 64, let oldest = order.first {
                 order.removeFirst()
                 observations.removeValue(forKey: oldest)
+                verified.removeValue(forKey: oldest)
+                sweepObservations.removeValue(forKey: oldest)
             }
             order.append(id)
         }
-        observations[id] = Observation(file: file, device: device, inode: inode, startKey: startKey)
+        observations[id] = current
     }
 
     func matchesObserved(id: String, file: URL, device: UInt64, inode: UInt64, startKey: String) -> Bool {
@@ -1252,6 +1271,15 @@ final class CodexExecDiscoveryCache {
             observed.device == device && observed.inode == inode && observed.startKey == startKey
     }
 
+    func matchesVerified(id: String, file: URL, device: UInt64, inode: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let proof = verified[id], let current = observations[id], current == proof,
+              !proof.startKey.isEmpty else { return false }
+        return proof.file.standardizedFileURL == file.standardizedFileURL &&
+            proof.device == device && proof.inode == inode
+    }
+
     /// Keep the iterator across refreshes. A complete sweep can confirm that
     /// an already observed task has only one recognized rollout path.
     func nextHistoryPage(directory: URL, limit: Int, previouslyObserved: Set<String>)
@@ -1259,14 +1287,25 @@ final class CodexExecDiscoveryCache {
         guard limit > 0 else { throw CocoaError(.fileReadUnknown) }
         lock.lock()
         defer { lock.unlock() }
-        let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        let attributes: [FileAttributeKey: Any]
+        do { attributes = try FileManager.default.attributesOfItem(atPath: directory.path) }
+        catch {
+            verified.removeAll()
+            historyEnumerator = nil
+            historyErrors = nil
+            throw error
+        }
         guard let device = (attributes[.systemNumber] as? NSNumber)?.uint64Value,
               let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value else {
+            verified.removeAll()
+            historyEnumerator = nil
+            historyErrors = nil
             throw CocoaError(.fileReadUnknown)
         }
         if historyPath != directory.path || historyDevice != device || historyInode != inode {
             historyEnumerator = nil
             historyErrors = nil
+            verified.removeAll()
             historyPath = directory.path
             historyDevice = device
             historyInode = inode
@@ -1275,14 +1314,17 @@ final class CodexExecDiscoveryCache {
             let errors = EnumerationErrors()
             guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil,
                 options: [.skipsHiddenFiles], errorHandler: { _, error in errors.value = error; return false }) else {
+                verified.removeAll()
                 throw CocoaError(.fileReadNoSuchFile)
             }
             historyEnumerator = enumerator
             historyErrors = errors
             sweepTargets = Set(previouslyObserved.filter { observations[$0] != nil })
+            sweepObservations = observations.filter { sweepTargets.contains($0.key) }
             sweepPaths.removeAll(keepingCapacity: true)
             sweepAmbiguous.removeAll(keepingCapacity: true)
         }
+        verified = verified.filter { previouslyObserved.contains($0.key) }
 
         func observe(_ url: URL) {
             let name = url.lastPathComponent
@@ -1295,6 +1337,7 @@ final class CodexExecDiscoveryCache {
                 let matching = sweepTargets.filter { $0.lowercased() == owner.lowercased() }
                 guard matching.count == 1, let id = matching.first, id == owner else {
                     sweepAmbiguous.formUnion(matching)
+                    for id in matching { verified.removeValue(forKey: id) }
                     return
                 }
                 var found = sweepPaths[id, default: []]
@@ -1302,8 +1345,14 @@ final class CodexExecDiscoveryCache {
                 if found.count > 3 {
                     sweepAmbiguous.insert(id)
                     sweepPaths.removeValue(forKey: id)
+                    verified.removeValue(forKey: id)
                 } else {
                     sweepPaths[id] = found
+                    let plain = Set(found.filter { !$0.hasSuffix(".zst") })
+                    let distinct = found.filter { path in
+                        !path.hasSuffix(".jsonl.zst") || !plain.contains(String(path.dropLast(4)))
+                    }
+                    if distinct.count > 1 { verified.removeValue(forKey: id) }
                 }
             } else {
                 let lower = stem.lowercased()
@@ -1311,6 +1360,7 @@ final class CodexExecDiscoveryCache {
                     let target = id.lowercased()
                     if lower == target || lower.hasSuffix("-" + target) || lower.contains("-" + target + "_") {
                         sweepAmbiguous.insert(id)
+                        verified.removeValue(forKey: id)
                     }
                 }
             }
@@ -1338,8 +1388,16 @@ final class CodexExecDiscoveryCache {
                 let error = historyErrors?.value
                 historyEnumerator = nil
                 historyErrors = nil
-                if let error { throw error }
-                return (urls, true, uniqueFiles())
+                if let error { verified.removeAll(); throw error }
+                let found = uniqueFiles()
+                verified.removeAll()
+                for (id, file) in found {
+                    guard let initial = sweepObservations[id], observations[id] == initial,
+                          !initial.startKey.isEmpty,
+                          initial.file.standardizedFileURL == file.standardizedFileURL else { continue }
+                    verified[id] = initial
+                }
+                return (urls, true, verified.mapValues(\.file))
             }
             if let url = item as? URL {
                 urls.append(url)
@@ -1349,9 +1407,10 @@ final class CodexExecDiscoveryCache {
         if let error = historyErrors?.value {
             historyEnumerator = nil
             historyErrors = nil
+            verified.removeAll()
             throw error
         }
-        return (urls, false, [:])
+        return (urls, false, verified.mapValues(\.file))
     }
 }
 
