@@ -23,6 +23,9 @@ struct ExternalProviderRefreshCapture {
     var verifiedActiveTurns: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:]
     var verifiedEndedTurns: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:]
     var verifiedSuccessors: [TaskProvider: Set<ExternalProviderVerifiedSuccessor>] = [:]
+    // The adapter proves this active turn follows all retained terminal
+    // signals for the ID; a later timestamp or matching ID is insufficient.
+    var verifiedPostTerminalActiveTurns: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:]
     // The adapter must prove a complete current roster, including absence;
     // merely completing a read or seeing an empty list is not enough.
     var completeProviders: Set<TaskProvider> = []
@@ -72,7 +75,7 @@ struct ExternalProviderRefreshCache {
     mutating func apply(_ capture: ExternalProviderRefreshCapture?, quality: ExternalProviderRefreshQuality,
                         providers: Set<TaskProvider>) {
         guard let capture else {
-            if quality != .current { markUncertain(providers) }
+            markUncertain(providers)
             return
         }
         let affected = providers.union(capture.gapProviders)
@@ -94,15 +97,48 @@ struct ExternalProviderRefreshCache {
             }
         }
 
+        if quality == .current {
+            for (provider, ids) in capture.terminalIDs where providers.contains(provider) && !uncertain.contains(provider) {
+                for id in ids {
+                    let key = Key(provider: provider, id: id)
+                    let old = retained[key]
+                    let ended = old.map {
+                        !$0.startKey.isEmpty &&
+                            (capture.verifiedEndedTurns[provider] ?? []).contains(
+                                ExternalProviderVerifiedTurn(id: id, startKey: $0.startKey))
+                    } ?? false
+                    if ended && grouped[key] == nil { continue }
+                    rememberTerminal(id, provider: provider)
+                    uncertainProviders.insert(provider)
+                }
+            }
+        }
+
         // Recovery needs an explicit source proof for the same turn, its
         // ending, or a successor ordered after it. Matching IDs alone are not
         // sufficient, particularly when a delayed terminal is pending.
         if quality == .current {
+            for (key, values) in grouped where values.count == 1 && retained[key] == nil &&
+                !uncertain.contains(key.provider) && (pendingTerminalIDs[key.provider] ?? []).contains(key.id) {
+                guard let incoming = values.first, incoming.isActive, !incoming.isUnconfirmed,
+                      !incoming.startKey.isEmpty else { continue }
+                let turn = ExternalProviderVerifiedTurn(id: key.id, startKey: incoming.startKey)
+                if (capture.verifiedActiveTurns[key.provider] ?? []).contains(turn) &&
+                    (capture.verifiedPostTerminalActiveTurns[key.provider] ?? []).contains(turn) {
+                    pendingTerminalIDs[key.provider]?.remove(key.id)
+                }
+            }
             for key in Array(uncertainTasks) where providers.contains(key.provider) && !uncertain.contains(key.provider) {
-                guard let old = retained[key], !old.startKey.isEmpty else { continue }
-                let oldTurn = ExternalProviderVerifiedTurn(id: key.id, startKey: old.startKey)
+                guard let old = retained[key] else { continue }
                 let incoming = grouped[key].flatMap { $0.count == 1 ? $0.first : nil }
                 let pendingTerminal = (pendingTerminalIDs[key.provider] ?? []).contains(key.id)
+                if incoming == nil && capture.completeProviders.contains(key.provider) && !pendingTerminal {
+                    retained.removeValue(forKey: key)
+                    uncertainTasks.remove(key)
+                    continue
+                }
+                guard !old.startKey.isEmpty else { continue }
+                let oldTurn = ExternalProviderVerifiedTurn(id: key.id, startKey: old.startKey)
                 let active = capture.verifiedActiveTurns[key.provider] ?? []
                 if let incoming, incoming.isActive && !incoming.isUnconfirmed && !incoming.startKey.isEmpty {
                     let incomingTurn = ExternalProviderVerifiedTurn(id: key.id, startKey: incoming.startKey)
@@ -111,12 +147,13 @@ struct ExternalProviderRefreshCache {
                                                                        newStartKey: incoming.startKey)
                     let nextTurn = incoming.startKey != old.startKey && active.contains(incomingTurn) &&
                         (capture.verifiedSuccessors[key.provider] ?? []).contains(successor)
-                    if sameTurn || nextTurn {
+                    let afterTerminal = pendingTerminal && active.contains(incomingTurn) &&
+                        (capture.verifiedPostTerminalActiveTurns[key.provider] ?? []).contains(incomingTurn)
+                    if sameTurn || nextTurn || afterTerminal {
                         uncertainTasks.remove(key)
-                        if nextTurn { pendingTerminalIDs[key.provider]?.remove(key.id) }
+                        if nextTurn || afterTerminal { pendingTerminalIDs[key.provider]?.remove(key.id) }
                     }
-                } else if incoming == nil && ((capture.verifiedEndedTurns[key.provider] ?? []).contains(oldTurn) ||
-                            (capture.completeProviders.contains(key.provider) && !pendingTerminal)) {
+                } else if incoming == nil && (capture.verifiedEndedTurns[key.provider] ?? []).contains(oldTurn) {
                     retained.removeValue(forKey: key)
                     uncertainTasks.remove(key)
                     pendingTerminalIDs[key.provider]?.remove(key.id)

@@ -13,10 +13,12 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
                          active: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:],
                          ended: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:],
                          successors: [TaskProvider: Set<ExternalProviderVerifiedSuccessor>] = [:],
+                         afterTerminal: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:],
                          complete: Set<TaskProvider> = []) -> ExternalProviderRefreshCapture {
         ExternalProviderRefreshCapture(tasks: tasks, terminalIDs: terminalIDs, gapProviders: gaps,
                                        verifiedActiveTurns: active, verifiedEndedTurns: ended,
-                                       verifiedSuccessors: successors, completeProviders: complete)
+                                       verifiedSuccessors: successors, verifiedPostTerminalActiveTurns: afterTerminal,
+                                       completeProviders: complete)
     }
 
     func testDelayedSourceRetainsTasksAndBothLateEventTypesWithoutTaintingNeighbor() throws {
@@ -52,7 +54,7 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
         var cache = ExternalProviderRefreshCache()
         let first = task("one", .opencode), neighbor = task("two", .deepseek)
         cache.apply(capture([first, neighbor]), quality: .current, providers: [.opencode, .deepseek])
-        cache.apply(capture([neighbor], terminalIDs: [.opencode: ["one"], .deepseek: ["not-visible"]],
+        cache.apply(capture([neighbor], terminalIDs: [.opencode: ["one"]],
                             gaps: [.opencode]), quality: .current, providers: [.opencode, .deepseek])
         XCTAssertTrue(try XCTUnwrap(cache.tasks.first { $0.provider == .opencode }).isUnconfirmed)
         XCTAssertTrue(try XCTUnwrap(cache.tasks.first { $0.provider == .deepseek }).isActive)
@@ -64,6 +66,13 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
     func testInvalidationBeforeFirstReadCannotBecomeAConfirmedEmptySource() {
         var cache = ExternalProviderRefreshCache()
         cache.apply(nil, quality: .invalidated, providers: [.opencode])
+        XCTAssertTrue(cache.tasks.isEmpty)
+        XCTAssertEqual(cache.uncertainProviders, [.opencode])
+    }
+
+    func testMissingCaptureCannotConfirmAnEmptySourceEvenWhenMarkedCurrent() {
+        var cache = ExternalProviderRefreshCache()
+        cache.apply(nil, quality: .current, providers: [.opencode])
         XCTAssertTrue(cache.tasks.isEmpty)
         XCTAssertEqual(cache.uncertainProviders, [.opencode])
     }
@@ -90,6 +99,43 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
 
         cache.apply(capture([], complete: [.opencode]), quality: .current, providers: [.opencode])
         XCTAssertTrue(cache.tasks.isEmpty)
+        XCTAssertTrue(cache.uncertainProviders.isEmpty)
+    }
+
+    func testCompleteAbsenceCanRecoverUnconfirmedTaskWithoutStartKey() throws {
+        var cache = ExternalProviderRefreshCache()
+        cache.apply(capture([task("one", .opencode, turn: "")]), quality: .current, providers: [.opencode])
+        cache.apply(capture([]), quality: .current, providers: [.opencode])
+        XCTAssertTrue(try XCTUnwrap(cache.tasks.first).isUnconfirmed)
+        cache.apply(capture([], complete: [.opencode]), quality: .current, providers: [.opencode])
+        XCTAssertTrue(cache.tasks.isEmpty)
+        XCTAssertTrue(cache.uncertainProviders.isEmpty)
+    }
+
+    func testCompleteAbsenceDoesNotEraseUnmatchedTerminalWithoutTurnProof() throws {
+        var cache = ExternalProviderRefreshCache()
+        cache.apply(capture([task("one", .opencode, turn: "")]), quality: .current, providers: [.opencode])
+        cache.apply(capture([], terminalIDs: [.opencode: ["one"]]), quality: .delayed, providers: [.opencode])
+        cache.apply(capture([], complete: [.opencode]), quality: .current, providers: [.opencode])
+        XCTAssertTrue(try XCTUnwrap(cache.tasks.first).isUnconfirmed)
+        XCTAssertEqual(cache.pendingTerminalIDs[.opencode], ["one"])
+    }
+
+    func testTerminalWithoutVisibleTaskCannotConfirmLaterActivityWithoutOrderProof() throws {
+        var cache = ExternalProviderRefreshCache()
+        cache.apply(capture([], terminalIDs: [.opencode: ["one"]]),
+                    quality: .current, providers: [.opencode])
+        XCTAssertEqual(cache.pendingTerminalIDs[.opencode], ["one"])
+        XCTAssertEqual(cache.uncertainProviders, [.opencode])
+        let next = task("one", .opencode, turn: "new-turn")
+        cache.apply(capture([next], complete: [.opencode]), quality: .current, providers: [.opencode])
+        XCTAssertTrue(try XCTUnwrap(cache.tasks.first).isUnconfirmed)
+
+        let proof = ExternalProviderVerifiedTurn(id: "one", startKey: "new-turn")
+        cache.apply(capture([next], active: [.opencode: [proof]], afterTerminal: [.opencode: [proof]],
+                            complete: [.opencode]), quality: .current, providers: [.opencode])
+        XCTAssertTrue(try XCTUnwrap(cache.tasks.first).isActive)
+        XCTAssertTrue(cache.pendingTerminalIDs.isEmpty)
         XCTAssertTrue(cache.uncertainProviders.isEmpty)
     }
 
