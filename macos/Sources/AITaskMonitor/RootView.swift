@@ -175,27 +175,29 @@ struct RootView: View {
                             .padding(.bottom, 6)
                     }
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        if task.codexAgentCountAtTitle, let count = task.codexAgentCountLabel(includingStatus: false) {
+                            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                                TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
+                                    .frame(minHeight: 18, alignment: .leading)
+                                Text(" " + count).font(.system(size: 16, weight: .semibold)).lineLimit(1).fixedSize()
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
                             TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
                                 .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
-                            if task.codexAgentCountAtTitle, let count = task.codexAgentCountLabel(includingStatus: false) {
-                                Text(" " + count).font(.system(size: 16, weight: .semibold)).lineLimit(1)
-                            }
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                         if let extra = task.compactExtraAgentStepLabel {
                             VStack(alignment: .trailing, spacing: 0) {
                                 if let label = task.compactProgressLabel {
                                     Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit()
                                 }
                                 TruncatingText(text: extra, font: .systemFont(ofSize: 11.5), color: .secondaryLabelColor, alignment: .right)
-                                    .frame(maxWidth: .infinity, minHeight: 16, alignment: .trailing)
+                                    .frame(width: compactProgressWidth(extra, font: .systemFont(ofSize: 11.5)), height: 16, alignment: .trailing)
                             }
-                            .frame(maxWidth: .infinity, alignment: .trailing)
                         } else if let label = task.compactProgressLabel {
                             if task.compactAgentStepLabel == label {
                                 TruncatingText(text: label, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor, alignment: .right)
-                                    .frame(maxWidth: .infinity, minHeight: 18, alignment: .trailing)
+                                    .frame(width: compactProgressWidth(label, font: .systemFont(ofSize: 16, weight: .semibold)), height: 18, alignment: .trailing)
                             } else {
                                 Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit()
                             }
@@ -249,6 +251,15 @@ struct RootView: View {
     }
 
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    private func compactProgressWidth(_ text: String, font: NSFont) -> CGFloat {
+        // The compact window and its horizontal insets are fixed above; leave
+        // part of the same row for the task title when the label is very long.
+        let available: CGFloat = 372 - 2 * 18 - 10
+        let measured = (text as NSString).size(withAttributes: [.font: font]).width
+        return min(ceil(measured) + 2, available * 0.60)
+    }
+
     private var compactHeight: CGFloat {
         if measuredCompactContentHeight > 0 { return ceil(58 + measuredCompactContentHeight) }
         let tasks = store.compactTasks

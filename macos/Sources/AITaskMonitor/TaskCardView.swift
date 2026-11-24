@@ -26,14 +26,17 @@ struct TaskCardView: View {
                     .padding(.bottom, 3)
             }
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                HStack(alignment: .firstTextBaseline, spacing: 0) {
-                    TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
-                        .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
-                    if task.codexAgentCountAtTitle {
+                if task.codexAgentCountAtTitle {
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
+                            .frame(minHeight: 20, alignment: .leading)
                         CodexAgentDisclosureButton(task: task, compact: false)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
+                        .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
                 if let label = task.progressLabel, !hidesUnconfirmedProgress {
                     Text(label)
                         .font(.system(size: 16, weight: .semibold))
@@ -75,11 +78,17 @@ struct TaskCardView: View {
                                 } else {
                                     StepMark(status: hidesUnconfirmedPlanStatus ? .pending : step.status)
                                 }
-                                TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: !hidesUnconfirmedPlanStatus && step.status == .active ? .labelColor : .secondaryLabelColor)
-                                    .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
                                 if task.activeAgentPlanStepIndex != nil, step.status == .active,
                                    task.codexAgentCountLabel(includingStatus: false) != nil {
-                                    CodexAgentDisclosureButton(task: task, compact: false, fontSize: 12)
+                                    HStack(spacing: 0) {
+                                        TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: .labelColor)
+                                            .frame(minHeight: 16, alignment: .leading)
+                                        CodexAgentDisclosureButton(task: task, compact: false, fontSize: 12)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                } else {
+                                    TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: !hidesUnconfirmedPlanStatus && step.status == .active ? .labelColor : .secondaryLabelColor)
+                                        .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
                                 }
                             }
                         }
