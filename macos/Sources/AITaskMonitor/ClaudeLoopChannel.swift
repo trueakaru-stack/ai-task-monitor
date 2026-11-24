@@ -228,6 +228,10 @@ final class ClaudeLoopChannel {
         stateLock.lock(); defer { stateLock.unlock() }
         return gap
     }
+    func hasPendingOrdinaryForTesting(_ session: String) -> Bool {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return events.contains { $0.kind != .phase && $0.sessionID == session }
+    }
     #endif
 
     // The copy is used only by the in-memory phase matcher.
@@ -235,6 +239,20 @@ final class ClaudeLoopChannel {
         stateLock.lock()
         defer { stateLock.unlock() }
         return stopping || finished ? nil : key
+    }
+
+    // Requesting shutdown never waits for the receiver or filesystem cleanup.
+    // A new channel must not be opened until `isStopped` becomes true.
+    func requestStop() {
+        stateLock.lock()
+        stopping = true
+        stateLock.unlock()
+    }
+
+    var isStopped: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return finished
     }
 
     @discardableResult
