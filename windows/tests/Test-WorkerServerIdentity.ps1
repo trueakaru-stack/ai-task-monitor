@@ -47,12 +47,12 @@ try{
     $source=[regex]::Replace($source,'(?m)^}finally\{',('}finally{'+[Environment]::NewLine+' [IO.File]::WriteAllText($env:AITM_ID_FINALLY,"finally")'))
     $source=$source.Replace(' if($identityVerified){',(' if($identityVerified){'+[Environment]::NewLine+' [IO.File]::WriteAllText($env:AITM_ID_CLEANUP,"cleanup")'))
     $source=$source.Replace('$identityVerified=$true',('$identityVerified=$true;[IO.File]::WriteAllText($env:AITM_ID_READY,"ready")'))
-    $readerNeedle='$variable=Get-Variable -Scope Script -Name $name -ErrorAction SilentlyContinue'
+    $readerNeedle='$variable=$ExecutionContext.SessionState.PSVariable.Get(''script:''+$name)'
     Require ($source.Contains($readerNeedle)) 'The synthetic reader cleanup probe could not be instrumented.'
     $readerProbe='[IO.File]::WriteAllText(($env:AITM_ID_READER_BEFORE+"-"+$name),"before");'+$readerNeedle+';[IO.File]::WriteAllText(($env:AITM_ID_READER_AFTER+"-"+$name),"after")'
     $source=$source.Replace($readerNeedle,$readerProbe)
     if($file -ceq 'LocalSourceWorker.ps1'){
-     $cursorNeedle='$cursor=Get-Variable -Scope Script -Name unindexedCursor -ErrorAction SilentlyContinue'
+     $cursorNeedle='$cursor=$ExecutionContext.SessionState.PSVariable.Get(''script:unindexedCursor'')'
      Require ($source.Contains($cursorNeedle)) 'The synthetic cursor cleanup probe could not be instrumented.'
      $cursorProbe='[IO.File]::WriteAllText($env:AITM_ID_CURSOR_BEFORE,"before");'+$cursorNeedle+';[IO.File]::WriteAllText($env:AITM_ID_CURSOR_AFTER,"after")'
      $source=$source.Replace($cursorNeedle,$cursorProbe)

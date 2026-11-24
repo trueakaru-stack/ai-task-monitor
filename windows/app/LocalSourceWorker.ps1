@@ -65,10 +65,10 @@ try{
  exit 1
 }finally{
  if($identityVerified){
-  $cursor=Get-Variable -Scope Script -Name unindexedCursor -ErrorAction SilentlyContinue
+  $cursor=$ExecutionContext.SessionState.PSVariable.Get('script:unindexedCursor')
   if($null -ne $cursor -and $null -ne $cursor.Value -and $null -ne $cursor.Value.Enumerator){try{$cursor.Value.Enumerator.Dispose()}catch{}}
   foreach($name in @('codexTitleReader','codexRolloutReader','codexRecentEventObserver','codexRootEvidenceReader')){
-   $variable=Get-Variable -Scope Script -Name $name -ErrorAction SilentlyContinue
+   $variable=$ExecutionContext.SessionState.PSVariable.Get('script:'+$name)
    if($null -ne $variable -and $null -ne $variable.Value){try{$variable.Value.Dispose()}catch{}}
   }
  }

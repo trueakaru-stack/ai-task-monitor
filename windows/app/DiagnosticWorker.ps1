@@ -145,7 +145,7 @@ try{
 }finally{
  if($identityVerified){
   foreach($name in @('codexTitleReader','codexRolloutReader','codexRecentEventObserver','codexRootEvidenceReader')){
-   $variable=Get-Variable -Scope Script -Name $name -ErrorAction SilentlyContinue
+   $variable=$ExecutionContext.SessionState.PSVariable.Get('script:'+$name)
    if($null -ne $variable -and $null -ne $variable.Value){try{$variable.Value.Dispose()}catch{}}
   }
  }
