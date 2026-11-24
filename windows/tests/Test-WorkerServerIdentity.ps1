@@ -13,29 +13,49 @@ try{
    $startName='Local\AITMIdentityStarted-'+[Guid]::NewGuid().ToString('N');$releaseName='Local\AITMIdentityRelease-'+[Guid]::NewGuid().ToString('N')
    $started=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$startName)
    $release=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$releaseName)
-   $server=[IO.Pipes.NamedPipeServerStream]::new($pipeName,[IO.Pipes.PipeDirection]::InOut,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::Asynchronous)
+   $server=[IO.Pipes.NamedPipeServerStream]::new($pipeName,[IO.Pipes.PipeDirection]::InOut,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::Asynchronous,4096,4096)
    $child=$null
    try{
     $marker=Join-Path $root ('read-'+[Guid]::NewGuid().ToString('N'))
+    $compiledMarker=Join-Path $root ('compiled-'+[Guid]::NewGuid().ToString('N'))
     $copy=Join-Path $root ('worker-'+[Guid]::NewGuid().ToString('N')+'.ps1')
     $source=[IO.File]::ReadAllText((Join-Path $app $file))
     $compileNeedle=" Add-Type -TypeDefinition @'"
     $compileGate='$identityStarted=[Threading.EventWaitHandle]::OpenExisting($env:AITM_ID_STARTED);$identityRelease=[Threading.EventWaitHandle]::OpenExisting($env:AITM_ID_RELEASE);try{[void]$identityStarted.Set();if(-not $identityRelease.WaitOne(30000)){throw "Synthetic identity gate timed out."}}finally{$identityStarted.Dispose();$identityRelease.Dispose()}'
     $readNeedle='$reader=[IO.BinaryReader]::new('
-    Require ($source.Contains($compileNeedle) -and $source.Contains($readNeedle)) 'The production worker identity checks could not be instrumented.'
-    $source=$source.Replace($compileNeedle,$compileGate+[Environment]::NewLine+$compileNeedle).Replace($readNeedle,'[IO.File]::WriteAllText($env:AITM_ID_READ,"verified")'+[Environment]::NewLine+' '+$readNeedle)
+    $compiledNeedle='$server=[uint32]0'
+    Require ($source.Contains($compileNeedle) -and $source.Contains($readNeedle) -and $source.Contains($compiledNeedle)) 'The production worker identity checks could not be instrumented.'
+    $source=$source.Replace($compileNeedle,$compileGate+[Environment]::NewLine+$compileNeedle).Replace($compiledNeedle,'[IO.File]::WriteAllText($env:AITM_ID_COMPILED,"compiled")'+[Environment]::NewLine+' '+$compiledNeedle).Replace($readNeedle,'[IO.File]::WriteAllText($env:AITM_ID_READ,"verified")'+[Environment]::NewLine+' '+$readNeedle)
     [IO.File]::WriteAllText($copy,$source,[Text.UTF8Encoding]::new($false))
     $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $expected=if($valid){$PID}else{0}
     $start.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$copy+'" -PipeName "'+$pipeName+'" -ParentId '+$expected
     $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
-    $start.EnvironmentVariables['AITM_ID_STARTED']=$startName;$start.EnvironmentVariables['AITM_ID_RELEASE']=$releaseName;$start.EnvironmentVariables['AITM_ID_READ']=$marker
+    $start.EnvironmentVariables['AITM_ID_STARTED']=$startName;$start.EnvironmentVariables['AITM_ID_RELEASE']=$releaseName;$start.EnvironmentVariables['AITM_ID_READ']=$marker;$start.EnvironmentVariables['AITM_ID_COMPILED']=$compiledMarker
     $connect=$server.WaitForConnectionAsync();$child=[Diagnostics.Process]::Start($start)
     Require ($connect.Wait(10000) -and $started.WaitOne(10000) -and $server.IsConnected -and -not [IO.File]::Exists($marker)) 'The worker did not connect before compiling its identity check.'
+    $unexpectedWrite=$null
+    if(-not $valid){
+     # An untrusted peer sends a complete synthetic frame before PID checking.
+     # It must receive no configuration, response or other bytes in return.
+     $body=[Text.Encoding]::UTF8.GetBytes('fake')
+     $length=[BitConverter]::GetBytes([int]$body.Length);$packet=New-Object byte[] ($length.Length+$body.Length)
+     [Array]::Copy($length,0,$packet,0,$length.Length);[Array]::Copy($body,0,$packet,$length.Length,$body.Length)
+     $write=$server.WriteAsync($packet,0,$packet.Length)
+     Require ($write.Wait(3000)) 'The unverified server could not send the synthetic frame.'
+     $buffer=New-Object byte[] 1;$unexpectedWrite=$server.ReadAsync($buffer,0,1)
+    }
     [void]$release.Set();$watch=[Diagnostics.Stopwatch]::StartNew()
     while(-not [IO.File]::Exists($marker) -and -not $child.HasExited -and $watch.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
-    if($valid){Require ([IO.File]::Exists($marker) -and -not $child.HasExited) 'The worker rejected its correct server identity.'}
-    else{Require ($child.HasExited -and $child.ExitCode -ne 0 -and -not [IO.File]::Exists($marker)) 'The worker read a frame from an unverified server.'}
+    if($valid){Require ([IO.File]::Exists($marker) -and -not $child.HasExited) ('The verified worker did not reach reading: compiled={0}; exited={1}.' -f [IO.File]::Exists($compiledMarker),$child.HasExited)}
+    else{
+     if([IO.File]::Exists($marker)){throw 'The worker read a frame from an unverified server.'}
+     if(-not $child.HasExited){throw ('The unverified synthetic worker did not exit: compiled={0}; connected={1}.' -f [IO.File]::Exists($compiledMarker),$server.IsConnected)}
+     if($child.ExitCode -eq 0){throw 'The unverified synthetic worker unexpectedly exited successfully.'}
+     $received=0;$readFinished=$false
+     try{if($unexpectedWrite.Wait(3000)){$received=$unexpectedWrite.GetAwaiter().GetResult();$readFinished=$true}}catch [AggregateException] {if($_.Exception.GetBaseException() -isnot [IO.IOException]){throw};$readFinished=$true}
+     Require ($readFinished -and $received -eq 0) 'The worker wrote data to an unverified server or did not close the channel.'
+    }
    }finally{
     [void]$release.Set()
     if($null -ne $child){if(-not $child.HasExited){$child.Kill();[void]$child.WaitForExit(3000)};$child.Dispose()}

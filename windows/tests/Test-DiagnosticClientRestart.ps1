@@ -43,6 +43,12 @@ try{
  $unsafe=[PSCustomObject]@{HasExited=$true;CanReplace=$false};$blocked=New-DiagnosticClient $unsafe $factory;$blocked.RetryDelayMilliseconds=0
  Repair-DiagnosticClientOwner $blocked ([Diagnostics.Stopwatch]::GetTimestamp())
  Require ($blocked.Owner -eq $unsafe -and $blocked.RetryCount -eq 0) 'A replacement started without confirmed cleanup.'
+ $blocked.RetryCount=4;$blocked.StableMilliseconds=30000;$tick=[Diagnostics.Stopwatch]::GetTimestamp()
+ Confirm-DiagnosticOwnerFresh $blocked $tick
+ Confirm-DiagnosticOwnerFresh $blocked ($tick+[Diagnostics.Stopwatch]::Frequency*29)
+ Require ($blocked.RetryCount -eq 4) 'The retry limit reset before stable operation.'
+ Confirm-DiagnosticOwnerFresh $blocked ($tick+[Diagnostics.Stopwatch]::Frequency*30)
+ Require ($blocked.RetryCount -eq 0) 'A stable owner did not restore the retry allowance.'
  Write-Output 'Diagnostic restart: an uncertain clear was not replayed; a later event survived and cleanup was required.'
 }finally{
  [void]$release.Set()

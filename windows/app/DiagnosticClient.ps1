@@ -4,10 +4,19 @@ function New-DiagnosticClient($owner,[scriptblock]$ownerFactory=$null) {
  return [PSCustomObject]@{Owner=$owner;Warnings=@{};Error=$false;Fresh=$false;FailureStage='';FailureKind='';PendingClear='';PendingDismissals=@{};
   LastClearCompleted=$false;LastClearUncertain=$false;PendingStartedAt=[long]0;TimeoutMilliseconds=6000;TimedOut=$false;
   Frames=[Collections.Generic.Queue[object]]::new();FrameCounter=[long]0;InFlightId=[long]0;Gap=$false;GapRevision=[long]0;ClearGapRevision=[long]0;
-  PendingClearSent=$false;OwnerFactory=$ownerFactory;RetryCount=0;MaximumRetries=5;RetryDelayMilliseconds=2000;NextRetryAt=[long]0}
+  PendingClearSent=$false;OwnerFactory=$ownerFactory;RetryCount=0;MaximumRetries=5;RetryDelayMilliseconds=2000;NextRetryAt=[long]0;
+  FirstFreshAt=[long]0;StableMilliseconds=30000}
+}
+
+function Set-DiagnosticClearUnconfirmed($client) {
+ if($client.PendingClear -and $client.PendingClearSent){
+  $client.PendingClear='';$client.PendingClearSent=$false;$client.LastClearUncertain=$true
+  $client.Gap=$true;$client.GapRevision++
+ }
 }
 
 function Invalidate-DiagnosticClientSettings($client) {
+ Set-DiagnosticClearUnconfirmed $client
  if($null -ne $client.Owner){$client.Owner.Invalidate()}
  $client.Warnings=@{};$client.Fresh=$false;$client.PendingStartedAt=[long]0;$client.TimedOut=$false;$client.InFlightId=[long]0
 }
@@ -68,6 +77,17 @@ function Add-DiagnosticClientFrame($client,$tasks,[string[]]$unavailable) {
  $client.Frames.Enqueue([PSCustomObject]@{Id=[long]$client.FrameCounter;Signature=$signature;Records=$recordValues;Codes=$codeValues;ObservedAt=[DateTimeOffset]::UtcNow.ToString('o',[Globalization.CultureInfo]::InvariantCulture)})
 }
 
+function Get-DiagnosticRetryDelay($client) {
+ $exponent=[Math]::Min(4,[Math]::Max(0,[int]$client.RetryCount))
+ return [long]([Diagnostics.Stopwatch]::Frequency * [Math]::Min(30000,[double]$client.RetryDelayMilliseconds*[Math]::Pow(2,$exponent)) / 1000)
+}
+
+function Confirm-DiagnosticOwnerFresh($client,[long]$now) {
+ if($client.RetryCount -le 0){return}
+ if($client.FirstFreshAt -eq 0){$client.FirstFreshAt=$now;return}
+ if(($now-$client.FirstFreshAt) -ge ([Diagnostics.Stopwatch]::Frequency*[double]$client.StableMilliseconds/1000)){$client.RetryCount=0;$client.FirstFreshAt=[long]0}
+}
+
 function Repair-DiagnosticClientOwner($client,[long]$now) {
  if($null -ne $client.Owner){
   if(-not $client.Owner.HasExited){return}
@@ -75,25 +95,25 @@ function Repair-DiagnosticClientOwner($client,[long]$now) {
   # A failed cleanup does not prove that the old writer has stopped. Never
   # start a replacement while that question remains unresolved.
   if(-not $client.Owner.CanReplace){return}
-  if($client.PendingClear -and $client.PendingClearSent){
-   $client.PendingClear='';$client.PendingClearSent=$false;$client.LastClearUncertain=$true
-  }
+  Set-DiagnosticClearUnconfirmed $client
   $client.Gap=$true;$client.GapRevision++
   $client.Owner.Dispose();$client.Owner=$null
-  $client.PendingStartedAt=[long]0;$client.InFlightId=[long]0;$client.TimedOut=$false
-  $client.NextRetryAt=$now+[long]([Diagnostics.Stopwatch]::Frequency*[double]$client.RetryDelayMilliseconds/1000)
+  $client.PendingStartedAt=[long]0;$client.InFlightId=[long]0;$client.TimedOut=$false;$client.FirstFreshAt=[long]0
+  $client.NextRetryAt=$now+(Get-DiagnosticRetryDelay $client)
  }
  if($null -eq $client.Owner -and $null -ne $client.OwnerFactory -and $client.RetryCount -lt $client.MaximumRetries -and $now -ge $client.NextRetryAt){
   $client.RetryCount++
   try{$client.Owner=& $client.OwnerFactory}catch{$client.Owner=$null}
-  if($null -eq $client.Owner){$client.NextRetryAt=$now+[long]([Diagnostics.Stopwatch]::Frequency*[double]$client.RetryDelayMilliseconds/1000)}
+  if($null -eq $client.Owner){$client.NextRetryAt=$now+(Get-DiagnosticRetryDelay $client)}
  }
 }
 
 function Get-DiagnosticClientUpdate($client,$tasks,[string[]]$unavailable) {
  $client.Fresh=$false;$client.LastClearCompleted=$false
+ try{Add-DiagnosticClientFrame $client $tasks $unavailable}catch{$client.Error=$true;$client.Warnings=@{};$client.Gap=$true;$client.GapRevision++;return}
  $now=[Diagnostics.Stopwatch]::GetTimestamp()
  if($null -ne $client.Owner -and $client.PendingStartedAt -gt 0 -and ($now-$client.PendingStartedAt) -ge ([Diagnostics.Stopwatch]::Frequency * [double]$client.TimeoutMilliseconds / 1000)){
+  Set-DiagnosticClearUnconfirmed $client
   $client.Owner.Invalidate();$client.Warnings=@{};$client.Error=$true;$client.TimedOut=$true;$client.PendingStartedAt=[long]0;$client.InFlightId=[long]0
  }
  $result=if($null -ne $client.Owner){$client.Owner.TryReceive()}else{$null}
@@ -103,6 +123,7 @@ function Get-DiagnosticClientUpdate($client,$tasks,[string[]]$unavailable) {
    $client.Frames.Count -gt 0 -and [long]$client.Frames.Peek().Id -eq $client.InFlightId
   foreach($field in @('Failed','Warnings','ClearAck','DismissAck')){if($null -eq $value -or $null -eq $value.PSObject.Properties[$field]){$valid=$false;break}}
   if($valid){
+   $hasNewerFrame=$client.Frames.Count -gt 1
    $warnings=@{}
    foreach($warning in @($value.Warnings|Where-Object {$null -ne $_})){
     $key=[string]$warning.Key;$token=[string]$warning.Token
@@ -111,6 +132,8 @@ function Get-DiagnosticClientUpdate($client,$tasks,[string[]]$unavailable) {
     $warnings[$key]=[PSCustomObject]@{Warning=[bool]$warning.Warning;Dismissed=[bool]$warning.Dismissed;Threshold=[int]$warning.Threshold;WindowMinutes=[int]$warning.WindowMinutes;Token=$token}
    }
   }
+  if($client.PendingClear -and $client.PendingClearSent -and
+     (-not $valid -or ($value.Failed -and [string]$value.ClearAck -cne [string]$client.PendingClear))){Set-DiagnosticClearUnconfirmed $client}
   if($valid){
    if($client.PendingClear -and [string]$value.ClearAck -ceq [string]$client.PendingClear){
     $client.PendingClear='';$client.PendingClearSent=$false;$client.LastClearCompleted=$true
@@ -123,17 +146,18 @@ function Get-DiagnosticClientUpdate($client,$tasks,[string[]]$unavailable) {
     $entry=$client.PendingDismissals[$id];$key='codex:'+ [string]$id
     if($warnings.ContainsKey($key) -and [string]$warnings[$key].Token -ceq [string]$entry.Token){$warnings[$key].Dismissed=$true}
    }
-   $client.Error=[bool]$value.Failed;$client.Warnings=if($client.Error){@{}}else{$warnings}
+   $client.Error=[bool]$value.Failed;$client.Warnings=if($client.Error -or $hasNewerFrame){@{}}else{$warnings}
    $stage=[string](Prop $value 'FailureStage' '');$kind=[string](Prop $value 'FailureKind' '')
    $client.FailureStage=if($client.Error -and $stage -cmatch '^[a-z-]{1,32}$'){$stage}else{''}
    $client.FailureKind=if($client.Error -and $kind -cmatch '^[A-Za-z0-9]{1,64}$'){$kind}else{''}
-   $client.Fresh=-not $client.Error;$client.PendingStartedAt=[long]0;$client.TimedOut=$false
+   $client.Fresh=-not $client.Error -and -not $hasNewerFrame;$client.PendingStartedAt=[long]0;$client.TimedOut=$false
+   if($client.Fresh){Confirm-DiagnosticOwnerFresh $client $now}
    if(-not $client.Error){[void]$client.Frames.Dequeue()}
   }else{$client.Error=$true;$client.Warnings=@{}}
   $client.InFlightId=[long]0
  }
  try{
-  Add-DiagnosticClientFrame $client $tasks $unavailable
+  if($client.Frames.Count -eq 0){Add-DiagnosticClientFrame $client $tasks $unavailable}
   Repair-DiagnosticClientOwner $client $now
   if($null -eq $client.Owner){$client.Error=$true;$client.Warnings=@{};return}
   if($client.InFlightId -ne 0){return}
