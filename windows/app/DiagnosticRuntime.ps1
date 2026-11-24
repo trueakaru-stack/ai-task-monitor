@@ -13,8 +13,8 @@ function New-DiagnosticRuntime {
  $settings=Get-DiagnosticSettings -Directory $Directory
  $key=Get-DiagnosticInstallationKey -Directory $Directory
  $limit=[long]$settings.MaximumMB*1000000
- Remove-ExpiredDiagnosticEvents -Directory $Directory -Now $Now -RetentionDays $settings.RetentionDays -MaximumBytes $limit
- $existing=@(Read-DiagnosticEvents -Directory $Directory -Now $Now -RetentionDays $settings.RetentionDays -MaximumBytes $limit)
+ Remove-ExpiredDiagnosticEvents -Directory $Directory -Now $Now -RetentionDays $settings.RetentionDays -MaximumBytes $limit -UseStoredPolicy
+ $existing=@(Read-DiagnosticEvents -Directory $Directory -Now $Now -RetentionDays $settings.RetentionDays -MaximumBytes $limit -UseStoredPolicy)
  $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
  $order=New-Object 'Collections.Generic.Queue[string]'
  foreach($event in $existing){if($seen.Add([string]$event.id)){$order.Enqueue([string]$event.id)}}
@@ -64,8 +64,8 @@ function Update-DiagnosticRuntime {
  )
  $limit=[long]$Runtime.Settings.MaximumMB*1000000
  if($Now -ge $Runtime.NextCleanup){
-  Remove-ExpiredDiagnosticEvents -Directory $Runtime.Directory -Now $Now -RetentionDays $Runtime.Settings.RetentionDays -MaximumBytes $limit
-  $existing=@(Read-DiagnosticEvents -Directory $Runtime.Directory -Now $Now -RetentionDays $Runtime.Settings.RetentionDays -MaximumBytes $limit)
+  Remove-ExpiredDiagnosticEvents -Directory $Runtime.Directory -Now $Now -RetentionDays $Runtime.Settings.RetentionDays -MaximumBytes $limit -UseStoredPolicy
+  $existing=@(Read-DiagnosticEvents -Directory $Runtime.Directory -Now $Now -RetentionDays $Runtime.Settings.RetentionDays -MaximumBytes $limit -UseStoredPolicy)
   Set-DiagnosticNextCleanup $Runtime $existing
  }
  $events=New-Object 'Collections.Generic.List[object]'
@@ -129,7 +129,7 @@ function Update-DiagnosticRuntime {
  $batchIds=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
  foreach($event in $events){if(-not $Runtime.Seen.Contains([string]$event.id) -and $batchIds.Add([string]$event.id)){$batch.Add($event)}}
  if($batch.Count -gt 0){
-  Write-DiagnosticEvents -Directory $Runtime.Directory -Events $batch.ToArray() -Now $Now -RetentionDays $Runtime.Settings.RetentionDays -MaximumBytes $limit
+  Write-DiagnosticEvents -Directory $Runtime.Directory -Events $batch.ToArray() -Now $Now -RetentionDays $Runtime.Settings.RetentionDays -MaximumBytes $limit -UseStoredPolicy
   foreach($event in $batch){
    if($Runtime.Seen.Add([string]$event.id)){$Runtime.SeenOrder.Enqueue([string]$event.id)}
    $time=Get-DiagnosticTimestamp (Get-DiagnosticProperty $event "time") $true

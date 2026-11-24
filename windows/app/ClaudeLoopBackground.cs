@@ -32,7 +32,7 @@ namespace AITaskMonitor.ClaudeLoop
         private readonly Thread thread;
         private readonly int startupTimeoutMilliseconds;
         private bool enabled, disposed, ready, error, gap;
-        private long generation, requestedAt;
+        private long generation, requestedAt, lastDrainAt;
 
         public BackgroundChannel(string pipeName) : this(delegate { return new NativeLoopSource(pipeName); }, 6000) { }
 
@@ -58,6 +58,7 @@ namespace AITaskMonitor.ClaudeLoop
                 if (disposed || enabled == value) return;
                 enabled = value; generation++; ready = false; error = false; gap = false;
                 requestedAt = value ? Stopwatch.GetTimestamp() : 0;
+                lastDrainAt = 0;
                 events.Clear(); wake.Set();
             }
         }
@@ -67,8 +68,9 @@ namespace AITaskMonitor.ClaudeLoop
             get {
                 lock (gate) {
                     if (disposed || !enabled) return false;
-                    bool overdue = !ready && requestedAt > 0 &&
-                        (Stopwatch.GetTimestamp() - requestedAt) >= Stopwatch.Frequency * (double)startupTimeoutMilliseconds / 1000.0;
+                    long reference = ready ? lastDrainAt : requestedAt;
+                    bool overdue = reference > 0 &&
+                        (Stopwatch.GetTimestamp() - reference) >= Stopwatch.Frequency * (double)startupTimeoutMilliseconds / 1000.0;
                     return error || overdue;
                 }
             }
@@ -123,7 +125,7 @@ namespace AITaskMonitor.ClaudeLoop
                             lock (gate)
                             {
                                 accepted = !disposed && enabled && generation == current;
-                                if (accepted) { ready = true; error = false; }
+                                if (accepted) { ready = true; error = false; lastDrainAt = Stopwatch.GetTimestamp(); }
                             }
                             if (!accepted) { try { source.Dispose(); } catch { } source = null; sourceGeneration = -1; continue; }
                         }
@@ -137,12 +139,17 @@ namespace AITaskMonitor.ClaudeLoop
                     {
                         if (source.IsStopped) throw new InvalidOperationException("The loop source stopped.");
                         LoopBatch batch = source.Drain();
+                        long completedAt = Stopwatch.GetTimestamp();
                         lock (gate)
                         {
                             if (!disposed && enabled && generation == sourceGeneration && batch != null)
                             {
-                                if (batch.Gap) { events.Clear(); gap = true; }
-                                if (batch.Events != null) foreach (LoopEvent item in batch.Events)
+                                bool stale = lastDrainAt > 0 &&
+                                    (completedAt - lastDrainAt) >= Stopwatch.Frequency * (double)startupTimeoutMilliseconds / 1000.0;
+                                lastDrainAt = completedAt;
+                                if (stale) { events.Clear(); gap = true; }
+                                else if (batch.Gap) { events.Clear(); gap = true; }
+                                if (!stale && batch.Events != null) foreach (LoopEvent item in batch.Events)
                                 {
                                     if (events.Count >= MaximumQueued) { events.Clear(); gap = true; }
                                     if (item != null) events.Enqueue(item);

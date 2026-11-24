@@ -8,9 +8,12 @@ public sealed class SyntheticClaudeLoopController
     public readonly ManualResetEventSlim CreateRelease = new ManualResetEventSlim(false);
     public readonly ManualResetEventSlim DisposeEntered = new ManualResetEventSlim(false);
     public readonly ManualResetEventSlim DisposeRelease = new ManualResetEventSlim(true);
+    public readonly ManualResetEventSlim DrainEntered = new ManualResetEventSlim(false);
+    public readonly ManualResetEventSlim DrainRelease = new ManualResetEventSlim(false);
     private int created;
     internal int overflow;
     internal int stopped;
+    internal int blockDrain;
     public int Created { get { return Interlocked.CompareExchange(ref created, 0, 0); } }
     public ILoopSource Create()
     {
@@ -20,6 +23,7 @@ public sealed class SyntheticClaudeLoopController
     }
     public void QueueOverflow() { Interlocked.Exchange(ref overflow, 1); }
     public void SetStopped(bool value) { Interlocked.Exchange(ref stopped, value ? 1 : 0); }
+    public void HoldNextDrain() { Interlocked.Exchange(ref blockDrain, 1); }
 }
 
 internal sealed class SyntheticClaudeLoopSource : ILoopSource
@@ -31,6 +35,11 @@ internal sealed class SyntheticClaudeLoopSource : ILoopSource
     public bool IsStopped { get { return Interlocked.CompareExchange(ref owner.stopped, 0, 0) != 0; } }
     public LoopBatch Drain()
     {
+        if (Interlocked.Exchange(ref owner.blockDrain, 0) != 0)
+        {
+            owner.DrainEntered.Set(); owner.DrainRelease.Wait();
+            return new LoopBatch { Gap = false, Events = new[] { new LoopEvent { SessionId = "stale", Kind = "start" } } };
+        }
         if (first)
         {
             first = false;

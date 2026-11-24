@@ -26,6 +26,8 @@
   "LoopDetection.ps1",
   "DiagnosticCollector.ps1",
   "DiagnosticRuntime.ps1",
+  "DiagnosticClient.ps1",
+  "DiagnosticWorker.ps1",
   "ReleaseUpdates.ps1",
   "AI task monitor.exe",
   "assets/app-icon.ico",

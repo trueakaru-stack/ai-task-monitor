@@ -4026,12 +4026,40 @@ function Refresh-Diagnostics($tasks) {
   $state=if([bool](Prop $task "Active" $false)){"active"}elseif($status -eq "Статус не подтверждён"){"unknown"}else{""}
   if($state){[PSCustomObject]@{Provider=$provider;Id=$id;State=$state}}
  })
+ $clientVariable=Get-Variable -Scope Script -Name diagnosticClient -ErrorAction SilentlyContinue
+ if($null -ne $clientVariable){
+  if($null -eq $clientVariable.Value){$script:diagnosticRuntime.LoopStates=@{};$script:diagnosticError="Не удалось обновить журнал";return}
+  $client=$clientVariable.Value
+  try{
+   Get-DiagnosticClientUpdate $client $observations $script:sourceErrors
+   $script:diagnosticRuntime.LoopStates=$client.Warnings
+   $script:diagnosticError=if($client.Error){"Не удалось обновить журнал"}else{""}
+   if($client.LastClearCompleted){
+    $script:journalUiError=if($client.Error){"Журнал очищен, но недоступен"}else{""};$script:journalFingerprint=""
+    if($script:showingSettings){Update-JournalSettings}
+   }elseif($client.Error -and $client.PendingClear){
+    $script:journalUiError="Не удалось очистить журнал"
+    if($script:showingSettings){Update-JournalSettings}
+   }
+  }catch{$script:diagnosticRuntime.LoopStates=@{};$script:diagnosticError="Не удалось обновить журнал"}
+  return
+ }
  $resolver=if($PreviewActiveTasks -ge 0){{param($id) return ""}}else{{param($id) return (Session-File $id)}}
  $stateResolver=if($PreviewActiveTasks -ge 0){{param($id) return [PSCustomObject]@{State="unknown"}}}else{{param($id) return (Thread-State $id)}}
  try{
   Update-DiagnosticRuntime -Runtime $script:diagnosticRuntime -Tasks $observations -Unavailable $script:sourceErrors -Now ([DateTimeOffset]::UtcNow) -SessionResolver $resolver -StateResolver $stateResolver
   $script:diagnosticError=""
  }catch{$script:diagnosticError="Не удалось обновить журнал"}
+}
+
+function Start-DiagnosticClient {
+ if($null -eq $script:diagnosticRuntime -or $null -ne $script:diagnosticClient){return}
+ try{
+  if(-not ('AITaskMonitor.LocalReadOwner.Owner' -as [type])){Add-Type -Path (Join-Path $PSScriptRoot 'LocalReadOwner.cs') -ErrorAction Stop}
+  $config=[string[]]@('AITM-DIAGNOSTIC-1',[IO.Path]::GetFullPath($codexHome),[IO.Path]::GetFullPath($env:USERPROFILE),[IO.Path]::GetFullPath($dataDirectory),[IO.Path]::GetFullPath($script:diagnosticDirectory),$script:monitorStartedUtc.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture))
+  $owner=[AITaskMonitor.LocalReadOwner.Owner]::new((Join-Path $PSScriptRoot 'DiagnosticWorker.ps1'),$config)
+  $script:diagnosticClient=New-DiagnosticClient $owner
+ }catch{$script:diagnosticClient=$null;$script:diagnosticError="Не удалось обновить журнал"}
 }
 
 function Unconfirmed-Tasks($tasks) {
@@ -4333,7 +4361,16 @@ function Add-LoopWarning($container,$task,[bool]$compact) {
   elseif($provider -eq 'claude'){
    $session=if($id.StartsWith('claude:')){$id.Substring(7)}else{$id}
    if($script:claudeLoopStates.ContainsKey($session)){$script:claudeLoopStates[$session].Dismissed=$true}
-  }elseif($null -ne $script:diagnosticRuntime){$key="codex:"+$id;if($script:diagnosticRuntime.LoopStates.ContainsKey($key)){$script:diagnosticRuntime.LoopStates[$key].Dismissed=$true}}
+  }elseif($null -ne $script:diagnosticRuntime){
+   $key="codex:"+$id
+   if($script:diagnosticRuntime.LoopStates.ContainsKey($key)){
+    $loop=$script:diagnosticRuntime.LoopStates[$key]
+    $clientVariable=Get-Variable -Scope Script -Name diagnosticClient -ErrorAction SilentlyContinue
+    if($null -ne $clientVariable -and $null -ne $clientVariable.Value -and $null -ne $loop.PSObject.Properties['Token']){
+     try{[void](Queue-DiagnosticDismiss $clientVariable.Value $id ([string]$loop.Token))}catch{$script:diagnosticError="Не удалось обновить журнал"}
+    }else{$loop.Dismissed=$true}
+   }
+  }
   $script:fingerprint="";Update-View
  })
  [Windows.Controls.Grid]::SetColumn($dismiss,1);$row.Children.Add($label)|Out-Null;$row.Children.Add($dismiss)|Out-Null
@@ -5035,7 +5072,9 @@ function Update-JournalSettings {
    foreach($size in 1..10){$unit=if($script:resolvedLanguage -eq 'en'){'MB'}else{'МБ'};[void]$journalSizeCombo.Items.Add((New-JournalComboItem "$size $unit" $size))}
   }
   $ready=$null -ne $script:diagnosticRuntime
-  $journalDaysCombo.IsEnabled=$ready; $journalSizeCombo.IsEnabled=$ready; $journalOpenButton.IsEnabled=$ready; $journalClearButton.IsEnabled=$script:diagnosticModulesAvailable -and $journalClearConfirmation.Visibility -ne "Visible"
+  $clientVariable=Get-Variable -Scope Script -Name diagnosticClient -ErrorAction SilentlyContinue
+  $clearPending=$null -ne $clientVariable -and $null -ne $clientVariable.Value -and [bool]$clientVariable.Value.PendingClear
+  $journalDaysCombo.IsEnabled=$ready; $journalSizeCombo.IsEnabled=$ready; $journalOpenButton.IsEnabled=$ready; $journalClearButton.IsEnabled=$script:diagnosticModulesAvailable -and -not $clearPending -and $journalClearConfirmation.Visibility -ne "Visible"
   if($ready){
    foreach($item in $journalDaysCombo.Items){if([int]$item.Tag -eq [int]$script:diagnosticRuntime.Settings.RetentionDays){$journalDaysCombo.SelectedItem=$item;break}}
    foreach($item in $journalSizeCombo.Items){if([int]$item.Tag -eq [int]$script:diagnosticRuntime.Settings.MaximumMB){$journalSizeCombo.SelectedItem=$item;break}}
@@ -5119,6 +5158,8 @@ function Update-LoopSettings {
 function Save-LoopControls {
  if($script:updatingLoopControls -or $null -eq $script:diagnosticRuntime -or $null -eq $loopThresholdCombo.SelectedItem -or $null -eq $loopWindowCombo.SelectedItem){return}
  try{
+  $clientVariable=Get-Variable -Scope Script -Name diagnosticClient -ErrorAction SilentlyContinue
+  if($null -ne $clientVariable -and $null -ne $clientVariable.Value){Invalidate-DiagnosticClientSettings $clientVariable.Value;$script:diagnosticRuntime.LoopStates=@{}}
   Save-DiagnosticSettings -Directory $script:diagnosticDirectory -LoopThreshold ([int]$loopThresholdCombo.SelectedItem.Tag) -LoopWindowMinutes ([int]$loopWindowCombo.SelectedItem.Tag)
   $script:diagnosticRuntime.Settings=Get-DiagnosticSettings -Directory $script:diagnosticDirectory
   $script:loopUiError=""; $script:fingerprint=""
@@ -5139,14 +5180,16 @@ function Save-JournalControls {
  if($script:updatingJournalControls -or $null -eq $script:diagnosticRuntime -or $null -eq $journalDaysCombo.SelectedItem -or $null -eq $journalSizeCombo.SelectedItem){return}
  $days=[int]$journalDaysCombo.SelectedItem.Tag; $size=[int]$journalSizeCombo.SelectedItem.Tag
  try{
+  $clientVariable=Get-Variable -Scope Script -Name diagnosticClient -ErrorAction SilentlyContinue
+  if($null -ne $clientVariable -and $null -ne $clientVariable.Value){Invalidate-DiagnosticClientSettings $clientVariable.Value;$script:diagnosticRuntime.LoopStates=@{}}
   Save-DiagnosticSettings -Directory $script:diagnosticDirectory -RetentionDays $days -MaximumMB $size
   $script:diagnosticRuntime.Settings=Get-DiagnosticSettings -Directory $script:diagnosticDirectory
   $script:journalUiError=""
  }catch{$script:journalUiError="Не удалось сохранить настройки журнала";Update-JournalSettings;return}
  try{
   $now=[DateTimeOffset]::UtcNow; $limit=[long]$size*1000000
-  Remove-ExpiredDiagnosticEvents -Directory $script:diagnosticDirectory -Now $now -RetentionDays $days -MaximumBytes $limit
-  $events=@(Read-DiagnosticEvents -Directory $script:diagnosticDirectory -Now $now -RetentionDays $days -MaximumBytes $limit)
+  Remove-ExpiredDiagnosticEvents -Directory $script:diagnosticDirectory -Now $now -RetentionDays $days -MaximumBytes $limit -UseStoredPolicy
+  $events=@(Read-DiagnosticEvents -Directory $script:diagnosticDirectory -Now $now -RetentionDays $days -MaximumBytes $limit -UseStoredPolicy)
   Set-DiagnosticNextCleanup $script:diagnosticRuntime $events
   $script:journalFingerprint=""
  }catch{$script:journalUiError="Не удалось применить очистку журнала"}
@@ -5575,11 +5618,17 @@ $journalClearButton.Add_Click({$journalClearConfirmation.Visibility="Visible";Up
 $journalCancelClearButton.Add_Click({$journalClearConfirmation.Visibility="Collapsed";Update-JournalSettings})
 $journalConfirmClearButton.Add_Click({
  try{
-  Clear-DiagnosticEvents -Directory $script:diagnosticDirectory
-  if($null -ne $script:diagnosticRuntime){$script:diagnosticRuntime.NextCleanup=[DateTimeOffset]::MaxValue}
+  $clientVariable=Get-Variable -Scope Script -Name diagnosticClient -ErrorAction SilentlyContinue
+  if($null -ne $clientVariable -and $null -ne $clientVariable.Value){[void](Queue-DiagnosticClear $clientVariable.Value)}
   else{
-   try{$script:diagnosticRuntime=New-DiagnosticRuntime -Directory $script:diagnosticDirectory -Since ([DateTimeOffset]$script:monitorStartedUtc) -Now ([DateTimeOffset]::UtcNow);$script:diagnosticError=""}
-   catch{$script:diagnosticError="Журнал очищен, но недоступен"}
+   Clear-DiagnosticEvents -Directory $script:diagnosticDirectory
+   if($null -ne $script:diagnosticRuntime){$script:diagnosticRuntime.NextCleanup=[DateTimeOffset]::MaxValue}
+   else{
+    try{
+     $script:diagnosticRuntime=New-DiagnosticRuntime -Directory $script:diagnosticDirectory -Since ([DateTimeOffset]$script:monitorStartedUtc) -Now ([DateTimeOffset]::UtcNow);$script:diagnosticError=""
+     if($null -ne $clientVariable){Start-DiagnosticClient}
+    }catch{$script:diagnosticError="Журнал очищен, но недоступен"}
+   }
   }
   $script:journalUiError="";$script:journalFingerprint=""
  }
@@ -5716,6 +5765,8 @@ $window.Add_Closed({if($null -ne $script:codexRootEvidenceReader){$script:codexR
 $window.Add_Closed({
  $clientVariable=Get-Variable -Scope Script -Name localSourceClient -ErrorAction SilentlyContinue
  if($null -ne $clientVariable -and $null -ne $clientVariable.Value -and $null -ne $clientVariable.Value.Owner){$clientVariable.Value.Owner.Dispose()}
+ $clientVariable=Get-Variable -Scope Script -Name diagnosticClient -ErrorAction SilentlyContinue
+ if($null -ne $clientVariable -and $null -ne $clientVariable.Value -and $null -ne $clientVariable.Value.Owner){$clientVariable.Value.Owner.Dispose()}
 })
 if($script:codexCloudModulesAvailable -and -not $SnapshotFile -and $PreviewActiveTasks -lt 0 -and (Load-CodexCloudEnabled)){Set-CodexCloudControllerEnabled $script:codexCloudController $true}
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
@@ -5735,6 +5786,8 @@ if($PreviewActiveTasks -lt 0 -and -not $SnapshotFile){
   $sourceOwner=[AITaskMonitor.LocalReadOwner.Owner]::new((Join-Path $PSScriptRoot 'LocalSourceWorker.ps1'),$sourceConfig)
   $script:localSourceClient=New-LocalSourceClient $sourceOwner $script:resolvedLanguage
  }catch{$script:localSourceClient=$null}
+ $script:diagnosticClient=$null
+ try{. (Join-Path $PSScriptRoot 'DiagnosticClient.ps1');Start-DiagnosticClient}catch{$script:diagnosticClient=$null;$script:diagnosticError="Не удалось обновить журнал"}
 }
 $initialLanguage=if($LanguageOverride){$LanguageOverride}elseif($SnapshotFile -or $PreviewActiveTasks -ge 0){'ru'}else{Load-LanguageMode}
 Apply-Language $initialLanguage $false

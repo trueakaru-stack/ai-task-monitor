@@ -7,7 +7,7 @@ try{
  $store=[IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\msix\Build-StorePackage.ps1'))
  $inventory=@(([IO.File]::ReadAllText((Join-Path $app 'Uninstall-Inventory.json'))|ConvertFrom-Json))
  foreach($name in @('ClaudeLoopBackground.cs','CodexTitlesCore.cs','CodexAgentRetention.ps1','CodexAgentRetentionAdapter.ps1',
-  'LocalReadOwner.cs','LocalSourceClient.ps1','LocalSourceCore.ps1','LocalSourceWorker.ps1')){
+  'LocalReadOwner.cs','LocalSourceClient.ps1','LocalSourceCore.ps1','LocalSourceWorker.ps1','DiagnosticClient.ps1','DiagnosticWorker.ps1')){
   if(-not [IO.File]::Exists((Join-Path $app $name))){throw 'A local source component is missing.'}
   if(-not $build.Contains("'$name'),$name")){throw 'An installer resource is missing.'}
   if(-not $extractor.Contains(('Extract(installGuard, "{0}", Path.Combine(stageDirectory, "{0}"))' -f $name))){throw 'An installer extraction is missing.'}

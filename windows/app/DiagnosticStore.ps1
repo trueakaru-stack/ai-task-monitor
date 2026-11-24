@@ -230,9 +230,10 @@ function Append-DiagnosticFile([string]$Directory,[string]$Original,[string]$Suf
 }
 
 function Read-DiagnosticEvents {
- param([Parameter(Mandatory=$true)][string]$Directory,[Parameter(Mandatory=$true)][DateTimeOffset]$Now,[ValidateRange(1,7)][int]$RetentionDays=7,[ValidateRange(1,10000000)][long]$MaximumBytes=10000000)
+ param([Parameter(Mandatory=$true)][string]$Directory,[Parameter(Mandatory=$true)][DateTimeOffset]$Now,[ValidateRange(1,7)][int]$RetentionDays=7,[ValidateRange(1,10000000)][long]$MaximumBytes=10000000,[switch]$UseStoredPolicy)
  $action={
   param($root)
+  if($UseStoredPolicy){$policy=Read-DiagnosticSettingsRaw $root;$RetentionDays=[int]$policy.RetentionDays;$MaximumBytes=[long]$policy.MaximumMB*1000000}
   $raw=Read-DiagnosticRaw $root
   $result=Limit-DiagnosticEvents -Events $raw.Events -Now $Now -RetentionDays $RetentionDays -MaximumBytes $MaximumBytes
   return $result.Events
@@ -248,26 +249,28 @@ function Write-DiagnosticEvent {
 }
 
 function Write-DiagnosticEvents {
- param([Parameter(Mandatory=$true)][string]$Directory,[AllowEmptyCollection()][object[]]$Events=@(),[Parameter(Mandatory=$true)][DateTimeOffset]$Now,[ValidateRange(1,7)][int]$RetentionDays=7,[ValidateRange(1,10000000)][long]$MaximumBytes=10000000)
- $candidate=Limit-DiagnosticEvents -Events $Events -Now $Now -RetentionDays $RetentionDays -MaximumBytes $MaximumBytes
- if($candidate.Events.Count -eq 0){return}
+ param([Parameter(Mandatory=$true)][string]$Directory,[AllowEmptyCollection()][object[]]$Events=@(),[Parameter(Mandatory=$true)][DateTimeOffset]$Now,[ValidateRange(1,7)][int]$RetentionDays=7,[ValidateRange(1,10000000)][long]$MaximumBytes=10000000,[switch]$UseStoredPolicy)
  $action={
   param($root)
+  if($UseStoredPolicy){$policy=Read-DiagnosticSettingsRaw $root;$RetentionDays=[int]$policy.RetentionDays;$MaximumBytes=[long]$policy.MaximumMB*1000000}
+  $candidate=Limit-DiagnosticEvents -Events $Events -Now $Now -RetentionDays $RetentionDays -MaximumBytes $MaximumBytes
+  if($candidate.Events.Count -eq 0){return}
   Ensure-DiagnosticDirectory $root
   $raw=Read-DiagnosticRaw $root
   $result=Limit-DiagnosticEvents -Events @($raw.Events+$candidate.Events) -Now $Now -RetentionDays $RetentionDays -MaximumBytes $MaximumBytes
-  $desired=ConvertTo-DiagnosticFileText $result.Events
-  if($raw.Exists -and $null -ne $raw.Content -and [Text.Encoding]::UTF8.GetByteCount($raw.Content) -eq $raw.FileBytes -and $desired.StartsWith($raw.Content,[StringComparison]::Ordinal)){
-   Append-DiagnosticFile $root $raw.Content $desired.Substring($raw.Content.Length) $raw.FileBytes
-  }else{Write-DiagnosticFile $root $result.Events}
+  # A background diagnostic worker can be terminated while blocked. Commit a
+  # complete journal via atomic replacement so the previous journal survives
+  # an interrupted write instead of ending with a partial appended record.
+  Write-DiagnosticFile $root $result.Events
  }.GetNewClosure()
  [void](Invoke-DiagnosticStoreLock $Directory $action)
 }
 
 function Remove-ExpiredDiagnosticEvents {
- param([Parameter(Mandatory=$true)][string]$Directory,[Parameter(Mandatory=$true)][DateTimeOffset]$Now,[ValidateRange(1,7)][int]$RetentionDays=7,[ValidateRange(1,10000000)][long]$MaximumBytes=10000000)
+ param([Parameter(Mandatory=$true)][string]$Directory,[Parameter(Mandatory=$true)][DateTimeOffset]$Now,[ValidateRange(1,7)][int]$RetentionDays=7,[ValidateRange(1,10000000)][long]$MaximumBytes=10000000,[switch]$UseStoredPolicy)
  $action={
   param($root)
+  if($UseStoredPolicy){$policy=Read-DiagnosticSettingsRaw $root;$RetentionDays=[int]$policy.RetentionDays;$MaximumBytes=[long]$policy.MaximumMB*1000000}
   $raw=Read-DiagnosticRaw $root
   if(-not $raw.Exists){return}
   $result=Limit-DiagnosticEvents -Events $raw.Events -Now $Now -RetentionDays $RetentionDays -MaximumBytes $MaximumBytes

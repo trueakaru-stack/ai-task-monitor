@@ -68,6 +68,8 @@ internal static class CodexProgressInstaller
                 Extract(installGuard, "LoopDetection.ps1", Path.Combine(stageDirectory, "LoopDetection.ps1"));
                 Extract(installGuard, "DiagnosticCollector.ps1", Path.Combine(stageDirectory, "DiagnosticCollector.ps1"));
                 Extract(installGuard, "DiagnosticRuntime.ps1", Path.Combine(stageDirectory, "DiagnosticRuntime.ps1"));
+                Extract(installGuard, "DiagnosticClient.ps1", Path.Combine(stageDirectory, "DiagnosticClient.ps1"));
+                Extract(installGuard, "DiagnosticWorker.ps1", Path.Combine(stageDirectory, "DiagnosticWorker.ps1"));
                 Extract(installGuard, "ReleaseUpdates.ps1", Path.Combine(stageDirectory, "ReleaseUpdates.ps1"));
                 string assetsDirectory = Path.Combine(stageDirectory, "assets");
                 installGuard.CreateChild(assetsDirectory);

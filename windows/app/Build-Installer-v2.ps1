@@ -117,6 +117,8 @@ $arguments = @(
     "/resource:$(Join-Path $source 'LoopDetection.ps1'),LoopDetection.ps1",
     "/resource:$(Join-Path $source 'DiagnosticCollector.ps1'),DiagnosticCollector.ps1",
     "/resource:$(Join-Path $source 'DiagnosticRuntime.ps1'),DiagnosticRuntime.ps1",
+    "/resource:$(Join-Path $source 'DiagnosticClient.ps1'),DiagnosticClient.ps1",
+    "/resource:$(Join-Path $source 'DiagnosticWorker.ps1'),DiagnosticWorker.ps1",
     "/resource:$(Join-Path $source 'ReleaseUpdates.ps1'),ReleaseUpdates.ps1",
     "/resource:$launcher,AI task monitor.exe",
     "/resource:$(Join-Path $source 'assets\app-icon.ico'),app-icon.ico",

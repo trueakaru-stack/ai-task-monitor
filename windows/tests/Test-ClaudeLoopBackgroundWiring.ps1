@@ -42,10 +42,17 @@ try{
   $script:claudeLoopStates['old']=[PSCustomObject]@{Warning=$true}
   Start-Sleep -Milliseconds 450;Sync-ClaudeLoopChannel
   Require ($script:claudeLoopError -and $script:claudeLoopStates.Count -eq 0) 'A stuck channel hid its unavailable state or retained a stale warning.'
+  $controller.CreateRelease.Set();$deadline=[Diagnostics.Stopwatch]::StartNew()
+  while(-not $script:claudeLoopChannel.IsReady -and $deadline.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
+  Require $script:claudeLoopChannel.IsReady 'The synthetic channel did not recover from startup.'
+  $controller.HoldNextDrain();Require ($controller.DrainEntered.Wait(10000)) 'The synthetic receiver did not block while draining.'
+  $script:claudeLoopStates['old']=[PSCustomObject]@{Warning=$true}
+  Start-Sleep -Milliseconds 450;Sync-ClaudeLoopChannel
+  Require ($script:claudeLoopError -and $script:claudeLoopStates.Count -eq 0 -and $controller.Created -eq 1) 'A blocked Drain retained a stale warning or started another channel.'
   $script:sourceErrors=@('Claude Code');$clock.Restart();Sync-ClaudeLoopChannel;$clock.Stop()
   Require ($clock.ElapsedMilliseconds -lt 1000 -and -not $script:claudeLoopChannel.IsReady) 'Disconnect waited for the blocked Claude channel.'
   Write-Output ('Claude loop wiring: production sync and compact dot stayed responsive during blocked channel startup ('+$clock.ElapsedMilliseconds+' ms disconnect).')
- }finally{$controller.CreateRelease.Set();$controller.DisposeRelease.Set();$script:claudeLoopChannel.Dispose()}
+ }finally{$controller.CreateRelease.Set();$controller.DrainRelease.Set();$controller.DisposeRelease.Set();$script:claudeLoopChannel.Dispose()}
 }finally{
  if(-not [string]::Equals($userPath,[Environment]::GetEnvironmentVariable('PATH','User'),[StringComparison]::Ordinal) -or
     -not [string]::Equals($machinePath,[Environment]::GetEnvironmentVariable('PATH','Machine'),[StringComparison]::Ordinal)){throw 'Persistent PATH changed during the synthetic check.'}
