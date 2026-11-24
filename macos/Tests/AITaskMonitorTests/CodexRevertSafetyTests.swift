@@ -259,6 +259,7 @@ final class CodexRevertSafetyTests: XCTestCase {
                                   claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("unused")),
                                   journal: DiagnosticJournal(directory: root.appendingPathComponent("journal")))
             store.refresh()
+            waitForCodexRead(store)
             XCTAssertTrue(store.codexPartiallyUnavailable)
             XCTAssertFalse(store.unavailableSources.contains(.codex))
             XCTAssertTrue(store.unavailableMessage.contains("Codex"))
@@ -266,6 +267,7 @@ final class CodexRevertSafetyTests: XCTestCase {
             XCTAssertFalse(store.tasks.contains { $0.id == thread })
             try FileManager.default.removeItem(at: old)
             store.refresh()
+            waitForCodexRead(store)
             XCTAssertFalse(store.codexPartiallyUnavailable)
             XCTAssertTrue(store.tasks.contains { $0.id == other && $0.isActive })
             XCTAssertTrue(store.tasks.contains { $0.id == thread && $0.isActive })
@@ -284,6 +286,7 @@ final class CodexRevertSafetyTests: XCTestCase {
                                   claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("unused")),
                                   journal: DiagnosticJournal(directory: root.appendingPathComponent("journal")))
             store.refresh()
+            waitForCodexRead(store)
             XCTAssertTrue(store.codexPartiallyUnavailable)
             XCTAssertFalse(store.unavailableSources.contains(.codex))
             XCTAssertTrue(store.tasks.isEmpty)

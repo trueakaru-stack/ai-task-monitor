@@ -2,12 +2,31 @@ import Foundation
 import XCTest
 @testable import AITaskMonitor
 
+// All Claude fixtures in this group must stay in the verified hosted-runner
+// sandbox. A channel test must also use the DEBUG-only socket-root override.
+// Profiles used by background workers remain until the XCTest process exits;
+// the disposable runner then removes the entire verified synthetic root.
+func claudeSyntheticDirectory(prefix: String, requiresSocket: Bool = false) throws -> URL {
+    let environment = ProcessInfo.processInfo.environment
+    guard environment["AITM_SYNTHETIC_REQUIRED"] == "1", environment["AITM_MACOS_TEST_SANDBOX"] == "1" else {
+        throw CocoaError(.fileWriteNoPermission)
+    }
+    if requiresSocket {
+        #if DEBUG
+        guard try ClaudeLoopSocket.syntheticSocketBase(environment: environment) != nil else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        #else
+        throw CocoaError(.fileWriteNoPermission)
+        #endif
+    }
+    return try codexSyntheticDirectory(prefix: prefix)
+}
+
 // Synthetic-only fixtures; run through the real hook, reader, store and view model.
 final class ClaudeCombinedRecoveryTests: XCTestCase {
     private func directory() throws -> URL {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-combined-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        try claudeSyntheticDirectory(prefix: "aitm-combined-")
     }
 
     private func record(_ input: [String: Any], time: Date) -> [String: Any] {
@@ -59,18 +78,20 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
 
     @MainActor
     func testPartialTailAndNewPromptPreserveBothPreviouslyVisibleAndNewTitles() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(1)
         try encode([prompt("case", time: time), created("case", title: "Old title", time: time.addingTimeInterval(0.1))]).write(to: file)
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("missing-codex")),
                               claudeReader: ClaudeTaskReader(eventFile: file),
                               journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
+        waitForClaudeRead(store)
         XCTAssertEqual(store.tasks.first(where: { $0.provider == .claude })?.steps.map(\.title), ["Old title"])
         try append([loss(time.addingTimeInterval(0.2), partial: true),
                     prompt("case", time: time.addingTimeInterval(0.3)),
                     created("case", title: "New title", time: time.addingTimeInterval(0.4)),
                     completed("case", time: time.addingTimeInterval(0.5))], to: file)
         store.refresh()
+        waitForClaudeRead(store)
         let task = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:case" }))
         XCTAssertEqual(task.steps.map(\.title), ["Old title", "New title"])
         XCTAssertTrue(task.isUnconfirmed)
@@ -84,22 +105,25 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
     @MainActor
     func testDeletionOrAtomicReplacementKeepsOldAndNewTitlesUnconfirmed() throws {
         for replaceDirectly in [false, true] {
-            let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+            let dir = try directory()
             let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(1)
             try encode([prompt("case", time: time), created("case", title: "Old title", time: time.addingTimeInterval(0.1))]).write(to: file)
             let store = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("missing-codex")),
                                   claudeReader: ClaudeTaskReader(eventFile: file),
                                   journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
+            waitForClaudeRead(store)
             XCTAssertEqual(store.tasks.first(where: { $0.provider == .claude })?.steps.first?.title, "Old title")
             if !replaceDirectly {
                 try FileManager.default.removeItem(at: file)
                 store.refresh() // Observe absence before recreation.
+                waitForClaudeRead(store)
             }
             let replacement = try encode([prompt("case", time: time.addingTimeInterval(0.4)),
                                           created("case", title: "New title", time: time.addingTimeInterval(0.5)),
                                           completed("case", time: time.addingTimeInterval(0.6))])
-            try replacement.write(to: file, options: .atomic)
+            try codexAtomicFixtureWrite(replacement, to: file)
             store.refresh()
+            waitForClaudeRead(store)
             let task = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:case" }))
             XCTAssertEqual(task.steps.map(\.title), ["Old title", "New title"], "replaceDirectly=\(replaceDirectly)")
             XCTAssertTrue(task.isUnconfirmed)
@@ -110,7 +134,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
     }
 
     func testKnownStatusesWithUnknownCompletenessKeepApproximateLabel() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(-3)
         try encode([prompt("case", time: time), created("case", title: "Known title", time: time.addingTimeInterval(0.1)),
                     completed("case", time: time.addingTimeInterval(0.2))]).write(to: file)
@@ -124,7 +148,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
     }
 
     func testNewEventAfterClearStopReopensCardWithoutNewPrompt() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(-3)
         let stop = record(["session_id": "case", "hook_event_name": "Stop", "background_tasks": [], "session_crons": []],
                           time: time.addingTimeInterval(0.4))
@@ -144,7 +168,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
 
     @MainActor
     func testForeignCodexNamespaceDoesNotCaptureClaudeInStore() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let home = dir.appendingPathComponent("codex", isDirectory: true)
         try FileManager.default.createDirectory(at: home.appendingPathComponent("sessions", isDirectory: true), withIntermediateDirectories: true)
         try Data("{\"id\":\"claude:case\",\"thread_name\":\"Foreign\"}\n".utf8).write(to: home.appendingPathComponent("session_index.jsonl"))
@@ -154,6 +178,8 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
         XCTAssertThrowsError(try codex.readSnapshot())
         let store = TaskStore(codexReader: codex, claudeReader: ClaudeTaskReader(eventFile: claude),
                               journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
+        waitForCodexRead(store)
+        waitForClaudeRead(store)
         XCTAssertTrue(store.unavailableSources.contains(.codex))
         XCTAssertFalse(store.tasks.contains(where: { $0.provider == .codex }))
         let task = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:case" }))
@@ -184,7 +210,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
 
     @MainActor
     func testSessionSpecificUncertaintyLeavesCodexAndNeighborClaudeIntact() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let home = dir.appendingPathComponent("codex", isDirectory: true)
         let sessions = home.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
@@ -205,6 +231,8 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
                     completed("neighbor", time: time.addingTimeInterval(0.2))]).write(to: file)
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: home), claudeReader: ClaudeTaskReader(eventFile: file),
                               journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
+        waitForCodexRead(store)
+        waitForClaudeRead(store)
         let affected = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:affected" }))
         let neighbor = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:neighbor" }))
         let codex = try XCTUnwrap(store.tasks.first(where: { $0.provider == .codex }))
@@ -218,7 +246,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
 
 
     func testUnreadablePartialTailCannotBecomeConfirmedAfterSameFileRepair() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(-3)
         let original = try encode([prompt("case", time: time), created("case", title: "Known title", time: time.addingTimeInterval(0.1))])
         try original.write(to: file)
@@ -243,16 +271,18 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
 
     @MainActor
     func testNewPromptWithoutSourceLossDoesNotResurrectOldTitle() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(1)
         try encode([prompt("case", time: time), created("case", title: "Old title", time: time.addingTimeInterval(0.1))]).write(to: file)
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("missing-codex")),
                               claudeReader: ClaudeTaskReader(eventFile: file),
                               journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
+        waitForClaudeRead(store)
         XCTAssertEqual(store.tasks.first(where: { $0.id == "claude:case" })?.steps.map(\.title), ["Old title"])
         try append([prompt("case", time: time.addingTimeInterval(0.2)),
                     created("case", title: "New title", time: time.addingTimeInterval(0.3))], to: file)
         store.refresh()
+        waitForClaudeRead(store)
         let task = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:case" }))
         XCTAssertEqual(task.steps.map(\.title), ["New title"])
         XCTAssertFalse(task.planConfirmed)

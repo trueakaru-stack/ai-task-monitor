@@ -5,12 +5,10 @@ import XCTest
 
 final class ClaudeLoopChannelTests: XCTestCase {
     func testPrivateChannelDeliveryGapAndFreshKeyAfterRestart() throws {
-        let profile = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-test-\(UUID().uuidString)")
+        let profile = try claudeSyntheticDirectory(prefix: "aitm-loop-profile-", requiresSocket: true)
         let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
         var channel: ClaudeLoopChannel? = try ClaudeLoopChannel(profile: profile)
-        defer {
-            if channel?.stop() != false { removeEmptyTestDirectory(directory) }
-        }
+        defer { _ = channel?.stop() }
         XCTAssertThrowsError(try ClaudeLoopChannel(profile: profile))
         var directoryInfo = stat()
         XCTAssertEqual(directory.withCString { lstat($0, &directoryInfo) }, 0)
@@ -51,14 +49,14 @@ final class ClaudeLoopChannelTests: XCTestCase {
     }
 
     func testDelayedHandshakeRemainsBoundedAndDoesNotLoseEvent() throws {
-        let profile = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-test-\(UUID().uuidString)")
+        let profile = try claudeSyntheticDirectory(prefix: "aitm-loop-profile-", requiresSocket: true)
         let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
         let channel = try ClaudeLoopChannel(profile: profile)
         let blocker = try XCTUnwrap(ClaudeLoopSocket.connect(path: directory + "/events.sock"))
         let blockerClosed = DispatchSemaphore(value: 0)
         defer {
             _ = blockerClosed.wait(timeout: .now() + 2)
-            if channel.stop() { removeEmptyTestDirectory(directory) }
+            _ = channel.stop()
         }
         XCTAssertNotNil(ClaudeLoopSocket.read(blocker, count: 32))
         DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(180)) {
@@ -81,6 +79,8 @@ final class ClaudeLoopChannelTests: XCTestCase {
     }
 
     func testClientAcceptsHandshakeDelayedBeyondOriginalTimeout() throws {
+        let root = try claudeSyntheticDirectory(prefix: "aitm-loop-pair-", requiresSocket: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         var descriptors: [Int32] = [-1, -1]
         XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors), 0)
         guard descriptors[0] >= 0, descriptors[1] >= 0 else { throw TestError.socket }
@@ -104,30 +104,30 @@ final class ClaudeLoopChannelTests: XCTestCase {
     }
 
     func testForeignFileAtSocketPathIsPreserved() throws {
-        let profile = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-test-\(UUID().uuidString)")
+        let profile = try claudeSyntheticDirectory(prefix: "aitm-loop-profile-", requiresSocket: true)
         let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
         let foreignPath = directory + "/events.sock"
         let value = "synthetic foreign content"
-        XCTAssertTrue(FileManager.default.createFile(atPath: foreignPath, contents: Data(value.utf8)))
+        try createFixtureFile(value, at: foreignPath)
+        XCTAssertEqual(try String(contentsOfFile: foreignPath, encoding: .utf8), value)
         defer {
             if (try? String(contentsOfFile: foreignPath, encoding: .utf8)) == value { _ = foreignPath.withCString { unlink($0) } }
-            removeEmptyTestDirectory(directory)
         }
         XCTAssertThrowsError(try ClaudeLoopChannel(profile: profile))
         XCTAssertEqual(try String(contentsOfFile: foreignPath, encoding: .utf8), value)
     }
 
     func testSymlinkAtSocketPathIsNotFollowedOrRemoved() throws {
-        let profile = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-test-\(UUID().uuidString)")
+        let profile = try claudeSyntheticDirectory(prefix: "aitm-loop-profile-", requiresSocket: true)
         let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
         let target = directory + "/sentinel"
         let socketPath = directory + "/events.sock"
-        XCTAssertTrue(FileManager.default.createFile(atPath: target, contents: Data("keep".utf8)))
+        try createFixtureFile("keep", at: target)
+        XCTAssertEqual(try String(contentsOfFile: target, encoding: .utf8), "keep")
         try FileManager.default.createSymbolicLink(atPath: socketPath, withDestinationPath: target)
         defer {
             _ = socketPath.withCString { unlink($0) }
             _ = target.withCString { unlink($0) }
-            removeEmptyTestDirectory(directory)
         }
         XCTAssertThrowsError(try ClaudeLoopChannel(profile: profile))
         XCTAssertEqual(try String(contentsOfFile: target, encoding: .utf8), "keep")
@@ -135,12 +135,11 @@ final class ClaudeLoopChannelTests: XCTestCase {
     }
 
     func testRejectsUnsafeDirectoryPermissionsWithoutChangingThem() throws {
-        let profile = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-test-\(UUID().uuidString)")
+        let profile = try claudeSyntheticDirectory(prefix: "aitm-loop-profile-", requiresSocket: true)
         let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
         XCTAssertEqual(directory.withCString { chmod($0, mode_t(0o755)) }, 0)
         defer {
             _ = directory.withCString { chmod($0, mode_t(0o700)) }
-            removeEmptyTestDirectory(directory)
         }
         XCTAssertThrowsError(try ClaudeLoopChannel(profile: profile))
         var info = stat()
@@ -149,16 +148,16 @@ final class ClaudeLoopChannelTests: XCTestCase {
     }
 
     func testOwnershipLockSymlinkIsNotFollowed() throws {
-        let profile = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-test-\(UUID().uuidString)")
+        let profile = try claudeSyntheticDirectory(prefix: "aitm-loop-profile-", requiresSocket: true)
         let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
         let target = directory + "/sentinel"
         let lock = directory + "/owner.lock"
-        XCTAssertTrue(FileManager.default.createFile(atPath: target, contents: Data("keep".utf8)))
+        try createFixtureFile("keep", at: target)
+        XCTAssertEqual(try String(contentsOfFile: target, encoding: .utf8), "keep")
         try FileManager.default.createSymbolicLink(atPath: lock, withDestinationPath: target)
         defer {
             _ = lock.withCString { unlink($0) }
             _ = target.withCString { unlink($0) }
-            removeEmptyTestDirectory(directory)
         }
         XCTAssertThrowsError(try ClaudeLoopChannel(profile: profile))
         XCTAssertEqual(try String(contentsOfFile: target, encoding: .utf8), "keep")
@@ -166,7 +165,7 @@ final class ClaudeLoopChannelTests: XCTestCase {
     }
 
     func testDeadSocketIsRecoveredButLiveForeignSocketIsPreserved() throws {
-        let profile = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-test-\(UUID().uuidString)")
+        let profile = try claudeSyntheticDirectory(prefix: "aitm-loop-profile-", requiresSocket: true)
         let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
         let path = directory + "/events.sock"
         var descriptor: Int32 = -1
@@ -179,7 +178,6 @@ final class ClaudeLoopChannelTests: XCTestCase {
                    (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFSOCK) {
                     _ = path.withCString { unlink($0) }
                 }
-                removeEmptyTestDirectory(directory)
             }
         }
         func bindSocket() throws -> Int32 {
@@ -209,24 +207,22 @@ final class ClaudeLoopChannelTests: XCTestCase {
 
     @MainActor
     func testSyntheticClaudeEventsReachCorrectTaskAndCanBeDismissed() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-store-test-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let directory = try ClaudeLoopSocket.directory(profile: root, create: true)
+        let root = try claudeSyntheticDirectory(prefix: "aitm-store-test-", requiresSocket: true)
+        _ = try ClaudeLoopSocket.directory(profile: root, create: true)
         let events = root.appendingPathComponent("claude-events-v2.jsonl")
         try Data().write(to: events)
         let journal = DiagnosticJournal(directory: root.appendingPathComponent("diagnostics"))
         var store: TaskStore? = TaskStore(codexReader: CodexTaskReader(codexHome: root.appendingPathComponent("codex")),
                                           claudeReader: ClaudeTaskReader(eventFile: events), journal: journal,
                                           claudeLoopProfile: root)
+        waitForClaudeRead(try XCTUnwrap(store))
         defer {
             store = nil
-            removeEmptyTestDirectory(directory)
-            try? FileManager.default.removeItem(at: root)
         }
         func send(_ event: String, id: String, session: String) throws {
             var payload = input(event: event, id: id)
             payload["session_id"] = session
-            XCTAssertEqual(ClaudeHook.process(payload, directory: root), 0)
+            XCTAssertEqual(ClaudeHook.process(payload, directory: root, retentionPolicy: { nil }), 0)
         }
         for index in 0..<5 {
             try send("PreToolUse", id: "first-\(index)", session: "first")
@@ -239,8 +235,9 @@ final class ClaudeLoopChannelTests: XCTestCase {
         let timeout = Date().addingTimeInterval(3)
         while Date() < timeout {
             store?.refresh()
+            if let store { waitForClaudeRead(store) }
             if store?.tasks.first(where: { $0.id == "claude:first" })?.loopWarning != nil { break }
-            Thread.sleep(forTimeInterval: 0.02)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
         let first = try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:first" }))
         XCTAssertEqual(first.loopWarning, LoopWarning(threshold: 5, windowMinutes: 10))
@@ -251,6 +248,18 @@ final class ClaudeLoopChannelTests: XCTestCase {
         for secret in ["synthetic secret command", "/synthetic/private", "synthetic secret output"] {
             XCTAssertFalse(persisted.contains(secret))
         }
+    }
+
+    private func createFixtureFile(_ contents: String, at path: String) throws {
+        let descriptor = path.withCString {
+            open($0, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
+        }
+        guard descriptor >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: path])
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        try handle.write(contentsOf: Data(contents.utf8))
     }
 
     private func awaitEvent(_ channel: ClaudeLoopChannel) throws -> ClaudeLoopEvent {
@@ -271,14 +280,6 @@ final class ClaudeLoopChannelTests: XCTestCase {
         ["session_id": "session-test", "hook_event_name": event, "tool_name": "Bash", "tool_use_id": id,
          "cwd": "/synthetic/private", "tool_input": ["command": "synthetic secret command"],
          "is_interrupt": false, "error": "Exit code 7\nsynthetic secret output"]
-    }
-
-    private func removeEmptyTestDirectory(_ path: String) {
-        guard path.hasPrefix("/private/tmp/aitm-loop-"),
-              let names = try? FileManager.default.contentsOfDirectory(atPath: path),
-              Set(names).isSubset(of: ["owner.lock"]) else { return }
-        _ = (path + "/owner.lock").withCString { unlink($0) }
-        _ = path.withCString { rmdir($0) }
     }
 
     private enum TestError: Error { case gap, timeout, socket }

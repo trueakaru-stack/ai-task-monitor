@@ -36,10 +36,8 @@ final class ClaudeSourceLossRecoveryTests: XCTestCase {
         return data
     }
 
-    private func temporaryDirectory() throws -> URL {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-source-loss-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+    private func temporaryDirectory(requiresSocket: Bool = false) throws -> URL {
+        try claudeSyntheticDirectory(prefix: "aitm-source-loss-", requiresSocket: requiresSocket)
     }
 
     func testSeenLossRemainsLatchedWhenMarkerDisappearsDuringRun() throws {
@@ -325,21 +323,16 @@ final class ClaudeSourceLossRecoveryTests: XCTestCase {
 
     @MainActor
     func testNewSessionAfterLossReachesTaskStoreThroughActualHookAndSocket() throws {
-        let dir = try temporaryDirectory()
+        let dir = try temporaryDirectory(requiresSocket: true)
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), now = Date()
         try encode([marker(at: now.addingTimeInterval(-4))]).write(to: file)
         let journal = DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics"))
         var store: TaskStore? = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("codex")),
                                           claudeReader: ClaudeTaskReader(eventFile: file), journal: journal, claudeLoopProfile: dir)
-        let socketDirectory = try ClaudeLoopSocket.directory(profile: dir, create: false)
+        waitForClaudeRead(try XCTUnwrap(store))
+        _ = try ClaudeLoopSocket.directory(profile: dir, create: false)
         defer {
             store = nil
-            if let names = try? FileManager.default.contentsOfDirectory(atPath: socketDirectory),
-               socketDirectory.hasPrefix("/private/tmp/aitm-loop-"), Set(names).isSubset(of: ["owner.lock"]) {
-                _ = (socketDirectory + "/owner.lock").withCString { unlink($0) }
-                _ = socketDirectory.withCString { rmdir($0) }
-            }
-            try? FileManager.default.removeItem(at: dir)
         }
         let inputs: [[String: Any]] = [
             ["session_id": "new-session", "hook_event_name": "SessionStart", "source": "startup"],
@@ -364,8 +357,9 @@ final class ClaudeSourceLossRecoveryTests: XCTestCase {
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline {
             store?.refresh()
+            if let store { waitForClaudeRead(store) }
             if store?.tasks.first(where: { $0.id == "claude:new-session" }) != nil { break }
-            Thread.sleep(forTimeInterval: 0.01)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
         let task = try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:new-session" }))
         XCTAssertTrue(task.isUnconfirmed)

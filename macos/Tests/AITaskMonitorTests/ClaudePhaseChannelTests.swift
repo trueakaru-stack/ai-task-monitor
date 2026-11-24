@@ -47,8 +47,7 @@ final class ClaudePhaseChannelTests: XCTestCase {
     }
 
     private func snapshot(_ records: [[String: Any]], evidence: ClaudePhaseEvidence, overlap: Bool = false) throws -> ClaudeTaskSnapshot {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-phase-channel-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try claudeSyntheticDirectory(prefix: "aitm-phase-channel-")
         defer { try? FileManager.default.removeItem(at: dir) }
         let file = dir.appendingPathComponent("events.jsonl"), legacy = dir.appendingPathComponent("legacy.jsonl")
         var data = Data()
@@ -207,23 +206,17 @@ final class ClaudePhaseChannelTests: XCTestCase {
 
     @MainActor
     func testRealHookChannelAndTaskStoreShowObservedProgress() throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-store-phase-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try claudeSyntheticDirectory(prefix: "aitm-store-phase-", requiresSocket: true)
         let events = dir.appendingPathComponent("claude-events-v2.jsonl")
         try Data().write(to: events)
         let journal = DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics"))
         var store: TaskStore? = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("codex")),
                                           claudeReader: ClaudeTaskReader(eventFile: events), journal: journal,
                                           claudeLoopProfile: dir)
-        let socketDirectory = try ClaudeLoopSocket.directory(profile: dir, create: false)
+        waitForClaudeRead(try XCTUnwrap(store))
+        _ = try ClaudeLoopSocket.directory(profile: dir, create: false)
         defer {
             store = nil
-            if let names = try? FileManager.default.contentsOfDirectory(atPath: socketDirectory),
-               socketDirectory.hasPrefix("/private/tmp/aitm-loop-"), Set(names).isSubset(of: ["owner.lock"]) {
-                _ = (socketDirectory + "/owner.lock").withCString { unlink($0) }
-                _ = socketDirectory.withCString { rmdir($0) }
-            }
-            try? FileManager.default.removeItem(at: dir)
         }
         let inputs: [[String: Any]] = [
             ["session_id": "synthetic", "hook_event_name": "UserPromptSubmit"],
@@ -247,8 +240,9 @@ final class ClaudePhaseChannelTests: XCTestCase {
         let limit = Date().addingTimeInterval(3)
         while Date() < limit {
             store?.refresh()
+            if let store { waitForClaudeRead(store) }
             if store?.tasks.first(where: { $0.id == "claude:synthetic" })?.planConfirmed == true { break }
-            Thread.sleep(forTimeInterval: 0.01)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
         let task = try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:synthetic" }))
         XCTAssertTrue(task.planConfirmed)
@@ -260,18 +254,11 @@ final class ClaudePhaseChannelTests: XCTestCase {
     }
 
     func testActualHookSocketAndReaderMatchWithoutPersistingToolIDs() throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-live-phase-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try claudeSyntheticDirectory(prefix: "aitm-live-phase-", requiresSocket: true)
         let channel = try ClaudeLoopChannel(profile: dir)
-        let socketDirectory = try ClaudeLoopSocket.directory(profile: dir, create: false)
+        _ = try ClaudeLoopSocket.directory(profile: dir, create: false)
         defer {
             _ = channel.stop()
-            if let names = try? FileManager.default.contentsOfDirectory(atPath: socketDirectory),
-               socketDirectory.hasPrefix("/private/tmp/aitm-loop-"), Set(names).isSubset(of: ["owner.lock"]) {
-                _ = (socketDirectory + "/owner.lock").withCString { unlink($0) }
-                _ = socketDirectory.withCString { rmdir($0) }
-            }
-            try? FileManager.default.removeItem(at: dir)
         }
         var evidence = ClaudePhaseEvidence()
         evidence.start(key: try XCTUnwrap(channel.phaseKey()))

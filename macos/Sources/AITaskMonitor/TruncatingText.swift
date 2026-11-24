@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+func measuredTaskLabelWidth(_ text: String, font: NSFont) -> CGFloat {
+    ceil((text as NSString).size(withAttributes: [.font: font]).width) + 2
+}
+
 func cursorHintOrigin(pointer: NSPoint, size: NSSize, workArea: NSRect) -> NSPoint {
     let gap: CGFloat = 4
     let maximumX = max(workArea.minX, workArea.maxX - size.width)
@@ -23,6 +27,7 @@ struct TruncatingText: NSViewRepresentable {
     var font: NSFont
     var color: NSColor
     var lineLimit = 1
+    var alignment: NSTextAlignment = .left
 
     func makeNSView(context: Context) -> TruncatingTextField {
         let field = TruncatingTextField(labelWithString: text)
@@ -37,6 +42,7 @@ struct TruncatingText: NSViewRepresentable {
         field.stringValue = text
         field.font = font
         field.textColor = color
+        field.alignment = alignment
         field.maximumNumberOfLines = lineLimit
         field.fullText = text
         field.needsLayout = true

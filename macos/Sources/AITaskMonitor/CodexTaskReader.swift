@@ -2,9 +2,15 @@ import Foundation
 import Darwin
 import CryptoKit
 
+struct CodexTerminalEvidence: Equatable {
+    let file: CodexFileIdentity
+    let startKey: String
+}
+
 struct CodexTaskSnapshot {
     var tasks: [MonitoredTask] = []
     var terminalIDs: Set<String> = []
+    var terminalEvidence: [String: CodexTerminalEvidence] = [:]
     var interruptedIDs: Set<String> = []
     var toolEvents: [String: [CodexToolEvent]] = [:]
     var subagentParents: [String: String] = [:]
@@ -12,11 +18,50 @@ struct CodexTaskSnapshot {
     var verifiedActivityFiles: [String: CodexFileIdentity] = [:]
     var subagentCandidates: Set<String> = []
     var subagentTitles: [String: String] = [:]
+    // Proofs describe one freshly checked file/header only. They do not
+    // establish complete coverage or uninterrupted agent lifetime.
+    var verifiedAgentIdentities: [String: CodexVerifiedAgentIdentity] = [:]
+    var agentIdentityPartial = false
+    // IDs nominate a bounded selection only; their headers are read afresh.
+    var selectedAgentProofIDs: Set<String> = []
     var isPartial = false
     var didCompleteUnindexedSweep = false
+
+    // A delayed read can be accepted only when a second serial read agrees on
+    // task state and diagnostics. Agent proof slices are revalidated
+    // separately because bounded proof rotation can visit different agents.
+    // Ambiguous duplicate task identities never become a confirmation.
+    func agreesWith(_ other: CodexTaskSnapshot) -> Bool {
+        let first = Dictionary(grouping: tasks, by: { $0.compactSelectionKey })
+        let second = Dictionary(grouping: other.tasks, by: { $0.compactSelectionKey })
+        guard first.keys.count == second.keys.count,
+              first.allSatisfy({ key, values in
+                  values.count == 1 && second[key]?.count == 1 && second[key]?.first == values.first
+              }) else { return false }
+        return terminalIDs == other.terminalIDs && terminalEvidence == other.terminalEvidence &&
+            interruptedIDs == other.interruptedIDs &&
+            toolEvents == other.toolEvents && subagentParents == other.subagentParents &&
+            confirmedSubagentRoots == other.confirmedSubagentRoots &&
+            verifiedActivityFiles == other.verifiedActivityFiles &&
+            subagentCandidates == other.subagentCandidates && subagentTitles == other.subagentTitles &&
+            isPartial == other.isPartial && didCompleteUnindexedSweep == other.didCompleteUnindexedSweep
+    }
+
+    // Do not combine proofs from separate slices. Every published proof must
+    // be identical in the two reads; missing or changed coverage is partial.
+    func revalidatingAgentEvidence(against earlier: CodexTaskSnapshot) -> CodexTaskSnapshot {
+        var result = self
+        result.verifiedAgentIdentities = verifiedAgentIdentities.filter { id, proof in
+            earlier.verifiedAgentIdentities[id] == proof
+        }
+        result.agentIdentityPartial = agentIdentityPartial || earlier.agentIdentityPartial ||
+            verifiedAgentIdentities != earlier.verifiedAgentIdentities
+        return result
+    }
 }
 
 struct CodexTaskReader {
+    static let maximumConfirmedAge: TimeInterval = 7_200
     private struct TerminalFileIdentity: Equatable {
         let device: UInt64
         let inode: UInt64
@@ -52,16 +97,32 @@ struct CodexTaskReader {
     private let ambiguousRollouts = CodexAmbiguousRolloutWorker()
     private let subagentMetadata = CodexSubagentMetadataWorker()
     private let ambiguousRootMetadata = CodexAmbiguousRootMetadataWorker()
+    private let agentProofSelection = CodexAgentProofSelection()
     private let afterDiscoveryForTests: (() -> Void)?
     private let beforeTerminalRecheckForTests: (() -> Void)?
     private let afterIndexedAttributesForTests: ((String) -> Void)?
+    private let afterSnapshotForTests: ((CodexTaskSnapshot) -> Void)?
+    private let afterUnindexedTailForTests: ((String) -> Void)?
+    private let beforeUnindexedTerminalRecheckForTests: ((String) -> Void)?
+    private let afterAgentProofSelectionForTests: (() -> Void)?
+    private let beforeSubagentMetadataLoadForTests: ((String) -> Void)?
 
     init(codexHome: URL? = nil, afterDiscoveryForTests: (() -> Void)? = nil,
          beforeTerminalRecheckForTests: (() -> Void)? = nil,
-         afterIndexedAttributesForTests: ((String) -> Void)? = nil) {
+         afterIndexedAttributesForTests: ((String) -> Void)? = nil,
+         afterSnapshotForTests: ((CodexTaskSnapshot) -> Void)? = nil,
+         afterUnindexedTailForTests: ((String) -> Void)? = nil,
+         beforeUnindexedTerminalRecheckForTests: ((String) -> Void)? = nil,
+         afterAgentProofSelectionForTests: (() -> Void)? = nil,
+         beforeSubagentMetadataLoadForTests: ((String) -> Void)? = nil) {
         self.afterDiscoveryForTests = afterDiscoveryForTests
         self.beforeTerminalRecheckForTests = beforeTerminalRecheckForTests
         self.afterIndexedAttributesForTests = afterIndexedAttributesForTests
+        self.afterSnapshotForTests = afterSnapshotForTests
+        self.afterUnindexedTailForTests = afterUnindexedTailForTests
+        self.beforeUnindexedTerminalRecheckForTests = beforeUnindexedTerminalRecheckForTests
+        self.afterAgentProofSelectionForTests = afterAgentProofSelectionForTests
+        self.beforeSubagentMetadataLoadForTests = beforeSubagentMetadataLoadForTests
         if let codexHome {
             self.codexHome = codexHome
         } else if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
@@ -83,7 +144,8 @@ struct CodexTaskReader {
         ambiguousRootMetadata.waitUntilIdleForTests()
     }
 
-    func readSnapshot(now: Date = Date(), observedSince: Date? = nil, previouslyObserved: Set<String> = []) throws -> CodexTaskSnapshot {
+    func readSnapshot(now: Date = Date(), observedSince: Date? = nil, previouslyObserved: Set<String> = [],
+                      priorityAgentProofIDs: [String] = [], repeatingAgentProofIDs: Set<String>? = nil) throws -> CodexTaskSnapshot {
         let index = codexHome.appendingPathComponent("session_index.jsonl")
         if !fileManager.fileExists(atPath: codexHome.path) { return CodexTaskSnapshot() }
         let sessions: [String: [String: Any]]
@@ -122,8 +184,9 @@ struct CodexTaskReader {
         var result = CodexTaskSnapshot()
         result.didCompleteUnindexedSweep = extra.didCompleteSweep
         var visibleMetadataStamps: [String: CodexSubagentMetadataWorker.Stamp] = [:]
+        var visibleAgentStamps: [String: AgentProofStamp] = [:]
         var candidateSubagentTitles: [String: CandidateSubagentTitle] = [:]
-        var indexedEndings: [String: (file: URL, identity: TerminalFileIdentity, interrupted: Bool, toolEvents: [CodexToolEvent]?)] = [:]
+        var indexedEndings: [String: (file: URL, identity: TerminalFileIdentity, startKey: String, interrupted: Bool, toolEvents: [CodexToolEvent]?)] = [:]
         result.isPartial = indexFailure != nil || discovered.isPartial || extra.isPartial || extraFiles.isPartial
         let uncertain = ambiguousRollouts.poll(
             candidates: discovered.ambiguousCandidates, ambiguousIDs: discovered.ambiguousIDs,
@@ -148,6 +211,9 @@ struct CodexTaskReader {
                 result.isPartial = true
                 continue
             }
+            let expectedAgentStamp: AgentProofStamp?
+            if visibleAgentStamps.count < 2_048 { expectedAgentStamp = try? agentProofStamp(file) }
+            else { expectedAgentStamp = nil }
             afterIndexedAttributesForTests?(id)
             if let recovered {
                 guard recovered.path == file.standardizedFileURL.path,
@@ -225,7 +291,7 @@ struct CodexTaskReader {
                     if previouslyObserved.contains(id), let observedSince {
                         events = CodexToolEventParser.parse(tail: tail, since: observedSince, now: now)
                     }
-                    indexedEndings[id] = (file, identity, interrupted, events)
+                    indexedEndings[id] = (file, identity, state.startKey, interrupted, events)
                 }
                 continue
             }
@@ -259,7 +325,7 @@ struct CodexTaskReader {
             if state.terminalUncertain || tail.utf8.last != 0x0a { result.isPartial = true }
             let recoveredUnconfirmed = fresh != nil || recovered != nil || state.terminalUncertain || tail.utf8.last != 0x0a
             let progress = recoveredUnconfirmed ? nil : MonitoredTask.progress(for: steps)
-            let unconfirmed = recoveredUnconfirmed || now.timeIntervalSince(modified) >= 7_200
+            let unconfirmed = recoveredUnconfirmed || now.timeIntervalSince(modified) >= Self.maximumConfirmedAge
             if title.isEmpty, let record = try? readUnindexedSession(file, id: id),
                record.device == expectedStamp.device, record.inode == expectedStamp.inode,
                let reference = record.subagent, let derived = subagentTitle(reference, sessions: sessions) {
@@ -293,6 +359,10 @@ struct CodexTaskReader {
                 lastActivityFileIdentity: CodexFileIdentity(device: expectedStamp.device, inode: expectedStamp.inode)
             ))
             visibleMetadataStamps[id] = CodexSubagentMetadataWorker.Stamp(attributes)
+            if let expectedAgentStamp, expectedAgentStamp.device == expectedStamp.device,
+               expectedAgentStamp.inode == expectedStamp.inode, expectedAgentStamp.size == expectedStamp.size {
+                visibleAgentStamps[id] = expectedAgentStamp
+            }
         }
         if !indexedEndings.isEmpty {
             beforeTerminalRecheckForTests?()
@@ -311,6 +381,9 @@ struct CodexTaskReader {
                         continue
                     }
                     result.terminalIDs.insert(id)
+                    result.terminalEvidence[id] = CodexTerminalEvidence(
+                        file: CodexFileIdentity(device: ending.identity.device, inode: ending.identity.inode),
+                        startKey: ending.startKey)
                     if ending.interrupted { result.interruptedIDs.insert(id) }
                     if let events = ending.toolEvents { result.toolEvents[id] = events }
                 }
@@ -340,7 +413,8 @@ struct CodexTaskReader {
                 guard let record = try readUnindexedSession(file, id: id) else { continue }
                 guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
                       let stamp = CodexSubagentMetadataWorker.Stamp(attributes),
-                      stamp.device == record.device, stamp.inode == record.inode, stamp.size >= record.size else {
+                      stamp.device == record.device, stamp.inode == record.inode,
+                      stamp.size == record.size, unindexedFileUnchanged(record, at: file) else {
                     result.isPartial = true
                     continue
                 }
@@ -385,7 +459,15 @@ struct CodexTaskReader {
                         state.terminalDate.map { $0 >= since } ?? false
                     } ?? true
                     if recognized {
+                        beforeUnindexedTerminalRecheckForTests?(id)
+                        guard unindexedFileUnchanged(record, at: file) else {
+                            result.isPartial = true
+                            continue
+                        }
                         result.terminalIDs.insert(id)
+                        result.terminalEvidence[id] = CodexTerminalEvidence(
+                            file: CodexFileIdentity(device: record.device, inode: record.inode),
+                            startKey: state.startKey)
                         if interrupted { result.interruptedIDs.insert(id) }
                         if previouslyObserved.contains(id), let observedSince {
                             result.toolEvents[id] = CodexToolEventParser.parse(tail: record.tail, since: observedSince, now: now)
@@ -427,6 +509,11 @@ struct CodexTaskReader {
                     lastActivityFileIdentity: CodexFileIdentity(device: record.device, inode: record.inode)
                 ))
                 visibleMetadataStamps[id] = stamp
+                if visibleAgentStamps.count < 2_048 {
+                    visibleAgentStamps[id] = AgentProofStamp(device: record.device, inode: record.inode, size: record.size,
+                        modifiedSeconds: record.modifiedSeconds, modifiedNanoseconds: record.modifiedNanoseconds,
+                        changedSeconds: record.changedSeconds, changedNanoseconds: record.changedNanoseconds)
+                }
             } catch {
                 // A changing, inaccessible or linked file is not evidence that
                 // a previously observed task finished.
@@ -452,6 +539,7 @@ struct CodexTaskReader {
         result.subagentCandidates = visibleIDs
         let knownIDs = visibleIDs.union(previouslyObserved.filter { UUID(uuidString: $0) != nil })
         let metadata = subagentMetadata.poll(candidates: metadataCandidates, visibleIDs: knownIDs) { id, file in
+            self.beforeSubagentMetadataLoadForTests?(id)
             let before = try self.fileManager.attributesOfItem(atPath: file.path)
             guard let stamp = CodexSubagentMetadataWorker.Stamp(before) else { throw CocoaError(.fileReadUnknown) }
             let metadata = try self.readSubagentParent(file, id: id)
@@ -506,6 +594,20 @@ struct CodexTaskReader {
         if !result.subagentParents.isEmpty && !visibleIDs.subtracting(verifiedMetadata).isEmpty {
             result.isPartial = true
         }
+        // Cached links only nominate a complete chain. A separate strict read
+        // proves every node, including the root, in this same snapshot.
+        var proofCandidates = discovered.files
+        if !extraFiles.didHitLimit { proofCandidates.merge(extraFiles.files) { first, _ in first } }
+        let ambiguousProofIDs = discovered.ambiguousIDs.union(extraFiles.ambiguousIDs)
+            .union(discovered.rootCandidates.keys).union(extraFiles.rootCandidates.keys)
+        let agentProofs = verifiedAgentProofs(tasks: result.tasks, candidates: proofCandidates,
+                                               observations: metadata, visibleStamps: visibleMetadataStamps,
+                                               visibleAgentStamps: visibleAgentStamps,
+                                               ambiguousIDs: ambiguousProofIDs, priority: priorityAgentProofIDs,
+                                               repeating: repeatingAgentProofIDs)
+        result.verifiedAgentIdentities = agentProofs.identities
+        result.agentIdentityPartial = agentProofs.partial || discovered.didHitLimit || extraFiles.didHitLimit
+        result.selectedAgentProofIDs = agentProofs.selected
         let ambiguousRootIDs = ambiguousRootMetadata.poll(candidates: discovered.rootCandidates,
             targets: Set(result.subagentParents.values)) { id, files in
                 self.verifyAmbiguousRoot(id: id, files: files)
@@ -518,6 +620,7 @@ struct CodexTaskReader {
             result.subagentTitles[parent] = title
         }
         result.tasks.sort { $0.updatedAt > $1.updatedAt }
+        afterSnapshotForTests?(result)
         return result
     }
 
@@ -1034,8 +1137,24 @@ struct CodexTaskReader {
         var device: UInt64
         var inode: UInt64
         var size: UInt64
+        var modifiedSeconds: Int64
+        var modifiedNanoseconds: Int64
+        var changedSeconds: Int64
+        var changedNanoseconds: Int64
         var subagent: SubagentReference?
         var headerDigest: Data
+    }
+
+    private func unindexedFileUnchanged(_ record: UnindexedSessionRecord, at url: URL) -> Bool {
+        guard let descriptor = try? openSessionFile(url) else { return false }
+        defer { Darwin.close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_size >= 0 else { return false }
+        return UInt64(bitPattern: Int64(info.st_dev)) == record.device && UInt64(info.st_ino) == record.inode &&
+            UInt64(info.st_size) == record.size && Int64(info.st_mtimespec.tv_sec) == record.modifiedSeconds &&
+            Int64(info.st_mtimespec.tv_nsec) == record.modifiedNanoseconds &&
+            Int64(info.st_ctimespec.tv_sec) == record.changedSeconds &&
+            Int64(info.st_ctimespec.tv_nsec) == record.changedNanoseconds
     }
 
     private func subagentReference(_ payload: [String: Any], id: String) -> SubagentReference? {
@@ -1151,6 +1270,185 @@ struct CodexTaskReader {
         return String(decoding: data, as: UTF8.self)
     }
 
+    private struct AgentProofStamp: Equatable {
+        let device: UInt64
+        let inode: UInt64
+        let size: UInt64
+        let modifiedSeconds: Int64
+        let modifiedNanoseconds: Int64
+        let changedSeconds: Int64
+        let changedNanoseconds: Int64
+    }
+
+    private struct AgentProofRead: Equatable {
+        let identity: CodexVerifiedAgentIdentity
+        let stamp: AgentProofStamp
+    }
+
+    private struct AgentProofCandidate {
+        let rawID: String
+        let file: URL
+        let observation: CodexSubagentMetadataWorker.Observation
+    }
+
+    private func agentProofStamp(_ file: URL) throws -> AgentProofStamp {
+        let descriptor = try openSessionFile(file)
+        defer { Darwin.close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_size >= 0,
+              (info.st_mode & S_IFMT) == S_IFREG else { throw CocoaError(.fileReadUnknown) }
+        return AgentProofStamp(device: UInt64(bitPattern: Int64(info.st_dev)), inode: UInt64(info.st_ino),
+                               size: UInt64(info.st_size), modifiedSeconds: Int64(info.st_mtimespec.tv_sec),
+                               modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec),
+                               changedSeconds: Int64(info.st_ctimespec.tv_sec),
+                               changedNanoseconds: Int64(info.st_ctimespec.tv_nsec))
+    }
+
+    private func readFreshAgentProof(_ candidate: AgentProofCandidate,
+                                     expectedTaskStamp: CodexSubagentMetadataWorker.Stamp?,
+                                     expectedAgentStamp: AgentProofStamp?) throws -> AgentProofRead {
+        if let expectedTaskStamp {
+            let attributes = try fileManager.attributesOfItem(atPath: candidate.file.path)
+            guard CodexSubagentMetadataWorker.Stamp(attributes) == expectedTaskStamp else { throw CocoaError(.fileReadUnknown) }
+        }
+        let before = try agentProofStamp(candidate.file)
+        if let expectedAgentStamp, before != expectedAgentStamp { throw CocoaError(.fileReadUnknown) }
+        let header = try readSubagentParent(candidate.file, id: candidate.rawID)
+        let after = try agentProofStamp(candidate.file)
+        guard before == after, before.device == header.device, before.inode == header.inode,
+              before.size == header.size, before.device == candidate.observation.stamp.device,
+              before.inode == candidate.observation.stamp.inode,
+              candidate.observation.headerDigest == header.headerDigest,
+              candidate.observation.parentID?.lowercased() == header.parentID?.lowercased(),
+              candidate.observation.isConfirmedRoot == (header.rootClassification != nil),
+              (header.parentID != nil) != (header.rootClassification != nil) else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        if let expectedTaskStamp {
+            let attributes = try fileManager.attributesOfItem(atPath: candidate.file.path)
+            guard CodexSubagentMetadataWorker.Stamp(attributes) == expectedTaskStamp else { throw CocoaError(.fileReadUnknown) }
+        }
+        let identity = CodexVerifiedAgentIdentity(file: CodexFileIdentity(device: before.device, inode: before.inode),
+                                                  headerDigest: header.headerDigest,
+                                                  parentID: header.parentID?.lowercased(),
+                                                  isRoot: header.rootClassification != nil)
+        return AgentProofRead(identity: identity, stamp: before)
+    }
+
+    private func verifiedAgentProofs(tasks: [MonitoredTask], candidates: [String: URL],
+                                     observations: [String: CodexSubagentMetadataWorker.Observation],
+                                     visibleStamps: [String: CodexSubagentMetadataWorker.Stamp],
+                                     visibleAgentStamps: [String: AgentProofStamp],
+                                     ambiguousIDs: Set<String>, priority: [String], repeating: Set<String>?)
+        -> (identities: [String: CodexVerifiedAgentIdentity], partial: Bool, selected: Set<String>) {
+        func normalized(_ value: String) -> String? {
+            guard value.utf8.count == 36, let uuid = UUID(uuidString: value) else { return nil }
+            return uuid.uuidString.lowercased()
+        }
+        let taskGroups = Dictionary(grouping: tasks.filter { $0.provider == .codex && normalized($0.id) != nil }) {
+            normalized($0.id)!
+        }
+        let candidateGroups = Dictionary(grouping: candidates.keys.compactMap { id in normalized(id).map { ($0, id) } }, by: { $0.0 })
+        let observationGroups = Dictionary(grouping: observations.keys.compactMap { id in normalized(id).map { ($0, id) } }, by: { $0.0 })
+        let stampGroups = Dictionary(grouping: visibleStamps.keys.compactMap { id in normalized(id).map { ($0, id) } }, by: { $0.0 })
+        let ambiguous = Set(ambiguousIDs.compactMap(normalized))
+        var nodes: [String: AgentProofCandidate] = [:]
+        for (id, variants) in observationGroups where variants.count == 1 && !ambiguous.contains(id) {
+            guard let candidateKeys = candidateGroups[id], candidateKeys.count == 1,
+                  let file = candidates[candidateKeys[0].1], let observation = observations[variants[0].1],
+                  candidateKeys[0].1 == variants[0].1,
+                  file.standardizedFileURL == observation.file.standardizedFileURL,
+                  (taskGroups[id]?.count ?? 0) <= 1 else { continue }
+            nodes[id] = AgentProofCandidate(rawID: variants[0].1, file: file, observation: observation)
+        }
+        let taskIDs = taskGroups.keys.sorted()
+        var partial = taskIDs.count > 2_048
+        var chains: [String: [String]] = [:]
+        for id in taskIDs.prefix(2_048) {
+            guard let task = taskGroups[id]?.first, taskGroups[id]?.count == 1,
+                  task.lastActivityIdentityConfirmed == true, let taskFile = task.lastActivityFileIdentity,
+                  let node = nodes[id], taskFile == CodexFileIdentity(device: node.observation.stamp.device,
+                                                                       inode: node.observation.stamp.inode) else {
+                partial = true
+                continue
+            }
+            if node.observation.isConfirmedRoot && node.observation.parentID == nil {
+                // A fresh root proof lets an already known group retain its
+                // count while a child temporarily disappears from the scan.
+                chains[id] = [id]
+                continue
+            }
+            var chain: [String] = []
+            var seen: Set<String> = []
+            var cursor = id
+            var foundRoot = false
+            for _ in 0..<128 {
+                guard seen.insert(cursor).inserted, let entry = nodes[cursor] else { break }
+                chain.append(cursor)
+                if entry.observation.isConfirmedRoot && entry.observation.parentID == nil {
+                    foundRoot = true
+                    break
+                }
+                guard !entry.observation.isConfirmedRoot, let rawParent = entry.observation.parentID,
+                      let parent = normalized(rawParent) else { break }
+                cursor = parent
+            }
+            if foundRoot && chain.count >= 2 { chains[id] = chain }
+            else {
+                // A fresh child header can establish only that this card is
+                // an assistant even when its complete ancestry is unavailable.
+                // Retention still requires the whole chain in one snapshot.
+                if node.observation.parentID != nil && !node.observation.isConfirmedRoot { chains[id] = [id] }
+                partial = true
+            }
+        }
+        let batch = agentProofSelection.next(chains: chains, prioritizing: priority, repeating: repeating)
+        partial = partial || batch.incomplete
+        if !batch.nodeIDs.isEmpty { afterAgentProofSelectionForTests?() }
+        var firstReads: [String: AgentProofRead] = [:]
+        for id in batch.nodeIDs.sorted() {
+            guard let entry = nodes[id] else { partial = true; continue }
+            let expected: CodexSubagentMetadataWorker.Stamp?
+            let expectedAgent: AgentProofStamp?
+            if taskGroups[id] != nil {
+                guard let keys = stampGroups[id], keys.count == 1, let value = visibleStamps[keys[0].1],
+                      let agentStamp = visibleAgentStamps[keys[0].1] else {
+                    partial = true; continue
+                }
+                expected = value
+                expectedAgent = agentStamp
+            } else { expected = nil; expectedAgent = nil }
+            guard let proof = try? readFreshAgentProof(entry, expectedTaskStamp: expected,
+                                                       expectedAgentStamp: expectedAgent) else { partial = true; continue }
+            if let task = taskGroups[id]?.first, task.lastActivityFileIdentity != proof.identity.file {
+                partial = true; continue
+            }
+            firstReads[id] = proof
+        }
+        var checked: [String: CodexVerifiedAgentIdentity] = [:]
+        for (id, first) in firstReads {
+            guard let entry = nodes[id] else { partial = true; continue }
+            let expected = stampGroups[id].flatMap { $0.count == 1 ? visibleStamps[$0[0].1] : nil }
+            let expectedAgent = stampGroups[id].flatMap { $0.count == 1 ? visibleAgentStamps[$0[0].1] : nil }
+            guard let second = try? readFreshAgentProof(entry, expectedTaskStamp: expected,
+                                                        expectedAgentStamp: expectedAgent), first == second else {
+                partial = true; continue
+            }
+            checked[id] = second.identity
+        }
+        let fileOwners = Dictionary(grouping: checked.keys, by: { checked[$0]!.file })
+        let sharedFiles = Set(fileOwners.filter { $0.value.count > 1 }.keys)
+        var accepted: [String: CodexVerifiedAgentIdentity] = [:]
+        for child in batch.childIDs {
+            guard let chain = chains[child], chain.allSatisfy({ id in
+                guard let proof = checked[id] else { return false }
+                return !sharedFiles.contains(proof.file)
+            }) else { partial = true; continue }
+            for id in chain { accepted[id] = checked[id] }
+        }
+        return (accepted, partial, batch.childIDs)
+    }
+
     private func readSubagentParent(_ url: URL, id: String) throws -> (parentID: String?, rootClassification: String?, device: UInt64, inode: UInt64, size: UInt64, headerDigest: Data) {
         let descriptor = try openSessionFile(url)
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
@@ -1207,6 +1505,8 @@ struct CodexTaskReader {
         let descriptor = try openSessionFile(url)
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
+        var before = stat()
+        guard fstat(descriptor, &before) == 0, before.st_size >= 0 else { throw CocoaError(.fileReadUnknown) }
         let prefix = try handle.read(upToCount: 65_536) ?? Data()
         guard let newline = prefix.firstIndex(of: 0x0a),
               let header = try? JSONSerialization.jsonObject(with: Data(prefix[..<newline])) as? [String: Any],
@@ -1223,17 +1523,28 @@ struct CodexTaskReader {
         let classifiedCLIChild = source == "cli" && payload.string("thread_source") == "subagent"
         guard ["exec", "vscode"].contains(source) || classifiedCLIChild || subagent != nil || unconfirmedSubagent else { return nil }
         let end = try handle.seekToEnd()
+        guard end == UInt64(before.st_size) else { throw CocoaError(.fileReadUnknown) }
         let count = min(end, UInt64(262_144))
         try handle.seek(toOffset: end - count)
         let bytes = try handle.read(upToCount: Int(count)) ?? Data()
+        afterUnindexedTailForTests?(id)
         var info = stat()
         guard bytes.count == Int(count), fstat(descriptor, &info) == 0,
-              info.st_size >= 0, UInt64(info.st_size) >= end else { throw CocoaError(.fileReadUnknown) }
+              info.st_dev == before.st_dev, info.st_ino == before.st_ino,
+              info.st_size >= 0, UInt64(info.st_size) == end,
+              info.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec,
+              info.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec,
+              info.st_ctimespec.tv_sec == before.st_ctimespec.tv_sec,
+              info.st_ctimespec.tv_nsec == before.st_ctimespec.tv_nsec else { throw CocoaError(.fileReadUnknown) }
         let modified = Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec) +
                             Double(info.st_mtimespec.tv_nsec) / 1_000_000_000)
         return UnindexedSessionRecord(tail: String(decoding: bytes, as: UTF8.self), modified: modified,
                                       truncated: end > count, device: UInt64(bitPattern: Int64(info.st_dev)),
-                                      inode: UInt64(info.st_ino), size: UInt64(info.st_size), subagent: subagent,
+                                      inode: UInt64(info.st_ino), size: UInt64(info.st_size),
+                                      modifiedSeconds: Int64(info.st_mtimespec.tv_sec),
+                                      modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec),
+                                      changedSeconds: Int64(info.st_ctimespec.tv_sec),
+                                      changedNanoseconds: Int64(info.st_ctimespec.tv_nsec), subagent: subagent,
                                       headerDigest: Data(SHA256.hash(data: Data(prefix[...newline]))))
     }
 

@@ -108,6 +108,7 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
     var planConfirmed: Bool = true
     var progressBasis: ProgressBasis? = nil
     var codexAgentCount: Int? = nil
+    var codexAgentCountUnconfirmed: Bool? = nil
     var codexAgentsUnconfirmed: Bool? = nil
     var codexAgents: [CodexAgentDetail]? = nil
     var lastKnownActivity: String? = nil
@@ -128,6 +129,14 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
         else if (2...4).contains(last) { russian = "агента" }
         else { russian = "агентов" }
         let english = count == 1 ? "agent" : "agents"
+        if includingStatus && codexAgentCountUnconfirmed == true && codexAgentsUnconfirmed == true {
+            return tr("(\(count) \(russian), число и статус не подтверждены)",
+                      "(\(count) \(english), count and status unconfirmed)")
+        }
+        if includingStatus && codexAgentCountUnconfirmed == true {
+            return tr("(\(count) \(russian), число не подтверждено)",
+                      "(\(count) \(english), count unconfirmed)")
+        }
         if includingStatus && codexAgentsUnconfirmed == true {
             return tr("(\(count) \(russian), статус не подтверждён)",
                       "(\(count) \(english), status unconfirmed)")
@@ -137,6 +146,13 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
 
     var codexAgentCountLabel: String? { codexAgentCountLabel(includingStatus: true) }
     var codexAgentStatusLabel: String? {
+        guard (codexAgentCount ?? 0) > 0 else { return nil }
+        if codexAgentCountUnconfirmed == true && codexAgentsUnconfirmed == true {
+            return tr("Число и статус агентов не подтверждены", "Agent count and status unconfirmed")
+        }
+        if codexAgentCountUnconfirmed == true {
+            return tr("Число агентов не подтверждено", "Agent count unconfirmed")
+        }
         guard codexAgentsUnconfirmed == true else { return nil }
         if codexAgentCount == 1 { return tr("Статус агента не подтверждён", "Agent status unconfirmed") }
         return tr("Статус агентов не подтверждён", "Agent status unconfirmed")
@@ -189,6 +205,40 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
         guard let progress, progressKind != .none, !isUnconfirmed else { return nil }
         let value = progressKind == .approximate ? "≈\(progress)%" : "\(progress)%"
         return value
+    }
+
+    // The count belongs to the task; the active step is its presentation location,
+    // not evidence that each assistant is assigned to that step.
+    var activeAgentPlanStepIndex: Int? {
+        guard planConfirmed, !isUnconfirmed else { return nil }
+        let active = steps.indices.filter { steps[$0].status == .active }
+        return active.count == 1 ? active[0] : nil
+    }
+
+    var codexAgentCountAtTitle: Bool {
+        (codexAgentCount ?? 0) > 0 && activeAgentPlanStepIndex == nil
+    }
+
+    private var activeAgentStepBaseLabel: String? {
+        guard let index = activeAgentPlanStepIndex else { return nil }
+        return tr("Этап \(index + 1) из \(steps.count)", "Step \(index + 1) of \(steps.count)")
+    }
+
+    var compactAgentStepLabel: String? {
+        guard let step = activeAgentStepBaseLabel,
+              let count = codexAgentCountLabel(includingStatus: false) else { return nil }
+        return step + " " + count
+    }
+
+    var compactProgressLabel: String? {
+        guard let progress = progressLabel else { return nil }
+        if progress == activeAgentStepBaseLabel, let step = compactAgentStepLabel { return step }
+        return progress
+    }
+
+    var compactExtraAgentStepLabel: String? {
+        guard let step = compactAgentStepLabel, progressLabel != activeAgentStepBaseLabel else { return nil }
+        return step
     }
 
     static func progress(for steps: [TaskStep]) -> Int? {

@@ -7,14 +7,13 @@ import XCTest
 final class CodexSourceStalePlanTests: XCTestCase {
     @MainActor
     func testMissingIndexDoesNotLeaveConfirmedPlanOnRetainedCodexCard() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("aitm-codex-stale-plan-" + UUID().uuidString)
+        let root = try codexSyntheticDirectory(prefix: "aitm-codex-stale-plan-")
         defer { try? FileManager.default.removeItem(at: root) }
         let codex = root.appendingPathComponent("codex", isDirectory: true)
         let sessions = codex.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         let index = codex.appendingPathComponent("session_index.jsonl")
-        try Data(#"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic"}"#.utf8).write(to: index, options: .atomic)
+        try Data(#"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic"}"#.utf8).write(to: index)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let timestamp = formatter.string(from: Date().addingTimeInterval(2))
@@ -33,6 +32,7 @@ final class CodexSourceStalePlanTests: XCTestCase {
             claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("unused")),
             journal: DiagnosticJournal(directory: root.appendingPathComponent("diagnostics")))
         store.refresh()
+        waitForCodexRead(store)
         let original = try XCTUnwrap(store.tasks.first { $0.id == "019127f4-35ae-7c73-9e72-a10123456001" })
         XCTAssertTrue(original.isActive)
         XCTAssertTrue(original.planConfirmed)
@@ -41,6 +41,7 @@ final class CodexSourceStalePlanTests: XCTestCase {
 
         try FileManager.default.removeItem(at: index)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertTrue(store.unavailableSources.contains(.codex))
         let retained = try XCTUnwrap(store.tasks.first { $0.id == "019127f4-35ae-7c73-9e72-a10123456001" })
         XCTAssertTrue(retained.isUnconfirmed)

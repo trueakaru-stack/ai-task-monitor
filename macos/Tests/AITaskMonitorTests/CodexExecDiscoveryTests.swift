@@ -71,11 +71,11 @@ final class CodexExecDiscoveryTests: XCTestCase {
         try handle.write(contentsOf: data)
     }
 
-    private func append(_ event: String, to file: URL) throws {
+    private func append(_ event: String, to file: URL, turn: String = "fixture-turn") throws {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let row: [String: Any] = ["timestamp": formatter.string(from: Date()), "type": "event_msg",
-                                  "payload": ["type": event, "turn_id": "fixture-turn",
+                                  "payload": ["type": event, "turn_id": turn,
                                               "text": event == "agent_reasoning" ? "**Synthetic detail**" : ""]]
         var data = try JSONSerialization.data(withJSONObject: row)
         data.append(0x0a)
@@ -807,11 +807,13 @@ final class CodexExecDiscoveryTests: XCTestCase {
         _ = try rollout(root, fileID: neighbor2)
         _ = try rollout(root, fileID: neighbor3)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertEqual(store.tasks.count, 4)
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(store.tasks.firstIndex { $0.id == first }), 3)
         try indexRows(root, [(first, "Parent"), (second, "Child"), (revision, "Neighbor"), (neighbor2, "Neighbor 2"), (neighbor3, "Neighbor 3")])
         try subagentRollout(root, id: second, parent: first)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertEqual(store.tasks.count, 5)
         store.compactIndex = try XCTUnwrap(store.tasks.firstIndex { $0.id == second })
         XCTAssertLessThan(store.compactIndex, 3)
@@ -819,6 +821,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         var found = false
         for _ in 0..<8 {
             store.refresh()
+            waitForCodexRead(store)
             reader.waitForAmbiguousObservationForTests()
             if store.tasks.first(where: { $0.id == first })?.codexAgentCount == 1 {
                 found = true
@@ -834,6 +837,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertTrue(store.tasks.contains { $0.id == neighbor2 })
         XCTAssertTrue(store.tasks.contains { $0.id == neighbor3 })
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertEqual(store.tasks[store.compactIndex].id, first)
         XCTAssertLessThan(store.compactIndex, 3)
         store.toggleCodexGroup(first)
@@ -843,6 +847,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         try append("agent_reasoning", to: childFile)
         for _ in 0..<8 {
             store.refresh()
+            waitForCodexRead(store)
             reader.waitForAmbiguousObservationForTests()
             if store.tasks.first(where: { $0.id == first })?.codexAgentCount == 1 { break }
         }
@@ -1015,6 +1020,40 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertFalse(snapshot.tasks.contains { $0.id == first })
         XCTAssertTrue(snapshot.terminalIDs.contains(first))
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("session_index.jsonl").path))
+    }
+
+    func testUnindexedNewStartDuringTerminalReadNeverClosesOldCard() throws {
+        for point in ["tail", "recheck"] {
+            let root = try makeRoot()
+            let since = Date().addingTimeInterval(-1)
+            let file = try rollout(root, fileID: first)
+            var armed = false
+            var appended = false
+            var appendError: Error?
+            let inject: (String) -> Void = { id in
+                guard id == self.first, armed, !appended else { return }
+                appended = true
+                do { try self.append("task_started", to: file, turn: "next-turn") }
+                catch { appendError = error }
+            }
+            let reader = CodexTaskReader(codexHome: root,
+                afterUnindexedTailForTests: point == "tail" ? inject : nil,
+                beforeUnindexedTerminalRecheckForTests: point == "recheck" ? inject : nil)
+            let previous = try reader.readSnapshot(observedSince: since).tasks
+            XCTAssertTrue(previous.contains { $0.id == first && $0.isUnconfirmed })
+            try append("task_complete", to: file)
+            armed = true
+            let raced = try reader.readSnapshot(observedSince: since, previouslyObserved: [first])
+            XCTAssertTrue(appended, "The fixture must write at the selected race point")
+            XCTAssertNil(appendError)
+            XCTAssertTrue(raced.isPartial)
+            XCTAssertFalse(raced.terminalIDs.contains(first))
+            let retained = TaskSnapshotMerger.merge(previous: previous, current: raced.tasks, terminalIDs: raced.terminalIDs)
+            XCTAssertTrue(retained.contains { $0.id == first && $0.isUnconfirmed })
+            armed = false
+            let next = try reader.readSnapshot(observedSince: since, previouslyObserved: [first])
+            XCTAssertTrue(next.tasks.contains { $0.id == first && $0.startKey == "turn:next-turn" })
+        }
     }
 
     func testUnindexedOtherSourcesAndMismatchedIdentityAreNotClaimed() throws {
@@ -1421,6 +1460,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
                               claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("unused")),
                               journal: DiagnosticJournal(directory: root.appendingPathComponent("journal")))
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertTrue(store.unavailableSources.contains(.codex))
         XCTAssertFalse(store.codexPartiallyUnavailable)
     }

@@ -76,7 +76,7 @@ struct RootView: View {
                 Spacer()
                 if store.unavailableMessage.isEmpty {
                     VStack(spacing: 8) {
-                        Text(tr("Активных задач нет", "No active tasks")).font(.system(size: 15, weight: .medium))
+                        Text(store.expandedEmptyMessage).font(.system(size: 15, weight: .medium))
                         Text(tr("Окно обновится автоматически", "Updates automatically")).font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary)
                     }
                     .frame(maxWidth: .infinity)
@@ -175,17 +175,41 @@ struct RootView: View {
                             .padding(.bottom, 6)
                     }
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        if task.codexAgentCountAtTitle, let count = task.codexAgentCountLabel(includingStatus: false) {
+                            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                                TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
+                                    .frame(maxWidth: measuredTaskLabelWidth(task.title, font: .systemFont(ofSize: 16, weight: .semibold)), minHeight: 18, alignment: .leading)
+                                Text(" " + count).font(.system(size: 16, weight: .semibold)).lineLimit(1).fixedSize()
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
                             TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
                                 .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        if let label = task.progressLabel { Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit() }
+                        if let extra = task.compactExtraAgentStepLabel {
+                            VStack(alignment: .trailing, spacing: 0) {
+                                if let label = task.compactProgressLabel {
+                                    Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit()
+                                }
+                                TruncatingText(text: extra, font: .systemFont(ofSize: 11.5), color: .secondaryLabelColor, alignment: .right)
+                                    .frame(width: compactProgressWidth(extra, font: .systemFont(ofSize: 11.5)), height: 16, alignment: .trailing)
+                            }
+                        } else if let label = task.compactProgressLabel {
+                            if task.compactAgentStepLabel == label {
+                                TruncatingText(text: label, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor, alignment: .right)
+                                    .frame(width: compactProgressWidth(label, font: .systemFont(ofSize: 16, weight: .semibold)), height: 18, alignment: .trailing)
+                            } else {
+                                Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit()
+                            }
+                        }
                     }
                     if !task.displayedActivity.isEmpty {
                         ActivityStatusRow(text: task.displayedActivity, isActive: task.isActive, fontSize: 11.5)
                             .padding(.top, 2)
                     }
+                }
+                if let status = task.codexAgentStatusLabel {
+                    Text(status).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
                 }
                 if let planNote = task.planStatusNote {
                     Text(planNote).font(.system(size: 11.5))
@@ -227,6 +251,14 @@ struct RootView: View {
     }
 
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    private func compactProgressWidth(_ text: String, font: NSFont) -> CGFloat {
+        // The compact window and its horizontal insets are fixed above; leave
+        // part of the same row for the task title when the label is very long.
+        let available: CGFloat = 372 - 2 * 18 - 10
+        return min(measuredTaskLabelWidth(text, font: font), available * 0.60)
+    }
+
     private var compactHeight: CGFloat {
         if measuredCompactContentHeight > 0 { return ceil(58 + measuredCompactContentHeight) }
         let tasks = store.compactTasks
@@ -235,7 +267,9 @@ struct RootView: View {
         let selected = tasks.isEmpty ? nil : tasks[min(store.compactSelectedIndex, tasks.count - 1)]
         let loopExtra: CGFloat = selected?.loopWarning == nil ? 0 : 64
         let planExtra: CGFloat = selected?.planStatusNote == nil ? 0 : 22
-        return base + sourceExtra + loopExtra + planExtra
+        let agentStatusExtra: CGFloat = selected?.codexAgentStatusLabel == nil ? 0 : 22
+        let agentStepExtra: CGFloat = selected?.compactExtraAgentStepLabel == nil ? 0 : 18
+        return base + sourceExtra + loopExtra + planExtra + agentStatusExtra + agentStepExtra
     }
 }
 

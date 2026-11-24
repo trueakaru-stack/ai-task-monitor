@@ -5,10 +5,8 @@ import XCTest
 
 // Synthetic fixtures only. These cases require native macOS XCTest.
 final class ClaudeRecoveryFix5Tests: XCTestCase {
-    private func directory() throws -> URL {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-recovery-fix5-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+    private func directory(requiresSocket: Bool = false) throws -> URL {
+        try claudeSyntheticDirectory(prefix: "aitm-recovery-fix5-", requiresSocket: requiresSocket)
     }
 
     private func event(_ input: [String: Any], at date: Date) -> [String: Any] {
@@ -133,27 +131,18 @@ final class ClaudeRecoveryFix5Tests: XCTestCase {
 
     @MainActor
     func testBusyJournalPreservesLivePhaseChannel() throws {
-        let dir = try directory()
+        let dir = try directory(requiresSocket: true)
         let now = Date(), file = dir.appendingPathComponent("claude-events-v2.jsonl")
         try write(observed("neighbor", now.addingTimeInterval(-2)), to: file)
         let journal = DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics"))
         var store: TaskStore? = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("codex")),
                                           claudeReader: ClaudeTaskReader(eventFile: file), journal: journal, claudeLoopProfile: dir)
-        let socketDirectory = try ClaudeLoopSocket.directory(profile: dir, create: false)
+        waitForClaudeRead(try XCTUnwrap(store))
+        _ = try ClaudeLoopSocket.directory(profile: dir, create: false)
         defer {
             store = nil
-            if let names = try? FileManager.default.contentsOfDirectory(atPath: socketDirectory),
-               socketDirectory.hasPrefix("/private/tmp/aitm-loop-"), Set(names).isSubset(of: ["owner.lock"]) {
-                _ = (socketDirectory + "/owner.lock").withCString { unlink($0) }
-                _ = socketDirectory.withCString { rmdir($0) }
-            }
-            try? FileManager.default.removeItem(at: dir)
         }
-        func channel(_ store: TaskStore) -> ClaudeLoopChannel? {
-            guard let child = Mirror(reflecting: store).children.first(where: { $0.label == "claudeLoopChannel" }) else { return nil }
-            return Mirror(reflecting: child.value).children.first?.value as? ClaudeLoopChannel
-        }
-        let before = try XCTUnwrap(store.flatMap { channel($0) })
+        let before = try XCTUnwrap(store?.testClaudeChannel)
         let path = dir.appendingPathComponent("claude-events.lock").path
         let descriptor = open(path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
         XCTAssertGreaterThanOrEqual(descriptor, 0)
@@ -161,12 +150,14 @@ final class ClaudeRecoveryFix5Tests: XCTestCase {
         defer { Darwin.close(descriptor) }
         XCTAssertEqual(flock(descriptor, LOCK_EX | LOCK_NB), 0)
         store?.refresh()
-        let during = try XCTUnwrap(store.flatMap { channel($0) })
+        waitForClaudeRead(try XCTUnwrap(store))
+        let during = try XCTUnwrap(store?.testClaudeChannel)
         XCTAssertTrue(before === during, "A transient busy journal must not replace the channel or its phase key")
         XCTAssertTrue(store?.unavailableSources.contains(.claude) == true)
         XCTAssertEqual(flock(descriptor, LOCK_UN), 0)
         store?.refresh()
-        let after = try XCTUnwrap(store.flatMap { channel($0) })
+        waitForClaudeRead(try XCTUnwrap(store))
+        let after = try XCTUnwrap(store?.testClaudeChannel)
         XCTAssertTrue(before === after)
     }
 

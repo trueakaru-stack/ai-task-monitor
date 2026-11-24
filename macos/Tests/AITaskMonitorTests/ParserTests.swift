@@ -38,28 +38,28 @@ final class ParserTests: XCTestCase {
     }
 
     func testCodexReaderFiltersQuietPreexistingSessions() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         let sessions = directory.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let index = directory.appendingPathComponent("session_index.jsonl")
         let session = sessions.appendingPathComponent("rollout-2026-11-09T10-00-00-019127f4-35ae-7c73-9e72-a10123456001.jsonl")
-        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
+        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task"}"#.writeSyntheticAtomically(to: index)
         let now = Date()
         let since = now.addingTimeInterval(-2)
         let formatter = ISO8601DateFormatter()
         let oldStart = #"{"timestamp":"\#(formatter.string(from: now.addingTimeInterval(-20)))","type":"event_msg","payload":{"type":"task_started"}}"#
         let newEvent = #"{"timestamp":"\#(formatter.string(from: now))","type":"event_msg","payload":{"type":"agent_reasoning","text":"Synthetic event"}}"#
-        try (oldStart + "\n").write(to: session, atomically: true, encoding: .utf8)
+        try (oldStart + "\n").writeSyntheticAtomically(to: session)
         let reader = CodexTaskReader(codexHome: directory)
         XCTAssertTrue(reader.readTasks(now: now, observedSince: since).isEmpty)
-        try (oldStart + "\n" + newEvent + "\n").write(to: session, atomically: true, encoding: .utf8)
+        try (oldStart + "\n" + newEvent + "\n").writeSyntheticAtomically(to: session)
         XCTAssertEqual(reader.readTasks(now: now, observedSince: since).map(\.title), ["Synthetic task"])
         try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-20)], ofItemAtPath: session.path)
         XCTAssertTrue(reader.readTasks(now: now, observedSince: since).isEmpty)
         XCTAssertEqual(try reader.readSnapshot(now: now, observedSince: since, previouslyObserved: ["019127f4-35ae-7c73-9e72-a10123456001"]).tasks.count, 1)
         let terminal = #"{"timestamp":"\#(formatter.string(from: now.addingTimeInterval(1)))","type":"event_msg","payload":{"type":"task_complete"}}"#
-        try (oldStart + "\n" + newEvent + "\n" + terminal + "\n").write(to: session, atomically: true, encoding: .utf8)
+        try (oldStart + "\n" + newEvent + "\n" + terminal + "\n").writeSyntheticAtomically(to: session)
         let snapshot = try reader.readSnapshot(now: now, observedSince: since)
         XCTAssertTrue(snapshot.tasks.isEmpty)
         XCTAssertFalse(snapshot.terminalIDs.contains("019127f4-35ae-7c73-9e72-a10123456001"))
@@ -67,7 +67,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testCodexReaderKeepsObservedQuietTaskAsUnconfirmed() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         let sessions = directory.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -77,8 +77,8 @@ final class ParserTests: XCTestCase {
         let eventTime = now.addingTimeInterval(-8_000)
         let formatter = ISO8601DateFormatter()
         let start = #"{"timestamp":"\#(formatter.string(from: eventTime))","type":"event_msg","payload":{"type":"task_started"}}"#
-        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
-        try (start + "\n").write(to: session, atomically: true, encoding: .utf8)
+        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task"}"#.writeSyntheticAtomically(to: index)
+        try (start + "\n").writeSyntheticAtomically(to: session)
         try FileManager.default.setAttributes([.modificationDate: eventTime], ofItemAtPath: session.path)
         let reader = CodexTaskReader(codexHome: directory)
         let task = try XCTUnwrap(reader.readTasks(now: now, observedSince: now.addingTimeInterval(-9_000)).first)
@@ -139,7 +139,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testClaudeStartIdentityChangesOnlyForANewPrompt() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("events.jsonl")
@@ -148,20 +148,20 @@ final class ParserTests: XCTestCase {
         let action = event(session: "one", name: "PreToolUse", active: true, date: now.addingTimeInterval(-4), prompt: "")
         let next = event(session: "one", name: "UserPromptSubmit", active: true, date: now.addingTimeInterval(-3), prompt: "")
         let reader = ClaudeTaskReader(eventFile: file)
-        try (first + "\n").write(to: file, atomically: true, encoding: .utf8)
+        try (first + "\n").writeSyntheticAtomically(to: file)
         let initial = try XCTUnwrap(reader.readTasks(now: now).first)
-        try ([first, action].joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+        try ([first, action].joined(separator: "\n") + "\n").writeSyntheticAtomically(to: file)
         let updated = try XCTUnwrap(reader.readTasks(now: now).first)
         XCTAssertFalse(initial.startKey.isEmpty)
         XCTAssertEqual(initial.startKey, updated.startKey)
-        try ([first, action, next].joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+        try ([first, action, next].joined(separator: "\n") + "\n").writeSyntheticAtomically(to: file)
         let resumed = try XCTUnwrap(reader.readTasks(now: now).first)
         XCTAssertNotEqual(resumed.startKey, initial.startKey)
         XCTAssertGreaterThan(resumed.startedAt, initial.startedAt)
     }
 
     func testClaudeReaderHidesStoppedAndMarksObservedQuietSessionsUnconfirmed() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("events.jsonl")
@@ -175,7 +175,7 @@ final class ParserTests: XCTestCase {
             "task_subject": "Первый этап", "task_status": "in_progress"
         ]
         let stepLine = String(decoding: try JSONSerialization.data(withJSONObject: step), as: UTF8.self)
-        try ([active, stepLine, stopped, stale].joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+        try ([active, stepLine, stopped, stale].joined(separator: "\n") + "\n").writeSyntheticAtomically(to: file)
         let tasks = ClaudeTaskReader(eventFile: file).readTasks(now: now)
         XCTAssertEqual(tasks.count, 2)
         let activeTask = try XCTUnwrap(tasks.first { $0.id == "claude:active" })
@@ -192,7 +192,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testLegacyClaudeSessionsRequireANewEventAndPreservePlan() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let legacyFile = directory.appendingPathComponent("legacy.jsonl")
@@ -205,14 +205,14 @@ final class ParserTests: XCTestCase {
             "prompt": "SYNTHETIC_SECRET"
         ]
         let oldLine = String(decoding: try JSONSerialization.data(withJSONObject: old), as: UTF8.self)
-        try (oldLine + "\n").write(to: legacyFile, atomically: true, encoding: .utf8)
+        try (oldLine + "\n").writeSyntheticAtomically(to: legacyFile)
         let unrelated = event(session: "other-session", name: "UserPromptSubmit", active: true, date: now.addingTimeInterval(-5), prompt: "")
-        try (unrelated + "\n").write(to: currentFile, atomically: true, encoding: .utf8)
+        try (unrelated + "\n").writeSyntheticAtomically(to: currentFile)
         let reader = ClaudeTaskReader(eventFile: currentFile, legacyFile: legacyFile)
         XCTAssertEqual(reader.readTasks(now: now).map(\.id), ["claude:other-session"])
         XCTAssertTrue(reader.readTasks(now: now, observedSince: now.addingTimeInterval(1)).isEmpty)
         let observed = event(session: "legacy-session", name: "PreToolUse", active: true, date: now, prompt: "")
-        try ([unrelated, observed].joined(separator: "\n") + "\n").write(to: currentFile, atomically: true, encoding: .utf8)
+        try ([unrelated, observed].joined(separator: "\n") + "\n").writeSyntheticAtomically(to: currentFile)
         let fresh = reader.readTasks(now: now, observedSince: now.addingTimeInterval(-1))
         XCTAssertEqual(fresh.map(\.id), ["claude:legacy-session"])
         let resumed = try XCTUnwrap(fresh.first)
@@ -220,7 +220,7 @@ final class ParserTests: XCTestCase {
         XCTAssertFalse(resumed.activity.contains("SYNTHETIC_SECRET"))
         XCTAssertEqual(try String(contentsOf: legacyFile, encoding: .utf8), oldLine + "\n")
         let stopped = event(session: "legacy-session", name: "Stop", active: false, date: now.addingTimeInterval(1), prompt: "")
-        try ([unrelated, observed, stopped].joined(separator: "\n") + "\n").write(to: currentFile, atomically: true, encoding: .utf8)
+        try ([unrelated, observed, stopped].joined(separator: "\n") + "\n").writeSyntheticAtomically(to: currentFile)
         let futureSnapshot = try reader.readSnapshot(now: now, observedSince: now.addingTimeInterval(-1))
         XCTAssertFalse(futureSnapshot.terminalIDs.contains("claude:legacy-session"))
         XCTAssertFalse(futureSnapshot.neutralEndedIDs.contains("claude:legacy-session"))
@@ -246,7 +246,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testClaudeHookBoundsInputWhileReading() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("input.json")
@@ -276,7 +276,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testClaudeConnectionDistinguishesDisconnectedAndInvalidSettings() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let settings = directory.appendingPathComponent("settings.json")
@@ -349,7 +349,7 @@ final class ParserTests: XCTestCase {
 
     @MainActor
     func testCodexLoopWarningTracksAndResetsPerTask() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         let codexHome = directory.appendingPathComponent("codex", isDirectory: true)
         let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
@@ -357,8 +357,8 @@ final class ParserTests: XCTestCase {
         let index = codexHome.appendingPathComponent("session_index.jsonl")
         let session = sessions.appendingPathComponent("rollout-2026-11-09T10-00-00-019127f4-35ae-7c73-9e72-a10123456001.jsonl")
         let claude = directory.appendingPathComponent("claude-events.jsonl")
-        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task"}"#.write(to: index, atomically: true, encoding: .utf8)
-        try "".write(to: session, atomically: true, encoding: .utf8)
+        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task"}"#.writeSyntheticAtomically(to: index)
+        try "".writeSyntheticAtomically(to: session)
         let journal = DiagnosticJournal(directory: directory.appendingPathComponent("diagnostics", isDirectory: true))
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: codexHome), claudeReader: ClaudeTaskReader(eventFile: claude), journal: journal)
         let formatter = ISO8601DateFormatter()
@@ -372,19 +372,22 @@ final class ParserTests: XCTestCase {
         }
         var lines = [start]
         for index in 0..<5 { lines.append(try item("first-\(index)", "CommandExecution", Double(index + 2))) }
-        try (lines.joined(separator: "\n") + "\n").write(to: session, atomically: true, encoding: .utf8)
+        try (lines.joined(separator: "\n") + "\n").writeSyntheticAtomically(to: session)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertEqual(store.tasks.first?.loopWarning, LoopWarning(threshold: 5, windowMinutes: 10))
         store.dismissLoop(for: "019127f4-35ae-7c73-9e72-a10123456001")
         XCTAssertNil(store.tasks.first?.loopWarning)
         lines.append(try item("first-5", "CommandExecution", 7))
-        try (lines.joined(separator: "\n") + "\n").write(to: session, atomically: true, encoding: .utf8)
+        try (lines.joined(separator: "\n") + "\n").writeSyntheticAtomically(to: session)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertNil(store.tasks.first?.loopWarning)
         lines.append(try item("changed", "FileChange", 8))
         for index in 0..<5 { lines.append(try item("next-\(index)", "CommandExecution", Double(index + 9))) }
-        try (lines.joined(separator: "\n") + "\n").write(to: session, atomically: true, encoding: .utf8)
+        try (lines.joined(separator: "\n") + "\n").writeSyntheticAtomically(to: session)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertNotNil(store.tasks.first?.loopWarning)
     }
 
@@ -401,7 +404,7 @@ final class ParserTests: XCTestCase {
 
     @MainActor
     func testSourceFailurePreservesObservedTaskAndOtherProvider() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         let codexHome = directory.appendingPathComponent("codex", isDirectory: true)
         let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
@@ -410,30 +413,39 @@ final class ParserTests: XCTestCase {
         let session = sessions.appendingPathComponent("rollout-2026-11-09T10-00-00-019127f4-35ae-7c73-9e72-a10123456001.jsonl")
         let claude = directory.appendingPathComponent("claude-events.jsonl")
         let indexLine = #"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic task"}"#
-        try (indexLine + "\n").write(to: index, atomically: true, encoding: .utf8)
-        try "".write(to: session, atomically: true, encoding: .utf8)
+        try (indexLine + "\n").writeSyntheticAtomically(to: index)
+        try "".writeSyntheticAtomically(to: session)
         let journal = DiagnosticJournal(directory: directory.appendingPathComponent("diagnostics", isDirectory: true))
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: codexHome), claudeReader: ClaudeTaskReader(eventFile: claude), journal: journal)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let start = #"{"timestamp":"\#(formatter.string(from: Date().addingTimeInterval(1)))","type":"event_msg","payload":{"type":"task_started"}}"#
+        let start = #"{"timestamp":"\#(formatter.string(from: Date().addingTimeInterval(1)))","type":"event_msg","payload":{"type":"task_started","turn_id":"synthetic-turn"}}"#
         let claudeEvent = event(session: "active-claude", name: "UserPromptSubmit", active: true, date: Date().addingTimeInterval(2), prompt: "")
-        try (start + "\n").write(to: session, atomically: true, encoding: .utf8)
-        try (claudeEvent + "\n").write(to: claude, atomically: true, encoding: .utf8)
+        try (start + "\n").writeSyntheticAtomically(to: session)
+        try (claudeEvent + "\n").writeSyntheticAtomically(to: claude)
         store.refresh()
+        waitForCodexRead(store)
+        waitForClaudeRead(store)
         XCTAssertEqual(store.tasks.count, 2)
         XCTAssertTrue(store.unavailableSources.isEmpty)
         try FileManager.default.removeItem(at: index)
         store.refresh()
+        waitForCodexRead(store)
+        waitForClaudeRead(store)
         XCTAssertEqual(store.unavailableSources, [.codex])
         let uncertain = try XCTUnwrap(store.tasks.first { $0.provider == .codex })
         XCTAssertTrue(uncertain.isUnconfirmed)
         XCTAssertFalse(uncertain.isActive)
         XCTAssertTrue(store.tasks.contains { $0.provider == .claude && $0.isActive })
-        try (indexLine + "\n").write(to: index, atomically: true, encoding: .utf8)
-        let end = #"{"timestamp":"\#(formatter.string(from: Date().addingTimeInterval(3)))","type":"event_msg","payload":{"type":"task_complete"}}"#
-        try (start + "\n" + end + "\n").write(to: session, atomically: true, encoding: .utf8)
+        try (indexLine + "\n").writeSyntheticAtomically(to: index)
+        let end = #"{"timestamp":"\#(formatter.string(from: Date().addingTimeInterval(3)))","type":"event_msg","payload":{"type":"task_complete","turn_id":"synthetic-turn"}}"#
+        let handle = try FileHandle(forWritingTo: session)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((end + "\n").utf8))
+        try handle.close()
         store.refresh()
+        waitForCodexRead(store)
+        waitForClaudeRead(store)
         XCTAssertTrue(store.unavailableSources.isEmpty)
         XCTAssertFalse(store.tasks.contains { $0.provider == .codex })
         XCTAssertTrue(store.tasks.contains { $0.provider == .claude && $0.isActive })

@@ -5,16 +5,16 @@ import XCTest
 final class CodexCloudStoreTests: XCTestCase {
     @MainActor
     func testCloudOptInFailurePartialAndDisconnectKeepLocalTaskAccurate() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-cloud-store-\(UUID().uuidString)")
+        let root = try codexSyntheticDirectory(prefix: "aitm-cloud-store-")
         let codexHome = root.appendingPathComponent("codex")
         let sessions = codexHome.appendingPathComponent("sessions")
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         let suite = "aitm-cloud-test-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root) }
-        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456009","thread_name":"Local fixture"}"#.appending("\n").write(to: codexHome.appendingPathComponent("session_index.jsonl"), atomically: true, encoding: .utf8)
+        try #"{"id":"019127f4-35ae-7c73-9e72-a10123456009","thread_name":"Local fixture"}"#.appending("\n").writeSyntheticAtomically(to: codexHome.appendingPathComponent("session_index.jsonl"))
         let rollout = sessions.appendingPathComponent("rollout-2026-11-09T10-00-00-019127f4-35ae-7c73-9e72-a10123456009.jsonl")
-        try "".write(to: rollout, atomically: true, encoding: .utf8)
+        try "".writeSyntheticAtomically(to: rollout)
         let executable = root.appendingPathComponent("fake-codex")
         let script = #"""
         #!/bin/sh
@@ -31,11 +31,11 @@ final class CodexCloudStoreTests: XCTestCase {
           *) printf '%s' '{"tasks":[{"id":"cloud-one","title":"Cloud fixture","status":"pending"}],"cursor":null}' ;;
         esac
         """#
-        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try script.writeSyntheticAtomically(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         let mode = root.appendingPathComponent("mode")
         let started = root.appendingPathComponent("started")
-        try "pending".write(to: mode, atomically: true, encoding: .utf8)
+        try "pending".writeSyntheticAtomically(to: mode)
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: codexHome),
                               claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("claude.jsonl")),
                               journal: DiagnosticJournal(directory: root.appendingPathComponent("journal")),
@@ -44,8 +44,9 @@ final class CodexCloudStoreTests: XCTestCase {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let timestamp = formatter.string(from: Date().addingTimeInterval(1))
-        try "{\"timestamp\":\"\(timestamp)\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n".write(to: rollout, atomically: true, encoding: .utf8)
+        try "{\"timestamp\":\"\(timestamp)\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n".writeSyntheticAtomically(to: rollout)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertTrue(store.tasks.contains { $0.id == "019127f4-35ae-7c73-9e72-a10123456009" && $0.isActive })
         XCTAssertFalse(FileManager.default.fileExists(atPath: started.path))
 
@@ -68,18 +69,18 @@ final class CodexCloudStoreTests: XCTestCase {
         XCTAssertEqual(store.filteredTasks.count, 2)
         XCTAssertTrue(defaults.bool(forKey: "codexCloudEnabled"))
 
-        try "failure".write(to: mode, atomically: true, encoding: .utf8)
+        try "failure".writeSyntheticAtomically(to: mode)
         waitFor { store.codexCloudFailed }
         XCTAssertTrue(store.tasks.contains { $0.id == cloud.id && $0.isUnconfirmed })
         XCTAssertTrue(store.tasks.contains { $0.id == "019127f4-35ae-7c73-9e72-a10123456009" && $0.isActive })
-        try "partial".write(to: mode, atomically: true, encoding: .utf8)
+        try "partial".writeSyntheticAtomically(to: mode)
         waitFor { store.codexCloudPartial && !store.codexCloudFailed }
         XCTAssertTrue(store.tasks.contains { $0.id == cloud.id && $0.isUnconfirmed })
-        try "terminal".write(to: mode, atomically: true, encoding: .utf8)
+        try "terminal".writeSyntheticAtomically(to: mode)
         waitFor { !store.codexCloudPartial && !store.codexCloudFailed && !store.tasks.contains { $0.id.hasPrefix("codex-cloud:") } }
         XCTAssertTrue(store.tasks.contains { $0.id == "019127f4-35ae-7c73-9e72-a10123456009" && $0.isActive })
 
-        try "slow".write(to: mode, atomically: true, encoding: .utf8)
+        try "slow".writeSyntheticAtomically(to: mode)
         try? FileManager.default.removeItem(at: started)
         waitFor { FileManager.default.fileExists(atPath: started.path) }
         store.setCodexCloudEnabled(false)

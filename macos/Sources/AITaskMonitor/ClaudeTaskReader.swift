@@ -466,13 +466,16 @@ struct ClaudeTaskReader {
     let usesExplicitFile: Bool
     private let sourceLossLatch: ClaudeSourceLossLatch
     private let readLockTiming: ((UInt64) -> Void)?
+    private let afterJournalLockForTests: (() -> Void)?
 
-    init(eventFile: URL? = nil, legacyFile: URL? = nil, readLockTiming: ((UInt64) -> Void)? = nil) {
+    init(eventFile: URL? = nil, legacyFile: URL? = nil, readLockTiming: ((UInt64) -> Void)? = nil,
+         afterJournalLockForTests: (() -> Void)? = nil) {
         self.eventFile = eventFile ?? AppPaths.claudeEvents
         self.legacyFile = legacyFile ?? (eventFile == nil ? AppPaths.legacyClaudeEvents : nil)
         self.usesExplicitFile = eventFile != nil
         self.sourceLossLatch = ClaudeSourceLossLatch()
         self.readLockTiming = readLockTiming
+        self.afterJournalLockForTests = afterJournalLockForTests
     }
 
     // Called when a previously present journal disappears between polls.
@@ -500,6 +503,7 @@ struct ClaudeTaskReader {
     private func readSnapshotImpl(now: Date, observedSince: Date?,
                                   phaseEvidence: ClaudePhaseEvidence?) throws -> ClaudeTaskSnapshot {
         let files: (ClaudeFileBytes, Result<ClaudeFileBytes?, Error>) = try withClaudeJournalReadLock(eventFile, timing: readLockTiming) {
+            afterJournalLockForTests?()
             let current = try readClaudeFile(eventFile)
             guard let legacyFile, !current.data.isEmpty else { return (current, .success(nil)) }
             do {
