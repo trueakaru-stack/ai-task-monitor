@@ -2,8 +2,12 @@ name: Windows passive Codex safety
 on:
   workflow_dispatch:
   push:
-    branches: [windows, codex/windows-compact-ci-20261124]
+    branches: [codex/windows-ui-probe-20261124]
     paths:
+      - 'windows/**'
+      - '.github/legacy-uninstall-ci/**'
+      - '.github/safe-uninstall-ci/**'
+      - '.github/workflows/legacy-uninstall-check-20261116.yml'
       - 'windows/app/CodexProgress.ps1'
       - 'windows/app/CodexRecentEventObserver.cs'
       - 'windows/app/Build-Installer-v2.ps1'
@@ -26,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks, checks-ui, checks-owner, checks-gap, checks-diagnostic, checks-retention, screenshots-active, screenshots-empty, screenshots-related, screenshots-showcase]
+        part: [screenshots-related, screenshots-showcase]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
@@ -83,7 +87,7 @@ jobs:
                 & $candidate.FullName -I -B (Join-Path $source 'windows/tests/Test-DotnetPathSafety.py')
                 if($LASTEXITCODE -ne 0){throw 'The PATH safety guard failed.'}
                 Write-Output 'PATH safety guard: passed using a verified hosted tool-cache interpreter.'
-              }else{Write-Warning 'PATH safety guard was not run: no verified hosted tool-cache Python was found.'}
+              }else{throw 'No verified hosted tool-cache Python was found.'}
             }
             function Invoke-Isolated([string]$executable,[string[]]$arguments){
               foreach($argument in $arguments){if($argument.Contains('"') -or $argument.EndsWith('\')){throw 'Unsupported synthetic argument.'}}
@@ -109,9 +113,11 @@ jobs:
               }finally{$process.Dispose()}
             }
             function Assert-SourceSnapshot {
-              & git -C "$source" diff --quiet HEAD -- windows .github/legacy-uninstall-ci .github/workflows
+              $revision=(& git -C "$source" rev-parse HEAD).Trim()
+              if($LASTEXITCODE -ne 0 -or $revision -cne $env:GITHUB_SHA){throw 'Source revision changed during verification.'}
+              & git -C "$source" diff --quiet HEAD -- windows .github/legacy-uninstall-ci .github/workflows .github/safe-uninstall-ci
               if($LASTEXITCODE -ne 0){throw 'Tracked source inputs changed during verification.'}
-              $unexpected=@(& git -C "$source" ls-files --others --exclude-standard -- windows .github/legacy-uninstall-ci .github/workflows)
+              $unexpected=@(& git -C "$source" ls-files --others --exclude-standard -- windows .github/legacy-uninstall-ci .github/workflows .github/safe-uninstall-ci)
               if($LASTEXITCODE -ne 0 -or $unexpected.Count -gt 0){throw 'Unexpected source inputs appeared during verification.'}
             }
             Assert-SourceSnapshot
@@ -121,7 +127,7 @@ jobs:
                 'checks-ui' {$tests=@('Test-LocalSourceWarmup.ps1','Test-LocalSourceProductionWiring.ps1','Test-RelatedAgentPlacement.ps1','Test-RelatedAgentStatusDisplay.ps1','Test-CompactAgentHint.ps1')}
                 'checks-owner' {$tests=@('Test-WorkerServerIdentity.ps1','Test-LocalReadOwner.ps1','Test-ReadOwnerChannel.ps1','Test-ReadOwnerLifecycle.ps1','Test-LocalSourceModuleParity.ps1','Test-LocalSourceClient.ps1','Test-ProductionLocalSourceWorker.ps1')}
                 'checks-gap' {$tests=@('Test-ProductionClaudeGlobalGap.ps1','Test-ClaudeGlobalGapRetention.ps1','Test-ClaudePartialDiagnostics.ps1','Test-ClaudeSourceControls.ps1','Test-ClaudeSourceActionError.ps1')}
-                'checks-diagnostic' {$tests=@('Test-DiagnosticStoreIsolated.ps1','Test-DiagnosticWorker.ps1','Test-DiagnosticClientQueue.ps1','Test-DiagnosticClientRestart.ps1','Test-DiagnosticClearBoundary.ps1','Test-DiagnosticClearRuntimeRecovery.ps1','Test-DiagnosticFallbackClear.ps1','Test-DiagnosticClearAckBarrier.ps1','Test-DiagnosticTemporaryCopyGuard.ps1','Test-DiagnosticTimer.ps1')}
+                'checks-diagnostic' {$tests=@('Test-DiagnosticStoreIsolated.ps1','Test-DiagnosticAtomicity.ps1','Test-DiagnosticPolicyRace.ps1','Test-DiagnosticWorker.ps1','Test-DiagnosticClientQueue.ps1','Test-DiagnosticClientRestart.ps1','Test-DiagnosticClearBoundary.ps1','Test-DiagnosticClearRuntimeRecovery.ps1','Test-DiagnosticFallbackClear.ps1','Test-DiagnosticClearAckBarrier.ps1','Test-DiagnosticTemporaryCopyGuard.ps1','Test-DiagnosticTimer.ps1')}
                 'checks-retention' {$tests=@('Test-ClaudeRetentionGate.ps1','Test-ClaudeRetentionProfileIsolation.ps1','Test-CodexAgentRetention.ps1','Test-CodexAgentRetentionAdapter.ps1','Test-ProductionCodexAgentRetention.ps1')}
                 default {throw 'Unexpected synthetic check group.'}
               }

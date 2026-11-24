@@ -4429,10 +4429,13 @@ function Add-Steps($container, $steps, [bool]$hidePlanState=$false, $task=$null)
   $empty.Margin=New-Object Windows.Thickness(0,11,0,0); $container.Children.Add($empty)|Out-Null
   return
  }
- $scroll = New-Object Windows.Controls.ScrollViewer; $scroll.Height=110; $scroll.Margin=New-Object Windows.Thickness(0,11,0,0); $scroll.VerticalScrollBarVisibility=$(if($all.Count -gt 5){"Auto"}else{"Hidden"}); $scroll.HorizontalScrollBarVisibility="Disabled"
+ $agentStepIndex=if($null -ne $task -and -not $hidePlanState -and [int](Prop $task 'RelatedAgentCount' 0) -gt 0){Active-PlanStepIndex $task}else{-1}
+ $agentCount=if($agentStepIndex -ge 0 -and $script:relatedAgentsExpanded.ContainsKey([string](Prop $task 'Id' ''))){@(Prop $task 'RelatedAgents' @()).Count}else{0}
+ $agentViewport=if($agentCount -gt 0){5+[Math]::Min(110,$agentCount*22)}else{0}
+ $agentRowsHeight=if($agentCount -gt 0){5+$agentCount*22}else{0}
+ $scroll = New-Object Windows.Controls.ScrollViewer; $scroll.Height=110+$agentViewport; $scroll.Margin=New-Object Windows.Thickness(0,11,0,0); $scroll.VerticalScrollBarVisibility=$(if(($all.Count*22+$agentRowsHeight) -gt $scroll.Height){"Auto"}else{"Hidden"}); $scroll.HorizontalScrollBarVisibility="Disabled"
  $rail = New-Object Windows.Controls.StackPanel
  $activeIndex=-1; $pendingIndex=-1; $stepIndex=0
- $agentStepIndex=if($null -ne $task -and -not $hidePlanState -and [int](Prop $task 'RelatedAgentCount' 0) -gt 0){Active-PlanStepIndex $task}else{-1}
  foreach ($step in $all) {
   $row=New-Object Windows.Controls.Grid; $row.Height=22
   $c1=New-Object Windows.Controls.ColumnDefinition; $c1.Width=New-Object Windows.GridLength(22)
@@ -4467,6 +4470,7 @@ function Add-Steps($container, $steps, [bool]$hidePlanState=$false, $task=$null)
    [Windows.Controls.Grid]::SetColumn($stepLine,1);$row.Children.Add($stepLine)|Out-Null
   }else{[Windows.Controls.Grid]::SetColumn($label,1);$row.Children.Add($label)|Out-Null}
   $rail.Children.Add($row)|Out-Null
+  if($stepIndex -eq $agentStepIndex){Add-RelatedAgentList $rail $task $false $true ($c1.Width.Value+$label.Margin.Left)}
   $stepIndex++
  }
  $focusIndex=if($activeIndex -ge 0){$activeIndex}elseif($pendingIndex -ge 0){$pendingIndex}else{[Math]::Max(0,$all.Count-2)}
@@ -4580,18 +4584,10 @@ function Related-AgentActivity($agent,[bool]$compact) {
  return $activity
 }
 
-function Add-RelatedAgentContent($container,$task,[bool]$compact=$false) {
- $statusText=Related-AgentStatus $task
- if($statusText){
-  $status=Text $statusText 11.5 $script:palette.Muted;$status.Margin=New-Object Windows.Thickness(0,4,0,0);$status.Tag='related-agent-status'
-  $container.Children.Add($status)|Out-Null
- }
+function Add-RelatedAgentList($container,$task,[bool]$compact=$false,[bool]$inline=$false,[double]$leftInset=0) {
  $id=[string](Prop $task 'Id' '')
  $agents=@(Prop $task 'RelatedAgents' @())
  if(-not $script:relatedAgentsExpanded.ContainsKey($id) -or $agents.Count -eq 0){return}
- $scroll=New-Object Windows.Controls.ScrollViewer;$scroll.Height=[Math]::Min(110,$agents.Count*22);$scroll.Margin=New-Object Windows.Thickness(0,5,0,0)
- $scroll.VerticalScrollBarVisibility=if($agents.Count -gt 5){'Auto'}else{'Hidden'};$scroll.HorizontalScrollBarVisibility='Disabled'
- [Windows.Automation.AutomationProperties]::SetAutomationId($scroll,'related-agent-actions')
  $rows=New-Object Windows.Controls.StackPanel
  foreach($agent in $agents){
   $name=[string](Prop $agent 'AgentNickname' '')
@@ -4602,7 +4598,24 @@ function Add-RelatedAgentContent($container,$task,[bool]$compact=$false) {
   Add-ConditionalHint $row $text 'line';[Windows.Automation.AutomationProperties]::SetAutomationId($row,'related-agent-action')
   $rows.Children.Add($row)|Out-Null
  }
- $scroll.Content=$rows;$container.Children.Add($scroll)|Out-Null
+ if($inline){
+  $rows.Margin=New-Object Windows.Thickness($leftInset,5,0,0);[Windows.Automation.AutomationProperties]::SetAutomationId($rows,'related-agent-actions')
+  $container.Children.Add($rows)|Out-Null
+ }else{
+  $scroll=New-Object Windows.Controls.ScrollViewer;$scroll.Height=[Math]::Min(110,$agents.Count*22);$scroll.Margin=New-Object Windows.Thickness(0,5,0,0)
+  $scroll.VerticalScrollBarVisibility=if($agents.Count -gt 5){'Auto'}else{'Hidden'};$scroll.HorizontalScrollBarVisibility='Disabled'
+  [Windows.Automation.AutomationProperties]::SetAutomationId($scroll,'related-agent-actions')
+  $scroll.Content=$rows;$container.Children.Add($scroll)|Out-Null
+ }
+}
+
+function Add-RelatedAgentContent($container,$task,[bool]$compact=$false,[bool]$statusOnly=$false) {
+ $statusText=Related-AgentStatus $task
+ if($statusText){
+  $status=Text $statusText 11.5 $script:palette.Muted;$status.Margin=New-Object Windows.Thickness(0,4,0,0);$status.Tag='related-agent-status'
+  $container.Children.Add($status)|Out-Null
+ }
+ if(-not $statusOnly){Add-RelatedAgentList $container $task $compact}
 }
 
 function Add-Card($task) {
@@ -4642,7 +4655,8 @@ function Add-Card($task) {
  $progressLabel=Progress-Label $task
  $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.Height=22; $percent.VerticalAlignment="Top"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip=Tr "Приблизительная оценка"}; [Windows.Controls.Grid]::SetColumn($percent,1)
  $header.Children.Add($titleStack)|Out-Null; $header.Children.Add($percent)|Out-Null; $stack.Children.Add($header)|Out-Null
- Add-RelatedAgentContent $stack $task
+ $agentsInStep=($stepCount -gt 0 -and -not $hideClaudePlanState -and [int](Prop $task 'RelatedAgentCount' 0) -gt 0 -and (Active-PlanStepIndex $task) -ge 0)
+ Add-RelatedAgentContent $stack $task $false $agentsInStep
  Add-LoopWarning $stack $task $false
  if(-not $hideClaudePlanState -and $task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Margin=New-Object Windows.Thickness(0,14,0,0); $stack.Children.Add($bar)|Out-Null}
  if($stepCount -gt 0){
@@ -5903,6 +5917,25 @@ if ($SnapshotFile) {
    }
    return $null
   }
+  function Assert-RelatedPreviewPlacement($row,[bool]$noActive){
+   $rows=$row.Parent
+   if($null -eq $rows -or $rows -isnot [Windows.Controls.StackPanel]){throw 'The agent action list is missing.'}
+   if($noActive){
+    if($rows.Parent -isnot [Windows.Controls.ScrollViewer] -or
+       [Windows.Automation.AutomationProperties]::GetAutomationId($rows.Parent) -cne 'related-agent-actions'){
+     throw 'The agent actions did not stay near the task title when no step is active.'
+    }
+   }else{
+    $rail=$rows.Parent
+    if([Windows.Automation.AutomationProperties]::GetAutomationId($rows) -cne 'related-agent-actions' -or
+       $rail -isnot [Windows.Controls.StackPanel]){throw 'The agent actions are not in the plan.'}
+    $index=$rail.Children.IndexOf($rows)
+    if($index -lt 1 -or $rail.Children[$index-1] -isnot [Windows.Controls.Grid] -or
+       $rail.Children[$index-1].Children.Count -ne 2 -or $rail.Children[$index-1].Children[1].Tag -cne 'related-agent-step'){
+     throw 'The agent actions are not immediately after the active step.'
+    }
+   }
+  }
   $surface=if($CompactMode){$compactTasksPanel}else{$tasksPanel}
   $count=Find-RelatedPreview $surface 'count';$progress=Find-RelatedPreview $surface 'progress';$status=Find-RelatedPreview $surface 'status';$title=$script:previewHintTarget
   if($script:lastAllTasks.Count -ne 1 -or $script:lastAllTasks[0].RelatedAgentCount -ne 3 -or $script:showProviderLabels -or
@@ -5971,9 +6004,12 @@ if ($SnapshotFile) {
   $surface=if($CompactMode){$compactTasksPanel}else{$tasksPanel};$row=Find-RelatedPreview $surface 'action'
   if(-not $script:relatedAgentsExpanded.ContainsKey($id) -or $null -eq $row -or
      ($CompactMode -and $window.Height -le $closedHeight)){throw 'Accessible invocation did not expand the agent actions.'}
+  Assert-RelatedPreviewPlacement $row $PreviewRelatedAgentsNoActive
   $script:fingerprint='';Update-View;$window.UpdateLayout()
   $surface=if($CompactMode){$compactTasksPanel}else{$tasksPanel}
-  if(-not $script:relatedAgentsExpanded.ContainsKey($id) -or $null -eq (Find-RelatedPreview $surface 'action')){throw 'Refreshing lost the expanded agent list.'}
+  $row=Find-RelatedPreview $surface 'action'
+  if(-not $script:relatedAgentsExpanded.ContainsKey($id) -or $null -eq $row){throw 'Refreshing lost the expanded agent list.'}
+  Assert-RelatedPreviewPlacement $row $PreviewRelatedAgentsNoActive
   if(-not $originalExpanded){
    $button=$script:relatedAgentButtons[$key];$button.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent));$window.UpdateLayout()
    if($script:relatedAgentsExpanded.ContainsKey($id) -or $null -ne (Find-RelatedPreview $surface 'action')){throw 'The agent list did not collapse.'}
