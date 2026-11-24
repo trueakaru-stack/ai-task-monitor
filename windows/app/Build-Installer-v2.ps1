@@ -61,6 +61,7 @@ $arguments = @(
     "/resource:$(Join-Path $source 'ClaudeLoopClient.ps1'),ClaudeLoopClient.ps1",
     "/resource:$(Join-Path $source 'ClaudeLoopDetection.ps1'),ClaudeLoopDetection.ps1",
     "/resource:$(Join-Path $source 'ClaudeLoopChannel.cs'),ClaudeLoopChannel.cs",
+    "/resource:$(Join-Path $source 'ClaudeLoopBackground.cs'),ClaudeLoopBackground.cs",
     "/resource:$(Join-Path $source 'ClaudeReaderCore.ps1'),ClaudeReaderCore.ps1",
     "/resource:$(Join-Path $source 'ClaudeRetention.cs'),ClaudeRetention.cs",
     "/resource:$(Join-Path $source 'CodexRecentEventObserver.cs'),CodexRecentEventObserver.cs",

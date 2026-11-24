@@ -52,6 +52,7 @@
  [switch]$PreviewRelatedAgentsNamedTitle,
  [switch]$PreviewRelatedAgentsNoActive,
  [switch]$PreviewRelatedAgentsLongActivity,
+ [switch]$PreviewRelatedAgentsCountOnly,
  [switch]$PreviewRelatedAgentsShowcase,
  [switch]$PreviewRelatedAgentsSelectClaude,
  [ValidateSet('','partial-data','partial-connection','partial-both','unavailable')][string]$PreviewSourceWarning = '',
@@ -158,6 +159,7 @@ if($PreviewRelatedAgentsExpanded -and -not $PreviewRelatedAgents){throw 'Expande
 if($PreviewRelatedAgentsNamedTitle -and -not $PreviewRelatedAgents){throw 'A named agent preview requires synthetic grouped agents.'}
 if($PreviewRelatedAgentsNoActive -and -not $PreviewRelatedAgents){throw 'A paused-plan preview requires synthetic grouped agents.'}
 if($PreviewRelatedAgentsLongActivity -and (-not $PreviewRelatedAgents -or $CompactMode)){throw 'Long agent activity requires an expanded synthetic agent preview.'}
+if($PreviewRelatedAgentsCountOnly -and -not $PreviewRelatedAgents){throw 'Count-only uncertainty requires a synthetic grouped-agent preview.'}
 if($PreviewRelatedAgentsShowcase -and -not $PreviewRelatedAgents){throw 'The agent showcase requires synthetic grouped agents.'}
 if($PreviewRelatedAgentsSelectClaude -and (-not $PreviewRelatedAgentsShowcase -or -not $CompactMode)){throw 'Claude selection requires a compact synthetic agent showcase.'}
 if($PreviewRelatedAgentsUiTest -and (-not $PreviewRelatedAgents -or -not $PreviewOffscreen -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:GITHUB_ACTIONS -cne 'true')){throw 'Agent grouping UI checks require a disposable hosted Windows preview.'}
@@ -662,7 +664,12 @@ try {
 }catch{$script:diagnosticModulesAvailable=$false;$script:diagnosticError="Журнал недоступен";if($PreviewStartupReadyFile){$script:previewDiagnosticFailure=$_.Exception.ToString()}}
 try{
  . (Join-Path $PSScriptRoot "ClaudeLoopDetection.ps1")
- if(-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot "ClaudeLoopChannel.cs") -PathType Leaf)){throw "Claude loop channel missing."}
+ $channelSources=@((Join-Path $PSScriptRoot 'ClaudeLoopChannel.cs'),(Join-Path $PSScriptRoot 'ClaudeLoopBackground.cs'))
+ foreach($channelSource in $channelSources){if(-not (Test-Path -LiteralPath $channelSource -PathType Leaf)){throw 'Claude loop channel missing.'}}
+ if(-not ('AITaskMonitor.ClaudeLoop.BackgroundChannel' -as [type])){
+  Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
+  Add-Type -Path $channelSources -ReferencedAssemblies 'System.Web.Extensions' -ErrorAction Stop
+ }
  $script:claudeLoopModulesAvailable=$true
 }catch{$script:claudeLoopModulesAvailable=$false}
 try { . (Join-Path $PSScriptRoot "ClaudeReaderCore.ps1") }catch{if($PreviewStartupReadyFile){$script:previewReaderFailure=$_.Exception.ToString()}}
@@ -3956,23 +3963,22 @@ function Sync-ClaudeLoopChannel {
   $clientVariable=Get-Variable -Scope Script -Name localSourceClient -ErrorAction SilentlyContinue
   $wanted=if($PreviewClaudeLoopPipe){$true}elseif($PreviewActiveTasks -ge 0){$false}elseif($null -ne $clientVariable){$null -ne $clientVariable.Value -and [string]$clientVariable.Value.Snapshot.ClaudeConnection -eq 'connected'}else{(Claude-ConnectionState) -eq 'connected'}
   if(-not $wanted -or $script:sourceErrors -contains 'Claude Code'){
-   if($null -ne $script:claudeLoopChannel){$script:claudeLoopChannel.Dispose();$script:claudeLoopChannel=$null}
+   if($null -ne $script:claudeLoopChannel){$script:claudeLoopChannel.SetEnabled($false)}
    $script:claudeLoopStates.Clear();$script:claudeLoopError=''
    return
   }
   if($null -eq $script:diagnosticRuntime -or -not $script:claudeLoopModulesAvailable){
-   if($null -ne $script:claudeLoopChannel){$script:claudeLoopChannel.Dispose();$script:claudeLoopChannel=$null}
+   if($null -ne $script:claudeLoopChannel){$script:claudeLoopChannel.SetEnabled($false)}
    $script:claudeLoopStates.Clear()
    $script:claudeLoopError='Предупреждение Claude Code недоступно'
    return
   }
   if($null -eq $script:claudeLoopChannel){
-   if(-not ('AITaskMonitor.ClaudeLoop.Channel' -as [type])){
-    Add-Type -AssemblyName System.Web.Extensions -ErrorAction Stop
-    Add-Type -Path (Join-Path $PSScriptRoot 'ClaudeLoopChannel.cs') -ReferencedAssemblies 'System.Web.Extensions' -ErrorAction Stop
-   }
-   $script:claudeLoopChannel=[AITaskMonitor.ClaudeLoop.Channel]::new($PreviewClaudeLoopPipe)
+   $script:claudeLoopChannel=[AITaskMonitor.ClaudeLoop.BackgroundChannel]::new($PreviewClaudeLoopPipe)
   }
+  $script:claudeLoopChannel.SetEnabled($true)
+  if($script:claudeLoopChannel.HasError){$script:claudeLoopStates.Clear();$script:claudeLoopError='Предупреждение Claude Code недоступно';return}
+  if(-not $script:claudeLoopChannel.IsReady){$script:claudeLoopStates.Clear();$script:claudeLoopError='';return}
   $script:claudeLoopError=''
   $now=[DateTimeOffset]::UtcNow
   $threshold=[int]$script:diagnosticRuntime.Settings.LoopThreshold
@@ -5467,6 +5473,7 @@ function Update-View {
       $agent.Activity=@((Preview-Text 'Проверка обработки ошибок' 'Checking error handling'),(Preview-Text 'Проверка загрузки данных' 'Checking data loading'),(Preview-Text 'Сравнение результатов проверок' 'Comparing check results'))[$agentIndex]
       $agent.Active=$false;$agent.Status='Статус не подтверждён';$agent.ActivityObserved=$true
      }
+     if($PreviewRelatedAgentsCountOnly){$agent.Active=$true;$agent.Status='В работе';if($agent.Activity -eq 'Статус не подтверждён'){$agent.Activity=Preview-Text 'Выполняет действие' 'Performing an action'}}
      $agentIndex++
      $previewTasks+=@($agent)
     }
@@ -5476,6 +5483,7 @@ function Update-View {
     $allTasks=@(Group-CodexTasks $previewTasks $previewLinks $previewTitlesById)
     $previewParent=@($allTasks|Where-Object {[string]$_.Id -eq $parent})
     if($allTasks.Count -ne $(if($PreviewRelatedAgentsShowcase){2}else{1}) -or $previewParent.Count -ne 1 -or [int]$previewParent[0].RelatedAgentCount -ne 3){throw 'Synthetic grouping preview failed.'}
+    $previewParent[0]|Add-Member -MemberType NoteProperty -Name RelatedAgentCountUnconfirmed -Value $true -Force
     if($PreviewRelatedAgentsExpanded -and $null -eq (Get-Variable -Scope Script -Name previewRelatedExpandedInitialized -ErrorAction SilentlyContinue)){
      $script:relatedAgentsExpanded[$parent]=$true;$script:previewRelatedExpandedInitialized=$true
     }
@@ -5922,7 +5930,7 @@ if ($SnapshotFile) {
   $demoCodex=@($script:lastAllTasks|Where-Object {[string]$_.Provider -eq 'codex'})
   $demoClaude=@($script:lastAllTasks|Where-Object {[string]$_.Provider -eq 'claude'})
   if($demoCodex.Count -ne 1 -or $demoClaude.Count -ne 1 -or [int]$demoCodex[0].RelatedAgentCount -ne 3 -or
-     -not [bool]$demoCodex[0].RelatedAgentsUnconfirmed -or -not $script:showProviderLabels){throw 'The two-source agent showcase is incomplete.'}
+     [bool]$demoCodex[0].RelatedAgentsUnconfirmed -eq [bool]$PreviewRelatedAgentsCountOnly -or -not $script:showProviderLabels){throw 'The two-source agent showcase is incomplete.'}
   function Find-ShowcaseAgentStatus($parent){
    if($parent -is [Windows.Controls.TextBlock] -and $parent.IsVisible -and $parent.Tag -ceq 'related-agent-status'){return $parent}
    for($i=0;$i -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$i++){
@@ -6228,7 +6236,9 @@ if ($SnapshotFile) {
   Write-Output "Application icon: window identity and both title-bar icons verified in the real WPF view."
  }
  if($PreviewClaudeLoopUiTest){
-  if($null -eq $script:claudeLoopChannel -or $null -eq $script:diagnosticRuntime){throw 'The synthetic Claude loop channel is unavailable.'}
+  $readyWatch=[Diagnostics.Stopwatch]::StartNew()
+  while(($null -eq $script:claudeLoopChannel -or -not $script:claudeLoopChannel.IsReady) -and $readyWatch.ElapsedMilliseconds -lt 10000){Sync-ClaudeLoopChannel;Start-Sleep -Milliseconds 10}
+  if($null -eq $script:claudeLoopChannel -or -not $script:claudeLoopChannel.IsReady -or $null -eq $script:diagnosticRuntime){throw 'The synthetic Claude loop channel is unavailable.'}
   function Send-PreviewClaudeLoop([string]$session,[int]$number,[string]$kind){
    $testEvent=[PSCustomObject]@{
     session_id=$session;tool_use_id=('synthetic-'+$session+'-'+$number);tool_name='Bash';cwd='synthetic-private-project'
