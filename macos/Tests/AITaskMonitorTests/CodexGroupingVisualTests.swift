@@ -4,6 +4,16 @@ import SwiftUI
 import XCTest
 @testable import AITaskMonitor
 
+private struct SyntheticAgentTaskCard: View {
+    @EnvironmentObject private var store: TaskStore
+
+    var body: some View {
+        if let task = store.tasks.first {
+            TaskCardView(task: task, showProvider: false)
+        }
+    }
+}
+
 final class CodexGroupingVisualTests: XCTestCase {
     @MainActor
     func testAgentCountFollowsConfirmedStepAndPause() {
@@ -129,7 +139,7 @@ final class CodexGroupingVisualTests: XCTestCase {
         store.toggleCodexGroup(task.id)
         NSApplication.shared.setActivationPolicy(.prohibited)
         let size = NSSize(width: 520, height: 600)
-        let hosting = NSHostingView(rootView: TaskCardView(task: task, showProvider: false).environmentObject(store))
+        let hosting = NSHostingView(rootView: SyntheticAgentTaskCard().environmentObject(store))
         hosting.frame = NSRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless],
                               backing: .buffered, defer: false)
@@ -144,6 +154,16 @@ final class CodexGroupingVisualTests: XCTestCase {
         func scrollViews(in view: NSView) -> [NSScrollView] {
             ((view as? NSScrollView).map { [$0] } ?? []) + view.subviews.flatMap { scrollViews(in: $0) }
         }
+        func findLastAgent(in view: NSView) -> TruncatingTextField? {
+            if let field = view as? TruncatingTextField, field.stringValue == "Assistant 9" { return field }
+            return view.subviews.lazy.compactMap { findLastAgent(in: $0) }.first
+        }
+        func lastAgentIsVisible(in scroll: NSScrollView) -> Bool {
+            guard let document = scroll.documentView, let label = findLastAgent(in: document) else { return false }
+            let visible = scroll.contentView.convert(scroll.contentView.bounds, to: hosting)
+            let bounds = label.convert(label.bounds, to: hosting)
+            return !bounds.isEmpty && visible.intersection(bounds).height >= bounds.height - 1
+        }
         let views = scrollViews(in: hosting)
         XCTAssertEqual(views.count, 1, "The agent rows must share the plan's scroll view")
         let scroll = try XCTUnwrap(views.first)
@@ -157,7 +177,28 @@ final class CodexGroupingVisualTests: XCTestCase {
         scroll.reflectScrolledClipView(clip)
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: bottomY))
         scroll.reflectScrolledClipView(clip)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        hosting.layoutSubtreeIfNeeded()
         XCTAssertEqual(clip.bounds.origin.y, bottomY, accuracy: 1)
+        XCTAssertTrue(lastAgentIsVisible(in: scroll), "The last assistant must be visible at the end of the plan")
+        var refreshed = task
+        refreshed.steps = task.steps.map { TaskStep(title: $0.title, status: $0.status) }
+        XCTAssertNotEqual(refreshed.steps.map(\.id), task.steps.map(\.id))
+        store.testReplacePreviewTasks([refreshed])
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        hosting.layoutSubtreeIfNeeded()
+        let refreshedViews = scrollViews(in: hosting)
+        XCTAssertEqual(refreshedViews.count, 1)
+        let refreshedScroll = try XCTUnwrap(refreshedViews.first)
+        let refreshedDocument = try XCTUnwrap(refreshedScroll.documentView)
+        let refreshedClip = refreshedScroll.contentView
+        let refreshedBottom = max(0, refreshedDocument.bounds.height - refreshedClip.bounds.height)
+        XCTAssertGreaterThan(refreshedBottom, 1)
+        let refreshedBottomY: CGFloat = refreshedDocument.isFlipped ? refreshedBottom : 0
+        XCTAssertTrue(store.isCodexGroupExpanded(task.id))
+        XCTAssertEqual(refreshedClip.bounds.origin.y, refreshedBottomY, accuracy: 1,
+                       "Refreshing an equivalent plan must not move the open list away from the bottom")
+        XCTAssertTrue(lastAgentIsVisible(in: refreshedScroll), "The last assistant must remain visible after refresh")
     }
     #endif
 

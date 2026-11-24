@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# CI-only image creation for the already signed and verified 0.3.12 app.
+# CI-only image creation for the already signed and verified 0.3.13 app.
 # The caller runs this script inside the disposable offline sandbox. This is
 # intentionally separate from the normal macOS installer script.
 if test "$#" != 2; then
@@ -28,7 +28,7 @@ test -d "$task_root/temp" && test ! -L "$task_root/temp"
 test "$(cd -P "$task_root/temp" && pwd -P)" = "$task_root/temp"
 task_source="$task_root/source/macos"
 task_app="$task_source/dist/AI Task Monitor.app"
-task_output="$task_source/dist/AITaskMonitor-macOS-0.3.12.dmg"
+task_output="$task_source/dist/AITaskMonitor-macOS-0.3.13.dmg"
 if test "$1" != "$task_app" || test "$2" != "$task_output"; then
   echo 'Unexpected app or image path.' >&2; exit 2
 fi
