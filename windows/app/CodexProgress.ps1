@@ -4395,7 +4395,7 @@ function New-RelatedAgentToggle($task,[double]$fontSize) {
  $button=New-Object Windows.Controls.Button;$button.Style=$window.Resources['ProviderTabStyle'];$button.Height=22;$button.Padding=New-Object Windows.Thickness(0);$button.Margin=New-Object Windows.Thickness(0);$button.Cursor=[Windows.Input.Cursors]::Hand
  $mode='expanded';$button.Tag=[PSCustomObject]@{Id=$id;Mode=$mode}
  $buttonContent=New-Object Windows.Controls.StackPanel;$buttonContent.Orientation='Horizontal'
- $count=Text $suffix $fontSize $script:palette.Primary 'SemiBold';$count.TextWrapping='NoWrap';$count.Tag='related-agent-count'
+ $count=Text $suffix $fontSize $script:palette.Primary 'SemiBold';$count.TextWrapping='NoWrap';[Windows.Automation.AutomationProperties]::SetAutomationId($count,'related-agent-count')
  $arrow=New-Object Windows.Shapes.Path;$arrow.Data=[Windows.Media.Geometry]::Parse('M 4,7 L 10,13 L 16,7');$arrow.Width=9;$arrow.Height=6;$arrow.Stretch='Uniform';$arrow.Stroke=Brush $script:palette.Secondary;$arrow.StrokeThickness=1.3;$arrow.StrokeStartLineCap='Round';$arrow.StrokeEndLineCap='Round';$arrow.StrokeLineJoin='Round';$arrow.Margin=New-Object Windows.Thickness(4,0,0,0);$arrow.VerticalAlignment='Center'
  if($expanded){$arrow.RenderTransformOrigin=[Windows.Point]::new(0.5,0.5);$arrow.RenderTransform=[Windows.Media.ScaleTransform]::new(1,-1)}
  $buttonContent.Children.Add($count)|Out-Null;$buttonContent.Children.Add($arrow)|Out-Null;$button.Content=$buttonContent
@@ -4433,7 +4433,7 @@ function New-TaskTitleLine($task,[double]$rightMargin,[bool]$fixedHeight) {
  $countColumn=New-Object Windows.Controls.ColumnDefinition;$countColumn.Width=[Windows.GridLength]::Auto
  $line.ColumnDefinitions.Add($nameColumn);$line.ColumnDefinitions.Add($countColumn)
  if($fixedHeight){$countView=New-RelatedAgentToggle $task 16}
- else{$countView=Text $suffix 16 $script:palette.Primary 'SemiBold';$countView.TextWrapping='NoWrap';$countView.Tag='related-agent-count'}
+ else{$countView=Text $suffix 16 $script:palette.Primary 'SemiBold';$countView.TextWrapping='NoWrap';[Windows.Automation.AutomationProperties]::SetAutomationId($countView,'related-agent-count')}
  [Windows.Controls.Grid]::SetColumn($countView,1)
  $line.Children.Add($title)|Out-Null;$line.Children.Add($countView)|Out-Null
  return $line
@@ -4554,10 +4554,10 @@ function Add-CompactTask($task) {
  if($extraAgentStep){
   $progressView=New-Object Windows.Controls.StackPanel;$progressView.HorizontalAlignment='Right'
   $percent.HorizontalAlignment='Right';$progressView.Children.Add($percent)|Out-Null
-  $agentStep=Text $extraAgentStep 11.5 $script:palette.Activity;$agentStep.HorizontalAlignment='Right';$agentStep.TextWrapping='NoWrap';$agentStep.TextTrimming='CharacterEllipsis';Add-ConditionalHint $agentStep $extraAgentStep 'line';$agentStep.Tag='related-agent-count';$progressView.Children.Add($agentStep)|Out-Null
+  $agentStep=Text $extraAgentStep 11.5 $script:palette.Activity;$agentStep.HorizontalAlignment='Right';$agentStep.TextWrapping='NoWrap';$agentStep.TextTrimming='CharacterEllipsis';Add-ConditionalHint $agentStep $extraAgentStep 'line';[Windows.Automation.AutomationProperties]::SetAutomationId($agentStep,'related-agent-count');$progressView.Children.Add($agentStep)|Out-Null
  }else{
   $progressView=$percent
-  if((Compact-AgentStepLabel $task) -and $progressLabel -ceq (Compact-AgentStepLabel $task)){$percent.Tag='related-agent-count'}
+  if((Compact-AgentStepLabel $task) -and $progressLabel -ceq (Compact-AgentStepLabel $task)){[Windows.Automation.AutomationProperties]::SetAutomationId($percent,'related-agent-count')}
  }
  [Windows.Controls.Grid]::SetColumn($title,0); [Windows.Controls.Grid]::SetColumn($progressView,1)
  $header.Children.Add($title)|Out-Null; $header.Children.Add($progressView)|Out-Null
@@ -5680,7 +5680,7 @@ if ($SnapshotFile) {
  if($PreviewRelatedAgentsUiTest){
   function Find-RelatedPreview($parent,[string]$kind){
    if($parent -is [Windows.Controls.TextBlock] -and $parent.IsVisible){
-    if($kind -eq 'count' -and $parent.Tag -ceq 'related-agent-count'){return $parent}
+    if($kind -eq 'count' -and [Windows.Automation.AutomationProperties]::GetAutomationId($parent) -ceq 'related-agent-count'){return $parent}
     if($kind -eq 'status' -and $parent.Tag -ceq 'related-agent-status'){return $parent}
     if($kind -eq 'action' -and [Windows.Automation.AutomationProperties]::GetAutomationId($parent) -ceq 'related-agent-action'){return $parent}
     if($kind -eq 'activity' -and [Windows.Automation.AutomationProperties]::GetAutomationId($parent) -ceq 'related-parent-activity'){return $parent}
