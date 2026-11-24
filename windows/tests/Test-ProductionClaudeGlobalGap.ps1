@@ -44,7 +44,7 @@ try{
    $owner=[AITaskMonitor.LocalReadOwner.Owner]::new((Join-Path $work 'LocalSourceWorker.ps1'),$config)
    $client=New-LocalSourceClient $owner 'ru';$clock=[Diagnostics.Stopwatch]::StartNew()
    do{$snapshot=Get-LocalSourceClientSnapshot $client 'ru' 0;if($client.Fresh -and @($snapshot.Claude).Count -eq 1){break};Start-Sleep -Milliseconds 15}while($clock.ElapsedMilliseconds -lt 15000)
-   Require ($client.Fresh -and @($snapshot.Claude).Count -eq 1 -and $snapshot.Claude[0].Active) ('The synthetic Claude baseline failed: mode='+$mode+'; owner='+$owner.Stage+'; failure='+$owner.FailureStage)
+   Require ($client.Fresh -and @($snapshot.Claude).Count -eq 1 -and $snapshot.Claude[0].Active) ('The synthetic Claude baseline failed: mode='+$mode+'; elapsed_ms='+$clock.ElapsedMilliseconds+'; owner='+$owner.Stage+'; failure='+$owner.FailureStage+'; kind='+$owner.FailureKind+'; warmup_ready='+$client.WarmupReady+'; warmup_pending='+$client.WarmupPending+'; timed_out='+$client.TimedOut+'; polling='+$owner.IsPolling+'; pending='+$owner.HasPendingRequest+'; result='+$owner.HasResult)
    $promptB=Event 'synthetic-b' 'UserPromptSubmit' $now.AddSeconds(-4) $true;$splitB=[int]($promptB.Length/2)
    $firstStop=Event 'synthetic-a' 'Stop' $now.AddSeconds(-3) $false 'stop_clear'
    [IO.File]::AppendAllText($eventPath,($firstStop+[Environment]::NewLine+$promptB.Substring(0,$splitB)),$utf8);$clock.Restart()

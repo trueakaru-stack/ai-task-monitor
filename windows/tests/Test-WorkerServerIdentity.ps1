@@ -19,6 +19,9 @@ try{
    try{
     $marker=Join-Path $root ('read-'+[Guid]::NewGuid().ToString('N'))
     $compiledMarker=Join-Path $root ('compiled-'+[Guid]::NewGuid().ToString('N'))
+    $callMarker=Join-Path $root ('call-'+[Guid]::NewGuid().ToString('N'));$returnedMarker=Join-Path $root ('returned-'+[Guid]::NewGuid().ToString('N'))
+    $rejectMarker=Join-Path $root ('rejected-'+[Guid]::NewGuid().ToString('N'));$catchMarker=Join-Path $root ('caught-'+[Guid]::NewGuid().ToString('N'))
+    $beforeCloseMarker=Join-Path $root ('before-close-'+[Guid]::NewGuid().ToString('N'));$afterCloseMarker=Join-Path $root ('after-close-'+[Guid]::NewGuid().ToString('N'))
     $foreign=Join-Path $root 'PipeServerIdentity.ps1';$foreignMarker=Join-Path $root ('foreign-'+[Guid]::NewGuid().ToString('N'))
     if([IO.File]::Exists($foreign)){[IO.File]::Delete($foreign)}
     if($valid){[IO.File]::WriteAllText($foreign,'[IO.File]::WriteAllText($env:AITM_ID_FOREIGN,"unexpected")',[Text.UTF8Encoding]::new($false))}
@@ -28,8 +31,12 @@ try{
     $compileGate='$identityStarted=[Threading.EventWaitHandle]::OpenExisting($env:AITM_ID_STARTED);$identityRelease=[Threading.EventWaitHandle]::OpenExisting($env:AITM_ID_RELEASE);try{[void]$identityStarted.Set();if(-not $identityRelease.WaitOne(30000)){throw "Synthetic identity gate timed out."}}finally{$identityStarted.Dispose();$identityRelease.Dispose()}'
     $readNeedle='$reader=[IO.BinaryReader]::new('
     $compiledNeedle='$server=[uint32]0'
-    Require ($source.Contains($compileNeedle) -and $source.Contains($readNeedle) -and $source.Contains($compiledNeedle)) 'The production worker identity checks could not be instrumented.'
+    $checkNeedle='if(-not $identityType::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw ''Unexpected owner.''}'
+    $checkProbe='[IO.File]::WriteAllText($env:AITM_ID_CALL,"call");$identityResult=$identityType::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server);[IO.File]::WriteAllText($env:AITM_ID_RETURNED,"returned");if(-not $identityResult -or $server -ne [uint32]$ParentId){[IO.File]::WriteAllText($env:AITM_ID_REJECTED,"rejected");throw ''Unexpected owner.''}'
+    $catchNeedle=if($file -ceq 'DiagnosticWorker.ps1'){' # Send only a phase and exception type; never emit paths or source content.'}else{' # Source paths and task content must not be emitted to a console or log.'}
+    Require ($source.Contains($compileNeedle) -and $source.Contains($readNeedle) -and $source.Contains($compiledNeedle) -and $source.Contains($checkNeedle) -and $source.Contains($catchNeedle) -and $source.Contains('$pipe.Dispose()')) 'The production worker identity checks could not be instrumented.'
     $source=$source.Replace($compileNeedle,$compileGate+[Environment]::NewLine+$compileNeedle).Replace($compiledNeedle,'[IO.File]::WriteAllText($env:AITM_ID_COMPILED,"compiled")'+[Environment]::NewLine+' '+$compiledNeedle).Replace($readNeedle,'[IO.File]::WriteAllText($env:AITM_ID_READ,"verified")'+[Environment]::NewLine+' '+$readNeedle)
+    $source=$source.Replace($checkNeedle,$checkProbe).Replace($catchNeedle,' [IO.File]::WriteAllText($env:AITM_ID_CATCH,"catch")'+[Environment]::NewLine+$catchNeedle).Replace('$pipe.Dispose()','[IO.File]::WriteAllText($env:AITM_ID_BEFORE_CLOSE,"before");$pipe.Dispose();[IO.File]::WriteAllText($env:AITM_ID_AFTER_CLOSE,"after")')
     if($mode -ceq 'api-failure'){
      $apiNeedle='$identityType=$identityBuilder.CreateType()'
      Require ($source.Contains($apiNeedle)) 'The synthetic API failure could not be injected.'
@@ -41,6 +48,7 @@ try{
     $start.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$copy+'" -PipeName "'+$pipeName+'" -ParentId '+$expected
     $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
     $start.EnvironmentVariables['AITM_ID_STARTED']=$startName;$start.EnvironmentVariables['AITM_ID_RELEASE']=$releaseName;$start.EnvironmentVariables['AITM_ID_READ']=$marker;$start.EnvironmentVariables['AITM_ID_COMPILED']=$compiledMarker;$start.EnvironmentVariables['AITM_ID_FOREIGN']=$foreignMarker
+    $start.EnvironmentVariables['AITM_ID_CALL']=$callMarker;$start.EnvironmentVariables['AITM_ID_RETURNED']=$returnedMarker;$start.EnvironmentVariables['AITM_ID_REJECTED']=$rejectMarker;$start.EnvironmentVariables['AITM_ID_CATCH']=$catchMarker;$start.EnvironmentVariables['AITM_ID_BEFORE_CLOSE']=$beforeCloseMarker;$start.EnvironmentVariables['AITM_ID_AFTER_CLOSE']=$afterCloseMarker
     $connect=$server.WaitForConnectionAsync();$child=[Diagnostics.Process]::Start($start)
     Require ($connect.Wait(10000) -and $started.WaitOne(10000) -and $server.IsConnected -and -not [IO.File]::Exists($marker)) 'The worker did not connect before compiling its identity check.'
     $unexpectedWrite=$null
@@ -59,7 +67,7 @@ try{
     if($valid){Require ([IO.File]::Exists($marker) -and -not $child.HasExited) ('The verified worker did not reach reading: compiled={0}; exited={1}.' -f [IO.File]::Exists($compiledMarker),$child.HasExited)}
     else{
      if([IO.File]::Exists($marker)){throw 'The worker read a frame from an unverified server.'}
-     if(-not $child.HasExited){throw ('The unverified synthetic worker did not exit: compiled={0}; connected={1}.' -f [IO.File]::Exists($compiledMarker),$server.IsConnected)}
+     if(-not $child.HasExited){throw ('The unverified synthetic worker did not exit: prepared={0}; connected={1}; entered={2}; returned={3}; rejected={4}; caught={5}; beforeClose={6}; afterClose={7}.' -f [IO.File]::Exists($compiledMarker),$server.IsConnected,[IO.File]::Exists($callMarker),[IO.File]::Exists($returnedMarker),[IO.File]::Exists($rejectMarker),[IO.File]::Exists($catchMarker),[IO.File]::Exists($beforeCloseMarker),[IO.File]::Exists($afterCloseMarker))}
      if($child.ExitCode -eq 0){throw 'The unverified synthetic worker unexpectedly exited successfully.'}
      $received=0;$readFinished=$false
      try{if($unexpectedWrite.Wait(3000)){$received=$unexpectedWrite.GetAwaiter().GetResult();$readFinished=$true}}catch [AggregateException] {if($_.Exception.GetBaseException() -isnot [IO.IOException]){throw};$readFinished=$true}

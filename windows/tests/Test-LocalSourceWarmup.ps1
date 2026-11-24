@@ -11,15 +11,18 @@ $definitions=foreach($name in @('Prop','Unconfirmed-Tasks')){
 }
 . ([scriptblock]::Create(($definitions -join [Environment]::NewLine)))
 function Require([bool]$condition,[string]$message){if(-not $condition){throw $message}}
+function Get-SyntheticStages {
+ return (($stageHandles.Keys|Sort-Object|ForEach-Object {$_+'='+$stageHandles[$_].WaitOne(0)}) -join '; ')
+}
 function Wait-Gate($gate,$owner,[string]$message){
  $clock=[Diagnostics.Stopwatch]::StartNew()
  while($clock.ElapsedMilliseconds -lt 15000){if($gate.WaitOne(20)){return};if($owner.HasExited){break}}
- throw ($message+'; stage='+$owner.Stage+'; failed_at='+$owner.FailureStage+'; kind='+$owner.FailureKind)
+ throw ($message+'; stage='+$owner.Stage+'; failed_at='+$owner.FailureStage+'; kind='+$owner.FailureKind+'; '+(Get-SyntheticStages))
 }
 $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
 $root=[IO.Path]::GetFullPath((Join-Path $temp ('aitm-source-warmup-'+[Guid]::NewGuid().ToString('N'))))
 Require ($root.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)) 'Unsafe synthetic warmup directory.'
-[void][IO.Directory]::CreateDirectory($root);$owner=$null;$handles=@()
+[void][IO.Directory]::CreateDirectory($root);$owner=$null;$handles=@();$stageHandles=@{}
 try{
  $work=Join-Path $root 'worker';$codex=Join-Path $root 'codex';$profile=Join-Path $root 'profile';$data=Join-Path $root 'data'
  foreach($path in @($work,$codex,$profile,$data)){[void][IO.Directory]::CreateDirectory($path)}
@@ -29,7 +32,26 @@ try{
   $name=$prefix+'-'+$key;[Environment]::SetEnvironmentVariable('AITM_WARM_'+$key,$name,'Process')
   $handles+=@([Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$name))
  }
+ $env:AITM_WARM_PREFIX=$prefix
+ foreach($name in @('CONNECTED','IDENTITY_BEGIN','IDENTITY_READY','PID_CALL','PID_DONE','FRAME','DESERIALIZED','CORE_START','CORE_DONE','CAUGHT')){
+  $stageHandles[$name]=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,($prefix+'-'+$name))
+ }
  $source=[IO.File]::ReadAllText((Join-Path $app 'LocalSourceWorker.ps1'))
+ $headerNeedle='$ErrorActionPreference=''Stop'''
+ $source=$source.Replace($headerNeedle,($headerNeedle+[Environment]::NewLine+'function Set-SyntheticStage([string]$name){$e=[Threading.EventWaitHandle]::OpenExisting($env:AITM_WARM_PREFIX+"-"+$name);try{[void]$e.Set()}finally{$e.Dispose()}}'))
+ $source=$source.Replace('$pipe.Connect(5000)',('$pipe.Connect(5000);Set-SyntheticStage "CONNECTED"'))
+ $source=$source.Replace('$identityName=[Reflection.AssemblyName]::new(',('Set-SyntheticStage "IDENTITY_BEGIN";'+ '$identityName=[Reflection.AssemblyName]::new('))
+ $source=$source.Replace('$identityType=$identityBuilder.CreateType()',('$identityType=$identityBuilder.CreateType();Set-SyntheticStage "IDENTITY_READY"'))
+ $identityNeedle='if(-not $identityType::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw ''Unexpected owner.''}'
+ $identityProbe='Set-SyntheticStage "PID_CALL";$ok=$identityType::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server);Set-SyntheticStage "PID_DONE";if(-not $ok -or $server -ne [uint32]$ParentId){throw ''Unexpected owner.''}'
+ Require ($source.Contains($identityNeedle)) 'The synthetic worker PID check could not be instrumented.'
+ $source=$source.Replace($identityNeedle,$identityProbe)
+ $source=$source.Replace('  if($length -le 0 -or $length -gt 16777216)',('  Set-SyntheticStage "FRAME"'+[Environment]::NewLine+'  if($length -le 0 -or $length -gt 16777216)'))
+ $source=$source.Replace('  if(-not $initialized){',('  Set-SyntheticStage "DESERIALIZED"'+[Environment]::NewLine+'  if(-not $initialized){'))
+ $coreNeedle='   . (Join-Path $PSScriptRoot ''LocalSourceCore.ps1'')'
+ Require ($source.Contains($headerNeedle) -and $source.Contains($coreNeedle)) 'The synthetic worker loading stages could not be instrumented.'
+ $source=$source.Replace($coreNeedle,('   Set-SyntheticStage "CORE_START"'+[Environment]::NewLine+$coreNeedle+[Environment]::NewLine+'   Set-SyntheticStage "CORE_DONE"'))
+ $source=$source.Replace(' # Source paths and task content must not be emitted to a console or log.',(' Set-SyntheticStage "CAUGHT"'+[Environment]::NewLine+' # Source paths and task content must not be emitted to a console or log.'))
  $initNeedle='   Initialize-LocalSourceReader -CodexHome'
  $initGate='$script:syntheticPolls=0;$s=[Threading.EventWaitHandle]::OpenExisting($env:AITM_WARM_INIT_START);$r=[Threading.EventWaitHandle]::OpenExisting($env:AITM_WARM_INIT_RELEASE);try{[void]$s.Set();if(-not $r.WaitOne(30000)){throw "Synthetic init gate timed out."}}finally{$s.Dispose();$r.Dispose()}'
  $readNeedle='$result=Local-SourceSnapshot'
@@ -62,8 +84,12 @@ try{
  Require ($owner.Generation -ne $generation -and $owner.OwnedProcessId -eq $id -and -not $handles[2].WaitOne(0)) 'The changed settings did not invalidate the old warmup.'
  [void]$handles[1].Set();$clock=[Diagnostics.Stopwatch]::StartNew()
  do{[void](Get-LocalSourceClientSnapshot $client 'en' 9);if($client.WarmupReady){break};Start-Sleep -Milliseconds 10}while($clock.ElapsedMilliseconds -lt 15000)
- Require ($client.WarmupReady -and -not $client.Fresh -and $owner.OwnedProcessId -eq $id) 'Initialization acknowledgement was treated as a source snapshot.'
+ Require ($client.WarmupReady -and -not $client.Fresh -and $owner.OwnedProcessId -eq $id) ('The initialization acknowledgement failed or was treated as a source snapshot; elapsed_ms='+$clock.ElapsedMilliseconds+'; owner='+$owner.Stage+'; failure='+$owner.FailureStage+'; kind='+$owner.FailureKind+'; warmup_ready='+$client.WarmupReady+'; warmup_pending='+$client.WarmupPending+'; polling='+$owner.IsPolling+'; pending='+$owner.HasPendingRequest+'; result='+$owner.HasResult+'; '+(Get-SyntheticStages))
  Wait-Gate $handles[2] $owner 'The separately timed source read did not start.'
+ foreach($stage in @('CONNECTED','IDENTITY_BEGIN','IDENTITY_READY','PID_CALL','PID_DONE','FRAME','DESERIALIZED','CORE_START','CORE_DONE')){
+  Require ($stageHandles[$stage].WaitOne(0)) ('Missing synthetic startup stage: '+$stage)
+ }
+ Require (-not $stageHandles['CAUGHT'].WaitOne(0)) 'The synthetic worker caught an unexpected startup error.'
  $generation=$owner.Generation;$client.PendingStartedAt=[Diagnostics.Stopwatch]::GetTimestamp()-([Diagnostics.Stopwatch]::Frequency*7)
  $uncertain=Get-LocalSourceClientSnapshot $client 'en' 9
  Require ($client.TimedOut -and -not $client.Fresh -and $owner.Generation -ne $generation -and
@@ -81,7 +107,9 @@ try{
  foreach($handle in $handles){[void]$handle.Set()}
  if($null -ne $owner){$owner.Dispose();$clock=[Diagnostics.Stopwatch]::StartNew();while(-not $owner.HasExited -and $clock.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10};if(-not $owner.CanReplace){throw 'The synthetic warmup owner did not stop.'}}
  foreach($handle in $handles){$handle.Dispose()}
+ foreach($handle in $stageHandles.Values){$handle.Dispose()}
  foreach($key in @('INIT_START','INIT_RELEASE','POLL_START_1','POLL_RELEASE_1','POLL_START_2','POLL_RELEASE_2')){[Environment]::SetEnvironmentVariable('AITM_WARM_'+$key,$null,'Process')}
+ [Environment]::SetEnvironmentVariable('AITM_WARM_PREFIX',$null,'Process')
  $resolved=[IO.Path]::GetFullPath((Resolve-Path -LiteralPath $root).Path)
  if($resolved -cne $root -or -not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe synthetic warmup cleanup.'}
  Remove-Item -LiteralPath $resolved -Recurse -Force
