@@ -23,6 +23,11 @@ function Wait-Result($owner,[int]$milliseconds=10000){
  while($clock.ElapsedMilliseconds -lt $milliseconds){$result=$owner.TryReceive();if($null -ne $result){return $result};Start-Sleep -Milliseconds 10}
  throw 'The synthetic transport did not return a result.'
 }
+function Wait-HasResult($owner,[int]$milliseconds=10000){
+ $clock=[Diagnostics.Stopwatch]::StartNew()
+ while(-not $owner.HasResult -and $clock.ElapsedMilliseconds -lt $milliseconds){Start-Sleep -Milliseconds 10}
+ Require $owner.HasResult 'The synthetic transport did not make a result available.'
+}
 function Wait-Exit($owner,[int]$milliseconds=10000){
  $clock=[Diagnostics.Stopwatch]::StartNew()
  while(-not $owner.HasExited -and $clock.ElapsedMilliseconds -lt $milliseconds){Start-Sleep -Milliseconds 10}
@@ -46,9 +51,9 @@ function New-TestGates {
 $workerPath=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'fixtures\LocalReadSyntheticWorker.ps1'))
 if($ExitProbe){
  $probeGates=New-TestGates
- $probeConfig=[PSCustomObject]@{Started=$probeGates.StartedName;Release=$probeGates.ReleaseName}
+ $probeConfig=[string[]]@($probeGates.StartedName,$probeGates.ReleaseName)
  $probeOwner=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$probeConfig)
- Require ($probeOwner.Request([PSCustomObject]@{Kind='block';Language='ru';Connected=$true})) 'The exit probe request was rejected.'
+ Require ($probeOwner.Request([string[]]@('block','ru','true'))) 'The exit probe request was rejected.'
  Require ($probeGates.Started.WaitOne(10000)) 'The exit probe did not enter its synthetic blocked read.'
  Write-Output ('WORKER:'+$probeOwner.OwnedProcessId)
  # Deliberately omit Dispose and leave the synthetic read blocked. The OS must
@@ -79,15 +84,16 @@ Sync-CompactDots $script:lastAllTasks
 
 $gates=New-TestGates
 [LocalReadTestRelay]::Relay($gates.LocalRelease,$gates.Release)
-$config=[PSCustomObject]@{Started=$gates.StartedName;Release=$gates.ReleaseName}
+$config=[string[]]@($gates.StartedName,$gates.ReleaseName)
 $owner=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$config)
+$config[0]='changed-after-construction'
 try{
- Require ($owner.Request([PSCustomObject]@{Kind='block';Language='ru';Connected=$true})) 'The first synthetic request was rejected.'
+ Require ($owner.Request([string[]]@('block','ru','true'))) 'The first synthetic request was rejected.'
  Require ($gates.Started.WaitOne(10000)) 'The synthetic worker did not enter the blocked read.'
  [LocalReadTestRelay]::Watchdog($gates.LocalRelease,8000)
  $childId=$owner.OwnedProcessId
  Require ($childId -gt 0 -and $owner.IsPolling) 'The single worker is not polling.'
- foreach($index in 1..50){Require ($owner.Request([PSCustomObject]@{Kind='obsolete';Language='ru';Connected=$true})) 'A repeated refresh was rejected.'}
+ foreach($index in 1..50){Require ($owner.Request([string[]]@('obsolete','ru','true'))) 'A repeated refresh was rejected.'}
  Require ($owner.HasPendingRequest -and $owner.OwnedProcessId -eq $childId) 'Refresh requests started another worker.'
 
  $dot=@($compactDotsPanel.Children|Where-Object {[string]$_.Tag -ceq 'second'})[0]
@@ -97,7 +103,9 @@ try{
  $oldGeneration=$owner.Generation
  $owner.Invalidate()
  Require ($owner.Generation -ne $oldGeneration -and -not $owner.HasPendingRequest) 'Disconnect or language invalidation did not clear stale pending work.'
- Require ($owner.Request([PSCustomObject]@{Kind='latest';Language='en';Connected=$false})) 'The new generation was not accepted.'
+ $latestRequest=[string[]]@('latest','en','false')
+ Require ($owner.Request($latestRequest)) 'The new generation was not accepted.'
+ $latestRequest[1]='changed-after-request'
  Require (-not $gates.LocalRelease.IsSet -and $null -eq $owner.TryReceive()) 'A stale result was published before the blocked read finished.'
  $gates.LocalRelease.Set()
  $result=Wait-Result $owner
@@ -110,13 +118,36 @@ try{
 Wait-Exit $owner
 Wait-ProcessGone $childId
 
+# An unread terminal result or source error cannot be overwritten by a newer
+# request. New requests may coalesce, but the current result is delivered first.
+$orderedGates=New-TestGates
+$orderedConfig=[string[]]@($orderedGates.StartedName,$orderedGates.ReleaseName)
+$ordered=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$orderedConfig)
+try{
+ Require ($ordered.Request([string[]]@('terminal','ru','true'))) 'The terminal request was rejected.'
+ Wait-HasResult $ordered
+ Require ($ordered.Request([string[]]@('error','en','false'))) 'The pending error request was rejected.'
+ Require ($ordered.HasPendingRequest -and -not $ordered.IsPolling) 'The unread result did not hold back the next poll.'
+ $terminal=$ordered.TryReceive()
+ Require ($terminal.Success -and $terminal.Value.Sequence -eq 1 -and $terminal.Value.Kind -ceq 'terminal') 'The unread terminal result was overwritten.'
+ Wait-HasResult $ordered
+ Require ($ordered.Request([string[]]@('after-error','en','true'))) 'The request after error was rejected.'
+ $errorResult=$ordered.TryReceive()
+ Require ($errorResult.Success -and $errorResult.Value.Sequence -eq 2 -and $errorResult.Value.IsError) 'The unread source error was overwritten.'
+ $afterError=Wait-Result $ordered
+ Require ($afterError.Success -and $afterError.Value.Sequence -eq 3 -and $afterError.Value.Kind -ceq 'after-error') 'The queued request did not follow the error result.'
+ $orderedId=$ordered.OwnedProcessId
+}finally{$ordered.Dispose()}
+Wait-Exit $ordered
+Wait-ProcessGone $orderedId
+
 # Fail closed when job assignment fails: the worker is not sent the synthetic
 # source configuration and is killed without ever reaching the blocked read.
 $rejectedGates=New-TestGates
-$rejectedConfig=[PSCustomObject]@{Started=$rejectedGates.StartedName;Release=$rejectedGates.ReleaseName}
+$rejectedConfig=[string[]]@($rejectedGates.StartedName,$rejectedGates.ReleaseName)
 $rejected=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$rejectedConfig,$true)
 try{
- [void]$rejected.Request([PSCustomObject]@{Kind='block';Language='ru';Connected=$true})
+ [void]$rejected.Request([string[]]@('block','ru','true'))
  $failed=Wait-Result $rejected
  Require (-not $failed.Success -and -not $rejectedGates.Started.WaitOne(0)) 'A worker read after a failed job assignment.'
 }finally{$rejected.Dispose()}
@@ -126,9 +157,9 @@ if($rejected.OwnedProcessId -gt 0){Wait-ProcessGone $rejected.OwnedProcessId}
 # Disposal is nonblocking even while the worker is stuck; the job releases only
 # this worker, without requiring the synthetic source to unblock itself.
 $closingGates=New-TestGates
-$closingConfig=[PSCustomObject]@{Started=$closingGates.StartedName;Release=$closingGates.ReleaseName}
+$closingConfig=[string[]]@($closingGates.StartedName,$closingGates.ReleaseName)
 $closing=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$closingConfig)
-Require ($closing.Request([PSCustomObject]@{Kind='block';Language='ru';Connected=$true})) 'The closing test request was rejected.'
+Require ($closing.Request([string[]]@('block','ru','true'))) 'The closing test request was rejected.'
 Require ($closingGates.Started.WaitOne(10000)) 'The closing test did not start its blocked read.'
 [LocalReadTestRelay]::Watchdog($closingGates.LocalRelease,8000)
 $closingId=$closing.OwnedProcessId
@@ -165,4 +196,4 @@ try{
  $probe.Dispose()
 }
 
-Write-Output 'Local read owner: production dot handler with stub rendering, blocked read, coalescing, generation, language, disconnect, rejected job and nonblocking close passed on synthetic data.'
+Write-Output 'Local read owner: production dot handler with stub rendering, blocked read, coalescing, ordered terminal/error results, generation, language, disconnect, rejected job and nonblocking close passed on synthetic data.'

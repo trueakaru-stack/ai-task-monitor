@@ -24,33 +24,35 @@ namespace AITaskMonitor.LocalReadOwner {
     // This transport is not connected to production sources yet. Its worker
     // must not write source data, spawn processes, or print source content.
     // The UI owns this object; all process, pipe and serialization work stays
-    // on a background thread. Arguments must be detached data, not WPF objects.
+    // on a background thread. The protocol accepts only bounded string arrays;
+    // the owner copies them before another thread can read them.
     public sealed class Owner : IDisposable {
         private const int MaximumFrame = 16777216;
         private readonly object gate = new object();
         private readonly AutoResetEvent pendingSignal = new AutoResetEvent(false);
         private readonly ManualResetEvent closingSignal = new ManualResetEvent(false);
         private readonly string workerPath;
-        private readonly object configuration;
+        private readonly string[] configuration;
         private readonly bool rejectAssignment;
         private readonly Thread thread;
         private Guid generation = Guid.NewGuid();
-        private object pending;
+        private string[] pending;
         private PollResult latest;
-        private bool hasPending, busy, closed, exited, broken;
+        private bool hasPending, busy, closed, exited, broken, cleanupStarted, cleanupFinished;
+        private string pipeName;
         private int ownedProcessId;
         private NamedPipeServerStream pipe;
         private Process process;
         private SafeFileHandle job;
 
-        public Owner(string workerPath, object configuration) : this(workerPath, configuration, false) { }
+        public Owner(string workerPath, string[] configuration) : this(workerPath, configuration, false) { }
 
         // This failure injection can only reject an assignment, never bypass it.
-        public Owner(string workerPath, object configuration, bool rejectAssignment) {
+        public Owner(string workerPath, string[] configuration, bool rejectAssignment) {
             if (String.IsNullOrWhiteSpace(workerPath)) throw new ArgumentException("A worker path is required.", "workerPath");
             this.workerPath = Path.GetFullPath(workerPath);
             if (this.workerPath.IndexOf('"') >= 0) throw new ArgumentException("Invalid worker path.", "workerPath");
-            this.configuration = configuration;
+            this.configuration = CopyArguments(configuration);
             this.rejectAssignment = rejectAssignment;
             thread = new Thread(Work);
             thread.IsBackground = true;
@@ -58,12 +60,13 @@ namespace AITaskMonitor.LocalReadOwner {
             thread.Start();
         }
 
-        public bool Request(object request) {
+        public bool Request(string[] request) {
+            string[] copy = CopyArguments(request);
             lock (gate) {
                 if (closed || broken || exited) return false;
-                pending = request;
+                pending = copy;
                 hasPending = true;
-                pendingSignal.Set();
+                if (latest == null) pendingSignal.Set();
                 return true;
             }
         }
@@ -83,13 +86,15 @@ namespace AITaskMonitor.LocalReadOwner {
                 if (closed) return null;
                 PollResult value = latest;
                 latest = null;
+                if (value != null && hasPending && !broken) pendingSignal.Set();
                 return value;
             }
         }
 
         public bool IsPolling { get { lock (gate) return busy; } }
         public bool HasPendingRequest { get { lock (gate) return hasPending; } }
-        public bool HasExited { get { lock (gate) return exited; } }
+        public bool HasExited { get { lock (gate) return exited && cleanupFinished; } }
+        public bool HasResult { get { lock (gate) return latest != null; } }
         public int OwnedProcessId { get { lock (gate) return ownedProcessId; } }
         public Guid Generation { get { lock (gate) return generation; } }
 
@@ -114,11 +119,11 @@ namespace AITaskMonitor.LocalReadOwner {
                 while (true) {
                     int signalled = WaitHandle.WaitAny(new WaitHandle[] { closingSignal, pendingSignal });
                     if (signalled == 0) return;
-                    object input;
+                    string[] input;
                     Guid requestGeneration;
                     lock (gate) {
                         if (closed) return;
-                        if (!hasPending) continue;
+                        if (!hasPending || latest != null) continue;
                         input = pending;
                         pending = null;
                         hasPending = false;
@@ -130,7 +135,7 @@ namespace AITaskMonitor.LocalReadOwner {
                         busy = false;
                         if (closed) return;
                         if (requestGeneration == generation) latest = new PollResult(true, result, requestGeneration);
-                        if (hasPending) pendingSignal.Set();
+                        if (hasPending && latest == null) pendingSignal.Set();
                     }
                 }
             } catch (Exception) {
@@ -149,7 +154,7 @@ namespace AITaskMonitor.LocalReadOwner {
         }
 
         private void StartWorker() {
-            string pipeName = "AITaskMonitorLocalRead-" + Guid.NewGuid().ToString("N");
+            string name = "AITaskMonitorLocalRead-" + Guid.NewGuid().ToString("N");
             var security = new PipeSecurity();
             security.SetAccessRuleProtection(true, false);
             security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.NetworkSid, null), PipeAccessRights.FullControl, AccessControlType.Deny));
@@ -157,7 +162,7 @@ namespace AITaskMonitor.LocalReadOwner {
             using (WindowsIdentity identity = WindowsIdentity.GetCurrent()) current = identity.User;
             if (current == null) throw new InvalidOperationException("Current user unavailable.");
             security.AddAccessRule(new PipeAccessRule(current, PipeAccessRights.ReadWrite | PipeAccessRights.Synchronize, AccessControlType.Allow));
-            var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
+            var server = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous, 4096, 4096, security);
             SafeFileHandle ownedJob = null;
             Process child = null;
@@ -166,7 +171,7 @@ namespace AITaskMonitor.LocalReadOwner {
                 ownedJob = Native.CreateJob();
                 var start = new ProcessStartInfo();
                 start.FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
-                start.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + workerPath + "\" -PipeName \"" + pipeName + "\" -ParentId " + Process.GetCurrentProcess().Id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                start.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + workerPath + "\" -PipeName \"" + name + "\" -ParentId " + Process.GetCurrentProcess().Id.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 start.UseShellExecute = false;
                 start.CreateNoWindow = true;
                 start.WindowStyle = ProcessWindowStyle.Hidden;
@@ -177,6 +182,7 @@ namespace AITaskMonitor.LocalReadOwner {
                 lock (gate) {
                     if (closed) throw new InvalidOperationException("Owner is closed.");
                     pipe = server; job = ownedJob; process = child;
+                    pipeName = name;
                     ownedProcessId = child.Id;
                     transferred = true;
                 }
@@ -201,7 +207,7 @@ namespace AITaskMonitor.LocalReadOwner {
             }
         }
 
-        private object Exchange(object input) {
+        private object Exchange(string[] input) {
             NamedPipeServerStream active;
             lock (gate) { if (closed) throw new InvalidOperationException("Owner is closed."); active = pipe; }
             var envelope = new PSObject();
@@ -244,13 +250,30 @@ namespace AITaskMonitor.LocalReadOwner {
             NamedPipeServerStream ownedPipe;
             SafeFileHandle ownedJob;
             Process ownedProcess;
-            lock (gate) { ownedPipe = pipe; pipe = null; ownedJob = job; job = null; ownedProcess = process; process = null; }
+            lock (gate) {
+                if (cleanupStarted) return;
+                cleanupStarted = true;
+                ownedPipe = pipe; pipe = null; ownedJob = job; job = null; ownedProcess = process; process = null;
+            }
             if (ownedJob != null) { try { ownedJob.Dispose(); } catch (Exception) { } }
             if (ownedPipe != null) { try { ownedPipe.Dispose(); } catch (Exception) { } }
             if (ownedProcess != null) {
                 try { if (!ownedProcess.HasExited) ownedProcess.Kill(); } catch (Exception) { }
                 try { ownedProcess.Dispose(); } catch (Exception) { }
             }
+            lock (gate) { cleanupFinished = true; }
+        }
+
+        private static string[] CopyArguments(string[] values) {
+            if (values == null) return new string[0];
+            if (values.Length > 32) throw new ArgumentException("Too many arguments.");
+            string[] copy = new string[values.Length];
+            for (int index = 0; index < values.Length; index++) {
+                string value = values[index] ?? "";
+                if (value.Length > 32768) throw new ArgumentException("An argument is too long.");
+                copy[index] = value;
+            }
+            return copy;
         }
     }
 

@@ -25,14 +25,14 @@ try {
   $xml=[Text.UTF8Encoding]::new($false,$true).GetString($bytes)
   $message=[Management.Automation.PSSerializer]::Deserialize($xml)
   $sequence++
-  if([string]$message.Request.Kind -ceq 'block'){
-   $started=[Threading.EventWaitHandle]::OpenExisting([string]$message.Configuration.Started)
-   $release=[Threading.EventWaitHandle]::OpenExisting([string]$message.Configuration.Release)
+  if([string]$message.Request[0] -ceq 'block'){
+   $started=[Threading.EventWaitHandle]::OpenExisting([string]$message.Configuration[0])
+   $release=[Threading.EventWaitHandle]::OpenExisting([string]$message.Configuration[1])
    [void]$started.Set()
    [void]$release.WaitOne()
    $started.Dispose();$release.Dispose()
   }
-  $result=[PSCustomObject]@{Sequence=$sequence;Kind=[string]$message.Request.Kind;Language=[string]$message.Request.Language;Connected=[bool]$message.Request.Connected}
+  $result=[PSCustomObject]@{Sequence=$sequence;Kind=[string]$message.Request[0];Language=[string]$message.Request[1];Connected=([string]$message.Request[2] -ceq 'true');IsError=([string]$message.Request[0] -ceq 'error')}
   $resultXml=[Management.Automation.PSSerializer]::Serialize($result,24)
   $resultBytes=[Text.UTF8Encoding]::new($false,$true).GetBytes($resultXml)
   $writer.Write([int]$resultBytes.Length)
