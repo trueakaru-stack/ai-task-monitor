@@ -87,7 +87,7 @@ try{
  $tokens=$null;$parseErrors=$null
  $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path (Split-Path -Parent $assets) 'CodexProgress.ps1'),[ref]$tokens,[ref]$parseErrors)
  if($parseErrors.Count){throw 'Application source could not be parsed.'}
- foreach($functionName in @('Prop','Unconfirmed-Tasks','Unconfirmed-ExternalTasks','Local-SourceSnapshot','Source-Snapshot')){
+ foreach($functionName in @('Prop','Unconfirmed-Tasks','Unconfirmed-ExternalTasks','Test-ClaudePartialData','Local-SourceSnapshot','Source-Snapshot')){
   $definition=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $functionName},$true)
   . ([scriptblock]::Create($definition.Extent.Text))
  }

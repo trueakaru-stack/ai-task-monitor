@@ -32,22 +32,41 @@ namespace AITaskMonitor.Claude {
   private static readonly Regex BackupName=new Regex(@"^settings\.json\.codex-tasks-backup-\d{8}-\d{6}-\d{7}$",RegexOptions.CultureInvariant);
 
   public static void Schedule(string directory,string backupDirectory,int days,long maximumBytes) {
-   lock(Gate){
-    if(configuredDays!=days || configuredMaximum!=maximumBytes){configuredDays=days;configuredMaximum=maximumBytes;generation++;}
-    if(worker!=null && !worker.IsCompleted)return;
-    int requestedGeneration=generation;
-    worker=Task.Run(() => {
-     string result;
-     try { result=CleanInternal(directory,backupDirectory,DateTimeOffset.UtcNow,days,maximumBytes,"Local\\CodexTasksClaudeEvents",requestedGeneration); }
-     catch(OperationCanceledException) { result="cancelled"; }
-     catch { result="error"; }
-     lock(Gate){status=result;}
-     return result;
-    });
-   }
+   lock(Gate){ScheduleLocked(directory,backupDirectory,days,maximumBytes);}
   }
-  public static string Status { get { lock(Gate){return status;} } }
-  public static void Invalidate() { lock(Gate){generation++;configuredDays=0;configuredMaximum=0;} }
+  // UI callers must never wait for a filesystem operation that currently owns
+  // Gate. A rejected request can be retried on a later timer tick.
+  public static bool TrySchedule(string directory,string backupDirectory,int days,long maximumBytes) {
+   if(!Monitor.TryEnter(Gate))return false;
+   try{ScheduleLocked(directory,backupDirectory,days,maximumBytes);return true;}
+   finally{Monitor.Exit(Gate);}
+  }
+  private static void ScheduleLocked(string directory,string backupDirectory,int days,long maximumBytes) {
+   if(configuredDays!=days || configuredMaximum!=maximumBytes){configuredDays=days;configuredMaximum=maximumBytes;Interlocked.Increment(ref generation);}
+   if(worker!=null && !worker.IsCompleted)return;
+   int requestedGeneration=Volatile.Read(ref generation);
+   worker=Task.Run(() => {
+    string result;
+    try { result=CleanInternal(directory,backupDirectory,DateTimeOffset.UtcNow,days,maximumBytes,"Local\\CodexTasksClaudeEvents",requestedGeneration); }
+    catch(OperationCanceledException) { result="cancelled"; }
+    catch { result="error"; }
+    lock(Gate){status=result;}
+    return result;
+   });
+  }
+  public static string Status { get {
+   if(!Monitor.TryEnter(Gate))return "busy";
+   try{return worker!=null && !worker.IsCompleted?"busy":status;}finally{Monitor.Exit(Gate);}
+  } }
+  public static void Invalidate() { lock(Gate){Interlocked.Increment(ref generation);configuredDays=0;configuredMaximum=0;} }
+  public static bool TryInvalidate() {
+   // Cancel any later commit immediately, even if a commit already holding
+   // Gate has to finish before the caller can safely persist a new policy.
+   Interlocked.Increment(ref generation);
+   if(!Monitor.TryEnter(Gate))return false;
+   try{configuredDays=0;configuredMaximum=0;return true;}
+   finally{Monitor.Exit(Gate);}
+  }
   public static void WaitForStop(int milliseconds) {
    Task<string> current;
    lock(Gate){current=worker;}
@@ -170,7 +189,7 @@ namespace AITaskMonitor.Claude {
 
   private static void Commit(int? expectedGeneration,Action action) {
    if(!expectedGeneration.HasValue){action();return;}
-   lock(Gate){if(expectedGeneration.Value!=generation)throw new OperationCanceledException();action();}
+   lock(Gate){if(expectedGeneration.Value!=Volatile.Read(ref generation))throw new OperationCanceledException();action();}
   }
 
   private static void AssertOrdinaryDirectory(string path) {

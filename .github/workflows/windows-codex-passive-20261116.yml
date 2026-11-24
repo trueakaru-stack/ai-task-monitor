@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks-warm, checks-live, checks-identity]
+        part: [checks-warm, checks-gap, checks-live, checks-controls, checks-parity, checks-identity, checks-gate, checks-profile]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
@@ -115,6 +115,8 @@ jobs:
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if($env:AITM_TEST_PART -like 'checks*'){
               switch($env:AITM_TEST_PART){
+                'checks-gate' {$tests=@('Test-ClaudeRetentionGate.ps1','Test-ClaudeRetention.ps1')}
+                'checks-profile' {$tests=@('Test-ClaudeRetentionProfileIsolation.ps1')}
                 'checks-warm' {$tests=@('Test-LocalSourceWarmup.ps1','Test-LocalSourceProductionWiring.ps1')}
                 'checks-identity' {$tests=@('Test-WorkerServerIdentity.ps1')}
                 'checks-gap' {$tests=@('Test-ClaudeGlobalGapRetention.ps1','Test-ClaudeReconnectContinuity.ps1')}

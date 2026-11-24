@@ -33,9 +33,17 @@ try{
   $handles+=@([Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$name))
  }
  $env:AITM_WARM_PREFIX=$prefix
- foreach($name in @('CONNECTED','IDENTITY_BEGIN','IDENTITY_READY','PID_CALL','PID_DONE','FRAME','DESERIALIZED','CORE_START','CORE_DONE','CAUGHT')){
+ foreach($name in @('CONNECTED','IDENTITY_BEGIN','IDENTITY_READY','PID_CALL','PID_DONE','FRAME','DESERIALIZED','CORE_START','CORE_ENTER','RETENTION_START','RETENTION_DONE','ADAPTER_START','ADAPTER_DONE','CORE_DONE','CAUGHT')){
   $stageHandles[$name]=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,($prefix+'-'+$name))
  }
+ $corePath=Join-Path $work 'LocalSourceCore.ps1';$core=[IO.File]::ReadAllText($corePath)
+ foreach($pair in @(@('CodexAgentRetention.ps1','RETENTION'),@('CodexAgentRetentionAdapter.ps1','ADAPTER'))){
+  $needle='. (Join-Path $PSScriptRoot '''+$pair[0]+''')'
+  Require ($core.Contains($needle)) 'A synthetic source module stage could not be instrumented.'
+  $core=$core.Replace($needle,('Set-SyntheticStage "'+$pair[1]+'_START"'+[Environment]::NewLine+$needle+[Environment]::NewLine+'Set-SyntheticStage "'+$pair[1]+'_DONE"'))
+ }
+ $core='Set-SyntheticStage "CORE_ENTER"'+[Environment]::NewLine+$core
+ [IO.File]::WriteAllText($corePath,$core,[Text.UTF8Encoding]::new($true))
  $source=[IO.File]::ReadAllText((Join-Path $app 'LocalSourceWorker.ps1'))
  $headerNeedle='$ErrorActionPreference=''Stop'''
  $source=$source.Replace($headerNeedle,($headerNeedle+[Environment]::NewLine+'function Set-SyntheticStage([string]$name){$e=[Threading.EventWaitHandle]::OpenExisting($env:AITM_WARM_PREFIX+"-"+$name);try{[void]$e.Set()}finally{$e.Dispose()}}'))
@@ -86,7 +94,7 @@ try{
  do{[void](Get-LocalSourceClientSnapshot $client 'en' 9);if($client.WarmupReady){break};Start-Sleep -Milliseconds 10}while($clock.ElapsedMilliseconds -lt 15000)
  Require ($client.WarmupReady -and -not $client.Fresh -and $owner.OwnedProcessId -eq $id) ('The initialization acknowledgement failed or was treated as a source snapshot; elapsed_ms='+$clock.ElapsedMilliseconds+'; owner='+$owner.Stage+'; failure='+$owner.FailureStage+'; kind='+$owner.FailureKind+'; warmup_ready='+$client.WarmupReady+'; warmup_pending='+$client.WarmupPending+'; polling='+$owner.IsPolling+'; pending='+$owner.HasPendingRequest+'; result='+$owner.HasResult+'; '+(Get-SyntheticStages))
  Wait-Gate $handles[2] $owner 'The separately timed source read did not start.'
- foreach($stage in @('CONNECTED','IDENTITY_BEGIN','IDENTITY_READY','PID_CALL','PID_DONE','FRAME','DESERIALIZED','CORE_START','CORE_DONE')){
+ foreach($stage in @('CONNECTED','IDENTITY_BEGIN','IDENTITY_READY','PID_CALL','PID_DONE','FRAME','DESERIALIZED','CORE_START','CORE_ENTER','RETENTION_START','RETENTION_DONE','ADAPTER_START','ADAPTER_DONE','CORE_DONE')){
   Require ($stageHandles[$stage].WaitOne(0)) ('Missing synthetic startup stage: '+$stage)
  }
  Require (-not $stageHandles['CAUGHT'].WaitOne(0)) 'The synthetic worker caught an unexpected startup error.'

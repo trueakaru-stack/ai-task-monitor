@@ -2,7 +2,7 @@ param([Parameter(Mandatory=$true)][string]$PipeName,[Parameter(Mandatory=$true)]
 Set-StrictMode -Version 2.0
 $ErrorActionPreference='Stop'
 $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut)
-$writer=$null;$phase='connect'
+$writer=$null;$phase='connect';$identityVerified=$false
 try{
  $pipe.Connect(5000);$phase='identity'
  $identityName=[Reflection.AssemblyName]::new('AITaskMonitor.PipeIdentity.'+[Guid]::NewGuid().ToString('N'))
@@ -15,6 +15,7 @@ try{
  $identityType=$identityBuilder.CreateType()
  $server=[uint32]0
  if(-not $identityType::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw 'Unexpected owner.'}
+ $identityVerified=$true
  $reader=[IO.BinaryReader]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)
  $writer=[IO.BinaryWriter]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)
  $initialized=$false;$runtime=$null;$warningTokens=@{}
@@ -133,9 +134,11 @@ try{
  }catch{}
  exit 1
 }finally{
- foreach($name in @('codexTitleReader','codexRolloutReader','codexRecentEventObserver','codexRootEvidenceReader')){
-  $variable=Get-Variable -Scope Script -Name $name -ErrorAction SilentlyContinue
-  if($null -ne $variable -and $null -ne $variable.Value){try{$variable.Value.Dispose()}catch{}}
+ if($identityVerified){
+  foreach($name in @('codexTitleReader','codexRolloutReader','codexRecentEventObserver','codexRootEvidenceReader')){
+   $variable=Get-Variable -Scope Script -Name $name -ErrorAction SilentlyContinue
+   if($null -ne $variable -and $null -ne $variable.Value){try{$variable.Value.Dispose()}catch{}}
+  }
  }
  $pipe.Dispose()
 }

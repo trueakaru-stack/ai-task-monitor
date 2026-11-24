@@ -8,8 +8,8 @@ Require ($root.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)) 'Unsafe 
 $app=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\app'))
 try{
  foreach($file in @('LocalSourceWorker.ps1','DiagnosticWorker.ps1')){
-  foreach($mode in @('foreign','valid','api-failure')){
-   $valid=$mode -ceq 'valid'
+  foreach($mode in @('foreign','valid','valid-cleanup','api-failure')){
+   $valid=$mode -in @('valid','valid-cleanup')
    $pipeName='AITMWorkerIdentity-'+[Guid]::NewGuid().ToString('N')
    $startName='Local\AITMIdentityStarted-'+[Guid]::NewGuid().ToString('N');$releaseName='Local\AITMIdentityRelease-'+[Guid]::NewGuid().ToString('N')
    $started=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$startName)
@@ -22,6 +22,8 @@ try{
     $callMarker=Join-Path $root ('call-'+[Guid]::NewGuid().ToString('N'));$returnedMarker=Join-Path $root ('returned-'+[Guid]::NewGuid().ToString('N'))
     $rejectMarker=Join-Path $root ('rejected-'+[Guid]::NewGuid().ToString('N'));$catchMarker=Join-Path $root ('caught-'+[Guid]::NewGuid().ToString('N'))
     $beforeCloseMarker=Join-Path $root ('before-close-'+[Guid]::NewGuid().ToString('N'));$afterCloseMarker=Join-Path $root ('after-close-'+[Guid]::NewGuid().ToString('N'))
+    $exitMarker=Join-Path $root ('exit-'+[Guid]::NewGuid().ToString('N'));$finallyMarker=Join-Path $root ('finally-'+[Guid]::NewGuid().ToString('N'))
+    $cleanupMarker=Join-Path $root ('cleanup-'+[Guid]::NewGuid().ToString('N'));$disposeMarker=Join-Path $root ('dispose-'+[Guid]::NewGuid().ToString('N'))
     $foreign=Join-Path $root 'PipeServerIdentity.ps1';$foreignMarker=Join-Path $root ('foreign-'+[Guid]::NewGuid().ToString('N'))
     if([IO.File]::Exists($foreign)){[IO.File]::Delete($foreign)}
     if($valid){[IO.File]::WriteAllText($foreign,'[IO.File]::WriteAllText($env:AITM_ID_FOREIGN,"unexpected")',[Text.UTF8Encoding]::new($false))}
@@ -34,9 +36,16 @@ try{
     $checkNeedle='if(-not $identityType::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw ''Unexpected owner.''}'
     $checkProbe='[IO.File]::WriteAllText($env:AITM_ID_CALL,"call");$identityResult=$identityType::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server);[IO.File]::WriteAllText($env:AITM_ID_RETURNED,"returned");if(-not $identityResult -or $server -ne [uint32]$ParentId){[IO.File]::WriteAllText($env:AITM_ID_REJECTED,"rejected");throw ''Unexpected owner.''}'
     $catchNeedle=if($file -ceq 'DiagnosticWorker.ps1'){' # Send only a phase and exception type; never emit paths or source content.'}else{' # Source paths and task content must not be emitted to a console or log.'}
-    Require ($source.Contains($compileNeedle) -and $source.Contains($readNeedle) -and $source.Contains($compiledNeedle) -and $source.Contains($checkNeedle) -and $source.Contains($catchNeedle) -and $source.Contains('$pipe.Dispose()')) 'The production worker identity checks could not be instrumented.'
+    Require ($source.Contains($compileNeedle) -and $source.Contains($readNeedle) -and $source.Contains($compiledNeedle) -and $source.Contains($checkNeedle) -and $source.Contains($catchNeedle) -and $source.Contains('$pipe.Dispose()') -and $source.Contains(' if($identityVerified){') -and $source.Contains(' $identityVerified=$true')) 'The production worker identity checks could not be instrumented.'
     $source=$source.Replace($compileNeedle,$compileGate+[Environment]::NewLine+$compileNeedle).Replace($compiledNeedle,'[IO.File]::WriteAllText($env:AITM_ID_COMPILED,"compiled")'+[Environment]::NewLine+' '+$compiledNeedle).Replace($readNeedle,'[IO.File]::WriteAllText($env:AITM_ID_READ,"verified")'+[Environment]::NewLine+' '+$readNeedle)
     $source=$source.Replace($checkNeedle,$checkProbe).Replace($catchNeedle,' [IO.File]::WriteAllText($env:AITM_ID_CATCH,"catch")'+[Environment]::NewLine+$catchNeedle).Replace('$pipe.Dispose()','[IO.File]::WriteAllText($env:AITM_ID_BEFORE_CLOSE,"before");$pipe.Dispose();[IO.File]::WriteAllText($env:AITM_ID_AFTER_CLOSE,"after")')
+    $source=$source.Replace(' exit 1',' [IO.File]::WriteAllText($env:AITM_ID_EXIT,"exit");exit 1')
+    $source=[regex]::Replace($source,'(?m)^}finally\{',('}finally{'+[Environment]::NewLine+' [IO.File]::WriteAllText($env:AITM_ID_FINALLY,"finally")'))
+    $source=$source.Replace(' if($identityVerified){',(' if($identityVerified){'+[Environment]::NewLine+' [IO.File]::WriteAllText($env:AITM_ID_CLEANUP,"cleanup")'))
+    if($mode -ceq 'valid-cleanup'){
+     $fake='$identityVerified=$true;$fake=New-Object PSObject;$fake|Add-Member -MemberType ScriptMethod -Name Dispose -Value {[IO.File]::WriteAllText($env:AITM_ID_DISPOSE,"disposed")};$script:codexTitleReader=$fake'
+     $source=$source.Replace('$identityVerified=$true',$fake)
+    }
     if($mode -ceq 'api-failure'){
      $apiNeedle='$identityType=$identityBuilder.CreateType()'
      Require ($source.Contains($apiNeedle)) 'The synthetic API failure could not be injected.'
@@ -49,6 +58,7 @@ try{
     $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
     $start.EnvironmentVariables['AITM_ID_STARTED']=$startName;$start.EnvironmentVariables['AITM_ID_RELEASE']=$releaseName;$start.EnvironmentVariables['AITM_ID_READ']=$marker;$start.EnvironmentVariables['AITM_ID_COMPILED']=$compiledMarker;$start.EnvironmentVariables['AITM_ID_FOREIGN']=$foreignMarker
     $start.EnvironmentVariables['AITM_ID_CALL']=$callMarker;$start.EnvironmentVariables['AITM_ID_RETURNED']=$returnedMarker;$start.EnvironmentVariables['AITM_ID_REJECTED']=$rejectMarker;$start.EnvironmentVariables['AITM_ID_CATCH']=$catchMarker;$start.EnvironmentVariables['AITM_ID_BEFORE_CLOSE']=$beforeCloseMarker;$start.EnvironmentVariables['AITM_ID_AFTER_CLOSE']=$afterCloseMarker
+    $start.EnvironmentVariables['AITM_ID_EXIT']=$exitMarker;$start.EnvironmentVariables['AITM_ID_FINALLY']=$finallyMarker;$start.EnvironmentVariables['AITM_ID_CLEANUP']=$cleanupMarker;$start.EnvironmentVariables['AITM_ID_DISPOSE']=$disposeMarker
     $connect=$server.WaitForConnectionAsync();$child=[Diagnostics.Process]::Start($start)
     Require ($connect.Wait(10000) -and $started.WaitOne(10000) -and $server.IsConnected -and -not [IO.File]::Exists($marker)) 'The worker did not connect before compiling its identity check.'
     $unexpectedWrite=$null
@@ -64,11 +74,20 @@ try{
     }
     [void]$release.Set();$watch=[Diagnostics.Stopwatch]::StartNew()
     while(-not [IO.File]::Exists($marker) -and -not $child.HasExited -and $watch.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
-    if($valid){Require ([IO.File]::Exists($marker) -and -not $child.HasExited) ('The verified worker did not reach reading: compiled={0}; exited={1}.' -f [IO.File]::Exists($compiledMarker),$child.HasExited)}
+    if($valid){
+     Require ([IO.File]::Exists($marker) -and -not $child.HasExited) ('The verified worker did not reach reading: compiled={0}; exited={1}.' -f [IO.File]::Exists($compiledMarker),$child.HasExited)
+     if($mode -ceq 'valid-cleanup'){
+      $invalid=[BitConverter]::GetBytes([int]0);$write=$server.WriteAsync($invalid,0,$invalid.Length)
+      Require ($write.Wait(3000)) 'The verified synthetic worker did not receive the invalid frame.'
+      Require ($child.WaitForExit(10000) -and $child.ExitCode -ne 0 -and [IO.File]::Exists($finallyMarker) -and
+       [IO.File]::Exists($cleanupMarker) -and [IO.File]::Exists($disposeMarker) -and [IO.File]::Exists($afterCloseMarker)) 'Verified worker failure did not clean up its synthetic reader and pipe.'
+     }
+    }
     else{
      if([IO.File]::Exists($marker)){throw 'The worker read a frame from an unverified server.'}
-     if(-not $child.HasExited){throw ('The unverified synthetic worker did not exit: prepared={0}; connected={1}; entered={2}; returned={3}; rejected={4}; caught={5}; beforeClose={6}; afterClose={7}.' -f [IO.File]::Exists($compiledMarker),$server.IsConnected,[IO.File]::Exists($callMarker),[IO.File]::Exists($returnedMarker),[IO.File]::Exists($rejectMarker),[IO.File]::Exists($catchMarker),[IO.File]::Exists($beforeCloseMarker),[IO.File]::Exists($afterCloseMarker))}
+     if(-not $child.HasExited){throw ('The unverified synthetic worker did not exit: prepared={0}; connected={1}; entered={2}; returned={3}; rejected={4}; caught={5}; exit={6}; finally={7}; cleanup={8}; beforeClose={9}; afterClose={10}.' -f [IO.File]::Exists($compiledMarker),$server.IsConnected,[IO.File]::Exists($callMarker),[IO.File]::Exists($returnedMarker),[IO.File]::Exists($rejectMarker),[IO.File]::Exists($catchMarker),[IO.File]::Exists($exitMarker),[IO.File]::Exists($finallyMarker),[IO.File]::Exists($cleanupMarker),[IO.File]::Exists($beforeCloseMarker),[IO.File]::Exists($afterCloseMarker))}
      if($child.ExitCode -eq 0){throw 'The unverified synthetic worker unexpectedly exited successfully.'}
+     Require ([IO.File]::Exists($finallyMarker) -and -not [IO.File]::Exists($cleanupMarker) -and [IO.File]::Exists($afterCloseMarker)) 'Unverified worker entered reader cleanup or did not close its pipe.'
      $received=0;$readFinished=$false
      try{if($unexpectedWrite.Wait(3000)){$received=$unexpectedWrite.GetAwaiter().GetResult();$readFinished=$true}}catch [AggregateException] {if($_.Exception.GetBaseException() -isnot [IO.IOException]){throw};$readFinished=$true}
      Require ($readFinished -and $received -eq 0) 'The worker wrote data to an unverified server or did not close the channel.'

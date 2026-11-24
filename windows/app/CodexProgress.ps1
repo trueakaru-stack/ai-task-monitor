@@ -5175,22 +5175,31 @@ function Schedule-ClaudeRetention([bool]$force=$false) {
  if($PreviewActiveTasks -ge 0 -or $SnapshotFile -or -not $script:claudeRetentionAvailable){return}
  $policy=Load-ClaudeRetentionSettings
  if(-not $policy.Valid){
-  if(-not $script:retentionPolicyInvalidated){[AITaskMonitor.Claude.Retention]::Invalidate();$script:retentionPolicyInvalidated=$true}
+  if(-not $script:retentionPolicyInvalidated -and [AITaskMonitor.Claude.Retention]::TryInvalidate()){$script:retentionPolicyInvalidated=$true}
   return
  }
  $script:retentionPolicyInvalidated=$false
  if(-not $force -and [DateTime]::UtcNow -lt $script:nextClaudeRetention){return}
  try{
-  [AITaskMonitor.Claude.Retention]::Schedule($dataDirectory,(Join-Path $env:USERPROFILE '.claude'),[int]$policy.Days,([long]$policy.MaximumMB*1000000))
+  if(-not [AITaskMonitor.Claude.Retention]::TrySchedule($dataDirectory,(Join-Path $env:USERPROFILE '.claude'),[int]$policy.Days,([long]$policy.MaximumMB*1000000))){$script:nextClaudeRetention=[DateTime]::UtcNow.AddSeconds(2);return}
   $script:nextClaudeRetention=[DateTime]::UtcNow.AddSeconds($(if($force -or [AITaskMonitor.Claude.Retention]::Status -in @('busy','cancelled')){10}else{300}))
  }catch{$script:claudeRetentionUiError='Не удалось очистить данные Claude Code';$script:nextClaudeRetention=[DateTime]::UtcNow.AddMinutes(1)}
 }
 
 function Save-ClaudeRetentionControls([string]$name,$combo) {
  if($script:updatingClaudeRetentionControls -or $null -eq $combo.SelectedItem){return}
+ # A cleanup already committing under the old policy cannot be cancelled.
+ # Do not confirm a new policy until that commit has finished and the old
+ # generation has been invalidated.
+ if($script:claudeRetentionAvailable -and -not [AITaskMonitor.Claude.Retention]::TryInvalidate()){
+  $script:claudeRetentionUiError='Не удалось сохранить настройки хранения Claude Code'
+  $script:nextClaudeRetention=[DateTime]::UtcNow.AddSeconds(2)
+  Update-ClaudeRetentionSettings
+  return
+ }
  if(Save-ClaudeRetentionPreference $name ([int]$combo.SelectedItem.Tag)){
   $script:claudeRetentionUiError='';Schedule-ClaudeRetention $true
- }else{$script:claudeRetentionUiError='Не удалось сохранить настройки хранения Claude Code'}
+ }else{$script:claudeRetentionUiError='Не удалось сохранить настройки хранения Claude Code';$script:nextClaudeRetention=[DateTime]::MinValue}
  Update-ClaudeRetentionSettings
 }
 
