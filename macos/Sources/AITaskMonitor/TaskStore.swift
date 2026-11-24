@@ -1235,6 +1235,7 @@ final class TaskStore: ObservableObject {
         let wasSeen = sawCodexHome
         let observedSince = monitoringStartedAt
         let previouslyObserved = Set(previousCodex.map(\.id))
+        let agentProofPriorities = codexAgentRootBindings.keys.sorted() + codexAgentCardBindings.keys.sorted()
         let selectionGeneration = compactManualSelectionGeneration
         let language = AppLanguage.current
         let pollInterval = Self.sourcePollInterval
@@ -1245,11 +1246,12 @@ final class TaskStore: ObservableObject {
                 self.codexReadStartedAt = startedAtUptime
             }
             let before = CodexHomeObservation.read(reader.codexHome)
-            func readSnapshot() -> Result<CodexTaskSnapshot, Error> {
+            func readSnapshot(repeatingAgentProofIDs: Set<String>? = nil) -> Result<CodexTaskSnapshot, Error> {
               AppLanguage.withSourceLanguage(language) {
                 Result<CodexTaskSnapshot, Error> {
                     if !before.exists && wasSeen { throw CocoaError(.fileReadNoSuchFile) }
-                    return try reader.readSnapshot(observedSince: observedSince, previouslyObserved: previouslyObserved)
+                    return try reader.readSnapshot(observedSince: observedSince, previouslyObserved: previouslyObserved,
+                        priorityAgentProofIDs: agentProofPriorities, repeatingAgentProofIDs: repeatingAgentProofIDs)
                 }
               }
             }
@@ -1260,9 +1262,12 @@ final class TaskStore: ObservableObject {
             if case .success(let initial) = first,
                (ProcessInfo.processInfo.systemUptime - startedAtUptime >= pollInterval ||
                 !initial.terminalIDs.isDisjoint(with: previouslyObserved)) {
-                result = readSnapshot()
+                result = readSnapshot(repeatingAgentProofIDs: initial.selectedAgentProofIDs)
                 revalidated = true
-                if case .success(let later) = result { agrees = initial.agreesWith(later) }
+                if case .success(let later) = result {
+                    agrees = initial.agreesWith(later)
+                    if agrees { result = .success(later.revalidatingAgentEvidence(against: initial)) }
+                }
             }
             let after = CodexHomeObservation.read(reader.codexHome)
             let finishedAtUptime = ProcessInfo.processInfo.systemUptime

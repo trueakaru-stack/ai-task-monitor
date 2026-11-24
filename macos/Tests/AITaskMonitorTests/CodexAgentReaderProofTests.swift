@@ -4,6 +4,38 @@ import XCTest
 @testable import AITaskMonitor
 
 final class CodexAgentReaderProofTests: XCTestCase {
+    func testRevalidationDoesNotCombineChangedAgentEvidence() {
+        let root = "019127f4-35ae-7c73-9e72-a10123456789"
+        let child = "019127f4-35ae-7c73-9e72-a10123456780"
+        let next = "019127f4-35ae-7c73-9e72-a10123456781"
+        let rootProof = CodexVerifiedAgentIdentity(file: CodexFileIdentity(device: 1, inode: 1),
+            headerDigest: Data(repeating: 1, count: 32), parentID: nil, isRoot: true)
+        let childProof = CodexVerifiedAgentIdentity(file: CodexFileIdentity(device: 1, inode: 2),
+            headerDigest: Data(repeating: 2, count: 32), parentID: root, isRoot: false)
+        let changedProof = CodexVerifiedAgentIdentity(file: CodexFileIdentity(device: 1, inode: 2),
+            headerDigest: Data(repeating: 3, count: 32), parentID: root, isRoot: false)
+        let nextProof = CodexVerifiedAgentIdentity(file: CodexFileIdentity(device: 1, inode: 3),
+            headerDigest: Data(repeating: 4, count: 32), parentID: root, isRoot: false)
+        var earlier = CodexTaskSnapshot()
+        earlier.verifiedAgentIdentities = [root: rootProof, child: childProof]
+        var later = earlier
+        later.verifiedAgentIdentities = [root: rootProof, child: changedProof, next: nextProof]
+        XCTAssertTrue(earlier.agreesWith(later), "Task-state agreement must not silently merge different proof slices")
+        let safe = later.revalidatingAgentEvidence(against: earlier)
+        XCTAssertEqual(safe.verifiedAgentIdentities, [root: rootProof])
+        XCTAssertTrue(safe.agentIdentityPartial)
+        XCTAssertNil(safe.verifiedAgentIdentities[child])
+        XCTAssertNil(safe.verifiedAgentIdentities[next])
+
+        let unchanged = earlier.revalidatingAgentEvidence(against: earlier)
+        XCTAssertEqual(unchanged.verifiedAgentIdentities, earlier.verifiedAgentIdentities)
+        XCTAssertFalse(unchanged.agentIdentityPartial)
+        later = earlier
+        later.agentIdentityPartial = true
+        XCTAssertTrue(later.revalidatingAgentEvidence(against: earlier).agentIdentityPartial)
+        XCTAssertTrue(earlier.revalidatingAgentEvidence(against: later).agentIdentityPartial)
+    }
+
     private let rootID = "10000000-0000-0000-0000-000000000001"
 
     private final class MetadataGate {
@@ -22,6 +54,24 @@ final class CodexAgentReaderProofTests: XCTestCase {
             entered.signal()
             _ = release.wait(timeout: .now() + 10)
         }
+    }
+
+    private final class RevalidationGate {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var armed = false
+        private var selections: [Set<String>] = []
+        func arm() { lock.lock(); armed = true; selections = []; lock.unlock() }
+        func observe(_ snapshot: CodexTaskSnapshot) {
+            lock.lock()
+            let shouldRecord = armed
+            if shouldRecord { selections.append(snapshot.selectedAgentProofIDs) }
+            let shouldWait = shouldRecord && selections.count == 1
+            lock.unlock()
+            if shouldWait { entered.signal(); _ = release.wait(timeout: .now() + 12) }
+        }
+        var recorded: [Set<String>] { lock.lock(); defer { lock.unlock() }; return selections }
     }
 
     private final class Mutation {
@@ -45,7 +95,8 @@ final class CodexAgentReaderProofTests: XCTestCase {
         String(format: "20000000-0000-0000-0000-%012d", index)
     }
 
-    private func rollout(_ directory: URL, id: String, parent: String?, suffix: String = "01") throws -> URL {
+    private func rollout(_ directory: URL, id: String, parent: String?, suffix: String = "01",
+                         startOffset: TimeInterval = 0) throws -> URL {
         let folder = directory.appendingPathComponent("sessions/2026/11/24", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let file = folder.appendingPathComponent("rollout-2026-11-24T00-00-\(suffix)-\(id).jsonl")
@@ -59,7 +110,7 @@ final class CodexAgentReaderProofTests: XCTestCase {
         }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let started: [String: Any] = ["timestamp": formatter.string(from: Date()), "type": "event_msg",
+        let started: [String: Any] = ["timestamp": formatter.string(from: Date().addingTimeInterval(startOffset)), "type": "event_msg",
                                       "payload": ["type": "task_started", "turn_id": "synthetic-turn"]]
         var data = try JSONSerialization.data(withJSONObject: ["type": "session_meta", "payload": payload], options: [.sortedKeys])
         data.append(10)
@@ -93,6 +144,147 @@ final class CodexAgentReaderProofTests: XCTestCase {
         }
         XCTFail("The synthetic complete chain was never verified")
         return latest
+    }
+
+    @MainActor
+    func testSlowTaskStoreRechecksVisibleGroupsWithoutStarvingRotation() throws {
+        let root = try codexSyntheticDirectory(prefix: "aitm-proof-groups-")
+        let secondRoot = "10000000-0000-0000-0000-000000000002"
+        let ids = (0..<40).map(childID)
+        var files: [String: URL] = [:]
+        for (index, id) in ids.enumerated() {
+            files[id] = try rollout(root, id: id, parent: index < 20 ? rootID : secondRoot, startOffset: 30)
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(35)], ofItemAtPath: files[id]!.path)
+        }
+        for id in [rootID, secondRoot] {
+            files[id] = try rollout(root, id: id, parent: nil, startOffset: 30)
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(40)], ofItemAtPath: files[id]!.path)
+        }
+        var index = Data()
+        for id in [rootID, secondRoot] + ids {
+            index.append(try JSONSerialization.data(withJSONObject: ["id": id, "thread_name": "Synthetic task"], options: [.sortedKeys]))
+            index.append(10)
+        }
+        try index.write(to: root.appendingPathComponent("session_index.jsonl"))
+        let gate = RevalidationGate()
+        let reader = CodexTaskReader(codexHome: root, afterSnapshotForTests: { gate.observe($0) })
+        let store = TaskStore(codexReader: reader,
+            claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("no-claude")), previewTasks: [])
+        defer {
+            gate.release.signal()
+            waitForCodexRead(store, timeout: 8)
+            try? FileManager.default.removeItem(at: root)
+        }
+        var ready = false
+        for _ in 0..<30 {
+            store.refresh()
+            waitForCodexRead(store, timeout: 8)
+            let groups = store.tasks.filter { $0.id == rootID || $0.id == secondRoot }
+            if groups.contains(where: { $0.id == rootID && ($0.codexAgentCount ?? 0) > 0 }) &&
+                groups.contains(where: { $0.id == secondRoot && ($0.codexAgentCount ?? 0) > 0 }) &&
+                !store.tasks.contains(where: { $0.id == "codex-retained:" + rootID || $0.id == "codex-retained:" + secondRoot }) {
+                ready = true
+                break
+            }
+            reader.waitForAmbiguousObservationForTests()
+        }
+        XCTAssertTrue(ready, "Both parent groups need fresh proof before testing the transition")
+        guard ready else { return }
+        reader.waitForAmbiguousObservationForTests()
+        let target = try XCTUnwrap(store.compactDots.first { $0.task.id == rootID || $0.task.id == secondRoot })
+        gate.arm()
+        store.refresh()
+        XCTAssertEqual(gate.entered.wait(timeout: .now() + 5), .success)
+        store.selectCompactTask(dot: target)
+        let selected = store.compactTasks[store.compactSelectedIndex].id
+        RunLoop.current.run(until: Date().addingTimeInterval(2.1))
+        gate.release.signal()
+        waitForCodexRead(store, timeout: 8)
+        let selections = gate.recorded
+        XCTAssertGreaterThanOrEqual(selections.count, 2)
+        if selections.count >= 2 { XCTAssertEqual(selections[0], selections[1]) }
+        XCTAssertEqual(store.compactTasks[store.compactSelectedIndex].id, selected)
+        for parent in [rootID, secondRoot] {
+            XCTAssertEqual(store.tasks.filter { $0.id == parent }.count, 1)
+            XCTAssertFalse(store.tasks.contains { $0.id == "codex-retained:" + parent })
+        }
+        if let last = selections.last {
+            let provenChildren = last.intersection(Set(ids))
+            XCTAssertFalse(provenChildren.isEmpty)
+            XCTAssertTrue(store.compactTasks.allSatisfy { !provenChildren.contains($0.id) },
+                          "A child with matching current proof must not become a separate compact card")
+        }
+    }
+
+    @MainActor
+    func testChangedHeaderBetweenSlowReadsCannotHideIndependentTask() throws {
+        let root = try codexSyntheticDirectory(prefix: "aitm-proof-changed-")
+        let child = childID(0)
+        let parentFile = try rollout(root, id: rootID, parent: nil, startOffset: 30)
+        let childFile = try rollout(root, id: child, parent: rootID, startOffset: 30)
+        for file in [parentFile, childFile] {
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(35)], ofItemAtPath: file.path)
+        }
+        var index = Data()
+        for id in [rootID, child] {
+            index.append(try JSONSerialization.data(withJSONObject: ["id": id, "thread_name": "Synthetic task"], options: [.sortedKeys]))
+            index.append(10)
+        }
+        try index.write(to: root.appendingPathComponent("session_index.jsonl"))
+        let gate = RevalidationGate()
+        let reader = CodexTaskReader(codexHome: root, afterSnapshotForTests: { gate.observe($0) })
+        let store = TaskStore(codexReader: reader,
+            claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("no-claude")), previewTasks: [])
+        defer {
+            gate.release.signal()
+            waitForCodexRead(store, timeout: 8)
+            try? FileManager.default.removeItem(at: root)
+        }
+        var ready = false
+        for _ in 0..<20 {
+            store.refresh()
+            waitForCodexRead(store, timeout: 8)
+            if store.tasks.contains(where: { $0.id == rootID && ($0.codexAgentCount ?? 0) == 1 }) &&
+                !store.compactTasks.contains(where: { $0.id == child }) {
+                ready = true
+                break
+            }
+            reader.waitForAmbiguousObservationForTests()
+        }
+        XCTAssertTrue(ready)
+        guard ready else { return }
+        reader.waitForAmbiguousObservationForTests()
+        var before = stat()
+        XCTAssertEqual(childFile.path.withCString { lstat($0, &before) }, 0)
+        gate.arm()
+        store.refresh()
+        XCTAssertEqual(gate.entered.wait(timeout: .now() + 5), .success)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let rows: [[String: Any]] = [
+            ["type": "session_meta", "payload": ["id": child, "source": "cli", "thread_source": "user", "agent_path": "/root"]],
+            ["timestamp": formatter.string(from: Date().addingTimeInterval(30)), "type": "event_msg",
+             "payload": ["type": "task_started", "turn_id": "new-independent-turn"]]
+        ]
+        var replacement = Data()
+        for row in rows {
+            replacement.append(try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]))
+            replacement.append(10)
+        }
+        let handle = try FileHandle(forUpdating: childFile)
+        try handle.truncate(atOffset: 0); try handle.seek(toOffset: 0)
+        try handle.write(contentsOf: replacement); try handle.close()
+        var after = stat()
+        XCTAssertEqual(childFile.path.withCString { lstat($0, &after) }, 0)
+        XCTAssertEqual(before.st_ino, after.st_ino)
+        RunLoop.current.run(until: Date().addingTimeInterval(2.1))
+        gate.release.signal()
+        waitForCodexRead(store, timeout: 8)
+        XCTAssertTrue(store.compactTasks.contains { $0.id == child && $0.isUnconfirmed },
+                      "The changed same-inode header may be an independent task and must remain visible")
+        XCTAssertFalse(store.tasks.contains { task in
+            task.id == rootID && (task.codexAgents ?? []).contains { $0.id == child && $0.isActive }
+        })
     }
 
     func testOneSnapshotProvesChildAndRootWithoutExposingHeader() throws {

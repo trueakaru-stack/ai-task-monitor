@@ -262,6 +262,22 @@ jobs:
           AITM_TEST_UI_EVENT=1 AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CompactProductionTimerTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"
           if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log"; then echo 'Timer tests skipped.' >&2; exit 1; fi
           grep -Eq 'Executed 2 tests?, with 0 failures' "$log"
+      - name: Verify task identity across delayed reads
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
+          failed=""
+          for suite in CodexAgentProofSelectionTests CodexAgentReaderProofTests CodexBackgroundReadTests CodexTerminalGuardTests; do
+            log="$AITM_TEST_TASK_ROOT/$suite.log"
+            if ! AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"; then
+              failed="$failed $suite"
+            elif grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log" || ! grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$log"; then
+              failed="$failed $suite"
+            fi
+          done
+          if test -n "$failed"; then echo "Synthetic test failures:$failed" >&2; exit 1; fi
       - name: Verify control files after the job
         if: ${{ always() && !cancelled() }}
         shell: bash

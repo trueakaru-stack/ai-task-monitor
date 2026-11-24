@@ -22,12 +22,15 @@ struct CodexTaskSnapshot {
     // establish complete coverage or uninterrupted agent lifetime.
     var verifiedAgentIdentities: [String: CodexVerifiedAgentIdentity] = [:]
     var agentIdentityPartial = false
+    // IDs nominate a bounded selection only; their headers are read afresh.
+    var selectedAgentProofIDs: Set<String> = []
     var isPartial = false
     var didCompleteUnindexedSweep = false
 
     // A delayed read can be accepted only when a second serial read agrees on
-    // all data that can affect publication and diagnostics. Ambiguous
-    // duplicate task identities never become a confirmation.
+    // task state and diagnostics. Agent proof slices are revalidated
+    // separately because bounded proof rotation can visit different agents.
+    // Ambiguous duplicate task identities never become a confirmation.
     func agreesWith(_ other: CodexTaskSnapshot) -> Bool {
         let first = Dictionary(grouping: tasks, by: { $0.compactSelectionKey })
         let second = Dictionary(grouping: other.tasks, by: { $0.compactSelectionKey })
@@ -42,6 +45,18 @@ struct CodexTaskSnapshot {
             verifiedActivityFiles == other.verifiedActivityFiles &&
             subagentCandidates == other.subagentCandidates && subagentTitles == other.subagentTitles &&
             isPartial == other.isPartial && didCompleteUnindexedSweep == other.didCompleteUnindexedSweep
+    }
+
+    // Do not combine proofs from separate slices. Every published proof must
+    // be identical in the two reads; missing or changed coverage is partial.
+    func revalidatingAgentEvidence(against earlier: CodexTaskSnapshot) -> CodexTaskSnapshot {
+        var result = self
+        result.verifiedAgentIdentities = verifiedAgentIdentities.filter { id, proof in
+            earlier.verifiedAgentIdentities[id] == proof
+        }
+        result.agentIdentityPartial = agentIdentityPartial || earlier.agentIdentityPartial ||
+            verifiedAgentIdentities != earlier.verifiedAgentIdentities
+        return result
     }
 }
 
@@ -129,7 +144,8 @@ struct CodexTaskReader {
         ambiguousRootMetadata.waitUntilIdleForTests()
     }
 
-    func readSnapshot(now: Date = Date(), observedSince: Date? = nil, previouslyObserved: Set<String> = []) throws -> CodexTaskSnapshot {
+    func readSnapshot(now: Date = Date(), observedSince: Date? = nil, previouslyObserved: Set<String> = [],
+                      priorityAgentProofIDs: [String] = [], repeatingAgentProofIDs: Set<String>? = nil) throws -> CodexTaskSnapshot {
         let index = codexHome.appendingPathComponent("session_index.jsonl")
         if !fileManager.fileExists(atPath: codexHome.path) { return CodexTaskSnapshot() }
         let sessions: [String: [String: Any]]
@@ -587,9 +603,11 @@ struct CodexTaskReader {
         let agentProofs = verifiedAgentProofs(tasks: result.tasks, candidates: proofCandidates,
                                                observations: metadata, visibleStamps: visibleMetadataStamps,
                                                visibleAgentStamps: visibleAgentStamps,
-                                               ambiguousIDs: ambiguousProofIDs)
+                                               ambiguousIDs: ambiguousProofIDs, priority: priorityAgentProofIDs,
+                                               repeating: repeatingAgentProofIDs)
         result.verifiedAgentIdentities = agentProofs.identities
         result.agentIdentityPartial = agentProofs.partial || discovered.didHitLimit || extraFiles.didHitLimit
+        result.selectedAgentProofIDs = agentProofs.selected
         let ambiguousRootIDs = ambiguousRootMetadata.poll(candidates: discovered.rootCandidates,
             targets: Set(result.subagentParents.values)) { id, files in
                 self.verifyAmbiguousRoot(id: id, files: files)
@@ -1321,7 +1339,8 @@ struct CodexTaskReader {
                                      observations: [String: CodexSubagentMetadataWorker.Observation],
                                      visibleStamps: [String: CodexSubagentMetadataWorker.Stamp],
                                      visibleAgentStamps: [String: AgentProofStamp],
-                                     ambiguousIDs: Set<String>) -> (identities: [String: CodexVerifiedAgentIdentity], partial: Bool) {
+                                     ambiguousIDs: Set<String>, priority: [String], repeating: Set<String>?)
+        -> (identities: [String: CodexVerifiedAgentIdentity], partial: Bool, selected: Set<String>) {
         func normalized(_ value: String) -> String? {
             guard value.utf8.count == 36, let uuid = UUID(uuidString: value) else { return nil }
             return uuid.uuidString.lowercased()
@@ -1383,7 +1402,7 @@ struct CodexTaskReader {
                 partial = true
             }
         }
-        let batch = agentProofSelection.next(chains: chains)
+        let batch = agentProofSelection.next(chains: chains, prioritizing: priority, repeating: repeating)
         partial = partial || batch.incomplete
         if !batch.nodeIDs.isEmpty { afterAgentProofSelectionForTests?() }
         var firstReads: [String: AgentProofRead] = [:]
@@ -1427,7 +1446,7 @@ struct CodexTaskReader {
             }) else { partial = true; continue }
             for id in chain { accepted[id] = checked[id] }
         }
-        return (accepted, partial)
+        return (accepted, partial, batch.childIDs)
     }
 
     private func readSubagentParent(_ url: URL, id: String) throws -> (parentID: String?, rootClassification: String?, device: UInt64, inode: UInt64, size: UInt64, headerDigest: Data) {
