@@ -5,6 +5,37 @@ import XCTest
 
 // Synthetic fixtures exercise the real file snapshot and AF_UNIX receiver.
 final class ClaudePhaseIsolationRaceTests: XCTestCase {
+    private final class Injection {
+        private let lock = NSLock()
+        private var receiver: ClaudeLoopChannel?
+        private var armed = false
+        private var claimed = false
+        private var received = false
+
+        func arm(_ channel: ClaudeLoopChannel) {
+            lock.lock(); defer { lock.unlock() }
+            receiver = channel
+            armed = true
+        }
+
+        func claim() -> ClaudeLoopChannel? {
+            lock.lock(); defer { lock.unlock() }
+            guard armed, !claimed, let receiver else { return nil }
+            claimed = true
+            return receiver
+        }
+
+        func markReceived() {
+            lock.lock(); defer { lock.unlock() }
+            received = true
+        }
+
+        func result() -> (injected: Bool, arrived: Bool) {
+            lock.lock(); defer { lock.unlock() }
+            return (claimed, received)
+        }
+    }
+
     private func record(_ input: [String: Any], time: Date) -> [String: Any] {
         var result = ClaudeHook.makeRecord(from: input)
         let f = ISO8601DateFormatter()
@@ -24,11 +55,6 @@ final class ClaudePhaseIsolationRaceTests: XCTestCase {
                                    "statusChange": ["from": "pending", "to": "completed"]]], time: time.addingTimeInterval(0.2))]
     }
 
-    private func channel(_ store: TaskStore) -> ClaudeLoopChannel? {
-        guard let item = Mirror(reflecting: store).children.first(where: { $0.label == "claudeLoopChannel" }) else { return nil }
-        return Mirror(reflecting: item.value).children.first?.value as? ClaudeLoopChannel
-    }
-
     @MainActor
     private func runInterleaving(gap: Bool) throws -> (first: MonitoredTask, neighbor: MonitoredTask) {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-phase-race-" + UUID().uuidString)
@@ -39,13 +65,9 @@ final class ClaudePhaseIsolationRaceTests: XCTestCase {
             data.append(try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])); data.append(10)
         }
         try data.write(to: file)
-        var store: TaskStore?
-        var trigger = false
-        var injected = false
-        var arrived = false
+        let injection = Injection()
         let reader = ClaudeTaskReader(eventFile: file, readLockTiming: { _ in
-            guard trigger, !injected, let current = store, let receiver = self.channel(current) else { return }
-            injected = true
+            guard let receiver = injection.claim() else { return }
             if gap {
                 guard let folder = try? ClaudeLoopSocket.directory(profile: dir, create: false),
                       let fd = ClaudeLoopSocket.connect(path: folder + "/events.sock") else { return }
@@ -61,14 +83,15 @@ final class ClaudePhaseIsolationRaceTests: XCTestCase {
             let deadline = Date().addingTimeInterval(3)
             while Date() < deadline {
                 if gap ? receiver.hasPendingGapForTesting() : receiver.hasPendingPhaseForTesting("first") {
-                    arrived = true; break
+                    injection.markReceived(); break
                 }
                 Thread.sleep(forTimeInterval: 0.01)
             }
         })
-        store = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("missing-codex")),
-                          claudeReader: reader, journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")),
-                          claudeLoopProfile: dir)
+        var store: TaskStore? = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("missing-codex")),
+                                          claudeReader: reader, journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")),
+                                          claudeLoopProfile: dir)
+        waitForClaudeRead(try XCTUnwrap(store))
         let socketDirectory = try ClaudeLoopSocket.directory(profile: dir, create: false)
         defer {
             store = nil
@@ -81,10 +104,12 @@ final class ClaudePhaseIsolationRaceTests: XCTestCase {
         }
         XCTAssertTrue(try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:first" })).planConfirmed)
         XCTAssertTrue(try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:neighbor" })).planConfirmed)
-        trigger = true
+        injection.arm(try XCTUnwrap(store?.testClaudeChannel))
         store?.refresh()
-        XCTAssertTrue(injected, "The event must be injected after the file snapshot")
-        XCTAssertTrue(arrived, "The real receiver must queue the synthetic frame before the second drain")
+        waitForClaudeRead(try XCTUnwrap(store))
+        let result = injection.result()
+        XCTAssertTrue(result.injected, "The event must be injected after the file snapshot")
+        XCTAssertTrue(result.arrived, "The real receiver must queue the synthetic frame before the second drain")
         let first = try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:first" }))
         let neighbor = try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:neighbor" }))
         return (first, neighbor)

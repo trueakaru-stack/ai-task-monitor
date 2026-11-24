@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 import XCTest
 @testable import AITaskMonitor
@@ -37,6 +38,26 @@ final class ClaudeSourceChannelTests: XCTestCase {
     @MainActor
     func testRealQueuedEventsSurviveBusyAndStopSignalsGap() throws {
         let root = try codexSyntheticDirectory(prefix: "aitm-claude-channel-")
+        defer { try? FileManager.default.removeItem(at: root) }
+        guard let configured = ProcessInfo.processInfo.environment["AITM_CLAUDE_CHANNEL_PROFILE"] else {
+            throw CocoaError(.fileReadNoPermission)
+        }
+        let profile = URL(fileURLWithPath: configured, isDirectory: true).standardizedFileURL
+        let expected = root.deletingLastPathComponent().appendingPathComponent("claude-channel-profile", isDirectory: true)
+        let values = try profile.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard profile == expected, profile.resolvingSymlinksInPath().standardizedFileURL == profile,
+              values.isDirectory == true, values.isSymbolicLink == false else {
+            throw CocoaError(.fileReadNoPermission)
+        }
+        let digest = SHA256.hash(data: Data(profile.path.utf8))
+        let suffix = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        let expectedSocketDirectory = "/private/tmp/aitm-loop-\(geteuid())-\(suffix)"
+        var before = stat()
+        let lookup = expectedSocketDirectory.withCString { lstat($0, &before) }
+        let lookupError = errno
+        guard lookup != 0, lookupError == ENOENT else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
         let file = root.appendingPathComponent("claude-events-v2.jsonl")
         var record = ClaudeHook.makeRecord(from: ["session_id": "fixture", "hook_event_name": "UserPromptSubmit"])
         let formatter = ISO8601DateFormatter()
@@ -46,7 +67,7 @@ final class ClaudeSourceChannelTests: XCTestCase {
         data.append(0x0a)
         try data.write(to: file)
         let state = Connection()
-        let worker = ClaudeSourceWorker(reader: ClaudeTaskReader(eventFile: file), channelProfile: root,
+        let worker = ClaudeSourceWorker(reader: ClaudeTaskReader(eventFile: file), channelProfile: profile,
                                         requiresChannel: true, connection: { state.read() })
         var socketDirectory: String?
         defer {
@@ -62,12 +83,12 @@ final class ClaudeSourceChannelTests: XCTestCase {
                 _ = (directory + "/owner.lock").withCString { unlink($0) }
                 _ = directory.withCString { rmdir($0) }
             }
-            try? FileManager.default.removeItem(at: root)
         }
         let first = try wait(worker)
         XCTAssertFalse(first.channelUnavailable, "The real isolated channel must open")
-        socketDirectory = try ClaudeLoopSocket.directory(profile: root, create: false)
-        sendAndWait(worker, profile: root, toolID: "first")
+        socketDirectory = try ClaudeLoopSocket.directory(profile: profile, create: false)
+        XCTAssertEqual(socketDirectory, expectedSocketDirectory)
+        sendAndWait(worker, profile: profile, toolID: "first")
 
         let lockPath = root.appendingPathComponent("claude-events.lock").path
         let descriptor = lockPath.withCString { open($0, O_RDWR | O_NOFOLLOW | O_CLOEXEC) }
@@ -83,7 +104,7 @@ final class ClaudeSourceChannelTests: XCTestCase {
         XCTAssertTrue(busy.before.ordinary.contains { $0.sessionID == "fixture" && $0.kind == .start })
         XCTAssertFalse(busy.before.gap)
 
-        sendAndWait(worker, profile: root, toolID: "second")
+        sendAndWait(worker, profile: profile, toolID: "second")
         state.disconnect()
         let disconnected = try wait(worker)
         guard case .disconnected = disconnected.outcome else { return XCTFail("The source must disconnect") }

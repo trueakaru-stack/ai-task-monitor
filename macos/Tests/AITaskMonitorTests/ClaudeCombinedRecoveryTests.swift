@@ -63,12 +63,14 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("missing-codex")),
                               claudeReader: ClaudeTaskReader(eventFile: file),
                               journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
+        waitForClaudeRead(store)
         XCTAssertEqual(store.tasks.first(where: { $0.provider == .claude })?.steps.map(\.title), ["Old title"])
         try append([loss(time.addingTimeInterval(0.2), partial: true),
                     prompt("case", time: time.addingTimeInterval(0.3)),
                     created("case", title: "New title", time: time.addingTimeInterval(0.4)),
                     completed("case", time: time.addingTimeInterval(0.5))], to: file)
         store.refresh()
+        waitForClaudeRead(store)
         let task = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:case" }))
         XCTAssertEqual(task.steps.map(\.title), ["Old title", "New title"])
         XCTAssertTrue(task.isUnconfirmed)
@@ -88,16 +90,19 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
             let store = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("missing-codex")),
                                   claudeReader: ClaudeTaskReader(eventFile: file),
                                   journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
+            waitForClaudeRead(store)
             XCTAssertEqual(store.tasks.first(where: { $0.provider == .claude })?.steps.first?.title, "Old title")
             if !replaceDirectly {
                 try FileManager.default.removeItem(at: file)
                 store.refresh() // Observe absence before recreation.
+                waitForClaudeRead(store)
             }
             let replacement = try encode([prompt("case", time: time.addingTimeInterval(0.4)),
                                           created("case", title: "New title", time: time.addingTimeInterval(0.5)),
                                           completed("case", time: time.addingTimeInterval(0.6))])
             try codexAtomicFixtureWrite(replacement, to: file)
             store.refresh()
+            waitForClaudeRead(store)
             let task = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:case" }))
             XCTAssertEqual(task.steps.map(\.title), ["Old title", "New title"], "replaceDirectly=\(replaceDirectly)")
             XCTAssertTrue(task.isUnconfirmed)
@@ -153,6 +158,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
         let store = TaskStore(codexReader: codex, claudeReader: ClaudeTaskReader(eventFile: claude),
                               journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
         waitForCodexRead(store)
+        waitForClaudeRead(store)
         XCTAssertTrue(store.unavailableSources.contains(.codex))
         XCTAssertFalse(store.tasks.contains(where: { $0.provider == .codex }))
         let task = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:case" }))
@@ -205,6 +211,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: home), claudeReader: ClaudeTaskReader(eventFile: file),
                               journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
         waitForCodexRead(store)
+        waitForClaudeRead(store)
         let affected = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:affected" }))
         let neighbor = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:neighbor" }))
         let codex = try XCTUnwrap(store.tasks.first(where: { $0.provider == .codex }))
@@ -249,10 +256,12 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("missing-codex")),
                               claudeReader: ClaudeTaskReader(eventFile: file),
                               journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
+        waitForClaudeRead(store)
         XCTAssertEqual(store.tasks.first(where: { $0.id == "claude:case" })?.steps.map(\.title), ["Old title"])
         try append([prompt("case", time: time.addingTimeInterval(0.2)),
                     created("case", title: "New title", time: time.addingTimeInterval(0.3))], to: file)
         store.refresh()
+        waitForClaudeRead(store)
         let task = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:case" }))
         XCTAssertEqual(task.steps.map(\.title), ["New title"])
         XCTAssertFalse(task.planConfirmed)

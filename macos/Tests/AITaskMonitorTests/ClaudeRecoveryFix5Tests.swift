@@ -139,6 +139,7 @@ final class ClaudeRecoveryFix5Tests: XCTestCase {
         let journal = DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics"))
         var store: TaskStore? = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("codex")),
                                           claudeReader: ClaudeTaskReader(eventFile: file), journal: journal, claudeLoopProfile: dir)
+        waitForClaudeRead(try XCTUnwrap(store))
         let socketDirectory = try ClaudeLoopSocket.directory(profile: dir, create: false)
         defer {
             store = nil
@@ -149,11 +150,7 @@ final class ClaudeRecoveryFix5Tests: XCTestCase {
             }
             try? FileManager.default.removeItem(at: dir)
         }
-        func channel(_ store: TaskStore) -> ClaudeLoopChannel? {
-            guard let child = Mirror(reflecting: store).children.first(where: { $0.label == "claudeLoopChannel" }) else { return nil }
-            return Mirror(reflecting: child.value).children.first?.value as? ClaudeLoopChannel
-        }
-        let before = try XCTUnwrap(store.flatMap { channel($0) })
+        let before = try XCTUnwrap(store?.testClaudeChannel)
         let path = dir.appendingPathComponent("claude-events.lock").path
         let descriptor = open(path, O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
         XCTAssertGreaterThanOrEqual(descriptor, 0)
@@ -161,12 +158,14 @@ final class ClaudeRecoveryFix5Tests: XCTestCase {
         defer { Darwin.close(descriptor) }
         XCTAssertEqual(flock(descriptor, LOCK_EX | LOCK_NB), 0)
         store?.refresh()
-        let during = try XCTUnwrap(store.flatMap { channel($0) })
+        waitForClaudeRead(try XCTUnwrap(store))
+        let during = try XCTUnwrap(store?.testClaudeChannel)
         XCTAssertTrue(before === during, "A transient busy journal must not replace the channel or its phase key")
         XCTAssertTrue(store?.unavailableSources.contains(.claude) == true)
         XCTAssertEqual(flock(descriptor, LOCK_UN), 0)
         store?.refresh()
-        let after = try XCTUnwrap(store.flatMap { channel($0) })
+        waitForClaudeRead(try XCTUnwrap(store))
+        let after = try XCTUnwrap(store?.testClaudeChannel)
         XCTAssertTrue(before === after)
     }
 

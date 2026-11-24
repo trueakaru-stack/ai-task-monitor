@@ -19,6 +19,12 @@ final class CodexGroupingVisualTests: XCTestCase {
         XCTAssertEqual(task.compactProgressLabel, "Этап 2 из 3 (3 агента)")
         XCTAssertNil(task.compactExtraAgentStepLabel)
         XCTAssertEqual(task.codexAgentStatusLabel, "Статус агентов не подтверждён")
+        task.codexAgentCountUnconfirmed = true
+        XCTAssertEqual(task.codexAgentStatusLabel, "Число и статус агентов не подтверждены")
+        task.codexAgentsUnconfirmed = false
+        XCTAssertEqual(task.codexAgentStatusLabel, "Число агентов не подтверждено")
+        task.codexAgentCountUnconfirmed = false
+        task.codexAgentsUnconfirmed = true
 
         task.progressBasis = .task
         XCTAssertEqual(task.compactProgressLabel, "50%")
@@ -82,7 +88,7 @@ final class CodexGroupingVisualTests: XCTestCase {
             for dark in [false, true] {
                 for compact in [false, true] {
                   for disclosureOpen in [false, true] {
-                   for scenario in ["normal", "long", "demo", "unavailable", "no-active", "percent"] {
+                   for scenario in ["normal", "long", "demo", "unavailable", "no-active", "percent", "count-unknown", "both-unknown"] {
                     for selected in (compact && scenario == "demo" ? [0, 1] : [0]) {
                     if selected == 1 && disclosureOpen { continue }
                     if scenario == "unavailable" && disclosureOpen { continue }
@@ -120,8 +126,12 @@ final class CodexGroupingVisualTests: XCTestCase {
                         progressKind: .none, steps: [], updatedAt: Date(), isUnconfirmed: true,
                         lastKnownActivity: tr("Проверка обработки ошибок", "Checking error handling"),
                         lastActivityIdentityConfirmed: true)
-                    let grouped = scenario == "unavailable" ? [unavailable] : CodexTaskGrouping.project([parentTask] + children,
+                    var grouped = scenario == "unavailable" ? [unavailable] : CodexTaskGrouping.project([parentTask] + children,
                         parents: [ids[0]: rootID, ids[1]: rootID, ids[2]: ids[0]], titles: [rootID: title], confirmedRoots: [rootID])
+                    if scenario == "count-unknown" || scenario == "both-unknown" {
+                        grouped[0].codexAgentCountUnconfirmed = true
+                        if scenario == "count-unknown" { grouped[0].codexAgentsUnconfirmed = false }
+                    }
                     let item = try XCTUnwrap(grouped.first)
                     XCTAssertEqual(grouped.count, 1)
                     if scenario == "unavailable" {

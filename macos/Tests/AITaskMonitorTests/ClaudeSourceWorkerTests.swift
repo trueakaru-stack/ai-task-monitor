@@ -156,7 +156,11 @@ final class ClaudeSourceWorkerTests: XCTestCase {
         gate.release.signal()
         let deadline = Date().addingTimeInterval(5)
         while result == nil && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
-        guard case .changed = try XCTUnwrap(result).outcome else { return XCTFail("The stale Stop must not be published") }
+        let raced = try XCTUnwrap(result)
+        guard case .snapshot(let uncertain) = raced.outcome else { return XCTFail("The changed session must stay visible") }
+        XCTAssertTrue(raced.changedSessionIDs.contains("claude:fixture"))
+        XCTAssertTrue(uncertain.tasks.contains { $0.id == "claude:fixture" && $0.isUnconfirmed })
+        XCTAssertFalse(uncertain.neutralEndedIDs.contains("claude:fixture"), "The stale Stop must not be applied")
         result = nil
         XCTAssertTrue(worker.tryRead(observedSince: Date().addingTimeInterval(-60)) { result = $0 })
         let retryDeadline = Date().addingTimeInterval(5)
@@ -164,6 +168,34 @@ final class ClaudeSourceWorkerTests: XCTestCase {
         guard case .snapshot(let current) = try XCTUnwrap(result).outcome else { return XCTFail("The new prompt must be reread") }
         XCTAssertTrue(current.tasks.contains { $0.id == "claude:fixture" && $0.isActive })
         XCTAssertFalse(current.neutralEndedIDs.contains("claude:fixture"))
+    }
+
+    func testChangedSessionDoesNotUnconfirmUnchangedNeighbor() {
+        let now = Date()
+        let step = TaskStep(id: "step", title: "Synthetic step", status: .active)
+        let first = MonitoredTask(id: "claude:first", provider: .claude, title: "First", activity: "Old",
+                                  isActive: true, progress: 50, progressKind: .approximate, steps: [step], updatedAt: now)
+        let neighbor = MonitoredTask(id: "claude:neighbor", provider: .claude, title: "Neighbor", activity: "Working",
+                                     isActive: true, progress: 50, progressKind: .approximate, steps: [step], updatedAt: now)
+        var old = ClaudeTaskSnapshot()
+        old.tasks = [first, neighbor]
+        var newer = ClaudeTaskSnapshot()
+        newer.tasks = [neighbor]
+        newer.neutralEndedIDs = [first.id]
+        var middle = ClaudeSourceEvents()
+        middle.affectedSessions = ["first"]
+        let result = ClaudeSourceWorker.compareSnapshots(old, newer, middle: middle)
+        XCTAssertFalse(result.affectsAll)
+        XCTAssertEqual(result.changed, [first.id])
+        XCTAssertTrue(result.snapshot.neutralEndedIDs.isEmpty)
+        XCTAssertEqual(result.snapshot.tasks, [neighbor])
+        XCTAssertTrue(result.snapshot.tasks[0].planConfirmed)
+
+        var lifecycle = ClaudeSourceEvents()
+        lifecycle.lifecycleSessions = ["first"]
+        let withNewEvent = ClaudeSourceWorker.compareSnapshots(old, old, middle: lifecycle)
+        XCTAssertTrue(withNewEvent.snapshot.tasks.first { $0.id == first.id }?.isUnconfirmed == true)
+        XCTAssertTrue(withNewEvent.snapshot.tasks.first { $0.id == neighbor.id }?.planConfirmed == true)
     }
 
     @MainActor

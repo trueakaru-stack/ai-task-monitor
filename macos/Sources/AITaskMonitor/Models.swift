@@ -108,6 +108,7 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
     var planConfirmed: Bool = true
     var progressBasis: ProgressBasis? = nil
     var codexAgentCount: Int? = nil
+    var codexAgentCountUnconfirmed: Bool? = nil
     var codexAgentsUnconfirmed: Bool? = nil
     var codexAgents: [CodexAgentDetail]? = nil
     var lastKnownActivity: String? = nil
@@ -128,6 +129,14 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
         else if (2...4).contains(last) { russian = "агента" }
         else { russian = "агентов" }
         let english = count == 1 ? "agent" : "agents"
+        if includingStatus && codexAgentCountUnconfirmed == true && codexAgentsUnconfirmed == true {
+            return tr("(\(count) \(russian), число и статус не подтверждены)",
+                      "(\(count) \(english), count and status unconfirmed)")
+        }
+        if includingStatus && codexAgentCountUnconfirmed == true {
+            return tr("(\(count) \(russian), число не подтверждено)",
+                      "(\(count) \(english), count unconfirmed)")
+        }
         if includingStatus && codexAgentsUnconfirmed == true {
             return tr("(\(count) \(russian), статус не подтверждён)",
                       "(\(count) \(english), status unconfirmed)")
@@ -137,7 +146,14 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
 
     var codexAgentCountLabel: String? { codexAgentCountLabel(includingStatus: true) }
     var codexAgentStatusLabel: String? {
-        guard (codexAgentCount ?? 0) > 0, codexAgentsUnconfirmed == true else { return nil }
+        guard (codexAgentCount ?? 0) > 0 else { return nil }
+        if codexAgentCountUnconfirmed == true && codexAgentsUnconfirmed == true {
+            return tr("Число и статус агентов не подтверждены", "Agent count and status unconfirmed")
+        }
+        if codexAgentCountUnconfirmed == true {
+            return tr("Число агентов не подтверждено", "Agent count unconfirmed")
+        }
+        guard codexAgentsUnconfirmed == true else { return nil }
         if codexAgentCount == 1 { return tr("Статус агента не подтверждён", "Agent status unconfirmed") }
         return tr("Статус агентов не подтверждён", "Agent status unconfirmed")
     }

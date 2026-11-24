@@ -75,3 +75,13 @@ func waitForCodexRead(_ store: TaskStore, timeout: TimeInterval = 5,
     }
     XCTAssertFalse(store.testCodexReadInFlight, "The source read did not finish", file: file, line: line)
 }
+
+@MainActor
+func waitForClaudeRead(_ store: TaskStore, timeout: TimeInterval = 5,
+                       file: StaticString = #filePath, line: UInt = #line) {
+    let deadline = Date().addingTimeInterval(timeout)
+    while store.testClaudeReadInFlight && Date() < deadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+    }
+    XCTAssertFalse(store.testClaudeReadInFlight, "The Claude source read did not finish", file: file, line: line)
+}

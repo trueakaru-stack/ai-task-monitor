@@ -218,6 +218,7 @@ final class ClaudeLoopChannelTests: XCTestCase {
         var store: TaskStore? = TaskStore(codexReader: CodexTaskReader(codexHome: root.appendingPathComponent("codex")),
                                           claudeReader: ClaudeTaskReader(eventFile: events), journal: journal,
                                           claudeLoopProfile: root)
+        waitForClaudeRead(try XCTUnwrap(store))
         defer {
             store = nil
             removeEmptyTestDirectory(directory)
@@ -239,8 +240,9 @@ final class ClaudeLoopChannelTests: XCTestCase {
         let timeout = Date().addingTimeInterval(3)
         while Date() < timeout {
             store?.refresh()
+            if let store { waitForClaudeRead(store) }
             if store?.tasks.first(where: { $0.id == "claude:first" })?.loopWarning != nil { break }
-            Thread.sleep(forTimeInterval: 0.02)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
         let first = try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:first" }))
         XCTAssertEqual(first.loopWarning, LoopWarning(threshold: 5, windowMinutes: 10))

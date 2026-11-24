@@ -14,9 +14,14 @@ struct ClaudeSourceEvents {
     var gap = false
     var ordinary: [ClaudeLoopEvent] = []
     var affectedSessions: Set<String> = []
+    var lifecycleSessions: Set<String> = []
     var affectsAll = false
 }
 
+// A snapshot is not, by itself, proof of a complete source or a confirmed
+// plan. Consumers must honor connection, phase uncertainty and all three
+// event batches even when the journal read fails. A batch gap resets its
+// associated diagnostics before any later events are consumed.
 struct ClaudeSourceRead {
     let generation: UInt64
     let connection: ClaudeIntegration.ConnectionState?
@@ -24,6 +29,9 @@ struct ClaudeSourceRead {
     let before: ClaudeSourceEvents
     let middle: ClaudeSourceEvents
     let after: ClaudeSourceEvents
+    let earlierTasks: [MonitoredTask]
+    let changedSessionIDs: Set<String>
+    let changesAffectAll: Bool
     let phaseUncertainSessions: Set<String>
     let phasePoisoned: Bool
     let channelUnavailable: Bool
@@ -33,10 +41,13 @@ struct ClaudeSourceRead {
                          before: ClaudeSourceEvents(gap: true, affectsAll: true),
                          middle: ClaudeSourceEvents(gap: true, affectsAll: true),
                          after: ClaudeSourceEvents(gap: true, affectsAll: true),
+                         earlierTasks: [], changedSessionIDs: [], changesAffectAll: true,
                          phaseUncertainSessions: [], phasePoisoned: true, channelUnavailable: true)
     }
 }
 
+// Its owner must call close() when the window is released. A blocked queue
+// retains the worker, so deinit alone cannot guarantee timely shutdown.
 final class ClaudeSourceWorker {
     private let queue = DispatchQueue(label: "ai-task-monitor.claude-source", qos: .utility)
     private let control = NSLock()
@@ -129,6 +140,12 @@ final class ClaudeSourceWorker {
         shutdown()
     }
 
+    // Only an owner's deinit may call this from outside MainActor; its weak
+    // callback cannot apply a result after that owner has been released.
+    func shutdownForOwnerDeinit() {
+        shutdown()
+    }
+
     private func shutdown() {
         control.lock()
         guard !closed else { control.unlock(); return }
@@ -142,6 +159,13 @@ final class ClaudeSourceWorker {
     private func isCurrent(_ requested: UInt64) -> Bool {
         control.lock(); defer { control.unlock() }
         return !closed && generation == requested
+    }
+
+    // XCTest uses the real receiver to verify that queued frames are not
+    // lost across journal errors or concurrent snapshot reads.
+    var channelForTesting: ClaudeLoopChannel? {
+        control.lock(); defer { control.unlock() }
+        return activeChannel
     }
 
     #if DEBUG
@@ -220,7 +244,11 @@ final class ClaudeSourceWorker {
         result.affectsAll = result.affectsAll || batch.gap
         if batch.gap { evidence.invalidate() }
         for event in batch.events {
-            guard event.kind == .phase else { result.ordinary.append(event); continue }
+            guard event.kind == .phase else {
+                result.ordinary.append(event)
+                if event.kind == .stop { result.lifecycleSessions.insert(event.sessionID) }
+                continue
+            }
             if let fingerprint = event.fingerprint,
                let affected = evidence.observe(session: event.sessionID, toolID: event.toolID, fingerprint: fingerprint) {
                 result.affectedSessions.formUnion(affected)
@@ -232,15 +260,50 @@ final class ClaudeSourceWorker {
         return result
     }
 
-    private func snapshotsAgree(_ first: ClaudeTaskSnapshot, _ second: ClaudeTaskSnapshot) -> Bool {
+    struct ComparedSnapshots {
+        let snapshot: ClaudeTaskSnapshot
+        let changed: Set<String>
+        let affectsAll: Bool
+    }
+
+    static func compareSnapshots(_ first: ClaudeTaskSnapshot, _ second: ClaudeTaskSnapshot,
+                                 middle: ClaudeSourceEvents) -> ComparedSnapshots {
         let old = Dictionary(grouping: first.tasks, by: \.id)
         let new = Dictionary(grouping: second.tasks, by: \.id)
-        guard old.keys.count == new.keys.count, old.allSatisfy({ key, tasks in
-            tasks.count == 1 && new[key]?.count == 1 && new[key]?.first == tasks.first
-        }) else { return false }
-        return first.terminalIDs == second.terminalIDs && first.interruptedIDs == second.interruptedIDs &&
-            first.neutralEndedIDs == second.neutralEndedIDs && first.sourceUncertain == second.sourceUncertain &&
-            first.titleHistoryOverflowIDs == second.titleHistoryOverflowIDs
+        var all = middle.gap || middle.affectsAll || first.sourceUncertain != second.sourceUncertain ||
+            old.values.contains(where: { $0.count != 1 }) || new.values.contains(where: { $0.count != 1 })
+        var changed = Set(old.keys).union(new.keys)
+        changed.formUnion(first.terminalIDs.union(second.terminalIDs))
+        changed.formUnion(first.neutralEndedIDs.union(second.neutralEndedIDs))
+        changed.formUnion(first.interruptedIDs.union(second.interruptedIDs))
+        changed.formUnion(first.titleHistoryOverflowIDs.union(second.titleHistoryOverflowIDs))
+        changed = Set(changed.filter { id in
+            old[id]?.first != new[id]?.first ||
+                first.terminalIDs.contains(id) != second.terminalIDs.contains(id) ||
+                first.neutralEndedIDs.contains(id) != second.neutralEndedIDs.contains(id) ||
+                first.interruptedIDs.contains(id) != second.interruptedIDs.contains(id) ||
+                first.titleHistoryOverflowIDs.contains(id) != second.titleHistoryOverflowIDs.contains(id)
+        })
+        for session in middle.affectedSessions.union(middle.lifecycleSessions) {
+            guard let key = claudeSessionKey(session) else { all = true; continue }
+            changed.insert("claude:" + key)
+        }
+        var safe = second
+        safe.titleHistoryOverflowIDs.formUnion(first.titleHistoryOverflowIDs)
+        if all {
+            safe.terminalIDs.removeAll()
+            safe.interruptedIDs.removeAll()
+            safe.neutralEndedIDs.removeAll()
+        } else {
+            safe.terminalIDs.subtract(changed)
+            safe.interruptedIDs.subtract(changed)
+            safe.neutralEndedIDs.subtract(changed)
+        }
+        safe.tasks = second.tasks.map { task in
+            guard all || changed.contains(task.id) else { return task }
+            return TaskSnapshotMerger.merge(previous: [task], current: [], terminalIDs: [])[0]
+        }
+        return ComparedSnapshots(snapshot: safe, changed: changed, affectsAll: all)
     }
 
     private func invalidatedRead(_ requested: UInt64) -> ClaudeSourceRead {
@@ -248,6 +311,7 @@ final class ClaudeSourceWorker {
                          before: ClaudeSourceEvents(gap: true, affectsAll: true),
                          middle: ClaudeSourceEvents(gap: true, affectsAll: true),
                          after: ClaudeSourceEvents(gap: true, affectsAll: true),
+                         earlierTasks: [], changedSessionIDs: [], changesAffectAll: true,
                          phaseUncertainSessions: [], phasePoisoned: true, channelUnavailable: true)
     }
 
@@ -264,6 +328,9 @@ final class ClaudeSourceWorker {
         var middle = ClaudeSourceEvents()
         var after = ClaudeSourceEvents()
         var uncertain: Set<String> = []
+        var earlierTasks: [MonitoredTask] = []
+        var changedSessions: Set<String> = []
+        var affectsAll = false
         var channelUnavailable = false
         do {
             let initial = try connection()
@@ -295,7 +362,11 @@ final class ClaudeSourceWorker {
                     lastObservationStartedAt = ProcessInfo.processInfo.systemUptime
                     let second = try reader.readSnapshot(observedSince: observedSince, phaseEvidence: evidence)
                     guard isCurrent(requested) else { return invalidatedRead(requested) }
-                    outcome = snapshotsAgree(first, second) ? .snapshot(second) : .changed
+                    let compared = Self.compareSnapshots(first, second, middle: middle)
+                    earlierTasks = first.tasks
+                    changedSessions = compared.changed
+                    affectsAll = compared.affectsAll
+                    outcome = .snapshot(compared.snapshot)
                     for task in second.tasks where task.id.hasPrefix("claude:") {
                         let session = String(task.id.dropFirst(7))
                         if evidence.isSessionUncertain(session) { uncertain.insert(task.id) }
@@ -319,7 +390,9 @@ final class ClaudeSourceWorker {
             after = ClaudeSourceEvents(gap: true, affectsAll: true)
         }
         let result = ClaudeSourceRead(generation: requested, connection: state, outcome: outcome,
-                                      before: before, middle: middle, after: after, phaseUncertainSessions: uncertain,
+                                      before: before, middle: middle, after: after,
+                                      earlierTasks: earlierTasks, changedSessionIDs: changedSessions, changesAffectAll: affectsAll,
+                                      phaseUncertainSessions: uncertain,
                                       phasePoisoned: evidence.poisoned, channelUnavailable: channelUnavailable)
         if case .changed = outcome { return result.invalidated() }
         return isCurrent(requested) ? result : result.invalidated()

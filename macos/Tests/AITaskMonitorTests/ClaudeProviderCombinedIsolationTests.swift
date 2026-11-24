@@ -122,6 +122,7 @@ final class ClaudeProviderCombinedIsolationTests: XCTestCase {
             try? manager.removeItem(at: root)
         }
         let monitor = try XCTUnwrap(store)
+        waitForClaudeRead(monitor)
         let firstRuntime = try XCTUnwrap(activeV2)
         XCTAssertNotNil(activeRuntime)
         XCTAssertFalse(monitor.externalV2Failed)
@@ -154,6 +155,7 @@ final class ClaudeProviderCombinedIsolationTests: XCTestCase {
         try handle.write(contentsOf: encoded([loss, next, newer]))
         try handle.close()
         monitor.refresh()
+        waitForClaudeRead(monitor)
         let claude = try XCTUnwrap(monitor.tasks.first { $0.id == "claude:case" })
         XCTAssertEqual(claude.steps.map(\.title), ["Old title", "New title"])
         XCTAssertTrue(claude.isUnconfirmed)

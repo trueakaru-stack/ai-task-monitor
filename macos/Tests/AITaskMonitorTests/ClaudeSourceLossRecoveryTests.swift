@@ -331,6 +331,7 @@ final class ClaudeSourceLossRecoveryTests: XCTestCase {
         let journal = DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics"))
         var store: TaskStore? = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("codex")),
                                           claudeReader: ClaudeTaskReader(eventFile: file), journal: journal, claudeLoopProfile: dir)
+        waitForClaudeRead(try XCTUnwrap(store))
         let socketDirectory = try ClaudeLoopSocket.directory(profile: dir, create: false)
         defer {
             store = nil
@@ -364,8 +365,9 @@ final class ClaudeSourceLossRecoveryTests: XCTestCase {
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline {
             store?.refresh()
+            if let store { waitForClaudeRead(store) }
             if store?.tasks.first(where: { $0.id == "claude:new-session" }) != nil { break }
-            Thread.sleep(forTimeInterval: 0.01)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
         let task = try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:new-session" }))
         XCTAssertTrue(task.isUnconfirmed)

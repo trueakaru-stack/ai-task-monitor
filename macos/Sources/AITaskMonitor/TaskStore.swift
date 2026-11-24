@@ -1,11 +1,6 @@
 import Combine
 import Foundation
 
-private struct ClaudePhaseChanges {
-    var affectsAll = false
-    var sessions: Set<String> = []
-}
-
 private struct CodexBackgroundRead {
     let homeExists: Bool
     let homeStable: Bool
@@ -17,6 +12,11 @@ private struct CodexBackgroundRead {
     let language: AppLanguage
     let startedAtUptime: TimeInterval
     let finishedAtUptime: TimeInterval
+}
+
+private struct ClaudeBackgroundRead {
+    let result: ClaudeSourceRead
+    let selectionGeneration: UInt64
 }
 
 private struct CodexHomeObservation: Equatable {
@@ -242,9 +242,16 @@ final class TaskStore: ObservableObject {
     private var codexTerminalGuard = CodexTerminalGuard()
     private var codexSourceUnavailable = false
     private var codexSourcePartial = false
-    private let claudeReader: ClaudeTaskReader
+    private let claudeSourceWorker: ClaudeSourceWorker
+    private let updateClaudeConnection: (Bool) throws -> Void
+    private var claudeReadInFlight = false
+    private var claudeReadPending = false
+    private var claudeReadDelayed = false
+    private var claudeReadStartedAt: TimeInterval?
+    private var claudeReadGeneration: UInt64 = 0
+    private var claudeHasCompletedRead = false
+    private var claudeSourceUnavailable = false
     private let diagnosticWorker: DiagnosticWorker?
-    private let claudeLoopProfile: URL?
     private let claudeRetentionWorker: ClaudeRetentionWorker?
     private let externalProvidersEnabled: Bool
     private let externalV2Enabled: Bool
@@ -307,11 +314,8 @@ final class TaskStore: ObservableObject {
     private var nextHermesScan = Date.distantPast
     private var taskFocus = TaskFocusTracker()
     private var sawCodexHome = false
-    private var sawClaudeEvents = false
     private var nextJournalMaintenance = Date.distantPast
     private var loopDetectors: [String: LoopDetector] = [:]
-    private var claudeLoopChannel: ClaudeLoopChannel?
-    private var claudePhaseEvidence = ClaudePhaseEvidence()
     private var claudeLoopDetectors: [String: ClaudeLoopTracker] = [:]
     private var timer: Timer?
 
@@ -725,7 +729,7 @@ final class TaskStore: ObservableObject {
         return hermesUncertainScopes.isEmpty ? .disconnected : .partial
     }
 
-    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, additionalExternalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState] = [:], makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }, makeExternalV2Runtime: @escaping () throws -> ExternalProviderV2Runtime = { try ExternalProviderV2Runtime() }, discoverDeepSeekContext: @escaping () -> DeepSeekIntegration.Context? = { DeepSeekIntegration.discover() }, inspectKimiConnection: @escaping () throws -> KimiConnection = {
+    init(codexReader: CodexTaskReader = CodexTaskReader(), claudeReader: ClaudeTaskReader = ClaudeTaskReader(), previewTasks: [MonitoredTask]? = nil, journal: DiagnosticJournal? = nil, claudeLoopProfile: URL? = nil, inspectClaudeConnection: (() throws -> ClaudeIntegration.ConnectionState)? = nil, updateClaudeConnection: @escaping (Bool) throws -> Void = { try ClaudeIntegration.setConnected($0) }, enableUpdateChecks: Bool = false, enableClaudeRetention: Bool = false, enableExternalProviders: Bool = false, openCodeConnection: @escaping () throws -> OpenCodeIntegration.State = { try OpenCodeIntegration.state() }, additionalExternalConnections: [TaskProvider: () throws -> ExternalProviderConnectionState] = [:], makeExternalRuntime: @escaping () throws -> ExternalProviderRuntime = { try ExternalProviderRuntime(channel: ExternalProviderChannel()) }, makeExternalV2Runtime: @escaping () throws -> ExternalProviderV2Runtime = { try ExternalProviderV2Runtime() }, discoverDeepSeekContext: @escaping () -> DeepSeekIntegration.Context? = { DeepSeekIntegration.discover() }, inspectKimiConnection: @escaping () throws -> KimiConnection = {
         guard let context = KimiIntegration.discover() else { throw KimiIntegrationError(code: "installation-unconfirmed") }
         return try KimiIntegration.inspect(context)
     }, kimiScanInterval: TimeInterval = 15,
@@ -738,8 +742,16 @@ final class TaskStore: ObservableObject {
        updateFileStore: ReleaseScheduleFileStore? = nil,
        makeReleaseRequest: @escaping ReleaseRequestFactory = { ReleaseRequest(completion: $0) }) {
         self.codexReader = codexReader
-        self.claudeReader = claudeReader
-        self.claudeLoopProfile = claudeLoopProfile
+        let needsClaudeChannel = !claudeReader.usesExplicitFile || claudeLoopProfile != nil
+        let sourceProfile = needsClaudeChannel ? (claudeLoopProfile ?? AppPaths.supportDirectory) : nil
+        let usesExplicitClaudeFile = claudeReader.usesExplicitFile
+        self.updateClaudeConnection = updateClaudeConnection
+        self.claudeSourceWorker = ClaudeSourceWorker(reader: claudeReader, channelProfile: sourceProfile,
+                                                     requiresChannel: needsClaudeChannel, connection: {
+            if let inspectClaudeConnection { return try inspectClaudeConnection() }
+            if usesExplicitClaudeFile { return .connected }
+            return try ClaudeIntegration.connectionState()
+        })
         self.externalProvidersEnabled = enableExternalProviders && previewTasks == nil
         self.externalV2Enabled = enableExternalV2 && enableExternalProviders && previewTasks == nil
         var connections = additionalExternalConnections.filter { [.kimi, .deepseek, .hermes].contains($0.key) }
@@ -797,7 +809,7 @@ final class TaskStore: ObservableObject {
     deinit {
         claudeRetentionWorker?.invalidate()
         timer?.invalidate()
-        claudeLoopChannel?.stop()
+        claudeSourceWorker.shutdownForOwnerDeinit()
         externalRuntime?.stop()
         externalV2Runtime?.stop()
     }
@@ -1017,7 +1029,7 @@ final class TaskStore: ObservableObject {
     var compactEmptyMessage: String {
         let warning = compactUnavailableMessage
         if !warning.isEmpty { return warning }
-        if codexReadInFlight && !codexHasCompletedRead {
+        if (codexReadInFlight && !codexHasCompletedRead) || (claudeReadInFlight && !claudeHasCompletedRead) {
             return tr("Нет отображаемых задач", "No tasks to display")
         }
         if !tasks.isEmpty && compactTasks.isEmpty {
@@ -1030,7 +1042,7 @@ final class TaskStore: ObservableObject {
     }
 
     var expandedEmptyMessage: String {
-        if codexReadInFlight && !codexHasCompletedRead {
+        if (codexReadInFlight && !codexHasCompletedRead) || (claudeReadInFlight && !claudeHasCompletedRead) {
             return tr("Нет отображаемых задач", "No tasks to display")
         }
         return tr("Активных задач нет", "No active tasks")
@@ -1121,12 +1133,55 @@ final class TaskStore: ObservableObject {
 
     func refresh() {
         scheduleCodexRead(periodic: false)
+        scheduleClaudeRead(periodic: false)
         refreshState(codexRead: nil)
     }
 
     private func periodicRefresh() {
         scheduleCodexRead(periodic: true)
+        scheduleClaudeRead(periodic: true)
         refreshState(codexRead: nil)
+    }
+
+    private func scheduleClaudeRead(periodic: Bool = false) {
+        if claudeReadInFlight {
+            claudeReadPending = true
+            if periodic, let start = claudeReadStartedAt,
+               ProcessInfo.processInfo.systemUptime - start >= Self.sourcePollInterval,
+               !claudeReadDelayed {
+                claudeReadDelayed = true
+                claudeSourceUnavailable = true
+                previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
+                previousClaude = Self.clearUnconfirmedClaudePlans(previousClaude)
+            }
+            return
+        }
+        claudeReadInFlight = true
+        claudeReadDelayed = false
+        claudeReadStartedAt = ProcessInfo.processInfo.systemUptime
+        claudeReadGeneration &+= 1
+        let generation = claudeReadGeneration
+        let selectionGeneration = compactManualSelectionGeneration
+        let accepted = claudeSourceWorker.tryRead(observedSince: monitoringStartedAt) { [weak self] result in
+            guard let self, self.claudeReadGeneration == generation else { return }
+            self.claudeReadInFlight = false
+            self.claudeReadStartedAt = nil
+            self.claudeReadDelayed = false
+            let pending = self.claudeReadPending
+            self.claudeReadPending = false
+            self.refreshState(codexRead: nil, claudeRead: ClaudeBackgroundRead(result: result,
+                                                                               selectionGeneration: selectionGeneration))
+            let shouldRepeat = pending || self.claudeReadPending
+            self.claudeReadPending = false
+            if shouldRepeat { self.scheduleClaudeRead() }
+        }
+        if !accepted {
+            claudeReadInFlight = false
+            claudeReadStartedAt = nil
+            claudeSourceUnavailable = true
+            previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
+            previousClaude = Self.clearUnconfirmedClaudePlans(previousClaude)
+        }
     }
 
     // One reader owns its caches on one serial queue. A burst of refresh
@@ -1204,7 +1259,8 @@ final class TaskStore: ObservableObject {
         }
     }
 
-    private func refreshState(codexRead: CodexBackgroundRead?, codexReadWasDelayed: Bool = false) {
+    private func refreshState(codexRead: CodexBackgroundRead?, claudeRead: ClaudeBackgroundRead? = nil,
+                              codexReadWasDelayed: Bool = false) {
         let previousTasks = tasks
         let previousCompact = compactTasks
         let previousCompactIndex = previousCompact.isEmpty ? nil : compactSelectedIndex
@@ -1215,7 +1271,6 @@ final class TaskStore: ObservableObject {
         var interruptedIDs: Set<String> = []
         var neutralEndedIDs: Set<String> = []
         var codexToolEvents: [String: [CodexToolEvent]] = [:]
-        var claudeConnected = false
         if let codexRead {
           codexHasCompletedRead = true
           if codexRead.homeExists { sawCodexHome = true }
@@ -1276,67 +1331,70 @@ final class TaskStore: ObservableObject {
         }
         if expiredCodex { codexSourcePartial = true }
         if codexSourceUnavailable { unavailable.append(.codex) }
-        do {
-            let connection: ClaudeIntegration.ConnectionState
-            if claudeReader.usesExplicitFile { connection = .connected }
-            else { connection = try ClaudeIntegration.connectionState() }
-            if connection == .disconnected {
+        if let response = claudeRead?.result {
+            claudeHasCompletedRead = true
+            let eventTime = Date()
+            applyClaudeEvents(response.before, now: eventTime)
+            applyClaudeEvents(response.middle, now: eventTime)
+            applyClaudeEvents(response.after, now: eventTime)
+            claudeLoopError = response.channelUnavailable && diagnosticWorker != nil
+                ? tr("Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение.",
+                     "Claude Code loop warnings are unavailable. Check access or restart the app.") : ""
+            switch response.outcome {
+            case .disconnected:
                 previousClaude = []
                 claudeRetainedTitlesOverflow = false
-                sawClaudeEvents = false
-            } else {
-                let complete = connection == .connected
-                claudeConnected = complete && (!claudeReader.usesExplicitFile || claudeLoopProfile != nil)
-                // Drain phase evidence before matching the file snapshot. A
-                // record whose frame is still in flight remains unconfirmed.
-                syncClaudeLoop(connected: claudeConnected, now: Date())
-                if !complete { unavailable.append(.claude) }
-                let exists = FileManager.default.fileExists(atPath: claudeReader.eventFile.path)
-                if !exists && sawClaudeEvents {
-                    claudeReader.noteSourceLoss()
-                    throw CocoaError(.fileReadNoSuchFile)
-                }
-                if exists {
-                    sawClaudeEvents = true
-                    let snapshot = try claudeReader.readSnapshot(observedSince: monitoringStartedAt,
-                                                                phaseEvidence: claudePhaseEvidence)
-                    terminalIDs.formUnion(snapshot.terminalIDs)
-                    interruptedIDs.formUnion(snapshot.interruptedIDs)
-                    neutralEndedIDs.formUnion(snapshot.neutralEndedIDs)
-                    let phaseAffected = Set(snapshot.tasks.compactMap { task -> String? in
-                        guard task.provider == .claude, task.id.hasPrefix("claude:") else { return nil }
-                        let session = String(task.id.dropFirst(7))
-                        return claudePhaseEvidence.isSessionUncertain(session) ? task.id : nil
-                    })
-                    let retainAll = snapshot.sourceUncertain || claudePhaseEvidence.poisoned
-                    let affected = phaseAffected.union(snapshot.titleHistoryOverflowIDs)
-                    let retainedTitles = retainAll || !affected.isEmpty
-                        ? Self.preserveUncertainClaudeTitles(previous: previousClaude, current: snapshot.tasks,
-                                                            affected: retainAll ? nil : affected)
-                        : (tasks: snapshot.tasks, overflow: false)
-                    claudeRetainedTitlesOverflow = claudeRetainedTitlesOverflow || retainedTitles.overflow
-                    previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: retainedTitles.tasks,
-                                                               terminalIDs: snapshot.terminalIDs.union(snapshot.neutralEndedIDs))
-                    if snapshot.sourceUncertain || !snapshot.titleHistoryOverflowIDs.isEmpty || claudeRetainedTitlesOverflow {
-                        // The warning remains for the affected history; keep
-                        // the live channel available for a scoped new session.
-                        if !unavailable.contains(.claude) { unavailable.append(.claude) }
-                    }
-                }
-                if !complete {
+                claudeSourceUnavailable = false
+            case .noEvents:
+                claudeSourceUnavailable = response.connection != .connected
+                if !previousClaude.isEmpty {
                     previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
                 }
+            case .snapshot(let snapshot):
+                let mappedAfter = Set(response.after.affectedSessions.compactMap { claudeSessionKey($0).map { "claude:" + $0 } })
+                let mappedLifecycle = Set(response.after.lifecycleSessions.compactMap { claudeSessionKey($0).map { "claude:" + $0 } })
+                let lifecycleUnknownAll = response.after.gap || mappedLifecycle.count != response.after.lifecycleSessions.count
+                let uncertainAll = response.changesAffectAll || response.after.affectsAll || response.after.gap ||
+                    response.phasePoisoned || snapshot.sourceUncertain ||
+                    mappedAfter.count != response.after.affectedSessions.count || lifecycleUnknownAll
+                let affected = response.changedSessionIDs.union(response.phaseUncertainSessions)
+                    .union(snapshot.titleHistoryOverflowIDs).union(mappedAfter).union(mappedLifecycle)
+                var current = Self.clearClaudePlanConfirmations(snapshot.tasks, affected: uncertainAll ? nil : affected)
+                current = current.map { task in
+                    guard lifecycleUnknownAll || mappedLifecycle.contains(task.id) else { return task }
+                    return TaskSnapshotMerger.merge(previous: [task], current: [], terminalIDs: [])[0]
+                }
+                if uncertainAll || !affected.isEmpty {
+                    let fromRead = Self.preserveUncertainClaudeTitles(previous: response.earlierTasks, current: current,
+                                                                      affected: uncertainAll ? nil : affected)
+                    let fromPrevious = Self.preserveUncertainClaudeTitles(previous: previousClaude, current: fromRead.tasks,
+                                                                          affected: uncertainAll ? nil : affected)
+                    claudeRetainedTitlesOverflow = claudeRetainedTitlesOverflow || fromRead.overflow || fromPrevious.overflow
+                    current = fromPrevious.tasks
+                }
+                var ended = snapshot.terminalIDs
+                var neutral = snapshot.neutralEndedIDs
+                if uncertainAll || response.connection != .connected {
+                    ended.removeAll(); neutral.removeAll()
+                } else {
+                    ended.subtract(affected); neutral.subtract(affected)
+                }
+                terminalIDs.formUnion(ended)
+                interruptedIDs.formUnion(snapshot.interruptedIDs.intersection(ended))
+                neutralEndedIDs.formUnion(neutral)
+                previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: current,
+                                                           terminalIDs: ended.union(neutral))
+                claudeSourceUnavailable = response.connection != .connected || snapshot.sourceUncertain ||
+                    !snapshot.titleHistoryOverflowIDs.isEmpty || claudeRetainedTitlesOverflow
+                if response.connection != .connected {
+                    previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
+                }
+            case .failed, .changed:
+                claudeSourceUnavailable = true
+                previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
             }
-        } catch ClaudeReadError.journalBusy {
-            // A concurrent hook or retention pass is transient. Preserve the
-            // channel and its phase evidence while the snapshot is retried.
-            if !unavailable.contains(.claude) { unavailable.append(.claude) }
-            previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
-        } catch {
-            claudeConnected = false
-            if !unavailable.contains(.claude) { unavailable.append(.claude) }
-            previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
         }
+        if claudeSourceUnavailable { unavailable.append(.claude) }
         // A retained card after a read error or lost source must not retain a
         // confirmed plan internally even when the UI also hides stale state.
         previousClaude = Self.clearUnconfirmedClaudePlans(previousClaude)
@@ -1348,14 +1406,6 @@ final class TaskStore: ObservableObject {
             .filter { $0.isActive || $0.isUnconfirmed || $0.isWaiting }
             .sorted { $0.updatedAt > $1.updatedAt }
         let now = Date()
-        let phaseChanges = syncClaudeLoop(connected: claudeConnected, now: now)
-        let knownIDs = Set(phaseChanges.sessions.compactMap { claudeSessionKey($0).map { "claude:" + $0 } })
-        let all = phaseChanges.affectsAll || claudePhaseEvidence.poisoned || knownIDs.count != phaseChanges.sessions.count
-        if all || !knownIDs.isEmpty {
-            let affected: Set<String>? = all ? nil : knownIDs
-            previousClaude = Self.clearClaudePlanConfirmations(previousClaude, affected: affected)
-            combined = Self.clearClaudePlanConfirmations(combined, affected: affected)
-        }
         for id in Array(loopDetectors.keys) {
             guard var detector = loopDetectors[id] else { continue }
             detector.configure(threshold: diagnosticSettings.loopThreshold, windowMinutes: diagnosticSettings.loopWindowMinutes)
@@ -1425,7 +1475,8 @@ final class TaskStore: ObservableObject {
             }
             chosen = mappedSelection
         }
-        if let codexRead, codexRead.selectionGeneration != compactManualSelectionGeneration,
+        let readSelectionGeneration = codexRead?.selectionGeneration ?? claudeRead?.selectionGeneration
+        if let readSelectionGeneration, readSelectionGeneration != compactManualSelectionGeneration,
            let selectedTask,
            let position = CodexTaskGrouping.manualRefreshMatch(combined, previous: previousTasks, selected: selectedTask) {
                 let visible = CodexTaskGrouping.compactVisibleIndices(combined, confirmedChildren: confirmedCodexChildrenForCompact)
@@ -1746,11 +1797,20 @@ final class TaskStore: ObservableObject {
     }
 
     var testCodexReadInFlight: Bool { codexReadInFlight }
+    var testClaudeReadInFlight: Bool { claudeReadInFlight }
+    var testClaudeChannel: ClaudeLoopChannel? { claudeSourceWorker.channelForTesting }
+    var testClaudeWorker: ClaudeSourceWorker { claudeSourceWorker }
 
     #if DEBUG
     func testSeedCodexTasks(_ seed: [MonitoredTask]) {
         precondition(diagnosticWorker == nil && !externalProvidersEnabled && !codexReadInFlight)
         previousCodex = seed
+        tasks = seed
+    }
+
+    func testSeedClaudeTasks(_ seed: [MonitoredTask]) {
+        precondition(diagnosticWorker == nil && !externalProvidersEnabled && !claudeReadInFlight)
+        previousClaude = seed
         tasks = seed
     }
 
@@ -1829,50 +1889,10 @@ final class TaskStore: ObservableObject {
         }
     }
 
-    @discardableResult
-    private func syncClaudeLoop(connected: Bool, now: Date) -> ClaudePhaseChanges {
-        guard connected else {
-            let changed = claudeLoopChannel != nil
-            if changed { claudePhaseEvidence.invalidate() }
-            claudeLoopChannel?.stop()
-            claudeLoopChannel = nil
-            claudeLoopDetectors.removeAll()
-            claudeLoopError = ""
-            return ClaudePhaseChanges(affectsAll: changed)
-        }
-        if claudeLoopChannel == nil {
-            do {
-                let channel = try ClaudeLoopChannel(profile: claudeLoopProfile ?? AppPaths.supportDirectory)
-                claudeLoopChannel = channel
-                if let key = channel.phaseKey() { claudePhaseEvidence.start(key: key) }
-                else { claudePhaseEvidence.invalidate() }
-            }
-            catch {
-                claudePhaseEvidence.invalidate()
-                claudeLoopDetectors.removeAll()
-                if diagnosticWorker != nil {
-                    claudeLoopError = tr("Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение.", "Claude Code loop warnings are unavailable. Check access or restart the app.")
-                }
-                return ClaudePhaseChanges(affectsAll: true)
-            }
-        }
-        guard let channel = claudeLoopChannel else { return ClaudePhaseChanges(affectsAll: true) }
-        claudeLoopError = ""
-        let batch = channel.drain()
-        var phaseChanges = ClaudePhaseChanges(affectsAll: batch.gap)
-        if batch.gap { claudeLoopDetectors.removeAll(); claudePhaseEvidence.invalidate() }
+    private func applyClaudeEvents(_ batch: ClaudeSourceEvents, now: Date) {
+        if batch.gap { claudeLoopDetectors.removeAll() }
         if diagnosticWorker == nil { claudeLoopDetectors.removeAll() }
-        for event in batch.events {
-            if event.kind == .phase {
-                if let fingerprint = event.fingerprint,
-                   let affected = claudePhaseEvidence.observe(session: event.sessionID, toolID: event.toolID, fingerprint: fingerprint) {
-                    phaseChanges.sessions.formUnion(affected)
-                } else {
-                    claudePhaseEvidence.invalidate()
-                    phaseChanges.affectsAll = true
-                }
-                continue
-            }
+        for event in batch.ordinary {
             guard diagnosticWorker != nil else { continue }
             if claudeLoopDetectors[event.sessionID] == nil {
                 guard event.kind == .start else { continue }
@@ -1896,7 +1916,6 @@ final class TaskStore: ObservableObject {
             if detector.lastSeen < now.addingTimeInterval(-1800) { claudeLoopDetectors.removeValue(forKey: id) }
             else { claudeLoopDetectors[id] = detector }
         }
-        return phaseChanges
     }
 
     func setDiagnosticSettings(_ settings: DiagnosticSettings) {
@@ -2028,7 +2047,12 @@ final class TaskStore: ObservableObject {
 
     func setClaudeConnected(_ connected: Bool) {
         do {
-            try ClaudeIntegration.setConnected(connected)
+            try updateClaudeConnection(connected)
+            claudeSourceWorker.invalidate()
+            claudeSourceUnavailable = true
+            previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
+            previousClaude = Self.clearUnconfirmedClaudePlans(previousClaude)
+            claudeLoopDetectors.removeAll()
             sourceMessage = connected ? tr("Подключено. Перезапустите Claude Code.", "Connected. Restart Claude Code.") : tr("Отключено", "Disconnected")
             refresh()
         } catch {

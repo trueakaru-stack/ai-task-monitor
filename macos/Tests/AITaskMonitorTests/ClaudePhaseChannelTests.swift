@@ -215,6 +215,7 @@ final class ClaudePhaseChannelTests: XCTestCase {
         var store: TaskStore? = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("codex")),
                                           claudeReader: ClaudeTaskReader(eventFile: events), journal: journal,
                                           claudeLoopProfile: dir)
+        waitForClaudeRead(try XCTUnwrap(store))
         let socketDirectory = try ClaudeLoopSocket.directory(profile: dir, create: false)
         defer {
             store = nil
@@ -247,8 +248,9 @@ final class ClaudePhaseChannelTests: XCTestCase {
         let limit = Date().addingTimeInterval(3)
         while Date() < limit {
             store?.refresh()
+            if let store { waitForClaudeRead(store) }
             if store?.tasks.first(where: { $0.id == "claude:synthetic" })?.planConfirmed == true { break }
-            Thread.sleep(forTimeInterval: 0.01)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
         }
         let task = try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:synthetic" }))
         XCTAssertTrue(task.planConfirmed)
