@@ -463,11 +463,17 @@ final class CodexAgentReaderProofTests: XCTestCase {
         let parent = try XCTUnwrap(files[rootID])
         let handle = try FileHandle(forWritingTo: parent)
         try handle.seekToEnd(); try handle.write(contentsOf: event("task_complete", offset: 2)); try handle.close()
-        store.refresh(); waitForCodexRead(store)
+        store.refresh(); waitForCodexRead(store); waitForClaudeRead(store)
         XCTAssertFalse(store.tasks.contains { $0.id == rootID || $0.id == "codex-retained:" + rootID })
         XCTAssertEqual(store.testRetainedAgentCount(root: rootID), 1, "A missing child is not proof of its exit")
-        store.refresh(); waitForCodexRead(store)
+        XCTAssertTrue(store.compactTasks.isEmpty, "The retained child must not become a separate compact task")
+        XCTAssertEqual(store.compactEmptyMessage,
+                       tr("Список задач Codex может быть неполным", "The Codex task list may be incomplete"))
+        store.refresh(); waitForCodexRead(store); waitForClaudeRead(store)
         XCTAssertFalse(store.tasks.contains { $0.id == rootID || $0.id == "codex-retained:" + rootID })
         XCTAssertEqual(store.testRetainedAgentCount(root: rootID), 1)
+        XCTAssertTrue(store.compactTasks.isEmpty)
+        XCTAssertEqual(store.compactEmptyMessage,
+                       tr("Список задач Codex может быть неполным", "The Codex task list may be incomplete"))
     }
 }

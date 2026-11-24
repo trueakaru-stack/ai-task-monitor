@@ -84,7 +84,7 @@ jobs:
           set -euo pipefail
           task_policy="${AITM_TEST_SANDBOX_POLICY:-$AITM_TEST_CONTROL_ROOT/profile.sb}"
           case "$task_policy" in "$AITM_TEST_CONTROL_ROOT/profile.sb"|"$AITM_TEST_CONTROL_ROOT/profile-offline.sb") ;; *) exit 1;; esac
-          task_extra=()
+          task_extra=("AITM_TEST_SCOPED_ENV=1")
           case "${AITM_TEST_UI_EVENT:-0}" in 0) ;; 1) task_extra+=("AITM_MACOS_UI_EVENT_TEST=1");; *) exit 1;; esac
           case "${AITM_TEST_SOCKET:-0}" in 0) ;; 1) task_extra+=("AITM_CLAUDE_SOCKET_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "AITM_CLAUDE_CHANNEL_PROFILE=$AITM_TEST_TASK_ROOT/temp/claude-channel-profile");; *) exit 1;; esac
           exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 \
