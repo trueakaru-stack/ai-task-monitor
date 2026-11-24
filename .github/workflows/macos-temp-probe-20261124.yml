@@ -1,0 +1,278 @@
+name: Diagnose macOS temporary directory
+on:
+  push:
+    branches: ['codex/macos-temp-probe-20261124']
+    paths: ['.github/workflows/macos-temp-probe-20261124.yml']
+permissions:
+  contents: read
+jobs:
+  isolated:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            developer: /Applications/Xcode.app/Contents/Developer
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer }}
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Prepare and verify disposable sandbox
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          task_profile_dir="$(/usr/bin/python3 -I -S -B -c 'import os,pwd; print(os.path.realpath(pwd.getpwuid(os.getuid()).pw_dir))')"
+          case "$task_profile_dir" in /Users/*) ;; *) echo 'Unexpected hosted runner profile.' >&2; exit 1;; esac
+          task_root="$(mktemp -d "$RUNNER_TEMP/aitm-card-tests.XXXXXXXX")"
+          task_control_parent="$(mktemp -d "$RUNNER_TEMP/aitm-card-control.XXXXXXXX")"
+          task_stage="$task_control_parent/stage"
+          task_control="$task_control_parent/mount"
+          /bin/mkdir "$task_stage" "$task_control"
+          case "$task_control" in "$task_profile_dir"/*) ;; *) echo 'Control directory is outside the runner profile.' >&2; exit 1;; esac
+          case "$task_control" in "$task_root"|"$task_root"/*) echo 'Control directory overlaps the task directory.' >&2; exit 1;; esac
+          test -d "$task_control" && test ! -L "$task_control"
+          test "$(cd -P "$task_control" && pwd -P)" = "$task_control"
+          task_marker="$(mktemp "$RUNNER_TEMP/aitm-profile-deny.XXXXXXXX")"
+          case "$task_marker" in "$task_profile_dir"/*) ;; *) echo 'Runner temp is outside expected profile.' >&2; exit 1;; esac
+          printf 'synthetic-only\n' > "$task_marker"
+          task_node="$(command -v node)"
+          task_node_real="$(/usr/bin/python3 -I -S -B -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$task_node")"
+          task_node_root="$(dirname "$(dirname "$task_node_real")")"
+          task_node_bin="$(dirname "$task_node")"
+          task_python=''
+          for name in python3 python3.14 python3.13 python3.12 python3.11; do
+            candidate="$(command -v "$name" || true)"
+            if [[ "$candidate" == /* && -x "$candidate" ]] && "$candidate" -I -S -B -c 'import sys; assert (3, 11) <= sys.version_info[:2] < (3, 15)' 2>/dev/null; then task_python="$candidate"; break; fi
+          done
+          test -n "$task_python"
+          task_python_root="$("$task_python" -I -S -B -c 'import os,sys; print(os.path.realpath(sys.base_prefix))')"
+          case "$task_node_root" in /|/Users|"$task_profile_dir") echo 'Unsafe Node root.' >&2; exit 1;; esac
+          case "$task_python_root" in /|/Users|"$task_profile_dir") echo 'Unsafe Python root.' >&2; exit 1;; esac
+          task_path="$task_node_bin:$(dirname "$task_python"):$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin:$DEVELOPER_DIR/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+          mkdir -p "$task_root/source" "$task_root/template" "$task_root/hooks" "$task_root/temp" "$task_root/npm-cache" "$task_root/swift-cache" "$task_root/swift-config" "$task_root/swift-security" "$task_root/clang-cache"
+          : > "$task_root/npmrc"
+          git -c credential.helper= -c core.hooksPath="$task_root/hooks" -c init.templateDir="$task_root/template" init --quiet "$task_root/source"
+          git -C "$task_root/source" -c credential.helper= -c core.hooksPath="$task_root/hooks" fetch --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY.git" "$GITHUB_SHA"
+          git -C "$task_root/source" -c core.hooksPath="$task_root/hooks" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
+          cat > "$task_stage/profile.sb" <<'PROFILE'
+          (version 1)
+          (allow default)
+          (deny file-read* (subpath (param "TASK_PROFILE")))
+          (allow file-read-metadata)
+          (allow file-read* (subpath (param "TASK_ROOT")))
+          (deny mach-lookup (global-name "com.apple.bsd.dirhelper"))
+          (allow file-read* (subpath (param "TASK_NODE_ROOT")))
+          (allow file-read* (subpath (param "TASK_PYTHON_ROOT")))
+          (deny file-write*)
+          (allow file-write* (subpath (param "TASK_ROOT")))
+          (allow file-write-data (literal "/dev/null") (literal "/dev/tty"))
+          PROFILE
+          cat "$task_stage/profile.sb" > "$task_stage/profile-offline.sb"
+          printf '\n(deny network*)\n' >> "$task_stage/profile-offline.sb"
+          cat > "$task_stage/run-isolated" <<'SCRIPT'
+          #!/bin/bash
+          set -euo pipefail
+          task_policy="${AITM_TEST_SANDBOX_POLICY:-$AITM_TEST_CONTROL_ROOT/profile.sb}"
+          case "$task_policy" in "$AITM_TEST_CONTROL_ROOT/profile.sb"|"$AITM_TEST_CONTROL_ROOT/profile-offline.sb") ;; *) exit 1;; esac
+          task_extra=("AITM_TEST_SCOPED_ENV=1")
+          case "${AITM_TEST_UI_EVENT:-0}" in 0) ;; 1) task_extra+=("AITM_MACOS_UI_EVENT_TEST=1");; *) exit 1;; esac
+          case "${AITM_TEST_SOCKET:-0}" in 0) ;; 1) task_extra+=("AITM_CLAUDE_SOCKET_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "AITM_CLAUDE_CHANNEL_PROFILE=$AITM_TEST_TASK_ROOT/temp/claude-channel-profile");; *) exit 1;; esac
+          exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 \
+            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 AITM_SYNTHETIC_REQUIRED=1 "${task_extra[@]}" \
+            "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "AITM_MACOS_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "AITM_SYNTHETIC_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "NPM_CONFIG_CACHE=$AITM_TEST_TASK_ROOT/npm-cache" \
+            "NPM_CONFIG_USERCONFIG=$AITM_TEST_TASK_ROOT/npmrc" NPM_CONFIG_GLOBALCONFIG=/dev/null NPM_CONFIG_UPDATE_NOTIFIER=false \
+            /usr/bin/sandbox-exec -D "TASK_PROFILE=$AITM_TEST_PROFILE" -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" \
+              -D "TASK_NODE_ROOT=$AITM_TEST_NODE_ROOT" -D "TASK_PYTHON_ROOT=$AITM_TEST_PYTHON_ROOT" \
+              -f "$task_policy" "$@"
+          SCRIPT
+          chmod 700 "$task_stage/run-isolated"
+          printf 'synthetic-control-probe\n' > "$task_stage/synthetic-control-probe"
+          (cd "$task_stage" && /usr/bin/shasum -a 256 profile.sb profile-offline.sb run-isolated > controls.sha256)
+          task_image="$task_control_parent/controls.dmg"
+          /usr/bin/hdiutil makehybrid -hfs -hfs-volume-name 'AITM CI Control' -o "$task_image" "$task_stage"
+          test -f "$task_image" && test ! -L "$task_image"
+          test "$(/usr/bin/stat -f %l "$task_image")" = 1
+          task_image_identity="$(/usr/bin/stat -f '%d:%i:%l' "$task_image")"
+          task_control_attached=''
+          cleanup_control_bootstrap() {
+            if test "$task_control_attached" = yes; then /usr/bin/hdiutil detach "$task_control" >/dev/null 2>&1 || true; fi
+          }
+          trap cleanup_control_bootstrap EXIT
+          task_control_attached=yes
+          /usr/bin/hdiutil attach -plist -readonly -nobrowse -noautoopen -mountpoint "$task_control" "$task_image" > "$task_control_parent/attach.plist"
+          task_mount_found=0
+          for task_index in {0..15}; do
+            task_value="$(/usr/libexec/PlistBuddy -c "Print :system-entities:$task_index:mount-point" "$task_control_parent/attach.plist" 2>/dev/null || true)"
+            if test "$task_value" = "$task_control"; then
+              test "$(/usr/libexec/PlistBuddy -c "Print :system-entities:$task_index:volume-kind" "$task_control_parent/attach.plist")" = hfs
+              task_mount_found=$((task_mount_found + 1))
+            fi
+          done
+          test "$task_mount_found" = 1
+          test "$(/usr/bin/stat -f %d "$task_control")" != "$(/usr/bin/stat -f %d "$task_root")"
+          /usr/bin/hdiutil info -plist > "$task_control_parent/image-info.plist"
+          task_image_match=0
+          for task_image_index in {0..63}; do
+            task_image_path="$(/usr/libexec/PlistBuddy -c "Print :images:$task_image_index:image-path" "$task_control_parent/image-info.plist" 2>/dev/null || true)"
+            if test "$task_image_path" = "$task_image"; then
+              test "$(/usr/libexec/PlistBuddy -c "Print :images:$task_image_index:writeable" "$task_control_parent/image-info.plist")" = false
+              task_matching_mounts=0
+              for task_entity in {0..15}; do
+                task_mount_path="$(/usr/libexec/PlistBuddy -c "Print :images:$task_image_index:system-entities:$task_entity:mount-point" "$task_control_parent/image-info.plist" 2>/dev/null || true)"
+                if test "$task_mount_path" = "$task_control"; then task_matching_mounts=$((task_matching_mounts + 1)); fi
+              done
+              test "$task_matching_mounts" = 1
+              task_image_match=$((task_image_match + 1))
+            fi
+          done
+          test "$task_image_match" = 1
+          if /usr/bin/touch "$task_control/.readonly-probe" >"$task_control_parent/readonly.log" 2>&1; then
+            echo 'The control image was not mounted read-only.' >&2; exit 1
+          fi
+          grep -Eiq 'read-only file system' "$task_control_parent/readonly.log"
+          test ! -e "$task_control/.readonly-probe"
+          for task_file in profile.sb profile-offline.sb run-isolated controls.sha256 synthetic-control-probe; do
+            test -f "$task_stage/$task_file" && test ! -L "$task_stage/$task_file"
+            test "$(/usr/bin/stat -f %l "$task_stage/$task_file")" = 1
+            test -f "$task_control/$task_file" && test ! -L "$task_control/$task_file"
+            /usr/bin/cmp "$task_stage/$task_file" "$task_control/$task_file"
+          done
+          test -x "$task_control/run-isolated"
+          (cd "$task_control" && /usr/bin/shasum -a 256 -c controls.sha256)
+          test "$(/usr/bin/stat -f '%d:%i:%l' "$task_image")" = "$task_image_identity"
+          /usr/bin/perl -e '
+            use strict;
+            use warnings;
+            use Fcntl qw(O_RDONLY O_NOFOLLOW :mode);
+            my $path = shift;
+            sysopen(my $fh, $path, O_RDONLY | O_NOFOLLOW) or die "open failed: $!";
+            my @fd_before = stat($fh);
+            my @path_before = lstat($path);
+            die "unexpected image identity" unless @fd_before && @path_before
+              && S_ISREG($fd_before[2]) && $fd_before[0] == $path_before[0]
+              && $fd_before[1] == $path_before[1] && $fd_before[3] == 1 && $path_before[3] == 1;
+            unlink($path) == 1 or die "unlink failed: $!";
+            my @fd_after = stat($fh);
+            die "backing inode still has links or changed" unless @fd_after
+              && $fd_after[0] == $fd_before[0] && $fd_after[1] == $fd_before[1] && $fd_after[3] == 0;
+            close($fh) or die "close failed: $!";
+            print "Verified the same read-only descriptor has zero links after unlink.\n";
+          ' "$task_image"
+          test ! -e "$task_image" && test ! -L "$task_image"
+          for task_file in profile.sb profile-offline.sb run-isolated controls.sha256 synthetic-control-probe; do
+            /bin/rm "$task_stage/$task_file"
+          done
+          /bin/rmdir "$task_stage"
+          test ! -e "$task_stage"
+          (cd "$task_control" && /usr/bin/shasum -a 256 -c controls.sha256)
+          echo 'Unlinked the one-link synthetic backing image and removed all staged control originals.'
+          { printf 'AITM_TEST_TASK_ROOT=%s\n' "$task_root"; printf 'AITM_TEST_CONTROL_ROOT=%s\n' "$task_control"; printf 'AITM_TEST_DENIED_FILE=%s\n' "$task_marker"; printf 'AITM_TEST_PROFILE=%s\n' "$task_profile_dir"; printf 'AITM_TEST_NODE_ROOT=%s\n' "$task_node_root"; printf 'AITM_TEST_PYTHON_ROOT=%s\n' "$task_python_root"; printf 'AITM_TASK_PATH=%s\n' "$task_path"; printf 'AITM_TEST_NODE_BIN=%s\n' "$task_node"; printf 'AITM_TEST_PYTHON_BIN=%s\n' "$task_python"; } >> "$GITHUB_ENV"
+          task_control_attached=''
+          trap - EXIT
+      - name: Verify sandbox blocks runner profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_CONTROL_ROOT/run-isolated"
+          "$task_run" /usr/bin/true
+          if "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_DENIED_FILE" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write was not denied.' >&2; exit 1; fi
+          "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import os; assert "HOME" not in os.environ and "CODEX_HOME" not in os.environ'
+          /bin/ln -s "$AITM_TEST_DENIED_FILE" "$AITM_TEST_TASK_ROOT/denied-link"
+          if "$task_run" /bin/cat "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile read via link was not denied.' >&2; exit 1; fi
+          if "$task_run" /usr/bin/touch "$AITM_TEST_TASK_ROOT/denied-link" >"$AITM_TEST_TASK_ROOT/out" 2>"$AITM_TEST_TASK_ROOT/err"; then echo 'Profile write via link was not denied.' >&2; exit 1; fi
+      - name: Verify sandbox cannot alter its controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_root="$AITM_TEST_TASK_ROOT"
+          task_control="$AITM_TEST_CONTROL_ROOT"
+          task_run="$task_control/run-isolated"
+          task_probe="$task_control/synthetic-control-probe"
+          test "$(cat "$task_probe")" = synthetic-control-probe
+          task_expected="$(/usr/bin/shasum -a 256 "$task_probe")"
+          task_expected="${task_expected%% *}"
+          /bin/ln -s "$task_probe" "$task_root/temp/control-probe-symlink"
+          task_inode="$(/usr/bin/stat -f '%d:%i' "$task_probe")"
+          test "$(/usr/bin/stat -f %d "$task_probe")" != "$(/usr/bin/stat -f %d "$task_root")"
+          if /bin/ln "$task_probe" "$task_root/temp/control-probe-hardlink" >"$task_root/temp/control-hardlink-host.log" 2>&1; then
+            echo 'Host unexpectedly hard-linked the read-only control inode across devices.' >&2; exit 1
+          fi
+          grep -Eiq 'cross-device link|different file systems|read-only file system' "$task_root/temp/control-hardlink-host.log"
+          test ! -e "$task_root/temp/control-probe-hardlink"
+          "$task_run" /usr/bin/touch "$task_root/temp/control-positive"
+          for task_policy in "$task_control/profile.sb" "$task_control/profile-offline.sb"; do
+            export AITM_TEST_SANDBOX_POLICY="$task_policy"
+            if "$task_run" /bin/sh -c 'printf x >> "$1"' sh "$task_probe" >"$task_root/temp/control-append.log" 2>&1; then
+              echo 'Sandbox modified the synthetic control file.' >&2; exit 1
+            fi
+            if "$task_run" /bin/rm "$task_probe" >"$task_root/temp/control-remove.log" 2>&1; then
+              echo 'Sandbox removed the synthetic control file.' >&2; exit 1
+            fi
+            if "$task_run" /bin/mv "$task_probe" "$task_control/synthetic-control-moved" >"$task_root/temp/control-move.log" 2>&1; then
+              echo 'Sandbox moved the synthetic control file.' >&2; exit 1
+            fi
+            if "$task_run" /usr/bin/touch "$task_control/synthetic-control-created" >"$task_root/temp/control-create.log" 2>&1; then
+              echo 'Sandbox created a control file.' >&2; exit 1
+            fi
+            if "$task_run" /bin/sh -c 'printf x >> "$1"' sh "$task_root/temp/control-probe-symlink" >"$task_root/temp/control-symlink.log" 2>&1; then
+              echo 'Sandbox modified the synthetic control via a symbolic link.' >&2; exit 1
+            fi
+            if "$task_run" /bin/ln "$task_probe" "$task_root/temp/control-probe-hardlink" >"$task_root/temp/control-hardlink.log" 2>&1; then
+              echo 'Sandbox unexpectedly hard-linked the synthetic control inode.' >&2; exit 1
+            fi
+            test ! -e "$task_root/temp/control-probe-hardlink"
+            test -f "$task_probe" && test ! -e "$task_control/synthetic-control-moved"
+            test ! -e "$task_control/synthetic-control-created"
+            test "$(/usr/bin/stat -f '%d:%i' "$task_probe")" = "$task_inode"
+            task_actual="$(/usr/bin/shasum -a 256 "$task_probe")"
+            test "${task_actual%% *}" = "$task_expected"
+            for task_log in append remove move create symlink hardlink; do
+              grep -Eiq 'operation not permitted|permission denied|read-only file system|cross-device link|different file systems' "$task_root/temp/control-$task_log.log"
+            done
+            (cd "$task_control" && /usr/bin/shasum -a 256 -c controls.sha256)
+          done
+      - name: Compare temporary directory in interpreter and binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$AITM_TEST_TASK_ROOT/temp/temporary-directory-probe.swift" <<'SWIFT'
+          import Foundation
+          import Darwin
+          guard let root = ProcessInfo.processInfo.environment["AITM_SYNTHETIC_TEST_ROOT"], let envTemp = ProcessInfo.processInfo.environment["TMPDIR"] else { exit(1) }
+          let base = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath().path
+          let envPath = URL(fileURLWithPath: envTemp, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath().path
+          let temporary = FileManager.default.temporaryDirectory.standardizedFileURL.resolvingSymlinksInPath().path
+          let rawTemporary = FileManager.default.temporaryDirectory.path
+          print("environment_matches_root=\(envPath == base); foundation_matches_root=\(temporary == base); foundation_within_root=\(temporary == base || temporary.hasPrefix(base + "/")); raw_ends_slash=\(rawTemporary.hasSuffix("/")); env_ends_slash=\(envTemp.hasSuffix("/")); foundation_last_component=\(URL(fileURLWithPath: temporary).lastPathComponent)")
+          SWIFT
+          task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
+          echo 'Interpreter:'
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" "$AITM_TEST_TASK_ROOT/temp/temporary-directory-probe.swift"
+          echo 'Compiled executable:'
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc" "$AITM_TEST_TASK_ROOT/temp/temporary-directory-probe.swift" -o "$AITM_TEST_TASK_ROOT/temp/temporary-directory-probe"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$AITM_TEST_TASK_ROOT/temp/temporary-directory-probe"
+      - name: Verify control files after the job
+        if: ${{ always() && !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${AITM_TEST_CONTROL_ROOT:-}"
+          cd "$AITM_TEST_CONTROL_ROOT"
+          /usr/bin/shasum -a 256 -c controls.sha256
+      - name: Detach synthetic control image
+        if: ${{ always() && !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${AITM_TEST_CONTROL_ROOT:-}"
+          case "$AITM_TEST_CONTROL_ROOT" in /Users/runner/work/_temp/aitm-card-control.*/mount) ;; *) exit 1;; esac
+          /usr/bin/hdiutil detach "$AITM_TEST_CONTROL_ROOT"
