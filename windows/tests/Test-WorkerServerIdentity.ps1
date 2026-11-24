@@ -28,6 +28,8 @@ try{
     $readerBeforeMarker=Join-Path $root ('reader-before-'+[Guid]::NewGuid().ToString('N'));$readerAfterMarker=Join-Path $root ('reader-after-'+[Guid]::NewGuid().ToString('N'))
     $acceptedMarker=Join-Path $root ('accepted-'+[Guid]::NewGuid().ToString('N'));$readyMarker=Join-Path $root ('ready-'+[Guid]::NewGuid().ToString('N'))
     $fixtureStartMarker=Join-Path $root ('fixture-start-'+[Guid]::NewGuid().ToString('N'));$fixtureEndMarker=Join-Path $root ('fixture-end-'+[Guid]::NewGuid().ToString('N'))
+    $serializeBefore=Join-Path $root ('serialize-before-'+[Guid]::NewGuid().ToString('N'));$serializeAfter=Join-Path $root ('serialize-after-'+[Guid]::NewGuid().ToString('N'))
+    $sendBefore=Join-Path $root ('send-before-'+[Guid]::NewGuid().ToString('N'));$sendAfter=Join-Path $root ('send-after-'+[Guid]::NewGuid().ToString('N'))
     $foreign=Join-Path $root 'PipeServerIdentity.ps1';$foreignMarker=Join-Path $root ('foreign-'+[Guid]::NewGuid().ToString('N'))
     if([IO.File]::Exists($foreign)){[IO.File]::Delete($foreign)}
     if($valid){[IO.File]::WriteAllText($foreign,'[IO.File]::WriteAllText($env:AITM_ID_FOREIGN,"unexpected")',[Text.UTF8Encoding]::new($false))}
@@ -57,6 +59,13 @@ try{
      $cursorProbe='[IO.File]::WriteAllText($env:AITM_ID_CURSOR_BEFORE,"before");'+$cursorNeedle+';[IO.File]::WriteAllText($env:AITM_ID_CURSOR_AFTER,"after")'
      $source=$source.Replace($cursorNeedle,$cursorProbe)
     }
+    if($file -ceq 'DiagnosticWorker.ps1'){
+     $serializeNeedle='$bytes=[Text.UTF8Encoding]::new($false,$true).GetBytes([Management.Automation.PSSerializer]::Serialize($safe,8))'
+     $sendNeedle='$writer.Write([int]$bytes.Length);$writer.Write($bytes);$writer.Flush()'
+     Require ($source.Contains($serializeNeedle) -and $source.Contains($sendNeedle)) 'The synthetic diagnostic response probe could not be instrumented.'
+     $source=$source.Replace($serializeNeedle,('[IO.File]::WriteAllText($env:AITM_ID_SERIALIZE_BEFORE,"before");'+$serializeNeedle+';[IO.File]::WriteAllText($env:AITM_ID_SERIALIZE_AFTER,"after")'))
+     $source=$source.Replace($sendNeedle,('[IO.File]::WriteAllText($env:AITM_ID_SEND_BEFORE,"before");'+$sendNeedle+';[IO.File]::WriteAllText($env:AITM_ID_SEND_AFTER,"after")'))
+    }
     if($mode -ceq 'valid-cleanup'){
       $fake='$identityVerified=$true;[IO.File]::WriteAllText($env:AITM_ID_FIXTURE_START,"start");$fake=[pscustomobject]@{};$fake.PSObject.Members.Add([Management.Automation.PSScriptMethod]::new(''Dispose'',{[IO.File]::WriteAllText($env:AITM_ID_DISPOSE,"disposed")}));$script:codexTitleReader=$fake;[IO.File]::WriteAllText($env:AITM_ID_FIXTURE_END,"end")'
      $source=$source.Replace('$identityVerified=$true',$fake)
@@ -76,6 +85,8 @@ try{
     $start.EnvironmentVariables['AITM_ID_EXIT']=$exitMarker;$start.EnvironmentVariables['AITM_ID_FINALLY']=$finallyMarker;$start.EnvironmentVariables['AITM_ID_CLEANUP']=$cleanupMarker;$start.EnvironmentVariables['AITM_ID_DISPOSE']=$disposeMarker
     $start.EnvironmentVariables['AITM_ID_CURSOR_BEFORE']=$cursorBeforeMarker;$start.EnvironmentVariables['AITM_ID_CURSOR_AFTER']=$cursorAfterMarker
     $start.EnvironmentVariables['AITM_ID_READER_BEFORE']=$readerBeforeMarker;$start.EnvironmentVariables['AITM_ID_READER_AFTER']=$readerAfterMarker
+    $start.EnvironmentVariables['AITM_ID_SERIALIZE_BEFORE']=$serializeBefore;$start.EnvironmentVariables['AITM_ID_SERIALIZE_AFTER']=$serializeAfter
+    $start.EnvironmentVariables['AITM_ID_SEND_BEFORE']=$sendBefore;$start.EnvironmentVariables['AITM_ID_SEND_AFTER']=$sendAfter
     $start.EnvironmentVariables['AITM_ID_ACCEPTED']=$acceptedMarker;$start.EnvironmentVariables['AITM_ID_READY']=$readyMarker;$start.EnvironmentVariables['AITM_ID_FIXTURE_START']=$fixtureStartMarker;$start.EnvironmentVariables['AITM_ID_FIXTURE_END']=$fixtureEndMarker
     $connect=$server.WaitForConnectionAsync();$child=[Diagnostics.Process]::Start($start)
     Require ($connect.Wait(10000) -and $started.WaitOne(10000) -and $server.IsConnected -and -not [IO.File]::Exists($marker)) 'The worker did not connect before compiling its identity check.'
@@ -100,7 +111,7 @@ try{
        $exited=$child.WaitForExit(10000);$exitCode=if($exited){$child.ExitCode}else{$null}
        $finallyReached=[IO.File]::Exists($finallyMarker);$cleanupReached=[IO.File]::Exists($cleanupMarker)
        $disposed=[IO.File]::Exists($disposeMarker);$beforeClose=[IO.File]::Exists($beforeCloseMarker);$afterClose=[IO.File]::Exists($afterCloseMarker)
-       Require ($exited -and $exitCode -ne 0 -and $finallyReached -and $cleanupReached -and $disposed -and $afterClose) ('Verified worker failure did not clean up its synthetic reader and pipe: worker={0}; mode={1}; exited={2}; exit_code={3}; finally={4}; cleanup={5}; disposed={6}; before_close={7}; after_close={8}; cursor_before={9}; cursor_after={10}; reader_before={11}; reader_after={12}.' -f $file,$mode,$exited,$exitCode,$finallyReached,$cleanupReached,$disposed,$beforeClose,$afterClose,[IO.File]::Exists($cursorBeforeMarker),[IO.File]::Exists($cursorAfterMarker),[IO.File]::Exists($readerBeforeMarker+'-codexTitleReader'),[IO.File]::Exists($readerAfterMarker+'-codexTitleReader'))
+       Require ($exited -and $exitCode -ne 0 -and $finallyReached -and $cleanupReached -and $disposed -and $afterClose) ('Verified worker failure did not clean up its synthetic reader and pipe: worker={0}; mode={1}; exited={2}; exit_code={3}; finally={4}; cleanup={5}; disposed={6}; before_close={7}; after_close={8}; cursor_before={9}; cursor_after={10}; reader_before={11}; reader_after={12}; caught={13}; serialize_before={14}; serialize_after={15}; send_before={16}; send_after={17}.' -f $file,$mode,$exited,$exitCode,$finallyReached,$cleanupReached,$disposed,$beforeClose,$afterClose,[IO.File]::Exists($cursorBeforeMarker),[IO.File]::Exists($cursorAfterMarker),[IO.File]::Exists($readerBeforeMarker+'-codexTitleReader'),[IO.File]::Exists($readerAfterMarker+'-codexTitleReader'),[IO.File]::Exists($catchMarker),[IO.File]::Exists($serializeBefore),[IO.File]::Exists($serializeAfter),[IO.File]::Exists($sendBefore),[IO.File]::Exists($sendAfter))
      }
     }
     else{
