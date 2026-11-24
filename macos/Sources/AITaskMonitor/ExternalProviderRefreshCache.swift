@@ -14,6 +14,15 @@ struct ExternalProviderVerifiedSuccessor: Hashable {
     let newStartKey: String
 }
 
+struct ExternalProviderQuarantinedEvidence {
+    let revision: UInt64
+    let tasks: [MonitoredTask]
+    let terminalIDs: Set<String>
+    let currentTerminalIDs: Set<String>
+    let terminalRevisions: [String: UInt64]
+    let gap: Bool
+}
+
 struct ExternalProviderRefreshCapture {
     let tasks: [MonitoredTask]
     let terminalIDs: [TaskProvider: Set<String>]
@@ -22,19 +31,25 @@ struct ExternalProviderRefreshCapture {
     // not merely from comparing IDs or start keys between two snapshots.
     var verifiedActiveTurns: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:]
     var verifiedEndedTurns: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:]
+    // This proof also attributes every pending terminal for this ID to the
+    // ended turn; a turn-specific ending by itself is not sufficient.
+    var verifiedEndedAfterAllTerminals: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:]
     var verifiedSuccessors: [TaskProvider: Set<ExternalProviderVerifiedSuccessor>] = [:]
     // The adapter proves this active turn follows all retained terminal
     // signals for the ID; a later timestamp or matching ID is insufficient.
     var verifiedPostTerminalActiveTurns: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:]
+    // Terminal ordering proofs apply only to the exact per-ID evidence
+    // revision supplied to the adapter, not to later terminal observations.
+    var verifiedTerminalRevisions: [TaskProvider: [String: UInt64]] = [:]
     // The adapter must prove a complete current roster, including absence;
     // merely completing a read or seeing an empty list is not enough.
     var completeProviders: Set<TaskProvider> = []
     // The generation is captured before reading each provider. A missing
     // value represents the initial generation only.
     var sourceGenerations: [TaskProvider: UInt64] = [:]
-    // The adapter has incorporated every quarantined cross-generation event
-    // and terminal for this source into this complete capture.
-    var reconciledProviders: Set<TaskProvider> = []
+    // The adapter has incorporated the exact quarantined evidence revision
+    // into this complete capture; a later quarantine invalidates this proof.
+    var reconciledEvidenceRevisions: [TaskProvider: UInt64] = [:]
 }
 
 struct ExternalProviderRefreshCache {
@@ -47,6 +62,7 @@ struct ExternalProviderRefreshCache {
         let id: String
         let startKey: String
         let generation: UInt64
+        let ordinal: Int
     }
 
     private let maximumTasks: Int
@@ -55,14 +71,42 @@ struct ExternalProviderRefreshCache {
     private var quarantined: [QuarantineKey: MonitoredTask] = [:]
     private var uncertainTasks: Set<Key> = []
     private(set) var uncertainProviders: Set<TaskProvider> = []
-    private(set) var pendingTerminalIDs: [TaskProvider: Set<String>] = [:]
+    private var ordinaryTerminals: [TaskProvider: Set<String>] = [:]
+    private var crossGenerationTerminals: [TaskProvider: Set<String>] = [:]
+    private var terminalRevisions: [TaskProvider: [String: UInt64]] = [:]
+    private var terminalSequence: UInt64 = 0
+    private var quarantinedGaps: Set<TaskProvider> = []
+    private var evidenceRevisions: [TaskProvider: UInt64] = [:]
     private var taskCapacityLimitedProviders: Set<TaskProvider> = []
+    private var quarantinedCapacityLimitedProviders: Set<TaskProvider> = []
     private var terminalCapacityLimitedProviders: Set<TaskProvider> = []
     private var disconnectedProviders: Set<TaskProvider> = []
     private var reconnectingProviders: Set<TaskProvider> = []
     private(set) var sourceGenerations: [TaskProvider: UInt64] = [:]
-    var capacityExceeded: Bool { !taskCapacityLimitedProviders.isEmpty || !terminalCapacityLimitedProviders.isEmpty }
+    var capacityExceeded: Bool {
+        !taskCapacityLimitedProviders.isEmpty || !quarantinedCapacityLimitedProviders.isEmpty ||
+            !terminalCapacityLimitedProviders.isEmpty
+    }
     var quarantinedTaskCount: Int { quarantined.count }
+
+    var pendingTerminalIDs: [TaskProvider: Set<String>] {
+        var result = ordinaryTerminals
+        for (provider, ids) in crossGenerationTerminals { result[provider, default: []].formUnion(ids) }
+        return result
+    }
+
+    // Snapshots here are reducer outputs, not a proof that the original V1/V2
+    // event stream was complete. The adapter must verify its own history.
+    func quarantinedEvidence(for provider: TaskProvider) -> ExternalProviderQuarantinedEvidence {
+        let current = ordinaryTerminals[provider] ?? []
+        let cross = crossGenerationTerminals[provider] ?? []
+        let pending = current.union(cross)
+        return ExternalProviderQuarantinedEvidence(revision: evidenceRevisions[provider] ?? 0,
+            tasks: quarantined.filter { $0.key.provider == provider }.map(\.value),
+            terminalIDs: cross, currentTerminalIDs: current,
+            terminalRevisions: (terminalRevisions[provider] ?? [:]).filter { pending.contains($0.key) },
+            gap: quarantinedGaps.contains(provider))
+    }
 
     init(maximumTasks: Int = 512, maximumTerminals: Int = 2_048) {
         precondition((1...2_048).contains(maximumTasks) && (1...8_192).contains(maximumTerminals))
@@ -105,8 +149,12 @@ struct ExternalProviderRefreshCache {
         quarantined = quarantined.filter { $0.key.provider != provider }
         uncertainTasks = Set(uncertainTasks.filter { $0.provider != provider })
         uncertainProviders.remove(provider)
-        pendingTerminalIDs.removeValue(forKey: provider)
+        ordinaryTerminals.removeValue(forKey: provider)
+        crossGenerationTerminals.removeValue(forKey: provider)
+        terminalRevisions.removeValue(forKey: provider)
+        quarantinedGaps.remove(provider)
         taskCapacityLimitedProviders.remove(provider)
+        quarantinedCapacityLimitedProviders.remove(provider)
         terminalCapacityLimitedProviders.remove(provider)
         return next
     }
@@ -127,9 +175,24 @@ struct ExternalProviderRefreshCache {
             disconnectedProviders.insert(provider)
             return nil
         }
+        guard advanceEvidenceRevision(provider) else {
+            disconnectedProviders.insert(provider)
+            return nil
+        }
         let next = current + 1
         sourceGenerations[provider] = next
         return next
+    }
+
+    private mutating func advanceEvidenceRevision(_ provider: TaskProvider) -> Bool {
+        let current = evidenceRevisions[provider] ?? 0
+        guard current < UInt64.max else {
+            terminalCapacityLimitedProviders.insert(provider)
+            markUncertainEligible([provider])
+            return false
+        }
+        evidenceRevisions[provider] = current + 1
+        return true
     }
 
     private func eligibleProviders(_ providers: Set<TaskProvider>, supplied: [TaskProvider: UInt64]) -> Set<TaskProvider> {
@@ -161,10 +224,17 @@ struct ExternalProviderRefreshCache {
         if !uncertain.isEmpty { markUncertainEligible(uncertain) }
 
         if quality == .current {
-            for provider in capture.reconciledProviders.intersection(capture.completeProviders)
-                .intersection(providers).subtracting(uncertain) {
+            for (provider, revision) in capture.reconciledEvidenceRevisions where
+                capture.completeProviders.contains(provider) && providers.contains(provider) &&
+                !uncertain.contains(provider) && !quarantinedCapacityLimitedProviders.contains(provider) &&
+                !terminalCapacityLimitedProviders.contains(provider) && revision == (evidenceRevisions[provider] ?? 0) {
                 quarantined = quarantined.filter { $0.key.provider != provider }
-                pendingTerminalIDs.removeValue(forKey: provider)
+                let cleared = crossGenerationTerminals.removeValue(forKey: provider) ?? []
+                for id in cleared where !(ordinaryTerminals[provider] ?? []).contains(id) {
+                    terminalRevisions[provider]?.removeValue(forKey: id)
+                }
+                if terminalRevisions[provider]?.isEmpty == true { terminalRevisions.removeValue(forKey: provider) }
+                quarantinedGaps.remove(provider)
             }
         }
 
@@ -187,7 +257,7 @@ struct ExternalProviderRefreshCache {
                             (capture.verifiedEndedTurns[provider] ?? []).contains(
                                 ExternalProviderVerifiedTurn(id: id, startKey: $0.startKey))
                     } ?? false
-                    if ended && grouped[key] == nil { continue }
+                    if ended && grouped[key] == nil && !(pendingTerminalIDs[provider] ?? []).contains(id) { continue }
                     rememberTerminal(id, provider: provider)
                     uncertainProviders.insert(provider)
                 }
@@ -204,8 +274,9 @@ struct ExternalProviderRefreshCache {
                       !incoming.startKey.isEmpty else { continue }
                 let turn = ExternalProviderVerifiedTurn(id: key.id, startKey: incoming.startKey)
                 if (capture.verifiedActiveTurns[key.provider] ?? []).contains(turn) &&
-                    (capture.verifiedPostTerminalActiveTurns[key.provider] ?? []).contains(turn) {
-                    pendingTerminalIDs[key.provider]?.remove(key.id)
+                    (capture.verifiedPostTerminalActiveTurns[key.provider] ?? []).contains(turn) &&
+                    terminalProofMatches(capture, provider: key.provider, id: key.id) {
+                    clearTerminals(key.id, provider: key.provider)
                 }
             }
             for key in Array(uncertainTasks) where providers.contains(key.provider) && !uncertain.contains(key.provider) &&
@@ -229,18 +300,20 @@ struct ExternalProviderRefreshCache {
                     let nextTurn = !pendingTerminal && incoming.startKey != old.startKey && active.contains(incomingTurn) &&
                         (capture.verifiedSuccessors[key.provider] ?? []).contains(successor)
                     let afterTerminal = pendingTerminal && active.contains(incomingTurn) &&
-                        (capture.verifiedPostTerminalActiveTurns[key.provider] ?? []).contains(incomingTurn)
+                        (capture.verifiedPostTerminalActiveTurns[key.provider] ?? []).contains(incomingTurn) &&
+                        terminalProofMatches(capture, provider: key.provider, id: key.id)
                     if sameTurn || nextTurn || afterTerminal {
                         uncertainTasks.remove(key)
-                        if nextTurn || afterTerminal { pendingTerminalIDs[key.provider]?.remove(key.id) }
+                        if afterTerminal { clearTerminals(key.id, provider: key.provider) }
                     }
-                } else if incoming == nil && (capture.verifiedEndedTurns[key.provider] ?? []).contains(oldTurn) {
+                } else if incoming == nil && (capture.verifiedEndedTurns[key.provider] ?? []).contains(oldTurn) &&
+                    (!pendingTerminal || ((capture.verifiedEndedAfterAllTerminals[key.provider] ?? []).contains(oldTurn) &&
+                        terminalProofMatches(capture, provider: key.provider, id: key.id))) {
                     retained.removeValue(forKey: key)
                     uncertainTasks.remove(key)
-                    pendingTerminalIDs[key.provider]?.remove(key.id)
+                    clearTerminals(key.id, provider: key.provider)
                 }
             }
-            pendingTerminalIDs = pendingTerminalIDs.filter { !$0.value.isEmpty }
         }
 
         // Absence in a current snapshot is not itself a terminal signal.
@@ -262,9 +335,6 @@ struct ExternalProviderRefreshCache {
                 retained[key] = Self.unconfirmed(old)
                 uncertainTasks.insert(key)
                 uncertainProviders.insert(key.provider)
-                if (capture.terminalIDs[key.provider] ?? []).contains(key.id) {
-                    rememberTerminal(key.id, provider: key.provider)
-                }
             }
         }
         let ordered = grouped.sorted { left, right in
@@ -308,7 +378,7 @@ struct ExternalProviderRefreshCache {
             for provider in capture.completeProviders.intersection(providers).subtracting(uncertain) {
                 let completeKeys = grouped.keys.filter { $0.provider == provider }
                 let allRepresented = completeKeys.allSatisfy { retained[$0] != nil && !uncertainTasks.contains($0) }
-                let hasQuarantined = quarantined.keys.contains { $0.provider == provider }
+                let hasQuarantined = quarantined.keys.contains { $0.provider == provider } || quarantinedGaps.contains(provider)
                 if allRepresented && !uncertainTasks.contains(where: { $0.provider == provider }) &&
                     (pendingTerminalIDs[provider] ?? []).isEmpty && !hasQuarantined {
                     taskCapacityLimitedProviders.remove(provider)
@@ -316,7 +386,8 @@ struct ExternalProviderRefreshCache {
                 }
                 if allRepresented && !uncertainTasks.contains(where: { $0.provider == provider }) &&
                     (pendingTerminalIDs[provider] ?? []).isEmpty && !hasQuarantined &&
-                    !taskCapacityLimitedProviders.contains(provider) && !terminalCapacityLimitedProviders.contains(provider) {
+                    !taskCapacityLimitedProviders.contains(provider) &&
+                    !quarantinedCapacityLimitedProviders.contains(provider) && !terminalCapacityLimitedProviders.contains(provider) {
                     uncertainProviders.remove(provider)
                 }
             }
@@ -334,26 +405,73 @@ struct ExternalProviderRefreshCache {
         })
         guard !stale.isEmpty else { return }
         markUncertainEligible(stale)
+        var versioned: Set<TaskProvider> = []
         for provider in stale {
-            for id in capture.terminalIDs[provider] ?? [] { rememberTerminal(id, provider: provider) }
+            let items = capture.tasks.filter { $0.provider == provider }
+            let ids = capture.terminalIDs[provider] ?? []
+            let gap = capture.gapProviders.contains(provider)
+            guard !items.isEmpty || !ids.isEmpty || gap else { continue }
+            guard advanceEvidenceRevision(provider) else { continue }
+            versioned.insert(provider)
+            if gap { quarantinedGaps.insert(provider) }
+            for id in ids { rememberTerminal(id, provider: provider, crossGeneration: true) }
         }
-        for task in capture.tasks where stale.contains(task.provider) {
-            let key = QuarantineKey(provider: task.provider, id: task.id, startKey: task.startKey,
-                                    generation: supplied[task.provider] ?? 0)
-            if quarantined[key] != nil { continue }
+        for task in capture.tasks where versioned.contains(task.provider) {
+            let generation = supplied[task.provider] ?? 0
+            let matches = quarantined.filter {
+                $0.key.provider == task.provider && $0.key.id == task.id &&
+                    $0.key.startKey == task.startKey && $0.key.generation == generation
+            }
+            if matches.values.contains(task) { continue }
             guard retained.count + quarantined.count < maximumTasks else {
-                taskCapacityLimitedProviders.insert(task.provider)
+                quarantinedCapacityLimitedProviders.insert(task.provider)
                 continue
             }
-            quarantined[key] = Self.unconfirmed(task)
+            let ordinal = (matches.keys.map(\.ordinal).max() ?? -1) + 1
+            let key = QuarantineKey(provider: task.provider, id: task.id, startKey: task.startKey,
+                                    generation: generation, ordinal: ordinal)
+            quarantined[key] = task
         }
     }
 
-    private mutating func rememberTerminal(_ id: String, provider: TaskProvider) {
-        if (pendingTerminalIDs[provider] ?? []).contains(id) { return }
-        let count = pendingTerminalIDs.values.reduce(0) { $0 + $1.count }
-        if count < maximumTerminals { pendingTerminalIDs[provider, default: []].insert(id) }
-        else { terminalCapacityLimitedProviders.insert(provider); markUncertainEligible([provider]) }
+    private mutating func rememberTerminal(_ id: String, provider: TaskProvider, crossGeneration: Bool = false) {
+        guard terminalSequence < UInt64.max else {
+            terminalCapacityLimitedProviders.insert(provider)
+            markUncertainEligible([provider])
+            return
+        }
+        terminalSequence += 1
+        let existing = crossGeneration ? crossGenerationTerminals[provider] : ordinaryTerminals[provider]
+        let count = ordinaryTerminals.values.reduce(0) { $0 + $1.count } +
+            crossGenerationTerminals.values.reduce(0) { $0 + $1.count }
+        if (existing ?? []).contains(id) || count < maximumTerminals {
+            terminalRevisions[provider, default: [:]][id] = terminalSequence
+            if crossGeneration { crossGenerationTerminals[provider, default: []].insert(id) }
+            else { ordinaryTerminals[provider, default: []].insert(id) }
+        } else {
+            // Invalidate a proof for this ID even when the second kind of
+            // evidence could not be stored at capacity.
+            if terminalRevisions[provider]?[id] != nil {
+                terminalRevisions[provider]?[id] = terminalSequence
+            }
+            terminalCapacityLimitedProviders.insert(provider)
+            markUncertainEligible([provider])
+        }
+    }
+
+    private func terminalProofMatches(_ capture: ExternalProviderRefreshCapture,
+                                      provider: TaskProvider, id: String) -> Bool {
+        guard let current = terminalRevisions[provider]?[id] else { return false }
+        return capture.verifiedTerminalRevisions[provider]?[id] == current
+    }
+
+    private mutating func clearTerminals(_ id: String, provider: TaskProvider) {
+        ordinaryTerminals[provider]?.remove(id)
+        crossGenerationTerminals[provider]?.remove(id)
+        terminalRevisions[provider]?.removeValue(forKey: id)
+        if ordinaryTerminals[provider]?.isEmpty == true { ordinaryTerminals.removeValue(forKey: provider) }
+        if crossGenerationTerminals[provider]?.isEmpty == true { crossGenerationTerminals.removeValue(forKey: provider) }
+        if terminalRevisions[provider]?.isEmpty == true { terminalRevisions.removeValue(forKey: provider) }
     }
 
     private static func unconfirmed(_ task: MonitoredTask) -> MonitoredTask {

@@ -53,6 +53,17 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
         var count: Int { lock.lock(); defer { lock.unlock() }; return calls }
     }
 
+    private final class EvidenceProbe {
+        private let lock = NSLock()
+        private var value: ExternalProviderQuarantinedEvidence?
+        func record(_ evidence: ExternalProviderQuarantinedEvidence?) {
+            lock.lock(); value = evidence; lock.unlock()
+        }
+        func result() -> ExternalProviderQuarantinedEvidence? {
+            lock.lock(); defer { lock.unlock() }; return value
+        }
+    }
+
     @MainActor
     private func wait(_ condition: () -> Bool, timeout: TimeInterval = 5) {
         let deadline = Date().addingTimeInterval(timeout)
@@ -70,7 +81,7 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
         defer { source.release.signal() }
         var changes = 0
         let pipeline = ExternalProviderRefreshPipeline<Int>(monotonicNow: { clock.now() },
-            read: { source.read($0) }, onChange: { _ in changes += 1 })
+            read: { request, _ in source.read(request) }, onChange: { _ in changes += 1 })
         defer { pipeline.close() }
         pipeline.poll(1, providers: Self.providers)
         wait { !pipeline.isInFlight && changes > 0 }
@@ -104,7 +115,7 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
         let lease = ExternalProviderRefreshLease<ExternalProviderPipelineBatch>()
         defer { source.release.signal() }
         var firstChanges = 0
-        let first = ExternalProviderRefreshPipeline<Int>(lease: lease, read: { source.read($0) }, finish: {
+        let first = ExternalProviderRefreshPipeline<Int>(lease: lease, read: { request, _ in source.read(request) }, finish: {
             finished.signal()
             return Self.batch([Self.task("drained", .deepseek)], gaps: [.deepseek])
         }, onChange: { _ in firstChanges += 1 })
@@ -116,7 +127,7 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
         first.close()
         var secondChanges = 0
         let second = ExternalProviderRefreshPipeline<Int>(lease: lease, initialCache: previous,
-            read: { source.read($0) }, onChange: { _ in secondChanges += 1 })
+            read: { request, _ in source.read(request) }, onChange: { _ in secondChanges += 1 })
         defer { second.close() }
         second.invalidate(3, providers: Self.providers)
         XCTAssertTrue(second.isWaitingForLease)
@@ -143,7 +154,7 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
         let lease = ExternalProviderRefreshLease<ExternalProviderPipelineBatch>()
         var changes = 0
         var first: ExternalProviderRefreshPipeline<Int>? = ExternalProviderRefreshPipeline<Int>(
-            lease: lease, read: { source.read($0) }, finish: { finished.signal(); return nil },
+            lease: lease, read: { request, _ in source.read(request) }, finish: { finished.signal(); return nil },
             onChange: { _ in changes += 1 })
         first?.poll(1, providers: Self.providers)
         wait { first?.isInFlight == false && changes > 0 }
@@ -151,7 +162,7 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
         first = nil
         XCTAssertNil(released)
         XCTAssertEqual(finished.wait(timeout: .now() + 3), .success)
-        let second = ExternalProviderRefreshPipeline<Int>(lease: lease, read: { source.read($0) }, onChange: { _ in })
+        let second = ExternalProviderRefreshPipeline<Int>(lease: lease, read: { request, _ in source.read(request) }, onChange: { _ in })
         defer { second.close() }
         wait {
             if source.count < 2 { second.poll(3, providers: Self.providers) }
@@ -166,7 +177,7 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
         let lease = ExternalProviderRefreshLease<ExternalProviderPipelineBatch>()
         defer { source.release.signal() }
         var first: ExternalProviderRefreshPipeline<Int>? = ExternalProviderRefreshPipeline<Int>(
-            lease: lease, read: { source.read($0) }, finish: {
+            lease: lease, read: { request, _ in source.read(request) }, finish: {
                 finished.signal()
                 return Self.batch([Self.task("drained", .deepseek)], gaps: [.deepseek])
             }, onChange: { _ in })
@@ -175,7 +186,7 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
         weak var released = first
         first = nil
         XCTAssertNil(released)
-        let second = ExternalProviderRefreshPipeline<Int>(lease: lease, read: { source.read($0) }, onChange: { _ in })
+        let second = ExternalProviderRefreshPipeline<Int>(lease: lease, read: { request, _ in source.read(request) }, onChange: { _ in })
         defer { second.close() }
         second.poll(3, providers: Self.providers)
         XCTAssertTrue(second.isWaitingForLease)
@@ -196,9 +207,10 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
     func testOldHandoffAfterDisconnectCannotReviveOldCardOrLoseAmbiguousEvidence() throws {
         let source = Source(), finished = DispatchSemaphore(value: 0)
         let lease = ExternalProviderRefreshLease<ExternalProviderPipelineBatch>()
+        let probe = EvidenceProbe()
         defer { source.release.signal() }
         var changes = 0
-        let first = ExternalProviderRefreshPipeline<Int>(lease: lease, read: { source.read($0) }, finish: {
+        let first = ExternalProviderRefreshPipeline<Int>(lease: lease, read: { request, _ in source.read(request) }, finish: {
             finished.signal()
             return Self.batch([Self.task("drained", .deepseek)], gaps: [.deepseek])
         }, onChange: { _ in changes += 1 })
@@ -213,7 +225,10 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
         first.close()
 
         let second = ExternalProviderRefreshPipeline<Int>(lease: lease, initialCache: previous,
-            read: { source.read($0) }, onChange: { _ in })
+            read: { request, evidence in
+                probe.record(evidence[.opencode])
+                return source.read(request)
+            }, onChange: { _ in })
         defer { second.close() }
         second.poll(3, providers: Self.providers)
         XCTAssertTrue(second.isWaitingForLease)
@@ -226,6 +241,10 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
         }
         XCTAssertEqual(second.cache.pendingTerminalIDs[.opencode], ["one"])
         XCTAssertEqual(second.cache.quarantinedTaskCount, 1)
+        let evidence = try XCTUnwrap(probe.result())
+        XCTAssertEqual(evidence.tasks.map(\.id), ["new"])
+        XCTAssertEqual(evidence.terminalIDs, ["one"])
+        XCTAssertEqual(evidence.revision, second.cache.quarantinedEvidence(for: .opencode).revision)
         let current = try XCTUnwrap(second.cache.tasks.first { $0.provider == .opencode && $0.id == "one" })
         XCTAssertEqual(current.startKey, "turn-2")
         XCTAssertTrue(current.isUnconfirmed)

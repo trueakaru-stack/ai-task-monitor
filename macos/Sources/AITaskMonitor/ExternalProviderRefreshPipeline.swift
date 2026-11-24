@@ -8,16 +8,17 @@ struct ExternalProviderPipelineBatch {
 private struct ExternalProviderPipelineRequest<Request> {
     let value: Request
     let generations: [TaskProvider: UInt64]
+    let quarantined: [TaskProvider: ExternalProviderQuarantinedEvidence]
 }
 
 // Used only on the source queue. Handoff is stamped with the generations
 // under which its events were consumed, including after window teardown.
 private final class ExternalProviderPipelineRunner<Request> {
-    private let read: (Request) -> ExternalProviderPipelineBatch
+    private let read: (Request, [TaskProvider: ExternalProviderQuarantinedEvidence]) -> ExternalProviderPipelineBatch
     private let finish: () -> ExternalProviderPipelineBatch?
     private var lastGenerations: [TaskProvider: UInt64] = [:]
 
-    init(read: @escaping (Request) -> ExternalProviderPipelineBatch,
+    init(read: @escaping (Request, [TaskProvider: ExternalProviderQuarantinedEvidence]) -> ExternalProviderPipelineBatch,
          finish: @escaping () -> ExternalProviderPipelineBatch?) {
         self.read = read
         self.finish = finish
@@ -25,7 +26,7 @@ private final class ExternalProviderPipelineRunner<Request> {
 
     func run(_ request: ExternalProviderPipelineRequest<Request>) -> ExternalProviderPipelineBatch {
         lastGenerations = request.generations
-        return stamp(read(request.value))
+        return stamp(read(request.value, request.quarantined))
     }
 
     func close() -> ExternalProviderPipelineBatch? {
@@ -57,7 +58,7 @@ final class ExternalProviderRefreshPipeline<Request> {
     init(lease: ExternalProviderRefreshLease<ExternalProviderPipelineBatch> = ExternalProviderRefreshLease(),
          initialCache: ExternalProviderRefreshCache = ExternalProviderRefreshCache(),
          monotonicNow: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-         read: @escaping (Request) -> ExternalProviderPipelineBatch,
+         read: @escaping (Request, [TaskProvider: ExternalProviderQuarantinedEvidence]) -> ExternalProviderPipelineBatch,
          finish: @escaping () -> ExternalProviderPipelineBatch? = { nil },
          onChange: @escaping (ExternalProviderRefreshCache) -> Void) {
         let runner = ExternalProviderPipelineRunner(read: read, finish: finish)
@@ -89,7 +90,9 @@ final class ExternalProviderRefreshPipeline<Request> {
         }
         if receivedHandoff { onChange(cache) }
         let generations = cache.sourceGenerations
-        let requestWithGeneration = ExternalProviderPipelineRequest(value: request, generations: generations)
+        let quarantined = Dictionary(uniqueKeysWithValues: providers.map { ($0, cache.quarantinedEvidence(for: $0)) })
+        let requestWithGeneration = ExternalProviderPipelineRequest(value: request, generations: generations,
+                                                                    quarantined: quarantined)
         let started = owner.tryRead(requestWithGeneration) { [weak self] delivery in
             guard let self, !self.closed else { return }
             let requestedProviders = self.activeProviders

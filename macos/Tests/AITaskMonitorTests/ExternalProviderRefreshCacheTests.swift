@@ -12,16 +12,20 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
                          gaps: Set<TaskProvider> = [],
                          active: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:],
                          ended: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:],
+                         endedAfterAll: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:],
                          successors: [TaskProvider: Set<ExternalProviderVerifiedSuccessor>] = [:],
                          afterTerminal: [TaskProvider: Set<ExternalProviderVerifiedTurn>] = [:],
+                         terminalRevisions: [TaskProvider: [String: UInt64]] = [:],
                          complete: Set<TaskProvider> = [],
                          generations: [TaskProvider: UInt64] = [:],
-                         reconciled: Set<TaskProvider> = []) -> ExternalProviderRefreshCapture {
+                         reconciled: [TaskProvider: UInt64] = [:]) -> ExternalProviderRefreshCapture {
         ExternalProviderRefreshCapture(tasks: tasks, terminalIDs: terminalIDs, gapProviders: gaps,
                                        verifiedActiveTurns: active, verifiedEndedTurns: ended,
+                                       verifiedEndedAfterAllTerminals: endedAfterAll,
                                        verifiedSuccessors: successors, verifiedPostTerminalActiveTurns: afterTerminal,
+                                       verifiedTerminalRevisions: terminalRevisions,
                                        completeProviders: complete, sourceGenerations: generations,
-                                       reconciledProviders: reconciled)
+                                       reconciledEvidenceRevisions: reconciled)
     }
 
     func testDelayedSourceRetainsTasksAndBothLateEventTypesWithoutTaintingNeighbor() throws {
@@ -135,8 +139,10 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(cache.tasks.first).isUnconfirmed)
 
         let proof = ExternalProviderVerifiedTurn(id: "one", startKey: "new-turn")
+        let terminalRevision = try XCTUnwrap(cache.quarantinedEvidence(for: .opencode).terminalRevisions["one"])
         cache.apply(capture([next], active: [.opencode: [proof]], afterTerminal: [.opencode: [proof]],
-                            complete: [.opencode]), quality: .current, providers: [.opencode])
+                            terminalRevisions: [.opencode: ["one": terminalRevision]], complete: [.opencode]),
+                    quality: .current, providers: [.opencode])
         XCTAssertTrue(try XCTUnwrap(cache.tasks.first).isActive)
         XCTAssertTrue(cache.pendingTerminalIDs.isEmpty)
         XCTAssertTrue(cache.uncertainProviders.isEmpty)
@@ -190,8 +196,10 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
         XCTAssertTrue(cache.capacityExceeded, "A roster cannot recover which terminal signal was dropped")
         XCTAssertTrue(cache.uncertainProviders.contains(.opencode))
         let proof = ExternalProviderVerifiedTurn(id: "one", startKey: "turn-1")
+        let revision = cache.quarantinedEvidence(for: .opencode).revision
         cache.apply(capture([task("one", .opencode)], active: [.opencode: [proof]], complete: [.opencode],
-                            reconciled: [.opencode]), quality: .current, providers: [.opencode])
+                            reconciled: [.opencode: revision]),
+                    quality: .current, providers: [.opencode])
         XCTAssertTrue(cache.tasks.allSatisfy(\.isUnconfirmed), "Lost terminal evidence can affect any task in the source")
     }
 
@@ -236,8 +244,10 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
                       "A successor alone does not order an unattributed terminal")
         XCTAssertEqual(cache.pendingTerminalIDs[.opencode], ["one"])
 
+        let terminalRevision = try XCTUnwrap(cache.quarantinedEvidence(for: .opencode).terminalRevisions["one"])
         cache.apply(capture([next], active: [.opencode: [nextProof]], successors: [.opencode: [transition]],
-                            afterTerminal: [.opencode: [nextProof]], complete: [.opencode]),
+                            afterTerminal: [.opencode: [nextProof]],
+                            terminalRevisions: [.opencode: ["one": terminalRevision]], complete: [.opencode]),
                     quality: .current, providers: [.opencode])
         let restored = try XCTUnwrap(cache.tasks.first)
         XCTAssertEqual(restored.startKey, "turn-2")
@@ -261,7 +271,7 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
         XCTAssertTrue(cache.uncertainProviders.isEmpty)
     }
 
-    func testVerifiedTerminalForTheRetainedTurnCanRemoveIt() {
+    func testVerifiedTerminalForTheRetainedTurnCanRemoveIt() throws {
         var cache = ExternalProviderRefreshCache()
         cache.apply(capture([task("one", .opencode)]), quality: .current, providers: [.opencode])
         cache.apply(capture([], terminalIDs: [.opencode: ["one"]]), quality: .delayed, providers: [.opencode])
@@ -273,6 +283,12 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
 
         let matching = ExternalProviderVerifiedTurn(id: "one", startKey: "turn-1")
         cache.apply(capture([], ended: [.opencode: [matching]], complete: [.opencode]),
+                    quality: .current, providers: [.opencode])
+        XCTAssertEqual(cache.tasks.count, 1, "A turn ending alone does not attribute an unknown terminal")
+        XCTAssertEqual(cache.pendingTerminalIDs[.opencode], ["one"])
+        let terminalRevision = try XCTUnwrap(cache.quarantinedEvidence(for: .opencode).terminalRevisions["one"])
+        cache.apply(capture([], ended: [.opencode: [matching]], endedAfterAll: [.opencode: [matching]],
+                            terminalRevisions: [.opencode: ["one": terminalRevision]], complete: [.opencode]),
                     quality: .current, providers: [.opencode])
         XCTAssertTrue(cache.tasks.isEmpty)
         XCTAssertTrue(cache.pendingTerminalIDs.isEmpty)
@@ -319,8 +335,9 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
                     quality: .current, providers: [.opencode])
         XCTAssertTrue(try XCTUnwrap(cache.tasks.first { $0.provider == .opencode }).isUnconfirmed)
         XCTAssertEqual(cache.quarantinedTaskCount, 1)
+        let revision = cache.quarantinedEvidence(for: .opencode).revision
         cache.apply(capture([first], active: [.opencode: [proof]], complete: [.opencode],
-                            generations: [.opencode: reconnected], reconciled: [.opencode]),
+                            generations: [.opencode: reconnected], reconciled: [.opencode: revision]),
                     quality: .current, providers: [.opencode])
         XCTAssertTrue(try XCTUnwrap(cache.tasks.first { $0.provider == .opencode }).isActive)
         XCTAssertTrue(try XCTUnwrap(cache.tasks.first { $0.provider == .deepseek }).isActive)
@@ -342,8 +359,10 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
         cache.apply(capture([first]), quality: .current, providers: [.opencode])
         XCTAssertTrue(try XCTUnwrap(cache.tasks.first { $0.provider == .opencode }).isUnconfirmed)
         let proof = ExternalProviderVerifiedTurn(id: "one", startKey: "turn-1")
+        let revision = cache.quarantinedEvidence(for: .opencode).revision
         cache.apply(capture([first], active: [.opencode: [proof]], complete: [.opencode],
-                            generations: [.opencode: generation]), quality: .current, providers: [.opencode])
+                            generations: [.opencode: generation], reconciled: [.opencode: revision]),
+                    quality: .current, providers: [.opencode])
         XCTAssertTrue(try XCTUnwrap(cache.tasks.first { $0.provider == .opencode }).isActive)
         XCTAssertTrue(try XCTUnwrap(cache.tasks.first { $0.provider == .deepseek }).isActive)
         XCTAssertFalse(cache.uncertainProviders.contains(.opencode))
@@ -383,5 +402,93 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
         XCTAssertEqual(cache.pendingTerminalIDs[.opencode], ["one"])
         XCTAssertEqual(cache.quarantinedTaskCount, 1)
         XCTAssertTrue(cache.uncertainProviders.contains(.opencode))
+    }
+
+    func testReconciledCrossGenerationEvidenceDoesNotClearCurrentTerminal() throws {
+        var cache = ExternalProviderRefreshCache()
+        let first = task("one", .opencode)
+        cache.apply(capture([first]), quality: .current, providers: [.opencode])
+        let generation = try XCTUnwrap(cache.beginReconnection(.opencode))
+        cache.apply(capture([task("old", .opencode)], terminalIDs: [.opencode: ["old"]]),
+                    quality: .invalidated, providers: [.opencode])
+        let evidence = cache.quarantinedEvidence(for: .opencode)
+        XCTAssertEqual(evidence.terminalIDs, ["old"])
+        cache.apply(capture([], terminalIDs: [.opencode: ["one"]], generations: [.opencode: generation]),
+                    quality: .current, providers: [.opencode])
+        XCTAssertEqual(cache.pendingTerminalIDs[.opencode], ["old", "one"])
+        let proof = ExternalProviderVerifiedTurn(id: "one", startKey: "turn-1")
+        cache.apply(capture([first], active: [.opencode: [proof]], complete: [.opencode],
+                            generations: [.opencode: generation], reconciled: [.opencode: evidence.revision]),
+                    quality: .current, providers: [.opencode])
+        XCTAssertEqual(cache.quarantinedTaskCount, 0)
+        XCTAssertEqual(cache.pendingTerminalIDs[.opencode], ["one"])
+        XCTAssertTrue(try XCTUnwrap(cache.tasks.first).isUnconfirmed)
+        let terminalRevision = try XCTUnwrap(cache.quarantinedEvidence(for: .opencode).terminalRevisions["one"])
+        cache.apply(capture([first], active: [.opencode: [proof]], afterTerminal: [.opencode: [proof]],
+                            terminalRevisions: [.opencode: ["one": terminalRevision]],
+                            complete: [.opencode], generations: [.opencode: generation]),
+                    quality: .current, providers: [.opencode])
+        XCTAssertTrue(try XCTUnwrap(cache.tasks.first).isActive)
+        XCTAssertTrue(cache.pendingTerminalIDs.isEmpty)
+    }
+
+    func testQuarantinedActionsRemainAvailableAndOldRevisionCannotClearNewerEvidence() throws {
+        var cache = ExternalProviderRefreshCache()
+        let generation = try XCTUnwrap(cache.beginReconnection(.opencode))
+        var first = task("same", .opencode)
+        first.activity = "First action"
+        var second = first
+        second.activity = "Second action"
+        cache.apply(capture([first]), quality: .invalidated, providers: [.opencode])
+        let before = cache.quarantinedEvidence(for: .opencode)
+        cache.apply(capture([second]), quality: .invalidated, providers: [.opencode])
+        let after = cache.quarantinedEvidence(for: .opencode)
+        XCTAssertGreaterThan(after.revision, before.revision)
+        XCTAssertEqual(Set(after.tasks.map(\.activity)), ["First action", "Second action"])
+        XCTAssertFalse(cache.tasks.contains { $0.id == "same" })
+        cache.apply(capture([], complete: [.opencode], generations: [.opencode: generation],
+                            reconciled: [.opencode: before.revision]), quality: .current, providers: [.opencode])
+        XCTAssertEqual(cache.quarantinedTaskCount, 2)
+        XCTAssertTrue(cache.uncertainProviders.contains(.opencode))
+        cache.apply(capture([], complete: [.opencode], generations: [.opencode: generation],
+                            reconciled: [.opencode: after.revision]), quality: .current, providers: [.opencode])
+        XCTAssertEqual(cache.quarantinedTaskCount, 0)
+        XCTAssertFalse(cache.uncertainProviders.contains(.opencode))
+    }
+
+    func testQuarantinedGapIsExposedWithItsRevision() throws {
+        var cache = ExternalProviderRefreshCache()
+        let generation = try XCTUnwrap(cache.beginReconnection(.opencode))
+        cache.apply(capture([], gaps: [.opencode]), quality: .invalidated, providers: [.opencode])
+        let evidence = cache.quarantinedEvidence(for: .opencode)
+        XCTAssertTrue(evidence.gap)
+        cache.apply(capture([], complete: [.opencode], generations: [.opencode: generation],
+                            reconciled: [.opencode: evidence.revision]), quality: .current, providers: [.opencode])
+        XCTAssertFalse(cache.quarantinedEvidence(for: .opencode).gap)
+        XCTAssertFalse(cache.uncertainProviders.contains(.opencode))
+    }
+
+    func testLaterTerminalInvalidatesEarlierOrderingProofForSameID() throws {
+        var cache = ExternalProviderRefreshCache()
+        let first = task("one", .opencode)
+        cache.apply(capture([first]), quality: .current, providers: [.opencode])
+        cache.apply(capture([], terminalIDs: [.opencode: ["one"]]), quality: .delayed, providers: [.opencode])
+        let before = cache.quarantinedEvidence(for: .opencode)
+        let oldRevision = try XCTUnwrap(before.terminalRevisions["one"])
+        XCTAssertEqual(before.currentTerminalIDs, ["one"])
+        cache.apply(capture([], terminalIDs: [.opencode: ["one"]]), quality: .delayed, providers: [.opencode])
+        let currentRevision = try XCTUnwrap(cache.quarantinedEvidence(for: .opencode).terminalRevisions["one"])
+        XCTAssertGreaterThan(currentRevision, oldRevision)
+        let active = ExternalProviderVerifiedTurn(id: "one", startKey: "turn-1")
+        cache.apply(capture([first], active: [.opencode: [active]], afterTerminal: [.opencode: [active]],
+                            terminalRevisions: [.opencode: ["one": oldRevision]], complete: [.opencode]),
+                    quality: .current, providers: [.opencode])
+        XCTAssertTrue(try XCTUnwrap(cache.tasks.first).isUnconfirmed)
+        XCTAssertEqual(cache.pendingTerminalIDs[.opencode], ["one"])
+        cache.apply(capture([first], active: [.opencode: [active]], afterTerminal: [.opencode: [active]],
+                            terminalRevisions: [.opencode: ["one": currentRevision]], complete: [.opencode]),
+                    quality: .current, providers: [.opencode])
+        XCTAssertTrue(try XCTUnwrap(cache.tasks.first).isActive)
+        XCTAssertTrue(cache.pendingTerminalIDs.isEmpty)
     }
 }
