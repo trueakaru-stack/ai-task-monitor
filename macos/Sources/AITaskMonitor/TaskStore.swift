@@ -6,8 +6,135 @@ private struct ClaudePhaseChanges {
     var sessions: Set<String> = []
 }
 
+private struct CodexBackgroundRead {
+    let homeExists: Bool
+    let homeStable: Bool
+    let firstResult: Result<CodexTaskSnapshot, Error>
+    let result: Result<CodexTaskSnapshot, Error>
+    let revalidated: Bool
+    let agrees: Bool
+    let selectionGeneration: UInt64
+    let language: AppLanguage
+    let startedAtUptime: TimeInterval
+    let finishedAtUptime: TimeInterval
+}
+
+private struct CodexHomeObservation: Equatable {
+    let exists: Bool
+    let path: String?
+    let device: UInt64?
+    let inode: UInt64?
+    let created: Date?
+
+    var hasIdentity: Bool { !exists || (path != nil && device != nil && inode != nil) }
+
+    static func read(_ home: URL) -> CodexHomeObservation {
+        let manager = FileManager.default
+        guard manager.fileExists(atPath: home.path) else {
+            return CodexHomeObservation(exists: false, path: nil, device: nil, inode: nil, created: nil)
+        }
+        let resolved = home.resolvingSymlinksInPath().standardizedFileURL
+        guard let attrs = try? manager.attributesOfItem(atPath: resolved.path),
+              attrs[.type] as? FileAttributeType == .typeDirectory,
+              let device = (attrs[.systemNumber] as? NSNumber)?.uint64Value,
+              let inode = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value else {
+            return CodexHomeObservation(exists: true, path: nil, device: nil, inode: nil, created: nil)
+        }
+        return CodexHomeObservation(exists: true, path: resolved.path, device: device, inode: inode,
+                                    created: attrs[.creationDate] as? Date)
+    }
+}
+
+// A discarded ending must not be converted back into a confirmed running
+// turn just because the stateful reader no longer emits that ending.
+struct CodexTerminalGuard {
+    static let maximumPendingIDs = 1_024
+    static let maximumTurnsPerID = 8
+
+    struct Pending: Hashable {
+        let file: CodexFileIdentity?
+        let startKey: String
+    }
+
+    struct Reconciled {
+        let tasks: [MonitoredTask]
+        let terminalIDs: Set<String>
+        let isPartial: Bool
+    }
+
+    private(set) var pending: [String: Set<Pending>] = [:]
+    private(set) var overflowed = false
+
+    mutating func remember(_ ids: Set<String>, previous: [MonitoredTask]) {
+        guard !overflowed else { return }
+        for task in previous where ids.contains(task.id) {
+            let candidate = Pending(file: task.lastActivityFileIdentity, startKey: task.startKey)
+            if pending[task.id] == nil && pending.count >= Self.maximumPendingIDs {
+                overflowed = true
+                return
+            }
+            if let existing = pending[task.id], !existing.contains(candidate), existing.count >= Self.maximumTurnsPerID {
+                overflowed = true
+                return
+            }
+            pending[task.id, default: []].insert(candidate)
+        }
+    }
+
+    mutating func reconcile(_ snapshot: CodexTaskSnapshot, previous: [MonitoredTask]) -> Reconciled {
+        if overflowed {
+            return Reconciled(tasks: snapshot.tasks.map {
+                TaskSnapshotMerger.merge(previous: [$0], current: [], terminalIDs: [])[0]
+            }, terminalIDs: [], isPartial: true)
+        }
+        let previousByID = Dictionary(grouping: previous, by: \.id)
+        var acceptedTerminals = snapshot.terminalIDs
+        for id in snapshot.terminalIDs {
+            let old = previousByID[id] ?? []
+            if old.isEmpty && pending[id] == nil { continue }
+            let evidence = snapshot.terminalEvidence[id]
+            let samePrevious = old.count == 1 && old[0].lastActivityFileIdentity != nil &&
+                !old[0].startKey.isEmpty && evidence?.file == old[0].lastActivityFileIdentity &&
+                evidence?.startKey == old[0].startKey
+            let samePending = (pending[id] ?? []).allSatisfy {
+                $0.file != nil && !$0.startKey.isEmpty && evidence?.file == $0.file && evidence?.startKey == $0.startKey
+            }
+            if samePrevious && samePending {
+                pending.removeValue(forKey: id)
+            } else {
+                acceptedTerminals.remove(id)
+                remember([id], previous: old)
+            }
+        }
+
+        if overflowed {
+            return Reconciled(tasks: snapshot.tasks.map {
+                TaskSnapshotMerger.merge(previous: [$0], current: [], terminalIDs: [])[0]
+            }, terminalIDs: [], isPartial: true)
+        }
+
+        let currentByID = Dictionary(grouping: snapshot.tasks, by: \.id)
+        for (id, candidates) in pending {
+            guard let current = currentByID[id], current.count == 1 else { continue }
+            let task = current[0]
+            guard task.isActive, !task.isUnconfirmed, task.lastActivityIdentityConfirmed == true,
+                  let file = task.lastActivityFileIdentity, !task.startKey.isEmpty,
+                  candidates.allSatisfy({ $0.file == file && !$0.startKey.isEmpty && $0.startKey != task.startKey }) else { continue }
+            pending.removeValue(forKey: id)
+        }
+
+        let safeTasks = snapshot.tasks.map { task in
+            guard pending[task.id] != nil else { return task }
+            return TaskSnapshotMerger.merge(previous: [task], current: [], terminalIDs: [])[0]
+        }
+        return Reconciled(tasks: safeTasks, terminalIDs: acceptedTerminals,
+                          isPartial: !pending.isEmpty || acceptedTerminals != snapshot.terminalIDs)
+    }
+}
+
 @MainActor
 final class TaskStore: ObservableObject {
+    private static let sourcePollInterval: TimeInterval = 2
     // Keep titles already displayed when an uncertain replacement snapshot
     // lacks them. This is in-memory only and does not persist private text.
     static func preserveUncertainClaudeTitles(previous: [MonitoredTask], current: [MonitoredTask], affected: Set<String>? = nil) -> (tasks: [MonitoredTask], overflow: Bool) {
@@ -54,6 +181,7 @@ final class TaskStore: ObservableObject {
     }
 
     private var compactSnapshotGeneration: UInt64 = 0
+    private var compactManualSelectionGeneration: UInt64 = 0
     @Published private(set) var tasks: [MonitoredTask] = [] {
         didSet {
             if CodexTaskGrouping.compactSnapshotChanged(oldValue, tasks, confirmedChildren: confirmedCodexChildrenForCompact) {
@@ -106,6 +234,16 @@ final class TaskStore: ObservableObject {
     @Published var updateOpenError = false
 
     private let codexReader: CodexTaskReader
+    private let codexReadQueue = DispatchQueue(label: "ai-task-monitor.codex-source", qos: .utility)
+    private var codexReadInFlight = false
+    private var codexReadPending = false
+    private var codexReadDelayed = false
+    private var codexReadStartedAt: TimeInterval?
+    private var codexReadGeneration: UInt64 = 0
+    private var codexHasCompletedRead = false
+    private var codexTerminalGuard = CodexTerminalGuard()
+    private var codexSourceUnavailable = false
+    private var codexSourcePartial = false
     private let claudeReader: ClaudeTaskReader
     private let diagnosticWorker: DiagnosticWorker?
     private let claudeLoopProfile: URL?
@@ -653,8 +791,8 @@ final class TaskStore: ObservableObject {
         refresh()
         maintainClaudeRetention()
         checkForUpdates()
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh(); self?.checkForUpdates(); self?.maintainClaudeRetention() }
+        timer = Timer.scheduledTimer(withTimeInterval: Self.sourcePollInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.periodicRefresh(); self?.checkForUpdates(); self?.maintainClaudeRetention() }
         }
     }
 
@@ -863,11 +1001,13 @@ final class TaskStore: ObservableObject {
                   visible.indices.contains(dot.visibleIndex),
                   tasks[visible[dot.visibleIndex]].compactSelectionKey == dot.task.compactSelectionKey else { return }
             compactIndex = visible[dot.visibleIndex]
+            compactManualSelectionGeneration &+= 1
             return
         }
         let matches = visible.filter { tasks[$0].compactSelectionKey == dot.task.compactSelectionKey }
         guard matches.count == 1, let index = matches.first else { return }
         compactIndex = index
+        compactManualSelectionGeneration &+= 1
     }
 
     var visibleProviderFilters: [ProviderFilter] {
@@ -879,10 +1019,20 @@ final class TaskStore: ObservableObject {
     var compactEmptyMessage: String {
         let warning = compactUnavailableMessage
         if !warning.isEmpty { return warning }
+        if codexReadInFlight && !codexHasCompletedRead {
+            return tr("Нет отображаемых задач", "No tasks to display")
+        }
         if !tasks.isEmpty && compactTasks.isEmpty {
             return tr("Список задач Codex может быть неполным", "The Codex task list may be incomplete")
         }
         if codexPartiallyUnavailable && !unavailableSources.contains(.codex) {
+            return tr("Нет отображаемых задач", "No tasks to display")
+        }
+        return tr("Активных задач нет", "No active tasks")
+    }
+
+    var expandedEmptyMessage: String {
+        if codexReadInFlight && !codexHasCompletedRead {
             return tr("Нет отображаемых задач", "No tasks to display")
         }
         return tr("Активных задач нет", "No active tasks")
@@ -972,35 +1122,161 @@ final class TaskStore: ObservableObject {
     }
 
     func refresh() {
+        scheduleCodexRead(periodic: false)
+        refreshState(codexRead: nil)
+    }
+
+    private func periodicRefresh() {
+        scheduleCodexRead(periodic: true)
+        refreshState(codexRead: nil)
+    }
+
+    // One reader owns its caches on one serial queue. A burst of refresh
+    // requests only schedules one more pass after the current read finishes.
+    private func scheduleCodexRead(periodic: Bool = false) {
+        if codexReadInFlight {
+            codexReadPending = true
+            if periodic, let start = codexReadStartedAt,
+               ProcessInfo.processInfo.systemUptime - start >= Self.sourcePollInterval,
+               !codexReadDelayed {
+                codexReadDelayed = true
+                codexSourcePartial = true
+                previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
+            }
+            return
+        }
+        codexReadInFlight = true
+        codexReadDelayed = false
+        codexReadStartedAt = nil
+        codexReadGeneration &+= 1
+        let generation = codexReadGeneration
+        let reader = codexReader
+        let wasSeen = sawCodexHome
+        let observedSince = monitoringStartedAt
+        let previouslyObserved = Set(previousCodex.map(\.id))
+        let selectionGeneration = compactManualSelectionGeneration
+        let language = AppLanguage.current
+        let pollInterval = Self.sourcePollInterval
+        codexReadQueue.async { [weak self] in
+            let startedAtUptime = ProcessInfo.processInfo.systemUptime
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.codexReadInFlight, self.codexReadGeneration == generation else { return }
+                self.codexReadStartedAt = startedAtUptime
+            }
+            let before = CodexHomeObservation.read(reader.codexHome)
+            func readSnapshot() -> Result<CodexTaskSnapshot, Error> {
+              AppLanguage.withSourceLanguage(language) {
+                Result<CodexTaskSnapshot, Error> {
+                    if !before.exists && wasSeen { throw CocoaError(.fileReadNoSuchFile) }
+                    return try reader.readSnapshot(observedSince: observedSince, previouslyObserved: previouslyObserved)
+                }
+              }
+            }
+            let first = readSnapshot()
+            var result = first
+            var revalidated = false
+            var agrees = false
+            if ProcessInfo.processInfo.systemUptime - startedAtUptime >= pollInterval,
+               case .success(let initial) = first {
+                result = readSnapshot()
+                revalidated = true
+                if case .success(let later) = result { agrees = initial.agreesWith(later) }
+            }
+            let after = CodexHomeObservation.read(reader.codexHome)
+            let finishedAtUptime = ProcessInfo.processInfo.systemUptime
+            let read = CodexBackgroundRead(homeExists: before.exists || after.exists,
+                                           homeStable: before.hasIdentity && after.hasIdentity && before == after,
+                                           firstResult: first, result: result, revalidated: revalidated, agrees: agrees,
+                                           selectionGeneration: selectionGeneration, language: language,
+                                           startedAtUptime: startedAtUptime, finishedAtUptime: finishedAtUptime)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.codexReadGeneration == generation else { return }
+                self.codexReadInFlight = false
+                self.codexReadStartedAt = nil
+                let delayed = self.codexReadDelayed
+                self.codexReadDelayed = false
+                let pending = self.codexReadPending
+                self.codexReadPending = false
+                self.refreshState(codexRead: read, codexReadWasDelayed: delayed)
+                let shouldRepeat = pending || self.codexReadPending
+                self.codexReadPending = false
+                if shouldRepeat { self.scheduleCodexRead() }
+            }
+        }
+    }
+
+    private func refreshState(codexRead: CodexBackgroundRead?, codexReadWasDelayed: Bool = false) {
         let previousTasks = tasks
         let previousCompact = compactTasks
         let previousCompactIndex = previousCompact.isEmpty ? nil : compactSelectedIndex
         let selectedTask = previousCompactIndex.map { previousCompact[$0] }
         let previousUnavailable = unavailableSources
         var unavailable: [TaskProvider] = []
-        var codexPartial = false
         var terminalIDs: Set<String> = []
         var interruptedIDs: Set<String> = []
         var neutralEndedIDs: Set<String> = []
         var codexToolEvents: [String: [CodexToolEvent]] = [:]
         var claudeConnected = false
-        do {
-            let exists = FileManager.default.fileExists(atPath: codexReader.codexHome.path)
-            if !exists && sawCodexHome { throw CocoaError(.fileReadNoSuchFile) }
-            if exists { sawCodexHome = true }
-            let snapshot = try codexReader.readSnapshot(observedSince: monitoringStartedAt, previouslyObserved: Set(previousCodex.map(\.id)))
+        if let codexRead {
+          codexHasCompletedRead = true
+          if codexRead.homeExists { sawCodexHome = true }
+          let nowUptime = ProcessInfo.processInfo.systemUptime
+          let slow = codexReadWasDelayed || codexRead.finishedAtUptime - codexRead.startedAtUptime >= Self.sourcePollInterval
+          let late = nowUptime - codexRead.finishedAtUptime >= Self.sourcePollInterval
+          let invalid = !codexRead.homeStable || codexRead.language != AppLanguage.current || late ||
+              (slow && !(codexRead.revalidated && codexRead.agrees))
+          if invalid {
+            if codexRead.language != AppLanguage.current { codexReadPending = true }
+            if case .success(let first) = codexRead.firstResult {
+                codexTerminalGuard.remember(first.terminalIDs, previous: previousCodex)
+            }
+            if case .success(let latest) = codexRead.result {
+                codexTerminalGuard.remember(latest.terminalIDs, previous: previousCodex)
+                if codexRead.homeStable && codexRead.language == AppLanguage.current {
+                    let uncertain = TaskSnapshotMerger.merge(previous: latest.tasks, current: [], terminalIDs: [])
+                    previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: uncertain, terminalIDs: [])
+                } else {
+                    previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
+                }
+                codexSourceUnavailable = false
+            } else {
+                previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
+                codexSourceUnavailable = true
+            }
+            codexSourcePartial = true
+            clearCodexDisplayEvidence()
+          } else {
+           switch codexRead.result {
+           case .success(let snapshot):
+            let safe = codexTerminalGuard.reconcile(snapshot, previous: previousCodex)
             updateCodexParentEvidence(snapshot)
-            codexPartial = snapshot.isPartial
-            terminalIDs.formUnion(snapshot.terminalIDs)
-            interruptedIDs.formUnion(snapshot.interruptedIDs)
-            codexToolEvents = snapshot.toolEvents
-            previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: snapshot.tasks, terminalIDs: snapshot.terminalIDs)
-            previousCodex = TaskSnapshotMerger.confirmCodexActivities(previousCodex, files: snapshot.verifiedActivityFiles)
-        } catch {
-            unavailable.append(.codex)
+            codexSourceUnavailable = false
+            codexSourcePartial = snapshot.isPartial || safe.isPartial
+            terminalIDs.formUnion(safe.terminalIDs)
+            interruptedIDs.formUnion(snapshot.interruptedIDs.intersection(safe.terminalIDs))
+            codexToolEvents = codexTerminalGuard.overflowed ? [:] :
+                snapshot.toolEvents.filter { codexTerminalGuard.pending[$0.key] == nil }
+            previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: safe.tasks, terminalIDs: safe.terminalIDs)
+            let verifiedFiles = codexTerminalGuard.overflowed ? [:] :
+                snapshot.verifiedActivityFiles.filter { codexTerminalGuard.pending[$0.key] == nil }
+            previousCodex = TaskSnapshotMerger.confirmCodexActivities(previousCodex, files: verifiedFiles)
+           case .failure:
+            codexSourceUnavailable = true
+            codexSourcePartial = false
             clearCodexDisplayEvidence()
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
+           }
+          }
         }
+        var expiredCodex = false
+        let nowForCodex = Date()
+        previousCodex = previousCodex.map { task in
+            guard task.isActive && nowForCodex.timeIntervalSince(task.updatedAt) >= CodexTaskReader.maximumConfirmedAge else { return task }
+            expiredCodex = true
+            return TaskSnapshotMerger.merge(previous: [task], current: [], terminalIDs: [])[0]
+        }
+        if expiredCodex { codexSourcePartial = true }
+        if codexSourceUnavailable { unavailable.append(.codex) }
         do {
             let connection: ClaudeIntegration.ConnectionState
             if claudeReader.usesExplicitFile { connection = .connected }
@@ -1067,7 +1343,7 @@ final class TaskStore: ObservableObject {
         previousClaude = Self.clearUnconfirmedClaudePlans(previousClaude)
         if externalProvidersEnabled { scheduleKimiScan(); scheduleDeepSeekScan(); scheduleHermesScan(); refreshExternalProviders(unavailable: &unavailable) }
         scheduleCodexCloudScan()
-        codexPartiallyUnavailable = codexPartial
+        codexPartiallyUnavailable = codexSourcePartial
         unavailableSources = unavailable
         var combined = (previousCodex + previousClaude + previousExternal + codexCloudTasks)
             .filter { $0.isActive || $0.isUnconfirmed || $0.isWaiting }
@@ -1148,6 +1424,21 @@ final class TaskStore: ObservableObject {
                 combined.insert(selectedTask, at: 0)
             }
             chosen = mappedSelection
+        }
+        if let codexRead, codexRead.selectionGeneration != compactManualSelectionGeneration,
+           let selectedTask {
+            let matches = combined.indices.filter { combined[$0].compactSelectionKey == selectedTask.compactSelectionKey }
+            if matches.count == 1, let position = matches.first {
+                let visible = CodexTaskGrouping.compactVisibleIndices(combined, confirmedChildren: confirmedCodexChildrenForCompact)
+                if let compactPosition = visible.firstIndex(of: position) {
+                    taskFocus.prioritize(selectedTask.id)
+                    if compactPosition >= 3 {
+                        let manuallySelected = combined.remove(at: position)
+                        combined.insert(manuallySelected, at: 0)
+                    }
+                    chosen = selectedTask.id
+                }
+            }
         }
         let selectedSourceIndex = CodexTaskGrouping.compactSelectionSourceIndex(combined,
             confirmedChildren: confirmedCodexChildrenForCompact, chosenID: chosen,
@@ -1447,7 +1738,20 @@ final class TaskStore: ObservableObject {
         }
     }
 
+    var testCodexReadInFlight: Bool { codexReadInFlight }
+
     #if DEBUG
+    func testSeedCodexTasks(_ seed: [MonitoredTask]) {
+        precondition(diagnosticWorker == nil && !externalProvidersEnabled && !codexReadInFlight)
+        previousCodex = seed
+        tasks = seed
+    }
+
+    var testCodexReadDelayed: Bool { codexReadDelayed }
+    var testCodexReadGeneration: UInt64 { codexReadGeneration }
+    var testPendingCodexTerminalIDs: Set<String> { Set(codexTerminalGuard.pending.keys) }
+    func testPeriodicRefresh() { periodicRefresh() }
+
     func testReplacePreviewTasks(_ updated: [MonitoredTask]) {
         precondition(diagnosticWorker == nil)
         tasks = updated

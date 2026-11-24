@@ -33,6 +33,7 @@ final class CodexSourceStalePlanTests: XCTestCase {
             claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("unused")),
             journal: DiagnosticJournal(directory: root.appendingPathComponent("diagnostics")))
         store.refresh()
+        waitForCodexRead(store)
         let original = try XCTUnwrap(store.tasks.first { $0.id == "019127f4-35ae-7c73-9e72-a10123456001" })
         XCTAssertTrue(original.isActive)
         XCTAssertTrue(original.planConfirmed)
@@ -41,6 +42,7 @@ final class CodexSourceStalePlanTests: XCTestCase {
 
         try FileManager.default.removeItem(at: index)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertTrue(store.unavailableSources.contains(.codex))
         let retained = try XCTUnwrap(store.tasks.first { $0.id == "019127f4-35ae-7c73-9e72-a10123456001" })
         XCTAssertTrue(retained.isUnconfirmed)

@@ -76,7 +76,7 @@ struct RootView: View {
                 Spacer()
                 if store.unavailableMessage.isEmpty {
                     VStack(spacing: 8) {
-                        Text(tr("Активных задач нет", "No active tasks")).font(.system(size: 15, weight: .medium))
+                        Text(store.expandedEmptyMessage).font(.system(size: 15, weight: .medium))
                         Text(tr("Окно обновится автоматически", "Updates automatically")).font(.system(size: 12)).foregroundStyle(MonitorTheme.secondary)
                     }
                     .frame(maxWidth: .infinity)

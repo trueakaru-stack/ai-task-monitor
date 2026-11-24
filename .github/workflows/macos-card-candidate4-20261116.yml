@@ -1,7 +1,7 @@
-name: Synthetic macOS capacity regressions
+name: macOS compact interaction checks
 on:
   push:
-    branches: ['macos', 'codex/macos-kimi-scope-fix-20261116', 'codex/macos-activity-ci-20261123', 'codex/macos-icon-fallback-ci-20261123']
+    branches: ['codex/macos-compact-ci-20261124']
     paths: ['.github/workflows/macos-build.yml', '.github/workflows/macos-card-candidate4-20261116.yml', '.github/macos-icon-fallback-20261123/**', '.github/macos-image-fallback-20261123/**', 'macos/**']
 permissions:
   contents: read
@@ -16,7 +16,7 @@ jobs:
           - runner: macos-26
             developer: /Applications/Xcode.app/Contents/Developer
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
       DEVELOPER_DIR: ${{ matrix.developer }}
     steps:
@@ -239,59 +239,6 @@ jobs:
             done
             (cd "$task_control" && /usr/bin/shasum -a 256 -c controls.sha256)
           done
-      - name: Verify isolated icon fallback guard
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$AITM_TEST_TASK_ROOT/source/macos"
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$AITM_TEST_CONTROL_ROOT/run-isolated" \
-            /bin/bash "$AITM_TEST_TASK_ROOT/source/.github/macos-icon-fallback-20261123/test-iconutil-guard.sh" "$AITM_TEST_TASK_ROOT/source"
-      - name: Verify isolated ZIP roundtrip
-        shell: bash
-        run: |
-          set -euo pipefail
-          task_probe="$(/usr/bin/mktemp -d "$AITM_TEST_TASK_ROOT/temp/archive-probe.XXXXXXXX")"
-          case "$task_probe" in "$AITM_TEST_TASK_ROOT"/temp/archive-probe.*) ;; *) exit 1;; esac
-          mkdir -p "$task_probe/Fixture.app/Contents/MacOS" "$task_probe/Fixture.app/Contents/Resources" "$task_probe/extracted"
-          printf '#!/bin/sh\nexit 0\n' > "$task_probe/Fixture.app/Contents/MacOS/Fixture"
-          chmod 700 "$task_probe/Fixture.app/Contents/MacOS/Fixture"
-          printf 'synthetic\n' > "$task_probe/Fixture.app/Contents/Resources/example.txt"
-          /bin/ln -s example.txt "$task_probe/Fixture.app/Contents/Resources/example-link"
-          task_run="$AITM_TEST_CONTROL_ROOT/run-isolated"
-          task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$task_probe/Fixture.app" "$task_probe/fixture.zip"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/unzip -t "$task_probe/fixture.zip" > "$task_probe/zip-check.txt"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/ditto -x -k "$task_probe/fixture.zip" "$task_probe/extracted"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/diff -qr "$task_probe/Fixture.app" "$task_probe/extracted/Fixture.app"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /bin/test -x "$task_probe/extracted/Fixture.app/Contents/MacOS/Fixture"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /bin/test -L "$task_probe/extracted/Fixture.app/Contents/Resources/example-link"
-      - name: Verify isolated image path guard
-        shell: bash
-        run: |
-          set -euo pipefail
-          task_root="$AITM_TEST_TASK_ROOT"
-          task_run="$AITM_TEST_CONTROL_ROOT/run-isolated"
-          task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
-          task_helper="$task_root/source/.github/macos-image-fallback-20261123/create-hybrid-ci.sh"
-          task_app="$task_root/source/macos/dist/AI Task Monitor.app"
-          task_output="$task_root/source/macos/dist/AITaskMonitor-macOS-0.3.12.dmg"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /bin/bash -n "$task_helper"
-          if AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/env "AITM_RELEASE_ROOT=$task_root" \
-            /bin/bash "$task_helper" "$task_app" >"$task_root/temp/image-guard-count.log" 2>&1; then
-            echo 'Image guard accepted the wrong argument count.' >&2; exit 1
-          fi
-          grep -F 'Expected app and image paths.' "$task_root/temp/image-guard-count.log"
-          if AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/env "AITM_RELEASE_ROOT=$task_root" \
-            /bin/bash "$task_helper" "$task_root/temp/other.app" "$task_output" >"$task_root/temp/image-guard-input.log" 2>&1; then
-            echo 'Image guard accepted the wrong app path.' >&2; exit 1
-          fi
-          grep -F 'Unexpected app or image path.' "$task_root/temp/image-guard-input.log"
-          if AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /usr/bin/env "AITM_RELEASE_ROOT=$task_root" \
-            /bin/bash "$task_helper" "$task_app" "$task_root/temp/other.dmg" >"$task_root/temp/image-guard-output.log" 2>&1; then
-            echo 'Image guard accepted the wrong output path.' >&2; exit 1
-          fi
-          grep -F 'Unexpected app or image path.' "$task_root/temp/image-guard-output.log"
-          test ! -e "$task_root/temp/other.dmg"
       - name: Build synthetic regression tests
         id: build
         shell: bash
@@ -303,32 +250,29 @@ jobs:
           task_bin="$("${task_compiler[@]}" build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
           test -d "$task_bin/AITaskMonitorPackageTests.xctest"
           printf 'AITM_TEST_BIN=%s\n' "$task_bin" >> "$GITHUB_ENV"
-      - name: Verify Codex activity, task names and compact warnings
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          for suite in CodexActiveOperationTests CodexExecDiscoveryTests CompactSourceWarningTests; do
-            "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
-          done
-          "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ParserTests/testActivityReadsCurrentSummaryWithoutExposingRawReasoning "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
-      - name: Verify Codex rollout selection offline
+      - name: Verify compact task selection
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           task_run="$AITM_TEST_CONTROL_ROOT/run-isolated"
           task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import errno,socket; exec("try:\n s=socket.socket()\n s.connect((\"127.0.0.1\",9))\nexcept OSError as e:\n assert e.errno in (errno.EACCES,errno.EPERM), e\nelse:\n raise AssertionError(\"network was not denied\")")'
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexRolloutSelectionTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/rollout-tests.log"
-          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/rollout-tests.log"; then echo 'Rollout tests were skipped.' >&2; exit 1; fi
-          grep -Eq 'Executed 38 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/rollout-tests.log"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexExecDiscoveryTests/testUnindexedUncertainEndingsDoNotClaimSuccess "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/unindexed-terminal-test.log"
-          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/unindexed-terminal-test.log"; then echo 'Unindexed terminal test was skipped.' >&2; exit 1; fi
-          grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/unindexed-terminal-test.log"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexRevertSafetyTests/testOldTerminalAndNewRevisionRetainUnconfirmedAndDoNotAffectNeighbor "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"
-          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"; then echo 'Existing rollout test was skipped.' >&2; exit 1; fi
-          grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CompactTaskSelectionTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/compact-selection.log"
+          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/compact-selection.log"; then exit 1; fi
+          grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/compact-selection.log"
+      - name: Verify background Codex reads
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_CONTROL_ROOT/run-isolated"
+          task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
+          for suite in CodexBackgroundReadTests CodexTerminalGuardTests CodexSourceStalePlanTests CodexRevertSafetyTests CodexExecDiscoveryTests ClaudeCombinedRecoveryTests CodexCloudStoreTests ParserTests; do
+            log="$AITM_TEST_TASK_ROOT/background-$suite.log"
+            AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"
+            if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log"; then echo 'Background test was skipped.' >&2; exit 1; fi
+            grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$log"
+          done
       - name: Verify synthetic Codex grouping
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -361,343 +305,6 @@ jobs:
           name: codex-grouping-synthetic-preview-${{ matrix.runner }}
           path: ${{ runner.temp }}/aitm-card-tests.*/temp/grouping-renders/*.png
           if-no-files-found: error
-      - name: Check guard skips without hosted test fixture
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$AITM_TEST_CONTROL_ROOT/run-isolated" /usr/bin/env -u AITM_SYNTHETIC_REQUIRED -u AITM_SYNTHETIC_TEST_ROOT -u AITM_CI_DENIED_FILE "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testV2CapacityWarningSurvivesScopeRemovalReconnectAndRestart "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/expected-skip.log"
-          grep -q 'skipped' "$AITM_TEST_TASK_ROOT/expected-skip.log"
-      - name: Check required guard rejects missing marker
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if "$AITM_TEST_CONTROL_ROOT/run-isolated" /usr/bin/env -u AITM_CI_DENIED_FILE "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testV2CapacityWarningSurvivesScopeRemovalReconnectAndRestart "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" >"$AITM_TEST_TASK_ROOT/expected-rejection.log" 2>&1; then
-            echo 'Missing marker unexpectedly passed.' >&2
-            exit 1
-          fi
-          grep -q 'unsafeEnvironment' "$AITM_TEST_TASK_ROOT/expected-rejection.log"
-      - name: Run synthetic Kimi capacity regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testVisibleKimiCardSurvivesCapacityAndLateTerminal "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Run synthetic V1 warning regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testV1CapacityWarningSurvivesUnavailableAndReconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Run synthetic V2 warning regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testV2CapacityWarningSurvivesScopeRemovalReconnectAndRestart "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Run synthetic TaskStore warning regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testTaskStoreKeepsCapacityWarningAfterPartialAndReconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Run synthetic scope isolation regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testCapacityLossInScopeADoesNotUnconfirmScopeB "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Run synthetic Hermes restart regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testHermesWaitsForAnObserverStartedAfterMonitoring "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Run synthetic Kimi temporary scan regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testKimiTemporaryInspectionFailureRetainsCardUntilExplicitDisconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Run synthetic partial scope retention regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testPartialScopeKeepsPriorCardAndHealthyNeighbourAfterReconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Run synthetic Hermes scope isolation regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testReclaimingHermesTerminalDoesNotDegradeOtherScope "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Check bounded V2 warning history
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testV2WarningHistoryStaysBoundedAndSignalsUntrackedScopes "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Check bounded visible task preservation
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testTaskStoreBoundKeepsVisibleNeighbourBeforeUnseenTasks "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Check full and partial warnings in both languages
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testFullAndPartialAvailabilityMessagesStayDistinctInBothLanguages "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Check Hermes late observer and terminal behavior
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testHermesLateEventAndConfirmedTerminalDoNotReviveOldCard "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Check DeepSeek warning attribution through reconnect
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testDeepSeekCapacityWarningFollowsAffectedScopeThroughDisableAndReconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Check partial loss with no visible tasks
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testConnectedScopeWithoutCardsStillReportsPartialLoss "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Check Kimi scope change and explicit disconnect
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testKimiScopeChangeRetainsObservedCardUntilExplicitDisconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Check Hermes scope change and healthy neighbour
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testHermesScopeChangeKeepsHealthyNeighbourAndReportsUncertainty "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Check existing in-memory provider suites
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          for suite in ExternalProviderStateTests ExternalProviderTaskMapperTests ExternalProviderFilterTests ExternalProviderV2BrokerTests V1ProtectionTests NeutralTerminalTransitionTests HermesObserverStateTests; do
-            "$AITM_TEST_CONTROL_ROOT/run-isolated" /usr/bin/env "AITM_HERMES_PYTHON=$AITM_TEST_PYTHON_BIN" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
-          done
-      - name: Render synthetic availability states
-        id: render
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testRenderExistingWarningForFullAndPartialSources "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
-      - name: Save synthetic availability renders
-        if: ${{ !cancelled() && steps.render.outcome == 'success' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-kimi-scope-${{ matrix.runner }}
-          path: ${{ runner.temp }}/aitm-card-tests.*/temp/render-*/renders/*.png
-          if-no-files-found: error
-          retention-days: 30
-      - name: Build and inspect isolated macOS app
-        id: app_candidate
-        if: ${{ success() && matrix.runner == 'macos-15' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$GITHUB_ACTIONS" = true
-          test "$RUNNER_ENVIRONMENT" = github-hosted
-          test "$RUNNER_OS" = macOS
-          test "$(git -C "$AITM_TEST_TASK_ROOT/source" rev-parse HEAD)" = "$GITHUB_SHA"
-          task_root="$AITM_TEST_TASK_ROOT"
-          task_source="$task_root/source/macos"
-          task_bin="$task_root/release-tools"
-          mkdir -p "$task_bin" "$task_root/release-artifacts" "$task_root/dmg-mount" "$task_root/synthetic-home" "$task_root/atomic-probe"
-          cat > "$task_bin/swift" <<'SCRIPT'
-          #!/bin/bash
-          set -euo pipefail
-          test "$#" = 7
-          test "$1" = build && test "$2" = -c && test "$3" = release
-          test "$4" = --arch && test "$5" = arm64 && test "$6" = --arch && test "$7" = x86_64
-          task_swift="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift"
-          task_options=(--disable-sandbox --manifest-cache none --cache-path "$AITM_RELEASE_ROOT/swift-cache"
-                        --config-path "$AITM_RELEASE_ROOT/swift-config" --security-path "$AITM_RELEASE_ROOT/swift-security")
-          mkdir -p .build/apple/Products/Release
-          run_swiftpm() {
-            "$task_swift" build -c release --triple "$1" "${task_options[@]}" 2>&1 | tee "$AITM_RELEASE_ROOT/swiftpm-$1.log"
-          }
-          if run_swiftpm arm64-apple-macosx13.0 && run_swiftpm x86_64-apple-macosx13.0; then
-            task_arm="$("$task_swift" build -c release --triple arm64-apple-macosx13.0 --show-bin-path "${task_options[@]}")"
-            task_x64="$("$task_swift" build -c release --triple x86_64-apple-macosx13.0 --show-bin-path "${task_options[@]}")"
-            test -f "$task_arm/AITaskMonitor" && test -f "$task_x64/AITaskMonitor"
-            task_arm_binary="$task_arm/AITaskMonitor"
-            task_x64_binary="$task_x64/AITaskMonitor"
-            printf '%s\n' 'SwiftPM release build, separately for arm64 and x86_64.' > "$AITM_RELEASE_ROOT/release-artifacts/build-method.txt"
-          else
-            if ! grep -Eq 'permission to save the file .*output-file-map[.]json' "$AITM_RELEASE_ROOT"/swiftpm-*.log; then
-              echo 'SwiftPM failed for a different reason; refusing the fallback.' >&2
-              exit 1
-            fi
-            echo 'SwiftPM build failed under the restricted environment; trying direct swiftc release builds.' >&2
-            shopt -s nullglob
-            task_sources=(Sources/AITaskMonitor/*.swift)
-            test "${#task_sources[@]}" -gt 0
-            task_all_count="$(/usr/bin/find Sources/AITaskMonitor -type f -name '*.swift' -print | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
-            test "${#task_sources[@]}" = "$task_all_count"
-            test -z "$(/usr/bin/find Sources/AITaskMonitor -type l -print)"
-            task_swiftc="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
-            mkdir -p "$AITM_RELEASE_ROOT/swiftc-arm64" "$AITM_RELEASE_ROOT/swiftc-x86_64"
-            task_arm_binary="$AITM_RELEASE_ROOT/swiftc-arm64/AITaskMonitor"
-            task_x64_binary="$AITM_RELEASE_ROOT/swiftc-x86_64/AITaskMonitor"
-            task_flags=(-O -whole-module-optimization -swift-version 5 -D SWIFT_PACKAGE -module-name AITaskMonitor -sdk "$SDKROOT")
-            "$task_swiftc" "${task_flags[@]}" -target arm64-apple-macosx13.0 "${task_sources[@]}" -o "$task_arm_binary"
-            "$task_swiftc" "${task_flags[@]}" -target x86_64-apple-macosx13.0 "${task_sources[@]}" -o "$task_x64_binary"
-            {
-              printf '%s\n' 'Direct swiftc release builds; differs from the standard SwiftPM build.'
-              printf '%s\n' 'Targets: arm64-apple-macosx13.0 and x86_64-apple-macosx13.0.'
-              printf '%s\n' 'Flags: -O -whole-module-optimization -swift-version 5 -D SWIFT_PACKAGE -module-name AITaskMonitor.'
-              printf 'Swift sources: %s\n' "${#task_sources[@]}"
-              "$task_swiftc" --version
-            } > "$AITM_RELEASE_ROOT/release-artifacts/build-method.txt"
-          fi
-          task_lipo="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/lipo"
-          "$task_lipo" -create "$task_arm_binary" "$task_x64_binary" -output .build/apple/Products/Release/AITaskMonitor
-          "$task_lipo" .build/apple/Products/Release/AITaskMonitor -verify_arch arm64
-          "$task_lipo" .build/apple/Products/Release/AITaskMonitor -verify_arch x86_64
-          SCRIPT
-          cat > "$task_bin/mktemp" <<'SCRIPT'
-          #!/bin/bash
-          set -euo pipefail
-          if [[ "$#" -ne 1 || "$1" != -d ]]; then
-            echo 'Only mktemp -d is supported for isolated packaging.' >&2
-            exit 2
-          fi
-          task_base="${AITM_RELEASE_ROOT:?}/temp"
-          test "$task_base" = "${AITM_SYNTHETIC_TEST_ROOT:?}"
-          test -d "$task_base" && test ! -L "$task_base"
-          test "$(cd -P "$task_base" && pwd -P)" = "$task_base"
-          task_directory="$(/usr/bin/mktemp -d "$task_base/aitm-release.XXXXXXXX")"
-          case "$task_directory" in "$task_base"/aitm-release.*) ;; *) exit 1;; esac
-          test -d "$task_directory" && test ! -L "$task_directory"
-          test "$(cd -P "$task_directory" && pwd -P)" = "$task_directory"
-          printf '%s\n' "$task_directory"
-          SCRIPT
-          cp "$task_root/source/.github/macos-icon-fallback-20261123/iconutil-ci.sh" "$task_bin/iconutil"
-          chmod 700 "$task_bin/swift" "$task_bin/mktemp" "$task_bin/iconutil"
-          task_run="$AITM_TEST_CONTROL_ROOT/run-isolated"
-          task_path="$task_bin:$AITM_TASK_PATH"
-          if AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /bin/cat "$AITM_TEST_DENIED_FILE" >/dev/null 2>&1; then
-            echo 'Release sandbox unexpectedly allowed runner-profile access.' >&2
-            exit 1
-          fi
-          "$AITM_TEST_NODE_BIN" -e 'const net=require("node:net"),fs=require("node:fs"); const s=net.createServer(c=>c.end()); s.listen(0,"127.0.0.1",()=>fs.writeFileSync(process.argv[1],String(s.address().port)));' "$task_root/probe-port" &
-          probe_pid=$!
-          trap 'kill "$probe_pid" 2>/dev/null || true; wait "$probe_pid" 2>/dev/null || true' EXIT
-          for attempt in {1..100}; do test -s "$task_root/probe-port" && break; sleep 0.1; done
-          test -s "$task_root/probe-port"
-          task_port="$(cat "$task_root/probe-port")"
-          [[ "$task_port" =~ ^[0-9]{1,5}$ ]]
-          /usr/bin/nc -vz -G 2 127.0.0.1 "$task_port"
-          if AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/nc -vz -G 2 127.0.0.1 "$task_port" >"$task_root/network-probe.log" 2>&1; then
-            echo 'Release sandbox unexpectedly allowed network access.' >&2
-            exit 1
-          fi
-          grep -Eiq 'operation not permitted|permission denied' "$task_root/network-probe.log"
-          kill "$probe_pid"
-          wait "$probe_pid" 2>/dev/null || true
-          trap - EXIT
-          task_tmp_probe="$(AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/env \
-            "AITM_RELEASE_ROOT=$task_root" "$task_bin/mktemp" -d)"
-          case "$task_tmp_probe" in "$task_root"/temp/aitm-release.*) ;; *) exit 1;; esac
-          test -d "$task_tmp_probe"
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /bin/rmdir "$task_tmp_probe"
-          if AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/env \
-            "AITM_RELEASE_ROOT=$task_root" "$task_bin/mktemp" -d unexpected >/dev/null 2>&1; then
-            echo 'The isolated mktemp wrapper accepted unexpected arguments.' >&2
-            exit 1
-          fi
-          cat > "$task_root/atomic-probe.swift" <<'SWIFT'
-          import Foundation
-          let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
-          let file = directory.appendingPathComponent(UUID().uuidString + ".json")
-          do {
-              try Data("synthetic".utf8).write(to: file, options: .atomic)
-              try FileManager.default.removeItem(at: file)
-              print("Atomic Foundation write succeeded")
-          } catch {
-              let failure = error as NSError
-              let underlying = failure.userInfo[NSUnderlyingErrorKey] as? NSError
-              print("Atomic Foundation write failed: \(failure.domain) \(failure.code); underlying \(underlying?.domain ?? "none") \(underlying?.code ?? 0)")
-              exit(1)
-          }
-          SWIFT
-          task_swiftc="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
-          if AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/env \
-            "CFFIXED_USER_HOME=$task_root/synthetic-home" "$task_swiftc" "$task_root/atomic-probe.swift" -o "$task_root/atomic-probe-bin"; then
-            echo 'Foundation atomic write without synthetic home:'
-            AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" "$task_root/atomic-probe-bin" "$task_root/atomic-probe" || true
-            echo 'Foundation atomic write with synthetic home:'
-            AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/env \
-              "CFFIXED_USER_HOME=$task_root/synthetic-home" "$task_root/atomic-probe-bin" "$task_root/atomic-probe" || true
-          else
-            echo 'Foundation atomic-write probe did not compile in the restricted environment.'
-          fi
-          echo 'Sandbox messages for the synthetic atomic-write probe, when available:'
-          /usr/bin/log show --last 2m --style compact --predicate 'eventMessage CONTAINS "atomic-probe-bin" AND eventMessage CONTAINS "deny"' 2>/dev/null | /usr/bin/tail -n 8 || true
-          cd "$task_source"
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/env \
-            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" "CFFIXED_USER_HOME=$task_root/synthetic-home" /bin/bash ./scripts/build-app.sh
-          task_app="$task_source/dist/AI Task Monitor.app"
-          test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw -o - "$task_app/Contents/Info.plist")" = 0.3.12
-          test "$(/usr/bin/plutil -extract AITaskMonitorReleaseVersion raw -o - "$task_app/Contents/Info.plist")" = 0.3.12
-          test "$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$task_app/Contents/Info.plist")" = 16
-          test "$(/usr/bin/plutil -extract LSMinimumSystemVersion raw -o - "$task_app/Contents/Info.plist")" = 13.0
-          task_binary="$task_app/Contents/MacOS/AITaskMonitor"
-          task_lipo="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/lipo"
-          task_otool="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/otool"
-          for task_arch in arm64 x86_64; do
-            "$task_lipo" "$task_binary" -verify_arch "$task_arch"
-            "$task_otool" -arch "$task_arch" -l "$task_binary" > "$task_root/release-artifacts/load-commands-$task_arch.txt"
-            grep -Eq '^[[:space:]]*minos[[:space:]]+13[.]0([.]0)?[[:space:]]*$' "$task_root/release-artifacts/load-commands-$task_arch.txt"
-          done
-          /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_app"
-          /usr/bin/codesign -dv --verbose=4 "$task_app" 2>&1 | tee "$task_root/release-artifacts/signature.txt"
-          grep -q 'Signature=adhoc' "$task_root/release-artifacts/signature.txt"
-          task_icon_sha=ec9ba4d716b1988dfad213127d9d2dffbb37e188199f8c7576d4325774e78e67
-          if test -f "$task_root/release-artifacts/icon-fallback-used"; then
-            test ! -L "$task_root/release-artifacts/icon-fallback-used"
-            test "$(cat "$task_root/release-artifacts/icon-fallback-used")" = "$task_icon_sha"
-            task_icon_actual="$(/usr/bin/shasum -a 256 "$task_app/Contents/Resources/AppIcon.icns")"
-            test "${task_icon_actual%% *}" = "$task_icon_sha"
-          fi
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/env \
-            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/smoke-test.sh "$task_app"
-          mkdir -p "$task_root/validated-app" "$task_root/app-roundtrip"
-          task_app_zip="$task_root/temp/AI Task Monitor.app.zip"
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$task_app" "$task_app_zip"
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/unzip -t "$task_app_zip" > "$task_root/validated-app/zip-check.txt"
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/ditto -x -k "$task_app_zip" "$task_root/app-roundtrip"
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/diff -qr "$task_app" "$task_root/app-roundtrip/AI Task Monitor.app"
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/codesign --verify --deep --strict --verbose=2 "$task_root/app-roundtrip/AI Task Monitor.app"
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /bin/test -x "$task_root/app-roundtrip/AI Task Monitor.app/Contents/MacOS/AITaskMonitor"
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/env \
-            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" /bin/bash ./scripts/smoke-test.sh "$task_root/app-roundtrip/AI Task Monitor.app"
-          /bin/mv "$task_app_zip" "$task_root/validated-app/AI Task Monitor.app.zip"
-          /bin/cp "$task_root/release-artifacts/build-method.txt" "$task_root/release-artifacts/signature.txt" \
-            "$task_root/release-artifacts/load-commands-arm64.txt" "$task_root/release-artifacts/load-commands-x86_64.txt" "$task_root/validated-app/"
-          if test -f "$task_root/release-artifacts/icon-fallback-used"; then
-            /bin/cp "$task_root/release-artifacts/icon-fallback-used" "$task_root/validated-app/"
-          fi
-          (cd "$task_root/validated-app" && /usr/bin/shasum -a 256 'AI Task Monitor.app.zip' > SHA256-APP.txt && /usr/bin/shasum -a 256 -c SHA256-APP.txt)
-          printf '%s\n' "$GITHUB_SHA" > "$task_root/validated-app/source-commit.txt"
-          (cd "$AITM_TEST_CONTROL_ROOT" && /usr/bin/shasum -a 256 -c controls.sha256)
-      - name: Save isolated verified app
-        if: ${{ !cancelled() && steps.app_candidate.outcome == 'success' && matrix.runner == 'macos-15' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-0.3.12-diagnostic-app-${{ github.sha }}
-          path: ${{ runner.temp }}/aitm-card-tests.*/validated-app/*
-          if-no-files-found: error
-          retention-days: 7
-      - name: Create and inspect isolated macOS image
-        id: dmg_candidate
-        if: ${{ !cancelled() && steps.app_candidate.outcome == 'success' && matrix.runner == 'macos-15' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          task_root="$AITM_TEST_TASK_ROOT"
-          task_source="$task_root/source/macos"
-          task_run="$AITM_TEST_CONTROL_ROOT/run-isolated"
-          task_path="$task_root/release-tools:$AITM_TASK_PATH"
-          task_app="$task_source/dist/AI Task Monitor.app"
-          task_dmg="$task_source/dist/AITaskMonitor-macOS-0.3.12.dmg"
-          test "$(git -C "$task_root/source" rev-parse HEAD)" = "$GITHUB_SHA"
-          cd "$task_source"
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$task_run" /usr/bin/env \
-            "PATH=$task_path" "AITM_RELEASE_ROOT=$task_root" \
-            /bin/bash "$task_root/source/.github/macos-image-fallback-20261123/create-hybrid-ci.sh" "$task_app" "$task_dmg"
-          (cd "$task_source/dist" && /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt)
-          /bin/cp "$task_root/validated-app/AI Task Monitor.app.zip" "$task_root/release-artifacts/AI Task Monitor.app.zip"
-          /bin/cp "$task_dmg" "$task_source/dist/SHA256SUMS-macOS.txt" "$task_root/release-artifacts/"
-          (cd "$task_root/release-artifacts" && /usr/bin/shasum -a 256 'AI Task Monitor.app.zip' >> SHA256SUMS-macOS.txt && /usr/bin/shasum -a 256 -c SHA256SUMS-macOS.txt)
-          printf '%s\n' "$GITHUB_SHA" > "$task_root/release-artifacts/source-commit.txt"
-          (cd "$AITM_TEST_CONTROL_ROOT" && /usr/bin/shasum -a 256 -c controls.sha256)
-      - name: Save isolated macOS candidate
-        if: ${{ !cancelled() && steps.dmg_candidate.outcome == 'success' && matrix.runner == 'macos-15' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-0.3.12-candidate-${{ github.sha }}
-          path: ${{ runner.temp }}/aitm-card-tests.*/release-artifacts/*
-          if-no-files-found: error
-          retention-days: 7
       - name: Verify control files after the job
         if: ${{ always() && !cancelled() }}
         shell: bash

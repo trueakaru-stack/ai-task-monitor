@@ -374,17 +374,20 @@ final class ParserTests: XCTestCase {
         for index in 0..<5 { lines.append(try item("first-\(index)", "CommandExecution", Double(index + 2))) }
         try (lines.joined(separator: "\n") + "\n").write(to: session, atomically: true, encoding: .utf8)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertEqual(store.tasks.first?.loopWarning, LoopWarning(threshold: 5, windowMinutes: 10))
         store.dismissLoop(for: "019127f4-35ae-7c73-9e72-a10123456001")
         XCTAssertNil(store.tasks.first?.loopWarning)
         lines.append(try item("first-5", "CommandExecution", 7))
         try (lines.joined(separator: "\n") + "\n").write(to: session, atomically: true, encoding: .utf8)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertNil(store.tasks.first?.loopWarning)
         lines.append(try item("changed", "FileChange", 8))
         for index in 0..<5 { lines.append(try item("next-\(index)", "CommandExecution", Double(index + 9))) }
         try (lines.joined(separator: "\n") + "\n").write(to: session, atomically: true, encoding: .utf8)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertNotNil(store.tasks.first?.loopWarning)
     }
 
@@ -416,24 +419,30 @@ final class ParserTests: XCTestCase {
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: codexHome), claudeReader: ClaudeTaskReader(eventFile: claude), journal: journal)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let start = #"{"timestamp":"\#(formatter.string(from: Date().addingTimeInterval(1)))","type":"event_msg","payload":{"type":"task_started"}}"#
+        let start = #"{"timestamp":"\#(formatter.string(from: Date().addingTimeInterval(1)))","type":"event_msg","payload":{"type":"task_started","turn_id":"synthetic-turn"}}"#
         let claudeEvent = event(session: "active-claude", name: "UserPromptSubmit", active: true, date: Date().addingTimeInterval(2), prompt: "")
         try (start + "\n").write(to: session, atomically: true, encoding: .utf8)
         try (claudeEvent + "\n").write(to: claude, atomically: true, encoding: .utf8)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertEqual(store.tasks.count, 2)
         XCTAssertTrue(store.unavailableSources.isEmpty)
         try FileManager.default.removeItem(at: index)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertEqual(store.unavailableSources, [.codex])
         let uncertain = try XCTUnwrap(store.tasks.first { $0.provider == .codex })
         XCTAssertTrue(uncertain.isUnconfirmed)
         XCTAssertFalse(uncertain.isActive)
         XCTAssertTrue(store.tasks.contains { $0.provider == .claude && $0.isActive })
         try (indexLine + "\n").write(to: index, atomically: true, encoding: .utf8)
-        let end = #"{"timestamp":"\#(formatter.string(from: Date().addingTimeInterval(3)))","type":"event_msg","payload":{"type":"task_complete"}}"#
-        try (start + "\n" + end + "\n").write(to: session, atomically: true, encoding: .utf8)
+        let end = #"{"timestamp":"\#(formatter.string(from: Date().addingTimeInterval(3)))","type":"event_msg","payload":{"type":"task_complete","turn_id":"synthetic-turn"}}"#
+        let handle = try FileHandle(forWritingTo: session)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((end + "\n").utf8))
+        try handle.close()
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertTrue(store.unavailableSources.isEmpty)
         XCTAssertFalse(store.tasks.contains { $0.provider == .codex })
         XCTAssertTrue(store.tasks.contains { $0.provider == .claude && $0.isActive })

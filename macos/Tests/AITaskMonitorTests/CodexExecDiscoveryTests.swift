@@ -807,11 +807,13 @@ final class CodexExecDiscoveryTests: XCTestCase {
         _ = try rollout(root, fileID: neighbor2)
         _ = try rollout(root, fileID: neighbor3)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertEqual(store.tasks.count, 4)
         XCTAssertGreaterThanOrEqual(try XCTUnwrap(store.tasks.firstIndex { $0.id == first }), 3)
         try indexRows(root, [(first, "Parent"), (second, "Child"), (revision, "Neighbor"), (neighbor2, "Neighbor 2"), (neighbor3, "Neighbor 3")])
         try subagentRollout(root, id: second, parent: first)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertEqual(store.tasks.count, 5)
         store.compactIndex = try XCTUnwrap(store.tasks.firstIndex { $0.id == second })
         XCTAssertLessThan(store.compactIndex, 3)
@@ -819,6 +821,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         var found = false
         for _ in 0..<8 {
             store.refresh()
+            waitForCodexRead(store)
             reader.waitForAmbiguousObservationForTests()
             if store.tasks.first(where: { $0.id == first })?.codexAgentCount == 1 {
                 found = true
@@ -834,6 +837,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertTrue(store.tasks.contains { $0.id == neighbor2 })
         XCTAssertTrue(store.tasks.contains { $0.id == neighbor3 })
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertEqual(store.tasks[store.compactIndex].id, first)
         XCTAssertLessThan(store.compactIndex, 3)
         store.toggleCodexGroup(first)
@@ -843,6 +847,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
         try append("agent_reasoning", to: childFile)
         for _ in 0..<8 {
             store.refresh()
+            waitForCodexRead(store)
             reader.waitForAmbiguousObservationForTests()
             if store.tasks.first(where: { $0.id == first })?.codexAgentCount == 1 { break }
         }
@@ -1421,6 +1426,7 @@ final class CodexExecDiscoveryTests: XCTestCase {
                               claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("unused")),
                               journal: DiagnosticJournal(directory: root.appendingPathComponent("journal")))
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertTrue(store.unavailableSources.contains(.codex))
         XCTAssertFalse(store.codexPartiallyUnavailable)
     }

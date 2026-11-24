@@ -6,7 +6,7 @@ enum CodexToolEventKind: String {
     case commandStarted, commandFinished, fileStarted, fileFinished
 }
 
-struct CodexToolEvent {
+struct CodexToolEvent: Equatable {
     let id: String
     let kind: CodexToolEventKind
     let time: Date

@@ -46,6 +46,7 @@ final class CodexCloudStoreTests: XCTestCase {
         let timestamp = formatter.string(from: Date().addingTimeInterval(1))
         try "{\"timestamp\":\"\(timestamp)\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n".write(to: rollout, atomically: true, encoding: .utf8)
         store.refresh()
+        waitForCodexRead(store)
         XCTAssertTrue(store.tasks.contains { $0.id == "019127f4-35ae-7c73-9e72-a10123456009" && $0.isActive })
         XCTAssertFalse(FileManager.default.fileExists(atPath: started.path))
 

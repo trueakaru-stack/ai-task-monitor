@@ -2,9 +2,15 @@ import Foundation
 import Darwin
 import CryptoKit
 
+struct CodexTerminalEvidence: Equatable {
+    let file: CodexFileIdentity
+    let startKey: String
+}
+
 struct CodexTaskSnapshot {
     var tasks: [MonitoredTask] = []
     var terminalIDs: Set<String> = []
+    var terminalEvidence: [String: CodexTerminalEvidence] = [:]
     var interruptedIDs: Set<String> = []
     var toolEvents: [String: [CodexToolEvent]] = [:]
     var subagentParents: [String: String] = [:]
@@ -14,9 +20,29 @@ struct CodexTaskSnapshot {
     var subagentTitles: [String: String] = [:]
     var isPartial = false
     var didCompleteUnindexedSweep = false
+
+    // A delayed read can be accepted only when a second serial read agrees on
+    // all data that can affect publication and diagnostics. Ambiguous
+    // duplicate task identities never become a confirmation.
+    func agreesWith(_ other: CodexTaskSnapshot) -> Bool {
+        let first = Dictionary(grouping: tasks, by: { $0.compactSelectionKey })
+        let second = Dictionary(grouping: other.tasks, by: { $0.compactSelectionKey })
+        guard first.keys.count == second.keys.count,
+              first.allSatisfy({ key, values in
+                  values.count == 1 && second[key]?.count == 1 && second[key]?.first == values.first
+              }) else { return false }
+        return terminalIDs == other.terminalIDs && terminalEvidence == other.terminalEvidence &&
+            interruptedIDs == other.interruptedIDs &&
+            toolEvents == other.toolEvents && subagentParents == other.subagentParents &&
+            confirmedSubagentRoots == other.confirmedSubagentRoots &&
+            verifiedActivityFiles == other.verifiedActivityFiles &&
+            subagentCandidates == other.subagentCandidates && subagentTitles == other.subagentTitles &&
+            isPartial == other.isPartial && didCompleteUnindexedSweep == other.didCompleteUnindexedSweep
+    }
 }
 
 struct CodexTaskReader {
+    static let maximumConfirmedAge: TimeInterval = 7_200
     private struct TerminalFileIdentity: Equatable {
         let device: UInt64
         let inode: UInt64
@@ -55,13 +81,16 @@ struct CodexTaskReader {
     private let afterDiscoveryForTests: (() -> Void)?
     private let beforeTerminalRecheckForTests: (() -> Void)?
     private let afterIndexedAttributesForTests: ((String) -> Void)?
+    private let afterSnapshotForTests: ((CodexTaskSnapshot) -> Void)?
 
     init(codexHome: URL? = nil, afterDiscoveryForTests: (() -> Void)? = nil,
          beforeTerminalRecheckForTests: (() -> Void)? = nil,
-         afterIndexedAttributesForTests: ((String) -> Void)? = nil) {
+         afterIndexedAttributesForTests: ((String) -> Void)? = nil,
+         afterSnapshotForTests: ((CodexTaskSnapshot) -> Void)? = nil) {
         self.afterDiscoveryForTests = afterDiscoveryForTests
         self.beforeTerminalRecheckForTests = beforeTerminalRecheckForTests
         self.afterIndexedAttributesForTests = afterIndexedAttributesForTests
+        self.afterSnapshotForTests = afterSnapshotForTests
         if let codexHome {
             self.codexHome = codexHome
         } else if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
@@ -123,7 +152,7 @@ struct CodexTaskReader {
         result.didCompleteUnindexedSweep = extra.didCompleteSweep
         var visibleMetadataStamps: [String: CodexSubagentMetadataWorker.Stamp] = [:]
         var candidateSubagentTitles: [String: CandidateSubagentTitle] = [:]
-        var indexedEndings: [String: (file: URL, identity: TerminalFileIdentity, interrupted: Bool, toolEvents: [CodexToolEvent]?)] = [:]
+        var indexedEndings: [String: (file: URL, identity: TerminalFileIdentity, startKey: String, interrupted: Bool, toolEvents: [CodexToolEvent]?)] = [:]
         result.isPartial = indexFailure != nil || discovered.isPartial || extra.isPartial || extraFiles.isPartial
         let uncertain = ambiguousRollouts.poll(
             candidates: discovered.ambiguousCandidates, ambiguousIDs: discovered.ambiguousIDs,
@@ -225,7 +254,7 @@ struct CodexTaskReader {
                     if previouslyObserved.contains(id), let observedSince {
                         events = CodexToolEventParser.parse(tail: tail, since: observedSince, now: now)
                     }
-                    indexedEndings[id] = (file, identity, interrupted, events)
+                    indexedEndings[id] = (file, identity, state.startKey, interrupted, events)
                 }
                 continue
             }
@@ -259,7 +288,7 @@ struct CodexTaskReader {
             if state.terminalUncertain || tail.utf8.last != 0x0a { result.isPartial = true }
             let recoveredUnconfirmed = fresh != nil || recovered != nil || state.terminalUncertain || tail.utf8.last != 0x0a
             let progress = recoveredUnconfirmed ? nil : MonitoredTask.progress(for: steps)
-            let unconfirmed = recoveredUnconfirmed || now.timeIntervalSince(modified) >= 7_200
+            let unconfirmed = recoveredUnconfirmed || now.timeIntervalSince(modified) >= Self.maximumConfirmedAge
             if title.isEmpty, let record = try? readUnindexedSession(file, id: id),
                record.device == expectedStamp.device, record.inode == expectedStamp.inode,
                let reference = record.subagent, let derived = subagentTitle(reference, sessions: sessions) {
@@ -311,6 +340,9 @@ struct CodexTaskReader {
                         continue
                     }
                     result.terminalIDs.insert(id)
+                    result.terminalEvidence[id] = CodexTerminalEvidence(
+                        file: CodexFileIdentity(device: ending.identity.device, inode: ending.identity.inode),
+                        startKey: ending.startKey)
                     if ending.interrupted { result.interruptedIDs.insert(id) }
                     if let events = ending.toolEvents { result.toolEvents[id] = events }
                 }
@@ -386,6 +418,9 @@ struct CodexTaskReader {
                     } ?? true
                     if recognized {
                         result.terminalIDs.insert(id)
+                        result.terminalEvidence[id] = CodexTerminalEvidence(
+                            file: CodexFileIdentity(device: record.device, inode: record.inode),
+                            startKey: state.startKey)
                         if interrupted { result.interruptedIDs.insert(id) }
                         if previouslyObserved.contains(id), let observedSince {
                             result.toolEvents[id] = CodexToolEventParser.parse(tail: record.tail, since: observedSince, now: now)
@@ -518,6 +553,7 @@ struct CodexTaskReader {
             result.subagentTitles[parent] = title
         }
         result.tasks.sort { $0.updatedAt > $1.updatedAt }
+        afterSnapshotForTests?(result)
         return result
     }
 

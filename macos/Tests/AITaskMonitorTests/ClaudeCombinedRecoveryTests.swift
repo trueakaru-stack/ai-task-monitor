@@ -154,6 +154,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
         XCTAssertThrowsError(try codex.readSnapshot())
         let store = TaskStore(codexReader: codex, claudeReader: ClaudeTaskReader(eventFile: claude),
                               journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
+        waitForCodexRead(store)
         XCTAssertTrue(store.unavailableSources.contains(.codex))
         XCTAssertFalse(store.tasks.contains(where: { $0.provider == .codex }))
         let task = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:case" }))
@@ -205,6 +206,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
                     completed("neighbor", time: time.addingTimeInterval(0.2))]).write(to: file)
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: home), claudeReader: ClaudeTaskReader(eventFile: file),
                               journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")))
+        waitForCodexRead(store)
         let affected = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:affected" }))
         let neighbor = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:neighbor" }))
         let codex = try XCTUnwrap(store.tasks.first(where: { $0.provider == .codex }))
