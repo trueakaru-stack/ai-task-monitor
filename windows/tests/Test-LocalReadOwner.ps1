@@ -235,7 +235,9 @@ $rejected=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$rejectedConfig,
 try{
  [void]$rejected.Request([string[]]@('block','ru','true'))
  $failed=Wait-Result $rejected
- Require (-not $failed.Success -and -not $rejectedGates.Started.WaitOne(0)) 'A worker read after a failed job assignment.'
+ Require (-not $failed.Success -and -not $rejectedGates.Started.WaitOne(0) -and
+  $rejected.FailureStage -ceq 'verify-job' -and $rejected.FailureKind -ceq 'InvalidOperationException' -and
+  $rejected.FailureHResult -ne 0) 'A worker read after a failed job assignment or its safe failure details were lost.'
 }finally{$rejected.Dispose()}
 Wait-Exit $rejected -name 'rejected'
 if($rejected.OwnedProcessId -gt 0){Wait-ProcessGone $rejected.OwnedProcessId}

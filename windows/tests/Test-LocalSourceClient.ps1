@@ -11,6 +11,16 @@ $definitions=foreach($name in @('Prop','Unconfirmed-Tasks')){
 }
 . ([scriptblock]::Create(($definitions -join "`n")))
 function Require([bool]$condition,[string]$message){if(-not $condition){throw $message}}
+function Wait-SyntheticGate($owner,$gate,[string]$message){
+ $deadline=[Diagnostics.Stopwatch]::StartNew()
+ while($deadline.ElapsedMilliseconds -lt 15000){
+  if($gate.WaitOne(50)){return}
+  if($owner.FailureStage -or $owner.HasExited){break}
+ }
+ throw ($message+'; stage='+$owner.Stage+'; failed_at='+$owner.FailureStage+'; kind='+$owner.FailureKind+
+  '; hresult='+$owner.FailureHResult+'; polling='+$owner.IsPolling+'; pending='+$owner.HasPendingRequest+
+  '; worker_started='+($owner.OwnedProcessId -gt 0)+'; exited='+$owner.HasExited+'; cleanup_failed='+$owner.CleanupFailed)
+}
 function Wait-Idle($owner){
  $deadline=[Diagnostics.Stopwatch]::StartNew()
  while($deadline.ElapsedMilliseconds -lt 10000){
@@ -35,7 +45,7 @@ try{
  $client.TimeoutMilliseconds=350
  $clock=[Diagnostics.Stopwatch]::StartNew();$initial=Get-LocalSourceClientSnapshot $client 'ru' 0;$clock.Stop()
  Require ($clock.ElapsedMilliseconds -lt 1000 -and @($initial.Codex).Count -eq 0) 'The initial client poll waited for the source.'
- Require ($started.WaitOne(10000)) 'The synthetic source did not block.'
+ Wait-SyntheticGate $owner $started 'The synthetic source did not block.'
  $workerId=$owner.OwnedProcessId;Start-Sleep -Milliseconds 450
  $initialTimeout=Get-LocalSourceClientSnapshot $client 'ru' 0
  Require ($client.TimedOut -and @($initialTimeout.Codex).Count -eq 0 -and @($initialTimeout.Unavailable) -ccontains 'Codex' -and
@@ -62,7 +72,7 @@ try{
  # first call after it becomes old must reject it before looking at results.
  Wait-Idle $owner;[void]$afterStarted.Reset();[void]$afterRelease.Reset();[void]$afterSnapshot.Set();$client.TimeoutMilliseconds=350
  [void](Get-LocalSourceClientSnapshot $client 'en' 3)
- Require ($afterStarted.WaitOne(10000)) 'The synthetic response did not pause after snapshot creation.'
+ Wait-SyntheticGate $owner $afterStarted 'The synthetic response did not pause after snapshot creation.'
  Start-Sleep -Milliseconds 450;[void]$afterRelease.Set();$deadline=[Diagnostics.Stopwatch]::StartNew()
  while(-not $owner.HasResult -and $deadline.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
  Require $owner.HasResult 'The synthetic aged response never reached the owner.'
@@ -77,11 +87,11 @@ try{
  Wait-Idle $owner;[void]$started.Reset();[void]$release.Reset();[void]$afterStarted.Reset();[void]$afterRelease.Reset()
  [void]$block.Set();[void]$afterSnapshot.Set();$client.TimeoutMilliseconds=350
  [void](Get-LocalSourceClientSnapshot $client 'en' 3)
- Require ($started.WaitOne(10000)) 'The first repeated synthetic read did not block.'
+ Wait-SyntheticGate $owner $started 'The first repeated synthetic read did not block.'
  Start-Sleep -Milliseconds 450;[void](Get-LocalSourceClientSnapshot $client 'en' 3)
  Require ($client.TimedOut -and $owner.OwnedProcessId -eq $workerId) 'The first repeated read did not time out safely.'
  $firstGeneration=$owner.Generation;[void]$release.Set()
- Require ($afterStarted.WaitOne(10000)) 'The second repeated synthetic read did not block.'
+ Wait-SyntheticGate $owner $afterStarted 'The second repeated synthetic read did not block.'
  Start-Sleep -Milliseconds 450;$secondLate=Get-LocalSourceClientSnapshot $client 'en' 3
  Require ($client.TimedOut -and $owner.Generation -ne $firstGeneration -and -not $client.Fresh -and
   @($secondLate.Codex).Count -eq 1 -and -not $secondLate.Codex[0].Active -and $owner.OwnedProcessId -eq $workerId) 'The second timeout did not invalidate its own late result.'
@@ -93,7 +103,7 @@ try{
  # a parallel worker; existing active cards remain visible but unconfirmed.
  Wait-Idle $owner;[void]$started.Reset();[void]$release.Reset();[void]$block.Set();$client.TimeoutMilliseconds=350
  [void](Get-LocalSourceClientSnapshot $client 'en' 3)
- Require ($started.WaitOne(10000)) 'The later synthetic read did not block.'
+ Wait-SyntheticGate $owner $started 'The later synthetic read did not block.'
  Start-Sleep -Milliseconds 450
  $late=Get-LocalSourceClientSnapshot $client 'en' 3
  Require ($client.TimedOut -and $owner.OwnedProcessId -eq $workerId -and $owner.IsPolling -and
@@ -108,7 +118,7 @@ try{
  # explicitly unconfirmed rather than retaining a false active status.
  Wait-Idle $owner;[void]$started.Reset();[void]$release.Reset();[void]$block.Set()
  [void](Get-LocalSourceClientSnapshot $client 'en' 3)
- Require ($started.WaitOne(10000)) 'The synthetic error read did not block.'
+ Wait-SyntheticGate $owner $started 'The synthetic error read did not block.'
  $uncertain=Get-LocalSourceClientSnapshot $client 'ru' 4
  Require (-not $uncertain.Codex[0].Active -and -not $uncertain.Claude[0].Active -and
   @($uncertain.Unavailable) -ccontains 'Codex') 'Language invalidation falsely confirmed a card while the error response was pending.'
@@ -121,7 +131,7 @@ try{
  # owner's state and must be reflected by the following current-language read.
  Wait-Idle $owner;[void]$started.Reset();[void]$release.Reset();[void]$terminal.Set();[void]$block.Set()
  [void](Get-LocalSourceClientSnapshot $client 'ru' 5)
- Require ($started.WaitOne(10000)) 'The synthetic terminal read did not block.'
+ Wait-SyntheticGate $owner $started 'The synthetic terminal read did not block.'
  $uncertain=Get-LocalSourceClientSnapshot $client 'en' 6
  Require (@($uncertain.Codex).Count -eq 1 -and -not $uncertain.Codex[0].Active) 'A task stayed active while its terminal result was invalidated.'
  [void]$release.Set();$deadline=[Diagnostics.Stopwatch]::StartNew()

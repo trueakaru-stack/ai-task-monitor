@@ -44,6 +44,8 @@ namespace AITaskMonitor.LocalReadOwner {
         private PollResult latest;
         private bool hasPending, busy, closed, exited, broken, cleanupStarted, cleanupFinished, cleanupFailed, beforeResume;
         private int cleanupFailureCode;
+        private string stage = "initializing", failureStage = "", failureKind = "";
+        private int failureHResult;
         private string pipeName;
         private int ownedProcessId;
         private NamedPipeServerStream pipe;
@@ -112,6 +114,12 @@ namespace AITaskMonitor.LocalReadOwner {
         public bool IsBeforeResume { get { lock (gate) return beforeResume; } }
         public int OwnedProcessId { get { lock (gate) return ownedProcessId; } }
         public Guid Generation { get { lock (gate) return generation; } }
+        public string Stage { get { lock (gate) return stage; } }
+        public string FailureStage { get { lock (gate) return failureStage; } }
+        public string FailureKind { get { lock (gate) return failureKind; } }
+        public int FailureHResult { get { lock (gate) return failureHResult; } }
+
+        private void MarkStage(string value) { lock (gate) { stage = value; } }
 
         public void Dispose() {
             lock (gate) {
@@ -132,6 +140,7 @@ namespace AITaskMonitor.LocalReadOwner {
             try {
                 lock (gate) { if (closed) return; }
                 StartWorker();
+                MarkStage("idle");
                 while (true) {
                     int signalled = WaitHandle.WaitAny(new WaitHandle[] { closingSignal, pendingSignal });
                     if (signalled == 0) return;
@@ -149,19 +158,25 @@ namespace AITaskMonitor.LocalReadOwner {
                         busy = true;
                         requestGeneration = generation;
                     }
+                    MarkStage("exchange");
                     object result = Exchange(input);
                     lock (gate) {
+                        stage = "idle";
                         busy = false;
                         if (closed) return;
                         if (requestGeneration == generation) latest = new PollResult(true, result, requestGeneration, inputStamp, true);
                         if (hasPending && latest == null) pendingSignal.Set();
                     }
                 }
-            } catch (Exception) {
+            } catch (Exception error) {
                 // Do not expose paths, source data, or exception messages.
                 lock (gate) {
                     busy = false;
                     broken = true;
+                    failureStage = stage;
+                    failureKind = error.GetType().Name;
+                    failureHResult = error.HResult;
+                    stage = "failed";
                     hasPending = false;
                     pending = null;
                     pendingStamp = 0;
@@ -174,6 +189,7 @@ namespace AITaskMonitor.LocalReadOwner {
         }
 
         private void StartWorker() {
+            MarkStage("create-pipe");
             string name = "AITaskMonitorLocalRead-" + Guid.NewGuid().ToString("N");
             var security = new PipeSecurity();
             security.SetAccessRuleProtection(true, false);
@@ -188,9 +204,11 @@ namespace AITaskMonitor.LocalReadOwner {
             Worker child = null;
             bool transferred = false;
             try {
+                MarkStage("create-job");
                 ownedJob = Native.CreateJob();
                 // STARTUPINFOEX places the initially suspended worker into the
                 // kill-on-close job before its first instruction can execute.
+                MarkStage("create-process");
                 try { child = Native.StartWorker(ownedJob, workerPath, name); }
                 catch (WorkerStartupException error) {
                     if (error.CleanupUnconfirmed) { lock (gate) { cleanupFailed = true; cleanupFailureCode = 6000; } }
@@ -205,6 +223,7 @@ namespace AITaskMonitor.LocalReadOwner {
                     pipeName = name;
                     transferred = true;
                 }
+                MarkStage("verify-job");
                 bool assigned;
                 if (rejectAssignment || !Native.IsProcessInJob(child.ProcessHandle, ownedJob, out assigned) || !assigned)
                     throw new InvalidOperationException("Worker job assignment failed.");
@@ -213,13 +232,16 @@ namespace AITaskMonitor.LocalReadOwner {
                     closingSignal.WaitOne();
                     throw new InvalidOperationException("Synthetic suspended worker closed.");
                 }
+                MarkStage("resume-process");
                 if (Native.ResumeThread(child.ThreadHandle) != 1)
                     throw new InvalidOperationException("Worker resume failed.");
                 lock (gate) { beforeResume = false; }
+                MarkStage("wait-connection");
                 IAsyncResult wait = server.BeginWaitForConnection(null, null);
                 int ready = WaitHandle.WaitAny(new WaitHandle[] { closingSignal, wait.AsyncWaitHandle }, 10000);
                 if (ready != 1) throw new InvalidOperationException("Worker connection unavailable.");
                 server.EndWaitForConnection(wait);
+                MarkStage("verify-peer");
                 uint client;
                 if (!Native.GetNamedPipeClientProcessId(server.SafePipeHandle, out client) || client != (uint)child.Id)
                     throw new InvalidOperationException("Unexpected worker identity.");
