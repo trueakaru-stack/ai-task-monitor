@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks]
+        part: [checks-diagnostics, checks-journal, checks-agents, checks-sources, checks-ui]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
@@ -39,7 +39,7 @@ jobs:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
     steps:
       - name: Verify passive observation in isolated Windows
-        if: ${{ matrix.part == 'checks' || (!contains(github.event.head_commit.message, '[remaining-checks]') && !contains(github.event.head_commit.message, '[checks-only]')) }}
+        if: ${{ startsWith(matrix.part, 'checks') || (!contains(github.event.head_commit.message, '[remaining-checks]') && !contains(github.event.head_commit.message, '[checks-only]')) }}
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -68,7 +68,7 @@ jobs:
             if($LASTEXITCODE -ne 0){throw 'Cannot fetch the test revision.'}
             git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
             if($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:GITHUB_SHA){throw 'The test revision does not match.'}
-            if($env:AITM_TEST_PART -eq 'checks'){
+            if($env:AITM_TEST_PART -like 'checks*'){
               $codexCommand=Get-Command -Name 'codex','codex.exe','codex.cmd' -All -ErrorAction SilentlyContinue | Select-Object -First 1
               if($null -eq $codexCommand){Write-Output 'Real Codex CLI: not found on the hosted runner; no account or local model was used.'}
               else{Write-Output ('Real Codex CLI: command detected ('+$codexCommand.CommandType+'); it was not launched because its provenance and an isolated model backend were not verified.')}
@@ -113,12 +113,22 @@ jobs:
               }finally{$process.Dispose()}
             }
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-            if($env:AITM_TEST_PART -eq 'checks'){
-              $tests=@('Test-DiagnosticPolicy.ps1','Test-DiagnosticSettings.ps1','Test-DiagnosticStore.ps1','Test-DiagnosticCollector.ps1','Test-DiagnosticRuntime.ps1','Test-DiagnosticPackaging.ps1','Test-DiagnosticAppIntegration.ps1','Test-DiagnosticWorker.ps1','Test-DiagnosticAtomicity.ps1','Test-DiagnosticPolicyRace.ps1','Test-DiagnosticTimer.ps1','Test-ClaudeLoopBackground.ps1','Test-ClaudeLoopBackgroundWiring.ps1','Test-ClaudeLoopBackgroundNative.ps1','Test-RelatedAgentStatusDisplay.ps1','Test-CompactAgentHint.ps1','Test-CodexAgentRetention.ps1','Test-CodexAgentRetentionAdapter.ps1','Test-LocalReadStartupFailure.ps1','Test-LocalReadOwner.ps1','Test-LocalSourceClient.ps1','Test-LocalSourceInitialization.ps1','Test-LocalSourceModuleParity.ps1','Test-LocalSourcePackaging.ps1','Test-LocalSourceProductionWiring.ps1','Test-LocalSourceSnapshotOwner.ps1','Test-LocalSourceUnconfirmedFallback.ps1','Test-ProductionCodexAgentRetention.ps1','Test-ProductionLocalSourceWorker.ps1','Test-CompactDotReuse.ps1','Test-CompactSwitchUi.ps1')
+            if($env:AITM_TEST_PART -like 'checks*'){
+              switch($env:AITM_TEST_PART){
+                'checks-diagnostics' {$tests=@('Test-DiagnosticPolicy.ps1','Test-DiagnosticSettings.ps1','Test-DiagnosticStore.ps1','Test-DiagnosticCollector.ps1','Test-DiagnosticRuntime.ps1','Test-DiagnosticPackaging.ps1','Test-DiagnosticAppIntegration.ps1')}
+                'checks-journal' {$tests=@('Test-DiagnosticWorker.ps1','Test-DiagnosticAtomicity.ps1','Test-DiagnosticPolicyRace.ps1','Test-DiagnosticTimer.ps1')}
+                'checks-agents' {$tests=@('Test-ClaudeLoopBackground.ps1','Test-ClaudeLoopBackgroundWiring.ps1','Test-ClaudeLoopBackgroundNative.ps1','Test-RelatedAgentStatusDisplay.ps1','Test-CompactAgentHint.ps1','Test-CodexAgentRetention.ps1','Test-CodexAgentRetentionAdapter.ps1','Test-ProductionCodexAgentRetention.ps1')}
+                'checks-sources' {$tests=@('Test-LocalReadStartupFailure.ps1','Test-LocalReadOwner.ps1','Test-LocalSourceClient.ps1','Test-LocalSourceInitialization.ps1','Test-LocalSourceModuleParity.ps1','Test-LocalSourcePackaging.ps1','Test-LocalSourceProductionWiring.ps1','Test-LocalSourceSnapshotOwner.ps1','Test-LocalSourceUnconfirmedFallback.ps1','Test-ProductionLocalSourceWorker.ps1')}
+                'checks-ui' {$tests=@('Test-CompactDotReuse.ps1','Test-CompactSwitchUi.ps1')}
+                default {throw 'Unexpected synthetic check group.'}
+              }
+              $failed=New-Object 'Collections.Generic.List[string]'
               foreach($test in $tests){
                 Write-Output ('Running '+$test)
-                Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
+                try{Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))}
+                catch{[void]$failed.Add($test);Write-Warning ('Synthetic failure in '+$test+': '+$_.Exception.Message)}
               }
+              if($failed.Count -gt 0){throw ('Synthetic checks failed: '+($failed -join ', '))}
             }else{
               $counts=if($env:AITM_TEST_PART -eq 'screenshots-active'){@(1)}elseif($env:AITM_TEST_PART -eq 'screenshots-empty'){@(0)}else{@()}
               foreach($count in $counts){foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){foreach($warningCase in @('partial-data','partial-both')){
