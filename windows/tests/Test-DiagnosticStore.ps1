@@ -120,20 +120,37 @@ try {
     $gate=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$gateName)
     $children=New-Object 'Collections.Generic.List[Diagnostics.Process]'
     $readySignals=New-Object 'Collections.Generic.List[Threading.EventWaitHandle]'
+    $startedSignals=New-Object 'Collections.Generic.List[Threading.EventWaitHandle]'
+    $policySignals=New-Object 'Collections.Generic.List[Threading.EventWaitHandle]'
     try {
         $fixture=Join-Path $PSScriptRoot 'fixtures\DiagnosticStoreWriter.ps1'
         $exe=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
         foreach($index in 1..8){
             $readyName=$gateName+'-ready-'+$index
+            $startedName=$gateName+'-started-'+$index
+            $policyName=$gateName+'-policy-'+$index
             $readySignals.Add([Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$readyName))
+            $startedSignals.Add([Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$startedName))
+            $policySignals.Add([Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$policyName))
             $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$exe
-            $start.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$fixture+'" -PolicyPath "'+$policy+'" -StorePath "'+$store+'" -Directory "'+$parallelDirectory+'" -Number '+$index+' -Time "'+$now.ToString('o')+'" -GateName "'+$gateName+'" -ReadyName "'+$readyName+'"'
+            $start.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$fixture+'" -PolicyPath "'+$policy+'" -StorePath "'+$store+'" -Directory "'+$parallelDirectory+'" -Number '+$index+' -Time "'+$now.ToString('o')+'" -GateName "'+$gateName+'" -ReadyName "'+$readyName+'" -StartedName "'+$startedName+'" -PolicyReadyName "'+$policyName+'"'
             $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
             $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
             $children.Add([Diagnostics.Process]::Start($start))
         }
         $clock=[Diagnostics.Stopwatch]::StartNew()
-        foreach($ready in $readySignals){$remaining=[Math]::Max(0,30000-[int]$clock.ElapsedMilliseconds);if(-not $ready.WaitOne($remaining)){throw 'A concurrent synthetic diagnostic writer did not reach the gate.'}}
+        foreach($index in 0..($readySignals.Count-1)){
+            while(-not $readySignals[$index].WaitOne(100)){
+                foreach($childIndex in 0..($children.Count-1)){
+                    if($children[$childIndex].HasExited){
+                        throw ('A synthetic writer exited before the gate: index={0}; exit={1}; started={2}; policy={3}; ready={4}.' -f ($childIndex+1),$children[$childIndex].ExitCode,$startedSignals[$childIndex].WaitOne(0),$policySignals[$childIndex].WaitOne(0),$readySignals[$childIndex].WaitOne(0))
+                    }
+                }
+                if($clock.ElapsedMilliseconds -ge 30000){
+                    throw ('A synthetic writer timed out before the gate: index={0}; started={1}; policy={2}; ready={3}; exited={4}.' -f ($index+1),$startedSignals[$index].WaitOne(0),$policySignals[$index].WaitOne(0),$readySignals[$index].WaitOne(0),$children[$index].HasExited)
+                }
+            }
+        }
         [void]$gate.Set();$clock.Restart()
         foreach($child in $children){
             $remaining=[Math]::Max(0,30000-[int]$clock.ElapsedMilliseconds)
@@ -145,6 +162,8 @@ try {
         [void]$gate.Set()
         foreach($child in $children){if(-not $child.HasExited){$child.Kill();[void]$child.WaitForExit(3000)};$child.Dispose()}
         foreach($ready in $readySignals){$ready.Dispose()}
+        foreach($started in $startedSignals){$started.Dispose()}
+        foreach($policyReady in $policySignals){$policyReady.Dispose()}
         $gate.Dispose()
     }
     Write-Output "Diagnostic store: safe fields, deduplication, retention, size and foreign-file protection verified."

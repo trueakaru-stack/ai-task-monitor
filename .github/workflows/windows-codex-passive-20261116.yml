@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks-worker, checks-streams]
+        part: [checks-store, checks-packaging, checks-integration]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
@@ -115,16 +115,15 @@ jobs:
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if($env:AITM_TEST_PART -like 'checks*'){
               switch($env:AITM_TEST_PART){
-                'checks-worker' {$tests=@('Test-DiagnosticWorker.ps1','Test-DiagnosticStoreIsolated.ps1')}
-                'checks-streams' {$tests=@('Test-ExternalSlowStreams.ps1')}
+                'checks-store' {$tests=@('Test-DiagnosticStore.ps1','Test-DiagnosticStoreIsolated.ps1')}
+                'checks-packaging' {$tests=@('Test-DiagnosticPackaging.ps1')}
+                'checks-integration' {$tests=@('Test-DiagnosticAppIntegration.ps1')}
                 default {throw 'Unexpected synthetic check group.'}
               }
               $failed=New-Object 'Collections.Generic.List[string]'
               foreach($test in $tests){
                 Write-Output ('Running '+$test)
-                $taskArguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
-                if($test -eq 'Test-DiagnosticStoreIsolated.ps1'){$taskArguments+=@('-Target','worker')}
-                try{Invoke-Isolated $powershell $taskArguments}
+                try{Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))}
                 catch{[void]$failed.Add($test);Write-Warning ('Synthetic failure in '+$test+': '+$_.Exception.Message)}
               }
               if($failed.Count -gt 0){throw ('Synthetic checks failed: '+($failed -join ', '))}
