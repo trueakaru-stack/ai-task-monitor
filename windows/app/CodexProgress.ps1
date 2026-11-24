@@ -5856,7 +5856,11 @@ if ($SnapshotFile) {
   }
   $demoSurface=if($CompactMode){$compactTasksPanel}else{$tasksPanel}
   $demoStatus=Find-ShowcaseAgentStatus $demoSurface
-  if($CompactMode -and $null -ne $demoStatus){throw 'Compact showcase exposed agent uncertainty.'}
+  if($CompactMode){
+   $expectedStatus=if($script:compactTaskId -ceq [string]$demoCodex[0].Id){Related-AgentStatus $demoCodex[0]}else{''}
+   if(($expectedStatus -and ($null -eq $demoStatus -or $demoStatus.Text -cne $expectedStatus)) -or
+      (-not $expectedStatus -and $null -ne $demoStatus)){throw 'Compact showcase has an incorrect agent uncertainty status.'}
+  }
   if(-not $CompactMode -and ($null -eq $demoStatus -or $demoStatus.Text -cne (Related-AgentStatus $demoCodex[0]))){throw 'The showcase agent uncertainty is not visible.'}
   if($PreviewRelatedAgentsSelectClaude){
    $demoDot=@($compactDotsPanel.Children|Where-Object {[string]$_.Tag -ceq [string]$demoClaude[0].Id})

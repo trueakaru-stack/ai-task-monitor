@@ -33,27 +33,30 @@ namespace AITaskMonitor.LocalReadOwner {
         private readonly ManualResetEvent closingSignal = new ManualResetEvent(false);
         private readonly string workerPath;
         private readonly string[] configuration;
-        private readonly bool rejectAssignment;
+        private readonly bool rejectAssignment, holdBeforeResume;
         private readonly Thread thread;
         private Guid generation = Guid.NewGuid();
         private string[] pending;
         private PollResult latest;
-        private bool hasPending, busy, closed, exited, broken, cleanupStarted, cleanupFinished, cleanupFailed;
+        private bool hasPending, busy, closed, exited, broken, cleanupStarted, cleanupFinished, cleanupFailed, beforeResume;
+        private int cleanupFailureCode;
         private string pipeName;
         private int ownedProcessId;
         private NamedPipeServerStream pipe;
-        private Process process;
+        private Worker process;
         private SafeFileHandle job;
 
-        public Owner(string workerPath, string[] configuration) : this(workerPath, configuration, false) { }
+        public Owner(string workerPath, string[] configuration) : this(workerPath, configuration, false, false) { }
 
-        // This failure injection can only reject an assignment, never bypass it.
-        public Owner(string workerPath, string[] configuration, bool rejectAssignment) {
+        // Failure injection can only prevent startup, never bypass job checks.
+        public Owner(string workerPath, string[] configuration, bool rejectAssignment) : this(workerPath, configuration, rejectAssignment, false) { }
+        public Owner(string workerPath, string[] configuration, bool rejectAssignment, bool holdBeforeResume) {
             if (String.IsNullOrWhiteSpace(workerPath)) throw new ArgumentException("A worker path is required.", "workerPath");
             this.workerPath = Path.GetFullPath(workerPath);
             if (this.workerPath.IndexOf('"') >= 0) throw new ArgumentException("Invalid worker path.", "workerPath");
             this.configuration = CopyArguments(configuration);
             this.rejectAssignment = rejectAssignment;
+            this.holdBeforeResume = holdBeforeResume;
             thread = new Thread(Work);
             thread.IsBackground = true;
             thread.Name = "AI Task Monitor local source owner";
@@ -95,7 +98,10 @@ namespace AITaskMonitor.LocalReadOwner {
         public bool HasPendingRequest { get { lock (gate) return hasPending; } }
         public bool HasExited { get { lock (gate) return exited && cleanupFinished; } }
         public bool CleanupFailed { get { lock (gate) return cleanupFailed; } }
+        public int CleanupFailureCode { get { lock (gate) return cleanupFailureCode; } }
+        public bool CanReplace { get { lock (gate) return exited && cleanupFinished && !cleanupFailed; } }
         public bool HasResult { get { lock (gate) return latest != null; } }
+        public bool IsBeforeResume { get { lock (gate) return beforeResume; } }
         public int OwnedProcessId { get { lock (gate) return ownedProcessId; } }
         public Guid Generation { get { lock (gate) return generation; } }
 
@@ -150,7 +156,7 @@ namespace AITaskMonitor.LocalReadOwner {
                 }
             } finally {
                 CloseOwnedResources();
-                lock (gate) { exited = true; pendingSignal.Dispose(); closingSignal.Dispose(); }
+                lock (gate) { beforeResume = false; exited = true; pendingSignal.Dispose(); closingSignal.Dispose(); }
             }
         }
 
@@ -166,20 +172,17 @@ namespace AITaskMonitor.LocalReadOwner {
             var server = new NamedPipeServerStream(name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
                 PipeOptions.Asynchronous, 4096, 4096, security);
             SafeFileHandle ownedJob = null;
-            Process child = null;
+            Worker child = null;
             bool transferred = false;
             try {
                 ownedJob = Native.CreateJob();
-                var start = new ProcessStartInfo();
-                start.FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
-                start.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + workerPath + "\" -PipeName \"" + name + "\" -ParentId " + Process.GetCurrentProcess().Id.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                start.UseShellExecute = false;
-                start.CreateNoWindow = true;
-                start.WindowStyle = ProcessWindowStyle.Hidden;
-                start.RedirectStandardOutput = true;
-                start.RedirectStandardError = true;
-                child = Process.Start(start);
-                if (child == null) throw new InvalidOperationException("Worker could not start.");
+                // STARTUPINFOEX places the initially suspended worker into the
+                // kill-on-close job before its first instruction can execute.
+                try { child = Native.StartWorker(ownedJob, workerPath, name); }
+                catch (WorkerStartupException error) {
+                    if (error.CleanupUnconfirmed) { lock (gate) { cleanupFailed = true; cleanupFailureCode = 6000; } }
+                    throw;
+                }
                 lock (gate) {
                     if (closed) throw new InvalidOperationException("Owner is closed.");
                     pipe = server; job = ownedJob; process = child;
@@ -187,11 +190,17 @@ namespace AITaskMonitor.LocalReadOwner {
                     ownedProcessId = child.Id;
                     transferred = true;
                 }
-                StartDrain(child.StandardOutput);
-                StartDrain(child.StandardError);
-                // No configuration or source paths are sent before job assignment.
-                if (rejectAssignment || !Native.AssignProcessToJobObject(ownedJob, child.Handle))
+                bool assigned;
+                if (rejectAssignment || !Native.IsProcessInJob(child.ProcessHandle, ownedJob, out assigned) || !assigned)
                     throw new InvalidOperationException("Worker job assignment failed.");
+                lock (gate) { if (closed) throw new InvalidOperationException("Owner is closed."); beforeResume = true; }
+                if (holdBeforeResume) {
+                    closingSignal.WaitOne();
+                    throw new InvalidOperationException("Synthetic suspended worker closed.");
+                }
+                if (Native.ResumeThread(child.ThreadHandle) != 1)
+                    throw new InvalidOperationException("Worker resume failed.");
+                lock (gate) { beforeResume = false; }
                 IAsyncResult wait = server.BeginWaitForConnection(null, null);
                 int ready = WaitHandle.WaitAny(new WaitHandle[] { closingSignal, wait.AsyncWaitHandle }, 10000);
                 if (ready != 1) throw new InvalidOperationException("Worker connection unavailable.");
@@ -201,9 +210,12 @@ namespace AITaskMonitor.LocalReadOwner {
                     throw new InvalidOperationException("Unexpected worker identity.");
             } finally {
                 if (!transferred) {
-                    try { server.Dispose(); } catch (Exception) { }
-                    if (ownedJob != null) { try { ownedJob.Dispose(); } catch (Exception) { } }
-                    if (child != null) { try { if (!child.HasExited) child.Kill(); } catch (Exception) { } child.Dispose(); }
+                    bool failed = false;
+                    try { server.Dispose(); } catch (Exception) { failed = true; }
+                    if (ownedJob != null) { try { ownedJob.Dispose(); } catch (Exception) { failed = true; } }
+                    int processFailure;
+                    if (child != null && !StopOwnedProcess(child, out processFailure)) { failed = true; lock (gate) cleanupFailureCode = processFailure; }
+                    if (failed) { lock (gate) cleanupFailed = true; }
                 }
             }
         }
@@ -240,35 +252,45 @@ namespace AITaskMonitor.LocalReadOwner {
             return bytes;
         }
 
-        private static void StartDrain(StreamReader stream) {
-            ThreadPool.QueueUserWorkItem(delegate {
-                try { char[] buffer = new char[1024]; while (stream.Read(buffer, 0, buffer.Length) > 0) { } }
-                catch (Exception) { }
-            });
-        }
-
         private void CloseOwnedResources() {
             NamedPipeServerStream ownedPipe;
             SafeFileHandle ownedJob;
-            Process ownedProcess;
+            Worker ownedProcess;
             lock (gate) {
                 if (cleanupStarted) return;
                 cleanupStarted = true;
                 ownedPipe = pipe; pipe = null; ownedJob = job; job = null; ownedProcess = process; process = null;
             }
             bool failed = false;
-            if (ownedJob != null) { try { ownedJob.Dispose(); } catch (Exception) { failed = true; } }
-            if (ownedPipe != null) { try { ownedPipe.Dispose(); } catch (Exception) { failed = true; } }
-            if (ownedProcess != null) {
-                try {
-                    if (!ownedProcess.HasExited) ownedProcess.Kill();
-                    if (!ownedProcess.HasExited && !ownedProcess.WaitForExit(5000)) failed = true;
-                } catch (Exception) {
-                    try { if (!ownedProcess.HasExited) failed = true; } catch (Exception) { failed = true; }
-                }
-                try { ownedProcess.Dispose(); } catch (Exception) { failed = true; }
+            if (ownedJob != null) { try { ownedJob.Dispose(); } catch (Exception) { failed = true; cleanupFailureCode = -1; } }
+            if (ownedPipe != null) { try { ownedPipe.Dispose(); } catch (Exception) { failed = true; cleanupFailureCode = -2; } }
+            int processFailure;
+            if (ownedProcess != null && !StopOwnedProcess(ownedProcess, out processFailure)) { failed = true; cleanupFailureCode = processFailure; }
+            lock (gate) { cleanupFailed |= failed; cleanupFinished = true; }
+        }
+
+        private static bool StopOwnedProcess(Worker ownedProcess, out int failure) {
+            bool stopped = false;
+            failure = 0;
+            try {
+                uint state = Native.WaitForSingleObject(ownedProcess.ProcessHandle, 0);
+                if (state == 0) stopped = true;
+                else if (state == 0x102) {
+                    bool terminated = Native.TerminateProcess(ownedProcess.ProcessHandle, 1);
+                    int terminateError = terminated ? 0 : Marshal.GetLastWin32Error();
+                    // Closing the job can already be terminating this process,
+                    // in which case TerminateProcess may return access denied
+                    // before the process handle becomes signalled.
+                    uint final = Native.WaitForSingleObject(ownedProcess.ProcessHandle, 5000);
+                    stopped = final == 0;
+                    if (!stopped) failure = terminated ? 2000 + (int)final : 1000 + terminateError;
+                } else failure = 3000 + Marshal.GetLastWin32Error();
+            } catch (Exception) {
+                failure = 4000;
+                try { stopped = Native.WaitForSingleObject(ownedProcess.ProcessHandle, 0) == 0; } catch (Exception) { }
             }
-            lock (gate) { cleanupFailed = failed; cleanupFinished = true; }
+            try { ownedProcess.Dispose(); } catch (Exception) { stopped = false; failure = 5000; }
+            return stopped;
         }
 
         private static string[] CopyArguments(string[] values) {
@@ -281,6 +303,22 @@ namespace AITaskMonitor.LocalReadOwner {
                 copy[index] = value;
             }
             return copy;
+        }
+    }
+
+    internal sealed class WorkerStartupException : Exception {
+        internal readonly bool CleanupUnconfirmed;
+        internal WorkerStartupException(bool cleanupUnconfirmed) : base("Worker startup failed.") { CleanupUnconfirmed = cleanupUnconfirmed; }
+    }
+
+    internal sealed class Worker : IDisposable {
+        internal readonly int Id;
+        internal readonly SafeFileHandle ProcessHandle, ThreadHandle;
+        internal Worker(int id, SafeFileHandle process, SafeFileHandle thread) {
+            Id = id; ProcessHandle = process; ThreadHandle = thread;
+        }
+        public void Dispose() {
+            try { ThreadHandle.Dispose(); } finally { ProcessHandle.Dispose(); }
         }
     }
 
@@ -302,14 +340,50 @@ namespace AITaskMonitor.LocalReadOwner {
             public IoCounters IoInfo;
             public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
         }
+        [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] private struct StartupInfo {
+            public int Size;
+            public string Reserved, Desktop, Title;
+            public uint X, Y, XSize, YSize, XCharacters, YCharacters, Fill, Flags;
+            public ushort Show, ReservedSize;
+            public IntPtr ReservedPointer, StandardInput, StandardOutput, StandardError;
+        }
+        [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] private struct StartupInfoEx {
+            public StartupInfo Startup;
+            public IntPtr Attributes;
+        }
+        [StructLayout(LayoutKind.Sequential)] private struct ProcessInfo {
+            public IntPtr Process, Thread;
+            public uint ProcessId, ThreadId;
+        }
         [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
         private static extern SafeFileHandle CreateJobObject(IntPtr attributes, string name);
         [DllImport("kernel32.dll", SetLastError=true)]
         private static extern bool SetInformationJobObject(SafeFileHandle job, int infoClass, ref ExtendedLimits info, uint length);
         [DllImport("kernel32.dll", SetLastError=true)]
-        internal static extern bool AssignProcessToJobObject(SafeFileHandle job, IntPtr process);
+        internal static extern bool IsProcessInJob(SafeFileHandle process, SafeFileHandle job, out bool result);
         [DllImport("kernel32.dll", SetLastError=true)]
         internal static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint processId);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        internal static extern uint ResumeThread(SafeFileHandle thread);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        internal static extern uint WaitForSingleObject(SafeFileHandle handle, uint milliseconds);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        internal static extern bool TerminateProcess(SafeFileHandle process, uint exitCode);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        private static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        private static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returned);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        private static extern void DeleteProcThreadAttributeList(IntPtr list);
+        [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+        private static extern bool CreateProcessW(string application, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes,
+            bool inherit, uint flags, IntPtr environment, string directory, ref StartupInfoEx startup, out ProcessInfo process);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        private static extern bool TerminateProcess(IntPtr process, uint exitCode);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        private static extern bool CloseHandle(IntPtr handle);
         internal static SafeFileHandle CreateJob() {
             SafeFileHandle handle = CreateJobObject(IntPtr.Zero, null);
             if (handle.IsInvalid) { handle.Dispose(); throw new InvalidOperationException("Job unavailable."); }
@@ -319,6 +393,56 @@ namespace AITaskMonitor.LocalReadOwner {
                 handle.Dispose(); throw new InvalidOperationException("Job policy unavailable.");
             }
             return handle;
+        }
+        internal static Worker StartWorker(SafeFileHandle job, string workerPath, string pipeName) {
+            string executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
+            string command = "\"" + executable + "\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + workerPath +
+                "\" -PipeName \"" + pipeName + "\" -ParentId " + Process.GetCurrentProcess().Id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            IntPtr size = IntPtr.Zero, list = IntPtr.Zero, jobs = IntPtr.Zero;
+            bool initialized = false;
+            try {
+                InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
+                if (size == IntPtr.Zero) throw new InvalidOperationException("Process attributes unavailable.");
+                list = Marshal.AllocHGlobal(size);
+                if (!InitializeProcThreadAttributeList(list, 1, 0, ref size))
+                    throw new InvalidOperationException("Process attributes unavailable.");
+                initialized = true;
+                jobs = Marshal.AllocHGlobal(IntPtr.Size);
+                Marshal.WriteIntPtr(jobs, job.DangerousGetHandle());
+                if (!UpdateProcThreadAttribute(list, 0, new IntPtr(0x0002000d), jobs, new IntPtr(IntPtr.Size), IntPtr.Zero, IntPtr.Zero))
+                    throw new InvalidOperationException("Creation-time job unavailable.");
+                var startup = new StartupInfoEx();
+                startup.Startup.Size = Marshal.SizeOf(typeof(StartupInfoEx));
+                startup.Attributes = list;
+                ProcessInfo child;
+                // No handles are inherited. No visible console is created.
+                if (!CreateProcessW(executable, new StringBuilder(command), IntPtr.Zero, IntPtr.Zero, false,
+                    0x00080000 | 0x08000000 | 0x00000004, IntPtr.Zero, null, ref startup, out child))
+                    throw new InvalidOperationException("Worker could not start in the job.");
+                SafeFileHandle processHandle = null, threadHandle = null;
+                try {
+                    if (child.Process == IntPtr.Zero || child.Thread == IntPtr.Zero || child.ProcessId == 0 || child.ProcessId > Int32.MaxValue)
+                        throw new InvalidOperationException("Invalid worker process.");
+                    processHandle = new SafeFileHandle(child.Process, true);
+                    threadHandle = new SafeFileHandle(child.Thread, true);
+                    return new Worker((int)child.ProcessId, processHandle, threadHandle);
+                } catch {
+                    bool confirmed = false;
+                    if (child.Process != IntPtr.Zero) {
+                        TerminateProcess(child.Process, 1);
+                        confirmed = WaitForSingleObject(child.Process, 5000) == 0;
+                        if (processHandle != null) processHandle.Dispose(); else CloseHandle(child.Process);
+                    }
+                    if (child.Thread != IntPtr.Zero) {
+                        if (threadHandle != null) threadHandle.Dispose(); else CloseHandle(child.Thread);
+                    }
+                    throw new WorkerStartupException(!confirmed);
+                }
+            } finally {
+                if (initialized) DeleteProcThreadAttributeList(list);
+                if (list != IntPtr.Zero) Marshal.FreeHGlobal(list);
+                if (jobs != IntPtr.Zero) Marshal.FreeHGlobal(jobs);
+            }
         }
     }
 }

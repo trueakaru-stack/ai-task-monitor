@@ -1,4 +1,4 @@
-param([switch]$ExitProbe)
+param([switch]$ExitProbe,[switch]$PreResumeProbe)
 $ErrorActionPreference='Stop'
 if([Threading.Thread]::CurrentThread.GetApartmentState() -ne [Threading.ApartmentState]::STA){throw 'The synthetic button check requires STA.'}
 Add-Type -AssemblyName PresentationFramework
@@ -28,11 +28,12 @@ function Wait-HasResult($owner,[int]$milliseconds=10000){
  while(-not $owner.HasResult -and $clock.ElapsedMilliseconds -lt $milliseconds){Start-Sleep -Milliseconds 10}
  Require $owner.HasResult 'The synthetic transport did not make a result available.'
 }
-function Wait-Exit($owner,[int]$milliseconds=10000){
+function Wait-Exit($owner,[int]$milliseconds=10000,[string]$name='unknown'){
  $clock=[Diagnostics.Stopwatch]::StartNew()
  while(-not $owner.HasExited -and $clock.ElapsedMilliseconds -lt $milliseconds){Start-Sleep -Milliseconds 10}
  Require $owner.HasExited 'The synthetic transport thread did not exit.'
- Require (-not $owner.CleanupFailed) 'Cleanup could not confirm the synthetic worker exit.'
+ Require (-not $owner.CleanupFailed) ('Cleanup could not confirm the synthetic worker exit: '+$name+' ('+$owner.CleanupFailureCode+')')
+ Require $owner.CanReplace 'The synthetic owner was not safe to replace after cleanup.'
 }
 function Wait-ProcessGone([int]$id,[int]$milliseconds=5000){
  $clock=[Diagnostics.Stopwatch]::StartNew()
@@ -50,12 +51,16 @@ function New-TestGates {
  }
 }
 $workerPath=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'fixtures\LocalReadSyntheticWorker.ps1'))
-if($ExitProbe){
+if($ExitProbe -or $PreResumeProbe){
  $probeGates=New-TestGates
  $probeConfig=[string[]]@($probeGates.StartedName,$probeGates.ReleaseName)
- $probeOwner=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$probeConfig)
+ $probeOwner=if($PreResumeProbe){[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$probeConfig,$false,$true)}else{[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$probeConfig)}
  Require ($probeOwner.Request([string[]]@('block','ru','true'))) 'The exit probe request was rejected.'
- Require ($probeGates.Started.WaitOne(10000)) 'The exit probe did not enter its synthetic blocked read.'
+ if($PreResumeProbe){
+  $clock=[Diagnostics.Stopwatch]::StartNew()
+  while(-not $probeOwner.IsBeforeResume -and $clock.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
+  Require ($probeOwner.IsBeforeResume -and -not $probeGates.Started.WaitOne(0)) 'The actual owner did not stop before resuming its worker.'
+ }else{Require ($probeGates.Started.WaitOne(10000)) 'The exit probe did not enter its synthetic blocked read.'}
  Write-Output ('WORKER:'+$probeOwner.OwnedProcessId)
  # Deliberately omit Dispose and leave the synthetic read blocked. The OS must
  # close the job handle when this owner process exits.
@@ -67,6 +72,7 @@ $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[re
 if($errors.Count){throw 'The production monitor source did not parse.'}
 $definitions=foreach($name in @('Prop','Brush','Text','Localized-TaskTitle','Localized-TaskActivity','Localized-CompactTaskActivity',
  'Plan-StatusNote','Progress-Label','Get-LoopWarning','Add-LoopWarning','Add-ConditionalHint','New-ActivityIndicator','New-TaskTitleLine',
+ 'Active-PlanStepIndex','Compact-AgentStepLabel','Compact-ProgressLabel','Compact-ExtraAgentStepLabel','Related-AgentStatus','New-RelatedAgentToggle',
  'Compact-VisibleTasks','Compact-ShowProviderLabels','Compact-HasHiddenAgentTasks','Source-WarningText','Compact-Height',
  'Add-CompactTask','Add-CompactDot','Sync-CompactDots','Render-CompactTasks')){
  $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true)
@@ -109,7 +115,9 @@ try{
  Require ($owner.HasPendingRequest -and $owner.OwnedProcessId -eq $childId) 'Refresh requests started another worker.'
 
  $dot=@($compactDotsPanel.Children|Where-Object {[string]$_.Tag -ceq 'second'})[0]
+ $clickClock=[Diagnostics.Stopwatch]::StartNew()
  $dot.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+ $clickClock.Stop()
  $switchedCard=$compactTasksPanel.Children[0]
  Require ($script:compactTaskId -ceq 'second' -and -not [object]::ReferenceEquals($initialCard,$switchedCard) -and
   [Windows.Automation.AutomationProperties]::GetName($switchedCard.Children[0].Children[0]) -ceq 'Second' -and
@@ -130,7 +138,7 @@ try{
  $gates.LocalRelease.Set()
  $owner.Dispose()
 }
-Wait-Exit $owner
+Wait-Exit $owner -name 'normal'
 Wait-ProcessGone $childId
 
 # An unread terminal result or source error cannot be overwritten by a newer
@@ -153,7 +161,7 @@ try{
  Require ($afterError.Success -and $afterError.Value.Sequence -eq 3 -and $afterError.Value.Kind -ceq 'after-error') 'The queued request did not follow the error result.'
  $orderedId=$ordered.OwnedProcessId
 }finally{$ordered.Dispose()}
-Wait-Exit $ordered
+Wait-Exit $ordered -name 'ordered'
 Wait-ProcessGone $orderedId
 
 # Exercise the ACL and PID check on the actual owner, with an unrelated process
@@ -195,7 +203,7 @@ try {
  $rogueOwner.Dispose();$delayGate.Dispose()
  if($null -ne $rogue){if(-not $rogue.HasExited){$rogue.Kill();[void]$rogue.WaitForExit(3000)};$rogue.Dispose()}
 }
-Wait-Exit $rogueOwner
+Wait-Exit $rogueOwner -name 'rogue'
 Wait-ProcessGone $delayedId
 
 # Fail closed when job assignment fails: the worker is not sent the synthetic
@@ -208,8 +216,24 @@ try{
  $failed=Wait-Result $rejected
  Require (-not $failed.Success -and -not $rejectedGates.Started.WaitOne(0)) 'A worker read after a failed job assignment.'
 }finally{$rejected.Dispose()}
-Wait-Exit $rejected
+Wait-Exit $rejected -name 'rejected'
 if($rejected.OwnedProcessId -gt 0){Wait-ProcessGone $rejected.OwnedProcessId}
+
+# Closing the owner while its already-assigned worker is suspended must return
+# without running that worker and must eventually confirm process cleanup.
+$suspendedGates=New-TestGates
+$suspended=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,[string[]]@($suspendedGates.StartedName,$suspendedGates.ReleaseName),$false,$true)
+try{
+ Require ($suspended.Request([string[]]@('block','ru','true'))) 'The suspended test request was rejected.'
+ $clock=[Diagnostics.Stopwatch]::StartNew()
+ while(-not $suspended.IsBeforeResume -and $clock.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
+ Require ($suspended.IsBeforeResume -and -not $suspendedGates.Started.WaitOne(0)) 'The synthetic owner did not pause before resuming its worker.'
+ $suspendedId=$suspended.OwnedProcessId
+ $suspended.Dispose()
+ Require (-not $suspendedGates.Started.WaitOne(0)) 'The suspended synthetic worker executed during disposal.'
+}finally{$suspended.Dispose()}
+Wait-Exit $suspended -name 'suspended'
+Wait-ProcessGone $suspendedId
 
 # Disposal is nonblocking even while the worker is stuck; the job releases only
 # this worker, without requiring the synthetic source to unblock itself.
@@ -222,17 +246,18 @@ Require ($closingGates.Started.WaitOne(10000)) 'The closing test did not start i
 $closingId=$closing.OwnedProcessId
 $closing.Dispose()
 Require (-not $closingGates.LocalRelease.IsSet -and $null -eq $closing.TryReceive()) 'Disposal waited for the blocked worker or exposed its data.'
-Wait-Exit $closing
+Wait-Exit $closing -name 'closing'
 Wait-ProcessGone $closingId
 
-# Exercise host-process exit without calling Dispose. The child must be killed
-# by the job even when the owner process closes unexpectedly.
+# Exercise host-process exit without calling Dispose while the worker is stuck
+# and while the actual owner is paused after job verification but before Resume.
 $exe=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'WindowsPowerShell\v1.0\powershell.exe'
 $start=[Diagnostics.ProcessStartInfo]::new()
 $start.FileName=$exe
-$start.Arguments='-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" -ExitProbe'
 $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
 $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+foreach($probeFlag in @('-ExitProbe','-PreResumeProbe')){
+$start.Arguments='-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" '+$probeFlag
 $probe=[Diagnostics.Process]::Start($start)
 $probeWorkerId=0
 try{
@@ -252,5 +277,6 @@ try{
  }
  $probe.Dispose()
 }
+}
 
-Write-Output 'Local read owner: real dot handler and compact rendering on an in-memory WPF tree, blocked read, coalescing, ordered terminal/error results, actual ACL and unauthorized PID, generation, language, disconnect, rejected job and nonblocking close passed on synthetic data.'
+Write-Output ('Local read owner: real dot handler and in-memory compact rendering while read blocked ({0} ms); coalescing, ordered terminal/error results, actual ACL and unauthorized PID, generation, language, disconnect, rejected job and owner exit before resume or while blocked passed on synthetic data.' -f $clickClock.ElapsedMilliseconds)
