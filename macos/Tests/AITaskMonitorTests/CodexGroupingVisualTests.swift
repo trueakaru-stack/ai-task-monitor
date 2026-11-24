@@ -6,6 +6,50 @@ import XCTest
 
 final class CodexGroupingVisualTests: XCTestCase {
     @MainActor
+    func testAgentCountFollowsConfirmedStepAndPause() {
+        defer { AppLanguage.previewOverride = nil }
+        AppLanguage.previewOverride = .ru
+        var task = MonitoredTask(id: "synthetic", provider: .codex, title: "Задача", activity: "",
+            isActive: true, progress: 50, progressKind: .exact,
+            steps: [TaskStep(title: "Первый", status: .done), TaskStep(title: "Второй", status: .active),
+                    TaskStep(title: "Третий", status: .pending)], updatedAt: .distantPast,
+            progressBasis: .steps, codexAgentCount: 3, codexAgentsUnconfirmed: true)
+        XCTAssertEqual(task.activeAgentPlanStepIndex, 1)
+        XCTAssertFalse(task.codexAgentCountAtTitle)
+        XCTAssertEqual(task.compactProgressLabel, "Этап 2 из 3 (3 агента)")
+        XCTAssertNil(task.compactExtraAgentStepLabel)
+        XCTAssertEqual(task.codexAgentStatusLabel, "Статус агентов не подтверждён")
+
+        task.progressBasis = .task
+        XCTAssertEqual(task.compactProgressLabel, "50%")
+        XCTAssertEqual(task.compactExtraAgentStepLabel, "Этап 2 из 3 (3 агента)")
+        task.steps[1].status = .done
+        XCTAssertTrue(task.codexAgentCountAtTitle)
+        XCTAssertNil(task.compactAgentStepLabel)
+        task.steps[2].status = .active
+        XCTAssertFalse(task.codexAgentCountAtTitle)
+        XCTAssertEqual(task.activeAgentPlanStepIndex, 2)
+        task.planConfirmed = false
+        XCTAssertTrue(task.codexAgentCountAtTitle)
+        task.planConfirmed = true
+        task.steps[1].status = .active
+        XCTAssertTrue(task.codexAgentCountAtTitle)
+        task.steps[1].status = .done
+        task.isUnconfirmed = true
+        XCTAssertTrue(task.codexAgentCountAtTitle)
+        task.isUnconfirmed = false
+        task.codexAgentCount = 0
+        XCTAssertNil(task.codexAgentStatusLabel)
+        XCTAssertNil(task.compactAgentStepLabel)
+        AppLanguage.previewOverride = .en
+        task.codexAgentCount = 1
+        task.progressBasis = .steps
+        XCTAssertEqual(task.compactProgressLabel, "Step 3 of 3 (1 agent)")
+        task.codexAgentCount = 2
+        XCTAssertEqual(task.compactProgressLabel, "Step 3 of 3 (2 agents)")
+    }
+
+    @MainActor
     func testRenderSyntheticGroupedParent() throws {
         let env = ProcessInfo.processInfo.environment
         guard env["GITHUB_ACTIONS"] == "true", env["RUNNER_ENVIRONMENT"] == "github-hosted",
@@ -38,7 +82,7 @@ final class CodexGroupingVisualTests: XCTestCase {
             for dark in [false, true] {
                 for compact in [false, true] {
                   for disclosureOpen in [false, true] {
-                   for scenario in ["normal", "long", "demo", "unavailable"] {
+                   for scenario in ["normal", "long", "demo", "unavailable", "no-active", "percent"] {
                     for selected in (compact && scenario == "demo" ? [0, 1] : [0]) {
                     if selected == 1 && disclosureOpen { continue }
                     if scenario == "unavailable" && disclosureOpen { continue }
@@ -56,8 +100,8 @@ final class CodexGroupingVisualTests: XCTestCase {
                                        TaskStep(title: tr("Проверить обработку ошибок", "Check error handling"), status: .active),
                                        TaskStep(title: tr("Сравнить результаты", "Compare results"), status: .pending)] :
                             [TaskStep(title: tr("Первый этап", "First step"), status: .done),
-                             TaskStep(title: tr("Второй этап", "Second step"), status: .active)],
-                        updatedAt: Date())
+                             TaskStep(title: tr("Второй этап", "Second step"), status: scenario == "no-active" ? .pending : .active)],
+                        updatedAt: Date(), progressBasis: scenario == "percent" ? .task : .steps)
                     let agentNames = ["Curie", "Averroes", "Noether"]
                     let exampleActions = [tr("Проверка обработки ошибок", "Checking error handling"),
                                           tr("Проверка загрузки данных", "Checking data loading"),
@@ -87,6 +131,11 @@ final class CodexGroupingVisualTests: XCTestCase {
                         XCTAssertEqual(item.title, title)
                         XCTAssertEqual(item.progress, parentTask.progress)
                         XCTAssertEqual(item.codexAgents?.count, 3)
+                        XCTAssertEqual(item.codexAgentCountAtTitle, scenario == "no-active")
+                        if scenario == "percent" {
+                            XCTAssertEqual(item.compactProgressLabel, "50%")
+                            XCTAssertNotNil(item.compactExtraAgentStepLabel)
+                        }
                         XCTAssertEqual(item.codexAgents?.first?.activity,
                                        demo ? exampleActions[0] : tr("Последнее проверенное действие 1", "Last observed action 1"))
                     }

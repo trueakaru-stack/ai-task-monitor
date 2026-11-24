@@ -267,12 +267,39 @@ jobs:
           set -euo pipefail
           task_run="$AITM_TEST_CONTROL_ROOT/run-isolated"
           task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
-          for suite in CodexBackgroundReadTests CodexTerminalGuardTests CodexSourceStalePlanTests CodexRevertSafetyTests CodexExecDiscoveryTests ClaudeCombinedRecoveryTests CodexCloudStoreTests ParserTests; do
+          for suite in CodexBackgroundReadTests CodexTerminalGuardTests CodexSourceStalePlanTests CodexRevertSafetyTests ClaudeCombinedRecoveryTests CodexCloudStoreTests ParserTests; do
             log="$AITM_TEST_TASK_ROOT/background-$suite.log"
             AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"
             if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log"; then echo 'Background test was skipped.' >&2; exit 1; fi
             grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$log"
           done
+      - name: Verify offline Codex discovery
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_run="$AITM_TEST_CONTROL_ROOT/run-isolated"
+          task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
+          task_source="$AITM_TEST_TASK_ROOT/source/macos"
+          task_list="$AITM_TEST_TASK_ROOT/offline-codex-tests.txt"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" /bin/bash "$task_source/integration-tests/List-CodexExecOfflineTests.sh" "$task_source/Tests/AITaskMonitorTests/CodexExecDiscoveryTests.swift" > "$task_list"
+          test "$(wc -l < "$task_list")" -gt 0
+          while IFS= read -r method; do
+            log="$AITM_TEST_TASK_ROOT/offline-$method.log"
+            AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.CodexExecDiscoveryTests/$method" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"
+            if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log"; then echo 'Offline discovery test was skipped.' >&2; exit 1; fi
+            grep -Eq 'Executed 1 tests?, with 0 failures' "$log"
+          done < "$task_list"
+          echo 'Official CLI fixture: NOT RUN; this separate live-source check requires an isolated real fixture.'
+      - name: Verify compact agent placement
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexGroupingVisualTests/testAgentCountFollowsConfirmedStepAndPause "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/agent-placement.log"
+          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/agent-placement.log"; then exit 1; fi
+          grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/agent-placement.log"
       - name: Verify synthetic Codex grouping
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash

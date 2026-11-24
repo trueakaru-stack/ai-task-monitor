@@ -178,14 +178,36 @@ struct RootView: View {
                         HStack(alignment: .firstTextBaseline, spacing: 0) {
                             TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
                                 .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
+                            if task.codexAgentCountAtTitle, let count = task.codexAgentCountLabel(includingStatus: false) {
+                                Text(" " + count).font(.system(size: 16, weight: .semibold)).lineLimit(1)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        if let label = task.progressLabel { Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit() }
+                        if let extra = task.compactExtraAgentStepLabel {
+                            VStack(alignment: .trailing, spacing: 0) {
+                                if let label = task.compactProgressLabel {
+                                    Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit()
+                                }
+                                TruncatingText(text: extra, font: .systemFont(ofSize: 11.5), color: .secondaryLabelColor, alignment: .right)
+                                    .frame(maxWidth: .infinity, minHeight: 16, alignment: .trailing)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                        } else if let label = task.compactProgressLabel {
+                            if task.compactAgentStepLabel == label {
+                                TruncatingText(text: label, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor, alignment: .right)
+                                    .frame(maxWidth: .infinity, minHeight: 18, alignment: .trailing)
+                            } else {
+                                Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit()
+                            }
+                        }
                     }
                     if !task.displayedActivity.isEmpty {
                         ActivityStatusRow(text: task.displayedActivity, isActive: task.isActive, fontSize: 11.5)
                             .padding(.top, 2)
                     }
+                }
+                if let status = task.codexAgentStatusLabel {
+                    Text(status).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
                 }
                 if let planNote = task.planStatusNote {
                     Text(planNote).font(.system(size: 11.5))
@@ -235,7 +257,9 @@ struct RootView: View {
         let selected = tasks.isEmpty ? nil : tasks[min(store.compactSelectedIndex, tasks.count - 1)]
         let loopExtra: CGFloat = selected?.loopWarning == nil ? 0 : 64
         let planExtra: CGFloat = selected?.planStatusNote == nil ? 0 : 22
-        return base + sourceExtra + loopExtra + planExtra
+        let agentStatusExtra: CGFloat = selected?.codexAgentStatusLabel == nil ? 0 : 22
+        let agentStepExtra: CGFloat = selected?.compactExtraAgentStepLabel == nil ? 0 : 18
+        return base + sourceExtra + loopExtra + planExtra + agentStatusExtra + agentStepExtra
     }
 }
 

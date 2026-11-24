@@ -29,7 +29,7 @@ struct TaskCardView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 0) {
                     TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
                         .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
-                    if task.codexAgentCountLabel != nil {
+                    if task.codexAgentCountAtTitle {
                         CodexAgentDisclosureButton(task: task, compact: false)
                     }
                 }
@@ -77,6 +77,10 @@ struct TaskCardView: View {
                                 }
                                 TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: !hidesUnconfirmedPlanStatus && step.status == .active ? .labelColor : .secondaryLabelColor)
                                     .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
+                                if task.activeAgentPlanStepIndex != nil, step.status == .active,
+                                   task.codexAgentCountLabel(includingStatus: false) != nil {
+                                    CodexAgentDisclosureButton(task: task, compact: false, fontSize: 12)
+                                }
                             }
                         }
                     }
@@ -103,12 +107,13 @@ struct CodexAgentDisclosureButton: View {
     @EnvironmentObject private var store: TaskStore
     let task: MonitoredTask
     let compact: Bool
+    var fontSize: CGFloat = 16
 
     var body: some View {
         if let label = task.codexAgentCountLabel(includingStatus: false) {
             Button { store.toggleCodexGroup(task.id) } label: {
                 HStack(spacing: 4) {
-                    Text(" " + label).font(.system(size: 16, weight: .semibold)).lineLimit(1)
+                    Text(" " + label).font(.system(size: fontSize, weight: .semibold)).lineLimit(1)
                     Image(systemName: store.isCodexGroupExpanded(task.id) ? "chevron.up" : "chevron.down")
                         .font(.system(size: 11.5, weight: .medium))
                 }

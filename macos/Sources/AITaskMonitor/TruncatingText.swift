@@ -23,6 +23,7 @@ struct TruncatingText: NSViewRepresentable {
     var font: NSFont
     var color: NSColor
     var lineLimit = 1
+    var alignment: NSTextAlignment = .left
 
     func makeNSView(context: Context) -> TruncatingTextField {
         let field = TruncatingTextField(labelWithString: text)
@@ -37,6 +38,7 @@ struct TruncatingText: NSViewRepresentable {
         field.stringValue = text
         field.font = font
         field.textColor = color
+        field.alignment = alignment
         field.maximumNumberOfLines = lineLimit
         field.fullText = text
         field.needsLayout = true

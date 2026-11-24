@@ -137,7 +137,7 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
 
     var codexAgentCountLabel: String? { codexAgentCountLabel(includingStatus: true) }
     var codexAgentStatusLabel: String? {
-        guard codexAgentsUnconfirmed == true else { return nil }
+        guard (codexAgentCount ?? 0) > 0, codexAgentsUnconfirmed == true else { return nil }
         if codexAgentCount == 1 { return tr("Статус агента не подтверждён", "Agent status unconfirmed") }
         return tr("Статус агентов не подтверждён", "Agent status unconfirmed")
     }
@@ -189,6 +189,40 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
         guard let progress, progressKind != .none, !isUnconfirmed else { return nil }
         let value = progressKind == .approximate ? "≈\(progress)%" : "\(progress)%"
         return value
+    }
+
+    // The count belongs to the task; the active step is its presentation location,
+    // not evidence that each assistant is assigned to that step.
+    var activeAgentPlanStepIndex: Int? {
+        guard planConfirmed, !isUnconfirmed else { return nil }
+        let active = steps.indices.filter { steps[$0].status == .active }
+        return active.count == 1 ? active[0] : nil
+    }
+
+    var codexAgentCountAtTitle: Bool {
+        (codexAgentCount ?? 0) > 0 && activeAgentPlanStepIndex == nil
+    }
+
+    private var activeAgentStepBaseLabel: String? {
+        guard let index = activeAgentPlanStepIndex else { return nil }
+        return tr("Этап \(index + 1) из \(steps.count)", "Step \(index + 1) of \(steps.count)")
+    }
+
+    var compactAgentStepLabel: String? {
+        guard let step = activeAgentStepBaseLabel,
+              let count = codexAgentCountLabel(includingStatus: false) else { return nil }
+        return step + " " + count
+    }
+
+    var compactProgressLabel: String? {
+        guard let progress = progressLabel else { return nil }
+        if progress == activeAgentStepBaseLabel, let step = compactAgentStepLabel { return step }
+        return progress
+    }
+
+    var compactExtraAgentStepLabel: String? {
+        guard let step = compactAgentStepLabel, progressLabel != activeAgentStepBaseLabel else { return nil }
+        return step
     }
 
     static func progress(for steps: [TaskStep]) -> Int? {
