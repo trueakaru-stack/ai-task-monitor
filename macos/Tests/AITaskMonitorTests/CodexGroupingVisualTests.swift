@@ -136,7 +136,6 @@ final class CodexGroupingVisualTests: XCTestCase {
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: root.appendingPathComponent("missing-codex")),
                               claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("missing-claude")),
                               previewTasks: [task])
-        store.toggleCodexGroup(task.id)
         NSApplication.shared.setActivationPolicy(.prohibited)
         let size = NSSize(width: 520, height: 600)
         let hosting = NSHostingView(rootView: SyntheticAgentTaskCard().environmentObject(store))
@@ -164,6 +163,20 @@ final class CodexGroupingVisualTests: XCTestCase {
             let bounds = label.convert(label.bounds, to: hosting)
             return !bounds.isEmpty && visible.intersection(bounds).height >= bounds.height - 1
         }
+        let initialViews = scrollViews(in: hosting)
+        XCTAssertEqual(initialViews.count, 1)
+        let initialScroll = try XCTUnwrap(initialViews.first)
+        XCTAssertEqual(initialScroll.scrollerStyle, .overlay)
+        let initialScrollerClass = initialScroll.verticalScroller.map { String(reflecting: type(of: $0)) }
+        let initialScrollerHidden = initialScroll.verticalScroller?.isHidden
+        let initialScrollerEnabled = initialScroll.verticalScroller?.isEnabled
+        let initialHasVerticalScroller = initialScroll.hasVerticalScroller
+        let initialAutohidesScrollers = initialScroll.autohidesScrollers
+        let initialFrameSize = initialScroll.frame.size
+        let initialClipSize = initialScroll.contentView.bounds.size
+        store.toggleCodexGroup(task.id)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        hosting.layoutSubtreeIfNeeded()
         let views = scrollViews(in: hosting)
         XCTAssertEqual(views.count, 1, "The agent rows must share the plan's scroll view")
         let scroll = try XCTUnwrap(views.first)
@@ -212,6 +225,15 @@ final class CodexGroupingVisualTests: XCTestCase {
         XCTAssertEqual(collapsedViews.count, 1)
         let collapsedScroll = try XCTUnwrap(collapsedViews.first)
         XCTAssertEqual(collapsedScroll.scrollerStyle, .overlay, "Collapsing must restore the plan's existing scrollbar style")
+        XCTAssertEqual(collapsedScroll.verticalScroller.map { String(reflecting: type(of: $0)) }, initialScrollerClass)
+        XCTAssertEqual(collapsedScroll.verticalScroller?.isHidden, initialScrollerHidden)
+        XCTAssertEqual(collapsedScroll.verticalScroller?.isEnabled, initialScrollerEnabled)
+        XCTAssertEqual(collapsedScroll.hasVerticalScroller, initialHasVerticalScroller)
+        XCTAssertEqual(collapsedScroll.autohidesScrollers, initialAutohidesScrollers)
+        XCTAssertEqual(collapsedScroll.frame.width, initialFrameSize.width, accuracy: 0.5)
+        XCTAssertEqual(collapsedScroll.frame.height, initialFrameSize.height, accuracy: 0.5)
+        XCTAssertEqual(collapsedScroll.contentView.bounds.width, initialClipSize.width, accuracy: 0.5)
+        XCTAssertEqual(collapsedScroll.contentView.bounds.height, initialClipSize.height, accuracy: 0.5)
         if let collapsedDocument = collapsedScroll.documentView {
             XCTAssertNil(findLastAgent(in: collapsedDocument))
         }
@@ -302,7 +324,7 @@ final class CodexGroupingVisualTests: XCTestCase {
                             activity: tr("Статус не подтверждён", "Status unconfirmed"), isActive: false, progress: nil,
                             progressKind: .none, steps: [], updatedAt: Date(), isUnconfirmed: true,
                             lastKnownActivity: demo ? exampleActions[offset] :
-                                tr("Последнее проверенное действие \(offset + 1)", "Last observed action \(offset + 1)"),
+                                tr("Проверенное действие \(offset + 1)", "Observed action \(offset + 1)"),
                             lastActivityIdentityConfirmed: true)
                     }
                     let unavailable = MonitoredTask(id: rootID, provider: .codex, title: tr("Проверка загрузки событий", "Checking event loading"),
@@ -315,7 +337,7 @@ final class CodexGroupingVisualTests: XCTestCase {
                     if scenario == "many-agents" {
                         let more = (4...9).map { number in
                             CodexAgentDetail(id: "extra-\(number)", title: tr("Помощник \(number)", "Assistant \(number)"),
-                                             activity: tr("Последнее проверенное действие \(number)", "Last observed action \(number)"),
+                                             activity: tr("Проверенное действие \(number)", "Observed action \(number)"),
                                              isActive: false, isUnconfirmed: true)
                         }
                         grouped[0].codexAgents = (grouped[0].codexAgents ?? []) + more
@@ -341,7 +363,7 @@ final class CodexGroupingVisualTests: XCTestCase {
                             XCTAssertNotNil(item.compactExtraAgentStepLabel)
                         }
                         XCTAssertEqual(item.codexAgents?.first?.activity,
-                                       demo ? exampleActions[0] : tr("Последнее проверенное действие 1", "Last observed action 1"))
+                                       demo ? exampleActions[0] : tr("Проверенное действие 1", "Observed action 1"))
                     }
                     let claude = MonitoredTask(id: "claude:synthetic", provider: .claude,
                         title: tr("Обновить настройки уведомлений", "Update notification settings"),
