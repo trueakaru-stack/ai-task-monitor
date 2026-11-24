@@ -11,6 +11,7 @@ public static class DiagnosticWorkerServerIdentity {
 }
 '@
 $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut)
+$writer=$null;$phase='connect'
 try{
  $pipe.Connect(5000);$server=[uint32]0
  if(-not [DiagnosticWorkerServerIdentity]::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw 'Unexpected owner.'}
@@ -25,17 +26,20 @@ try{
   $bytes=$reader.ReadBytes($length);if($bytes.Length -ne $length){throw 'Incomplete request frame.'}
   $message=[Management.Automation.PSSerializer]::Deserialize([Text.UTF8Encoding]::new($false,$true).GetString($bytes))
   if(-not $initialized){
+   $phase='configure'
    $configuration=@($message.Configuration)
    if($configuration.Count -ne 6 -or [string]$configuration[0] -cne 'AITM-DIAGNOSTIC-1'){throw 'Unsupported diagnostic configuration.'}
    $started=[DateTimeOffset]::MinValue
    if(-not [DateTimeOffset]::TryParseExact([string]$configuration[5],'o',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$started)){throw 'Invalid diagnostic start time.'}
    $diagnosticDirectory=[IO.Path]::GetFullPath([string]$configuration[4])
-   . (Join-Path $PSScriptRoot 'LocalSourceCore.ps1')
+   $phase='load-source';. (Join-Path $PSScriptRoot 'LocalSourceCore.ps1')
    Initialize-LocalSourceReader -CodexHome ([string]$configuration[1]) -ProfileRoot ([string]$configuration[2]) -DataDirectory ([string]$configuration[3]) -MonitorStartedUtc $started.UtcDateTime
+   $phase='load-diagnostics'
    foreach($module in @('DiagnosticPolicy.ps1','DiagnosticStore.ps1','LoopDetection.ps1','DiagnosticCollector.ps1','DiagnosticRuntime.ps1')){. (Join-Path $PSScriptRoot $module)}
    try{$runtime=New-DiagnosticRuntime -Directory $diagnosticDirectory -Since $started -Now ([DateTimeOffset]::UtcNow)}catch{$runtime=$null}
    $initialized=$true
   }
+  $phase='parse-request'
   $request=@($message.Request)
   if($request.Count -lt 1 -or $request.Count -gt 32 -or [string]$request[0] -cne 'poll'){throw 'Unsupported diagnostic request.'}
   $tasks=New-Object 'Collections.Generic.List[object]';$unavailable=New-Object 'Collections.Generic.List[string]'
@@ -61,18 +65,22 @@ try{
     }
    }else{throw 'Invalid diagnostic request field.'}
   }
-  $clearAck='';$dismissed=New-Object 'Collections.Generic.List[string]';$failed=$false
+  $clearAck='';$dismissed=New-Object 'Collections.Generic.List[string]';$failed=$false;$clearedAt=$null
+  $failureStage='';$failureKind=''
   try{
+   $phase='clear'
    if($clearId){
     $key='clear:'+ $clearId
     if(-not $seen.Contains($key)){
      Clear-DiagnosticEvents -Directory $diagnosticDirectory
-     if($null -ne $runtime){$runtime.NextCleanup=[DateTimeOffset]::MaxValue}
+     $clearedAt=[DateTimeOffset]::UtcNow
+     if($null -ne $runtime){$runtime.NextCleanup=[DateTimeOffset]::MaxValue;$runtime.Since=$clearedAt}
      if($seen.Add($key)){$seenOrder.Enqueue($key)}
     }
     $clearAck=$clearId
    }
-   if($null -eq $runtime){$runtime=New-DiagnosticRuntime -Directory $diagnosticDirectory -Since $started -Now ([DateTimeOffset]::UtcNow)}
+   $phase='runtime'
+   if($null -eq $runtime){$runtime=New-DiagnosticRuntime -Directory $diagnosticDirectory -Since $(if($null -ne $clearedAt){$clearedAt}else{$started}) -Now ([DateTimeOffset]::UtcNow)}
    $settings=Get-DiagnosticSettings -Directory $diagnosticDirectory
    if($settings.RetentionDays -ne $runtime.Settings.RetentionDays -or $settings.MaximumMB -ne $runtime.Settings.MaximumMB){$runtime.NextCleanup=[DateTimeOffset]::MinValue}
    $runtime.Settings=$settings
@@ -86,10 +94,11 @@ try{
     $dismissed.Add([string]$entry.Operation)
    }
    while($seenOrder.Count -gt 1024){[void]$seen.Remove($seenOrder.Dequeue())}
+   $phase='update'
    $resolver={param($id) return (Session-File $id)}
    $stateResolver={param($id) return (Thread-State $id)}
    Update-DiagnosticRuntime -Runtime $runtime -Tasks $tasks.ToArray() -Unavailable $unavailable.ToArray() -Now ([DateTimeOffset]::UtcNow) -SessionResolver $resolver -StateResolver $stateResolver
-  }catch{$failed=$true}
+  }catch{$failed=$true;$failureStage=$phase;$failureKind=$_.Exception.GetBaseException().GetType().Name}
   $warnings=New-Object 'Collections.Generic.List[object]';$present=@{}
   if(-not $failed){
    foreach($key in @($runtime.LoopStates.Keys)){
@@ -103,13 +112,21 @@ try{
    }
    foreach($key in @($warningTokens.Keys)){if(-not $present.ContainsKey($key)){[void]$warningTokens.Remove($key)}}
   }
-  $result=[PSCustomObject]@{Failed=$failed;Warnings=$warnings.ToArray();ClearAck=$clearAck;DismissAck=$dismissed.ToArray()}
+  $result=[PSCustomObject]@{Failed=$failed;FailureStage=$failureStage;FailureKind=$failureKind;Warnings=$warnings.ToArray();ClearAck=$clearAck;DismissAck=$dismissed.ToArray()}
+  $phase='respond'
   $response=[Text.UTF8Encoding]::new($false,$true).GetBytes([Management.Automation.PSSerializer]::Serialize($result,24))
   if($response.Length -le 0 -or $response.Length -gt 16777216){throw 'Invalid result frame.'}
   $writer.Write([int]$response.Length);$writer.Write($response);$writer.Flush()
  }
 }catch{
- # Never print paths, task identifiers, commands, or errors from the worker.
+ # Send only a phase and exception type; never emit paths or source content.
+ try{
+  if($null -ne $writer){
+   $safe=[PSCustomObject]@{Failed=$true;Fatal=$true;FailureStage=$phase;FailureKind=$_.Exception.GetBaseException().GetType().Name;Warnings=@();ClearAck='';DismissAck=@()}
+   $bytes=[Text.UTF8Encoding]::new($false,$true).GetBytes([Management.Automation.PSSerializer]::Serialize($safe,8))
+   $writer.Write([int]$bytes.Length);$writer.Write($bytes);$writer.Flush()
+  }
+ }catch{}
  exit 1
 }finally{
  foreach($name in @('codexTitleReader','codexRolloutReader','codexRecentEventObserver','codexRootEvidenceReader')){

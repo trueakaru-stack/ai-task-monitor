@@ -49,6 +49,9 @@ function Receive-KimiRuntimeRequest {
   if(([DateTimeOffset]::UtcNow-$Request.Started).TotalSeconds -lt 30){return $null}
   try{$Request.Process.Kill()}catch{};$Request.Process.Dispose();throw 'Kimi source check timed out.'
  }
+ # The process can exit while a descendant still holds a redirected stream.
+ # Never wait for that stream on the UI thread; keep this one request pending.
+ if(-not $Request.Output.IsCompleted -or -not $Request.Errors.IsCompleted){return $null}
  try{
   $output=$Request.Output.GetAwaiter().GetResult();$errors=$Request.Errors.GetAwaiter().GetResult()
   if($output.Length -gt 131072 -or $errors.Length -gt 0){throw 'Kimi source check returned invalid output.'}
@@ -82,6 +85,10 @@ function Update-KimiMonitorController {
     }
    }elseif($reply.Ok){$Controller.LastError='invalid-response'}else{$Controller.LastError=[string]$reply.Error}
    $Controller.NextScan=$Now.AddSeconds(15)
+  }elseif($Controller.Request.Process.HasExited -and
+    (-not $Controller.Request.Output.IsCompleted -or -not $Controller.Request.Errors.IsCompleted) -and
+    ($Now-$Controller.Request.Started).TotalSeconds -ge 30){
+   $Controller.LastError='operation-failed'
   }
  }
  if($null -eq $Controller.Request -and $Now -ge $Controller.NextScan){

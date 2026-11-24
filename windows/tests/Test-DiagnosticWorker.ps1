@@ -8,8 +8,16 @@ function Require([bool]$condition,[string]$message){if(-not $condition){throw $m
 function Poll($owner,[string[]]$request){
  Require ($owner.Request($request)) 'The synthetic diagnostic request was rejected.'
  $clock=[Diagnostics.Stopwatch]::StartNew()
- while($clock.ElapsedMilliseconds -lt 20000){$result=$owner.TryReceive();if($null -ne $result){Require $result.Success 'The synthetic diagnostic worker failed.';return $result.Value};Start-Sleep -Milliseconds 10}
- throw 'The synthetic diagnostic worker did not respond.'
+ while($clock.ElapsedMilliseconds -lt 20000){
+  $result=$owner.TryReceive()
+  if($null -ne $result){
+   if(-not $result.Success){throw ('The synthetic diagnostic worker failed; stage='+$owner.FailureStage+'; kind='+$owner.FailureKind+'; code='+$owner.FailureHResult+'; exit_known='+$owner.HasStartupExitCode+'; exit='+$owner.StartupExitCode)}
+   if($null -ne $result.Value.PSObject.Properties['Fatal'] -and $result.Value.Fatal){throw ('The synthetic diagnostic worker failed; stage='+$result.Value.FailureStage+'; kind='+$result.Value.FailureKind)}
+   return $result.Value
+  }
+  Start-Sleep -Milliseconds 10
+ }
+ throw ('The synthetic diagnostic worker did not respond; stage='+$owner.Stage+'; failure='+$owner.FailureStage+'; kind='+$owner.FailureKind)
 }
 function Failure([int]$number,[string]$command,[DateTimeOffset]$time){
  return @{timestamp=$time.ToString('o');type='event_msg';payload=@{type='item_completed';item=@{type='CommandExecution';id=('failure-'+$number);status='failed';exit_code=1;command=@('synthetic-tool',$command);cwd='synthetic-private-directory'}}}|ConvertTo-Json -Depth 8 -Compress

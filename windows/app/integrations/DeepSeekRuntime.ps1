@@ -75,6 +75,9 @@ function Start-DeepSeekRuntimeRequest {
 function Receive-DeepSeekRuntimeRequest {
  param([Parameter(Mandatory=$true)]$Request)
  if(-not $Request.Process.HasExited){return $null}
+ # A child can keep stdout/stderr open even after the bridge exits. Avoid
+ # waiting on those tasks in the window's periodic refresh.
+ if(-not $Request.Output.IsCompleted -or -not $Request.Errors.IsCompleted){return $null}
  try{
   $output=$Request.Output.GetAwaiter().GetResult()
   $errorText=$Request.Errors.GetAwaiter().GetResult()
@@ -184,6 +187,11 @@ function Update-DeepSeekMonitorController {
     }else{$Controller.ActionError=[string]$reply.Error}
     $Controller.NextScan=[DateTimeOffset]::MinValue
    }
+  }elseif($Controller.Request.Process.HasExited -and
+    (-not $Controller.Request.Output.IsCompleted -or -not $Controller.Request.Errors.IsCompleted) -and
+    ($Now-$Controller.Request.Started).TotalSeconds -ge 30){
+   $Controller.LastError='operation-failed'
+   if($Controller.Request.Action -ne 'list'){$Controller.ActionError='operation-failed'}
   }
  }
  if($null -eq $Controller.Request -and $Now -ge $Controller.NextScan){

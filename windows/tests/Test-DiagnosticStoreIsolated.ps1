@@ -1,3 +1,4 @@
+param([ValidateSet('store','worker')][string]$Target='store')
 $ErrorActionPreference='Stop'
 $userPath=[Environment]::GetEnvironmentVariable('PATH','User');$machinePath=[Environment]::GetEnvironmentVariable('PATH','Machine')
 $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
@@ -8,7 +9,7 @@ try{
  $profile=Join-Path $root 'profile';$roaming=Join-Path $root 'roaming';$local=Join-Path $root 'local';$scratch=Join-Path $root 'temp'
  foreach($path in @($profile,$roaming,$local,$scratch)){[void][IO.Directory]::CreateDirectory($path)}
  $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
- $test=Join-Path $PSScriptRoot 'Test-DiagnosticStore.ps1'
+ $test=Join-Path $PSScriptRoot $(if($Target -ceq 'worker'){'Test-DiagnosticWorker.ps1'}else{'Test-DiagnosticStore.ps1'})
  $start.Arguments='-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "'+$test+'"'
  $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
  $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
@@ -27,7 +28,7 @@ try{
  if(-not $child.WaitForExit(45000)){throw 'The isolated synthetic diagnostic store test timed out.'}
  if($child.ExitCode -ne 0){throw ('The isolated synthetic diagnostic store test failed: '+$errors.GetAwaiter().GetResult())}
  Write-Output ($output.GetAwaiter().GetResult().Trim())
- Write-Output 'The diagnostic store passed with a synthetic profile and a restricted process environment.'
+ Write-Output ('The diagnostic '+$Target+' test passed with a synthetic profile and a restricted process environment.')
 }finally{
  if($null -ne $child){if(-not $child.HasExited){$child.Kill();[void]$child.WaitForExit(3000)};$child.Dispose()}
  $resolved=[IO.Path]::GetFullPath((Resolve-Path -LiteralPath $root).Path)
