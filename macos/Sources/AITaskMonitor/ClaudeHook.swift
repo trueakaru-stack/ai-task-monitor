@@ -16,10 +16,8 @@ enum ClaudeHook {
 
     static func process(_ input: [String: Any], directory: URL = AppPaths.supportDirectory,
                         retentionPolicy: () -> ClaudeRetentionPolicy? = { ClaudeRetentionPolicy.load() },
-                        sendLoop: (([String: Any], URL) -> Void)? = nil,
-                        sendGap: ((URL) -> Void)? = nil) -> Int32 {
+                        sendLoop: (([String: Any], URL) -> Void)? = nil) -> Int32 {
         let record = makeRecord(from: input)
-        var mayHaveChangedJournal = false
         do {
             var writtenRecord = Data()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -33,9 +31,6 @@ enum ClaudeHook {
                 guard fstat(lockDescriptor, &lockInfo) == 0, (lockInfo.st_mode & S_IFMT) == S_IFREG else { throw HookError.lock }
                 guard acquireEventLock(lockDescriptor) else { throw HookError.lock }
                 defer { flock(lockDescriptor, LOCK_UN) }
-                // From this point a failed operation may have altered another
-                // session's journal or rotation; the loss is not scoped.
-                mayHaveChangedJournal = true
                 var existing = stat()
                 if lstat(events.path, &existing) == 0 && (existing.st_mode & S_IFMT) != S_IFREG { throw HookError.lock }
                 try markDamagedTailIfNeeded(at: events)
@@ -54,12 +49,6 @@ enum ClaudeHook {
             else { ClaudeLoopClient.send(input, profile: directory, record: writtenRecord) }
             return 0
         } catch {
-            let marked = ClaudeHookLossEvidence.record(directory: directory, session: input.string("session_id"),
-                                                        global: mayHaveChangedJournal)
-            if !marked {
-                if let sendGap { sendGap(directory) }
-                else { ClaudeLoopClient.signalGap(profile: directory) }
-            }
             return ProcessInfo.processInfo.environment["AI_TASK_MONITOR_AUDIT"] == "1" ? 1 : 0
         }
     }

@@ -84,8 +84,11 @@ jobs:
           set -euo pipefail
           task_policy="${AITM_TEST_SANDBOX_POLICY:-$AITM_TEST_CONTROL_ROOT/profile.sb}"
           case "$task_policy" in "$AITM_TEST_CONTROL_ROOT/profile.sb"|"$AITM_TEST_CONTROL_ROOT/profile-offline.sb") ;; *) exit 1;; esac
+          task_extra=()
+          case "${AITM_TEST_UI_EVENT:-0}" in 0) ;; 1) task_extra+=("AITM_MACOS_UI_EVENT_TEST=1");; *) exit 1;; esac
+          case "${AITM_TEST_SOCKET:-0}" in 0) ;; 1) task_extra+=("AITM_CLAUDE_SOCKET_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "AITM_CLAUDE_CHANNEL_PROFILE=$AITM_TEST_TASK_ROOT/temp/claude-channel-profile");; *) exit 1;; esac
           exec /usr/bin/env -i "PATH=$AITM_TASK_PATH" "TMPDIR=$AITM_TEST_TASK_ROOT/temp" "DEVELOPER_DIR=$DEVELOPER_DIR" "CLANG_MODULE_CACHE_PATH=$AITM_TEST_TASK_ROOT/clang-cache" "SDKROOT=$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk" XCRUN_NO_CACHE=1 \
-            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 AITM_SYNTHETIC_REQUIRED=1 \
+            CI=true GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted RUNNER_OS=macOS AITM_MACOS_TEST_SANDBOX=1 AITM_SYNTHETIC_REQUIRED=1 "${task_extra[@]}" \
             "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "AITM_MACOS_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "AITM_SYNTHETIC_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "NPM_CONFIG_CACHE=$AITM_TEST_TASK_ROOT/npm-cache" \
             "NPM_CONFIG_USERCONFIG=$AITM_TEST_TASK_ROOT/npmrc" NPM_CONFIG_GLOBALCONFIG=/dev/null NPM_CONFIG_UPDATE_NOTIFIER=false \
             /usr/bin/sandbox-exec -D "TASK_PROFILE=$AITM_TEST_PROFILE" -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" \
@@ -260,6 +263,15 @@ jobs:
           AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CompactTaskSelectionTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/compact-selection.log"
           if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/compact-selection.log"; then exit 1; fi
           grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/compact-selection.log"
+      - name: Verify compact window events during blocked sources
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
+          AITM_TEST_UI_EVENT=1 AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CompactWindowEventTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/compact-window.log"
+          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/compact-window.log"; then echo 'Compact window event test was skipped.' >&2; exit 1; fi
+          grep -Eq 'Executed 2 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/compact-window.log"
       - name: Verify background Codex reads
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
@@ -267,7 +279,7 @@ jobs:
           set -euo pipefail
           task_run="$AITM_TEST_CONTROL_ROOT/run-isolated"
           task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
-          for suite in CodexBackgroundReadTests CodexTerminalGuardTests CodexSourceStalePlanTests CodexRevertSafetyTests CodexAgentRetentionTests CodexAgentProofSelectionTests CodexAgentReaderProofTests CodexRetainedProjectionTests ClaudeSourceWorkerTests ClaudeHookLossEvidenceTests ClaudeTaskStoreBackgroundTests ClaudeCombinedRecoveryTests CodexCloudStoreTests ParserTests; do
+          for suite in CodexBackgroundReadTests CodexTerminalGuardTests CodexSourceStalePlanTests CodexRevertSafetyTests CodexAgentRetentionTests CodexAgentProofSelectionTests CodexAgentReaderProofTests CodexRetainedProjectionTests ClaudeSourceWorkerTests ClaudeTaskStoreBackgroundTests ClaudeCombinedRecoveryTests CodexCloudStoreTests ParserTests; do
             log="$AITM_TEST_TASK_ROOT/background-$suite.log"
             AITM_TEST_SANDBOX_POLICY="$task_policy" "$task_run" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"
             if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log"; then echo 'Background test was skipped.' >&2; exit 1; fi
@@ -291,6 +303,29 @@ jobs:
             grep -Eq 'Executed 1 tests?, with 0 failures' "$log"
           done < "$task_list"
           echo 'Official CLI fixture: NOT RUN; this separate live-source check requires an isolated real fixture.'
+      - name: Verify isolated Claude socket
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
+          /bin/mkdir -m 700 "$AITM_TEST_TASK_ROOT/temp/claude-channel-profile"
+          AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import errno,socket
+for family, address in [(socket.AF_INET,("127.0.0.1",9)),(socket.AF_INET6,("::1",9))]:
+ try:
+  s=socket.socket(family,socket.SOCK_STREAM)
+  s.settimeout(2)
+  s.connect(address)
+ except OSError as e:
+  if e.errno not in (errno.EACCES,errno.EPERM,errno.EAFNOSUPPORT): raise
+ else: raise RuntimeError("Network isolation failed")
+ finally:
+  if "s" in locals(): s.close()'
+          AITM_TEST_SOCKET=1 AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ClaudeSourceChannelTests/testSyntheticSocketOverrideRejectsPathsOutsideVerifiedRoot "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/claude-channel-guard.log"
+          grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/claude-channel-guard.log"
+          AITM_TEST_SOCKET=1 AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ClaudeSourceChannelTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/claude-channel.log"
+          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/claude-channel.log"; then echo 'Claude channel test was skipped.' >&2; exit 1; fi
+          grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/claude-channel.log"
       - name: Verify compact agent placement
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash

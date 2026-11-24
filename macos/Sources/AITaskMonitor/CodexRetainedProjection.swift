@@ -94,7 +94,7 @@ extension CodexTaskGrouping {
             let details = group.members.map { member in
                 CodexAgentDetail(id: member.id, title: member.title.isEmpty ? tr("Агент", "Agent") : member.title,
                                  activity: tr("Статус не подтверждён", "Status unconfirmed"),
-                                 isActive: false, isUnconfirmed: true)
+                                 isActive: false, isUnconfirmed: true, loopWarning: nil)
             }
             let retained = MonitoredTask(id: "codex-retained:" + id, provider: .codex, title: old.title,
                 activity: tr("Статус не подтверждён", "Status unconfirmed"), isActive: false,

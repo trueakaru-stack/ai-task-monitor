@@ -114,16 +114,46 @@ final class CodexAgentReaderProofTests: XCTestCase {
     }
 
     func testAmbiguousRootCannotProveAnyChildChain() throws {
-        let (root, ids, _) = try fixture(children: 1)
+        let (root, ids, _) = try fixture(children: 2)
         defer { try? FileManager.default.removeItem(at: root) }
         let reader = CodexTaskReader(codexHome: root)
         _ = try awaitProof(reader, id: ids[0])
+        let before = try awaitProof(reader, id: ids[1])
+        let rootProof = try XCTUnwrap(before.verifiedAgentIdentities[rootID])
+        let firstProof = try XCTUnwrap(before.verifiedAgentIdentities[ids[0]])
+        let secondProof = try XCTUnwrap(before.verifiedAgentIdentities[ids[1]])
+        var retained = CodexAgentRetention()
+        let initial = retained.observe(tasks: before.tasks,
+            identities: [rootID: rootProof, ids[0]: firstProof], sourcePartial: true)
+        XCTAssertEqual(initial.groups.first?.knownCount, 1)
         _ = try rollout(root, id: rootID, parent: nil, suffix: "02")
         let snapshot = try reader.readSnapshot(observedSince: Date().addingTimeInterval(-60),
                                                previouslyObserved: Set([rootID] + ids))
         XCTAssertNil(snapshot.verifiedAgentIdentities[rootID])
-        XCTAssertNil(snapshot.verifiedAgentIdentities[ids[0]])
+        let first = try XCTUnwrap(snapshot.verifiedAgentIdentities[ids[0]])
+        let second = try XCTUnwrap(snapshot.verifiedAgentIdentities[ids[1]])
+        XCTAssertEqual(first, firstProof)
+        XCTAssertEqual(second, secondProof)
+        XCTAssertEqual(first.parentID, rootID)
+        XCTAssertFalse(first.isRoot)
+        XCTAssertEqual(second.parentID, rootID)
+        XCTAssertFalse(second.isRoot)
         XCTAssertTrue(snapshot.agentIdentityPartial)
+
+        var fresh = CodexAgentRetention()
+        let unlinked = fresh.observe(tasks: snapshot.tasks, identities: snapshot.verifiedAgentIdentities,
+                                     sourcePartial: snapshot.agentIdentityPartial)
+        XCTAssertTrue(unlinked.groups.isEmpty, "A child header alone must not create a parent group")
+
+        let previous = retained.observe(tasks: snapshot.tasks, identities: snapshot.verifiedAgentIdentities,
+                                        sourcePartial: snapshot.agentIdentityPartial)
+        let group = try XCTUnwrap(previous.groups.first)
+        XCTAssertEqual(previous.groups.count, 1)
+        XCTAssertEqual(group.knownCount, 1, "An unlinked child must not increase the retained count")
+        XCTAssertEqual(group.members.map(\.id), [ids[0]])
+        XCTAssertTrue(group.countUnconfirmed)
+        XCTAssertFalse(group.canAttach)
+        XCTAssertTrue(group.members.allSatisfy { !$0.current && !$0.active && $0.statusUnconfirmed })
     }
 
     func testAppendAfterTaskSnapshotCannotUseCachedHeaderAsProof() throws {
@@ -396,5 +426,48 @@ final class CodexAgentReaderProofTests: XCTestCase {
         XCTAssertTrue(recovered)
         XCTAssertEqual(store.tasks[store.compactIndex].id, rootID)
         XCTAssertFalse(store.tasks.contains { $0.id == ids[0] })
+    }
+
+    @MainActor
+    func testConfirmedRootEndingDoesNotResurrectOldFallback() throws {
+        let (root, ids, files) = try fixture(children: 1)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let reader = CodexTaskReader(codexHome: root)
+        let store = TaskStore(codexReader: reader,
+                              claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("no-claude")),
+                              previewTasks: [])
+        Thread.sleep(forTimeInterval: 0.02)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        func event(_ kind: String, offset: TimeInterval) throws -> Data {
+            let row: [String: Any] = ["timestamp": formatter.string(from: Date().addingTimeInterval(offset)),
+                                      "type": "event_msg", "payload": ["type": kind, "turn_id": "store-turn"]]
+            var data = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
+            data.append(10)
+            return data
+        }
+        let started = try event("task_started", offset: 1)
+        for file in files.values {
+            let handle = try FileHandle(forWritingTo: file)
+            try handle.seekToEnd(); try handle.write(contentsOf: started); try handle.close()
+        }
+        var found = false
+        for _ in 0..<20 {
+            store.refresh(); waitForCodexRead(store); reader.waitForAmbiguousObservationForTests()
+            if store.tasks.first(where: { $0.id == rootID })?.codexAgentCount == 1 { found = true; break }
+        }
+        XCTAssertTrue(found)
+        guard found else { return }
+        let childFile = try XCTUnwrap(files[ids[0]])
+        try FileManager.default.moveItem(at: childFile, to: root.appendingPathComponent("parked-synthetic-child.jsonl"))
+        let parent = try XCTUnwrap(files[rootID])
+        let handle = try FileHandle(forWritingTo: parent)
+        try handle.seekToEnd(); try handle.write(contentsOf: event("task_complete", offset: 2)); try handle.close()
+        store.refresh(); waitForCodexRead(store)
+        XCTAssertFalse(store.tasks.contains { $0.id == rootID || $0.id == "codex-retained:" + rootID })
+        XCTAssertEqual(store.testRetainedAgentCount(root: rootID), 1, "A missing child is not proof of its exit")
+        store.refresh(); waitForCodexRead(store)
+        XCTAssertFalse(store.tasks.contains { $0.id == rootID || $0.id == "codex-retained:" + rootID })
+        XCTAssertEqual(store.testRetainedAgentCount(root: rootID), 1)
     }
 }

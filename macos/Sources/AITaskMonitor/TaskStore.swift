@@ -260,7 +260,6 @@ final class TaskStore: ObservableObject {
     private var claudeReadGeneration: UInt64 = 0
     private var claudeHasCompletedRead = false
     private var claudeSourceUnavailable = false
-    private var claudeScopedLossPresent = false
     private let diagnosticWorker: DiagnosticWorker?
     private let claudeRetentionWorker: ClaudeRetentionWorker?
     private let externalProvidersEnabled: Bool
@@ -1071,8 +1070,8 @@ final class TaskStore: ObservableObject {
 
     private func sourceUnavailableMessage(includeCodexPartial: Bool) -> String {
         var messages: [String] = []
-        let partial = unavailableSources.filter { partialExternalSources.contains($0) || ($0 == .claude && claudeScopedLossPresent) }
-        let absent = unavailableSources.filter { !partial.contains($0) }
+        let partial = unavailableSources.filter { partialExternalSources.contains($0) }
+        let absent = unavailableSources.filter { !partialExternalSources.contains($0) }
         if !absent.isEmpty {
             messages.append(tr("Нет данных от ", "No data from ") + absent.map(\.displayName).joined(separator: ", "))
         }
@@ -1351,6 +1350,7 @@ final class TaskStore: ObservableObject {
             codexSourcePartial = snapshot.isPartial || safe.isPartial
             terminalIDs.formUnion(safe.terminalIDs)
             interruptedIDs.formUnion(snapshot.interruptedIDs.intersection(safe.terminalIDs))
+            for id in safe.terminalIDs { codexAgentFallbackRoots.removeValue(forKey: id.lowercased()) }
             codexToolEvents = codexTerminalGuard.overflowed ? [:] :
                 snapshot.toolEvents.filter { codexTerminalGuard.pending[$0.key] == nil }
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: safe.tasks, terminalIDs: safe.terminalIDs)
@@ -1398,10 +1398,8 @@ final class TaskStore: ObservableObject {
                 previousClaude = []
                 claudeRetainedTitlesOverflow = false
                 claudeSourceUnavailable = false
-                claudeScopedLossPresent = false
             case .noEvents:
                 claudeSourceUnavailable = response.connection != .connected
-                claudeScopedLossPresent = false
                 if !previousClaude.isEmpty {
                     previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
                 }
@@ -1416,8 +1414,7 @@ final class TaskStore: ObservableObject {
                     response.phasePoisoned || snapshot.sourceUncertain ||
                     mappedAfter.count != afterPhases.count || lifecycleUnknownAll
                 let affected = response.changedSessionIDs.union(response.phaseUncertainSessions)
-                    .union(snapshot.titleHistoryOverflowIDs).union(snapshot.hookLossSessionIDs)
-                    .union(mappedAfter).union(mappedLifecycle)
+                    .union(snapshot.titleHistoryOverflowIDs).union(mappedAfter).union(mappedLifecycle)
                 var current = Self.clearClaudePlanConfirmations(snapshot.tasks, affected: uncertainAll ? nil : affected)
                 current = current.map { task in
                     guard lifecycleUnknownAll || mappedLifecycle.contains(task.id) else { return task }
@@ -1444,14 +1441,12 @@ final class TaskStore: ObservableObject {
                 previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: current,
                                                            terminalIDs: ended.union(neutral))
                 claudeSourceUnavailable = response.connection != .connected || snapshot.sourceUncertain ||
-                    snapshot.hookLossPresent || !snapshot.titleHistoryOverflowIDs.isEmpty || claudeRetainedTitlesOverflow
-                claudeScopedLossPresent = response.connection == .connected && snapshot.hookLossPresent && !snapshot.sourceUncertain
+                    !snapshot.titleHistoryOverflowIDs.isEmpty || claudeRetainedTitlesOverflow
                 if response.connection != .connected {
                     previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
                 }
             case .failed, .changed:
                 claudeSourceUnavailable = true
-                claudeScopedLossPresent = false
                 previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
             }
         }
@@ -1942,6 +1937,9 @@ final class TaskStore: ObservableObject {
     var testCodexReadDelayed: Bool { codexReadDelayed }
     var testCodexReadGeneration: UInt64 { codexReadGeneration }
     var testPendingCodexTerminalIDs: Set<String> { Set(codexTerminalGuard.pending.keys) }
+    func testRetainedAgentCount(root: String) -> Int? {
+        codexAgentGroups.first(where: { $0.rootID == root.lowercased() })?.knownCount
+    }
     func testPeriodicRefresh() { periodicRefresh() }
 
     func testReplacePreviewTasks(_ updated: [MonitoredTask]) {

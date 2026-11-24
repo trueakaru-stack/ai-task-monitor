@@ -7,10 +7,39 @@ private enum ClaudeLoopSocketError: Error { case unavailable }
 enum ClaudeLoopSocket {
     static let maximumFrame = 4096
 
+    #if DEBUG
+    static func syntheticSocketBase(environment env: [String: String]) throws -> String? {
+        guard let configured = env["AITM_CLAUDE_SOCKET_TEST_ROOT"] else { return nil }
+        guard env["GITHUB_ACTIONS"] == "true", env["RUNNER_ENVIRONMENT"] == "github-hosted",
+              env["RUNNER_OS"] == "macOS", env["AITM_MACOS_TEST_SANDBOX"] == "1",
+              env["HOME"] == nil, env["CODEX_HOME"] == nil,
+              let rootValue = env["AITM_SYNTHETIC_TEST_ROOT"], let denied = env["AITM_CI_DENIED_FILE"] else {
+            throw ClaudeLoopSocketError.unavailable
+        }
+        let probe = denied.withCString { open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) }
+        if probe >= 0 { Darwin.close(probe); throw ClaudeLoopSocketError.unavailable }
+        guard errno == EACCES || errno == EPERM else { throw ClaudeLoopSocketError.unavailable }
+        let root = URL(fileURLWithPath: rootValue, isDirectory: true).standardizedFileURL
+        let requested = URL(fileURLWithPath: configured, isDirectory: true).standardizedFileURL
+        let runnerTemp = URL(fileURLWithPath: "/Users/runner/work/_temp", isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL
+        let values = try root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard requested == root, root == root.resolvingSymlinksInPath().standardizedFileURL,
+              root.lastPathComponent == "temp", root.deletingLastPathComponent().lastPathComponent.hasPrefix("aitm-card-tests."),
+              root.deletingLastPathComponent().deletingLastPathComponent() == runnerTemp,
+              values.isDirectory == true, values.isSymbolicLink == false else { throw ClaudeLoopSocketError.unavailable }
+        return root.path
+    }
+    #endif
+
     static func directory(profile: URL, create: Bool) throws -> String {
         let digest = SHA256.hash(data: Data(profile.standardizedFileURL.path.utf8))
         let suffix = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
-        let path = "/private/tmp/aitm-loop-\(geteuid())-\(suffix)"
+        var base = "/private/tmp"
+        #if DEBUG
+        if let synthetic = try syntheticSocketBase(environment: ProcessInfo.processInfo.environment) { base = synthetic }
+        #endif
+        let path = base + "/aitm-loop-\(geteuid())-\(suffix)"
         if create {
             let result = path.withCString { mkdir($0, mode_t(0o700)) }
             if result != 0 && errno != EEXIST { throw ClaudeLoopSocketError.unavailable }
@@ -141,17 +170,6 @@ enum ClaudeLoopSocket {
 }
 
 enum ClaudeLoopClient {
-    // Last-resort notice when a hook cannot persist even an empty loss marker.
-    // The receiver already treats an invalid-length frame as a global gap.
-    static func signalGap(profile: URL = AppPaths.supportDirectory) {
-        guard let directory = try? ClaudeLoopSocket.directory(profile: profile, create: false),
-              let descriptor = ClaudeLoopSocket.connect(path: directory + "/events.sock") else { return }
-        defer { Darwin.close(descriptor) }
-        guard var key = ClaudeLoopSocket.read(descriptor, count: 32) else { return }
-        defer { key.resetBytes(in: 0..<key.count) }
-        _ = ClaudeLoopSocket.write(descriptor, data: Data([0, 0, 0, 0]))
-    }
-
     static func send(_ input: [String: Any], profile: URL = AppPaths.supportDirectory, record: Data? = nil) {
         let name = input.string("hook_event_name"), toolName = input.string("tool_name")
         let phase = ["PreToolUse", "PostToolUse", "PostToolUseFailure"].contains(name) &&

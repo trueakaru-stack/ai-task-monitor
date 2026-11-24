@@ -46,18 +46,8 @@ final class ClaudeTaskStoreBackgroundTests: XCTestCase {
         func update(_ value: Bool) { lock.lock(); connected = value; lock.unlock() }
     }
 
-    private final class HookResult {
-        let finished = DispatchSemaphore(value: 0)
-        private let lock = NSLock()
-        private var value: (Int32, TimeInterval, Bool)?
-        func finish(_ status: Int32, elapsed: TimeInterval, sentGap: Bool) {
-            lock.lock(); value = (status, elapsed, sentGap); lock.unlock(); finished.signal()
-        }
-        func result() -> (Int32, TimeInterval, Bool)? { lock.lock(); defer { lock.unlock() }; return value }
-    }
-
-    private func event(_ name: String, offset: TimeInterval, session: String = "fixture") throws -> Data {
-        var input: [String: Any] = ["session_id": session, "hook_event_name": name]
+    private func event(_ name: String, offset: TimeInterval) throws -> Data {
+        var input: [String: Any] = ["session_id": "fixture", "hook_event_name": name]
         if name == "Stop" { input["background_tasks"] = [String](); input["session_crons"] = [String]() }
         var record = ClaudeHook.makeRecord(from: input)
         let formatter = ISO8601DateFormatter()
@@ -222,97 +212,6 @@ final class ClaudeTaskStoreBackgroundTests: XCTestCase {
         let deadline = Date().addingTimeInterval(5)
         while worker != nil && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
         XCTAssertNil(worker, "The blocked owner must be released when its reader returns")
-    }
-
-    @MainActor
-    func testHookTimeoutDuringActualReaderLockKeepsOnlyAffectedSessionUnconfirmed() throws {
-        let root = try codexSyntheticDirectory(prefix: "aitm-claude-store-")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let file = root.appendingPathComponent("claude-events-v2.jsonl")
-        var records = try event("UserPromptSubmit", offset: 1, session: "first")
-        records.append(try event("UserPromptSubmit", offset: 1, session: "neighbor"))
-        try records.write(to: file)
-        let gate = Gate()
-        defer { gate.release.signal() }
-        let reader = ClaudeTaskReader(eventFile: file, afterJournalLockForTests: { gate.waitOnce() })
-        let first = task("first"), neighbor = task("neighbor")
-        let store = TaskStore(codexReader: CodexTaskReader(codexHome: root.appendingPathComponent("no-codex")),
-                              claudeReader: reader, previewTasks: [first, neighbor])
-        store.testSeedClaudeTasks([first, neighbor])
-        store.refresh()
-        XCTAssertEqual(gate.entered.wait(timeout: .now() + 3), .success)
-        let hook = HookResult()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let started = Date()
-            var sentGap = false
-            let status = ClaudeHook.process(["hook_event_name": "Stop", "session_id": "first",
-                                             "background_tasks": [], "session_crons": []],
-                                            directory: root, retentionPolicy: { nil }, sendLoop: { _, _ in },
-                                            sendGap: { _ in sentGap = true })
-            hook.finish(status, elapsed: Date().timeIntervalSince(started), sentGap: sentGap)
-        }
-        let dot = try XCTUnwrap(store.compactDots.first { $0.task.id == neighbor.id })
-        let selectedAt = ProcessInfo.processInfo.systemUptime
-        store.selectCompactTask(dot: dot)
-        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - selectedAt, 1)
-        XCTAssertEqual(store.tasks[store.compactIndex].id, neighbor.id)
-        XCTAssertEqual(hook.finished.wait(timeout: .now() + 5), .success)
-        let hookResult = try XCTUnwrap(hook.result())
-        XCTAssertEqual(hookResult.0, 0)
-        XCTAssertGreaterThanOrEqual(hookResult.1, 1.6)
-        XCTAssertFalse(hookResult.2, "The persisted session marker must avoid a global gap")
-        gate.release.signal()
-        waitForClaudeRead(store, timeout: 8)
-        XCTAssertTrue(store.tasks.contains { $0.id == first.id && $0.isUnconfirmed && !$0.isActive })
-        XCTAssertTrue(store.tasks.contains { $0.id == neighbor.id && $0.isActive && !$0.isUnconfirmed })
-        XCTAssertTrue(store.unavailableSources.contains(.claude))
-        XCTAssertEqual(store.tasks[store.compactIndex].id, neighbor.id)
-    }
-
-    @MainActor
-    func testScopedLossProtectsPreviouslyVisibleCardEvenWhenOldSnapshotOnlyHasStop() throws {
-        let root = try codexSyntheticDirectory(prefix: "aitm-claude-store-")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let file = root.appendingPathComponent("claude-events-v2.jsonl")
-        var records = try event("UserPromptSubmit", offset: -3, session: "first")
-        records.append(try event("UserPromptSubmit", offset: 1, session: "neighbor"))
-        try records.write(to: file)
-        let first = task("first"), neighbor = task("neighbor")
-        let store = TaskStore(codexReader: CodexTaskReader(codexHome: root.appendingPathComponent("no-codex")),
-                              claudeReader: ClaudeTaskReader(eventFile: file), previewTasks: [first, neighbor])
-        store.testSeedClaudeTasks([first, neighbor])
-        let afterStoreStart = Date()
-        Thread.sleep(forTimeInterval: 0.2)
-        let handle = try FileHandle(forWritingTo: file)
-        try handle.seekToEnd(); try handle.write(contentsOf: event("Stop", offset: -0.1, session: "first")); try handle.close()
-        let old = try ClaudeTaskReader(eventFile: file).readSnapshot(observedSince: afterStoreStart)
-        XCTAssertTrue(old.neutralEndedIDs.contains(first.id), "The old snapshot must contain a genuine Stop")
-        XCTAssertFalse(old.tasks.contains { $0.id == first.id })
-        XCTAssertTrue(old.tasks.contains { $0.id == neighbor.id && $0.isActive })
-
-        XCTAssertTrue(ClaudeHookLossEvidence.record(directory: root, session: "first", global: false))
-        store.refresh()
-        waitForClaudeRead(store)
-        XCTAssertTrue(store.tasks.contains { $0.id == first.id && $0.isUnconfirmed && !$0.isActive })
-        XCTAssertTrue(store.tasks.contains { $0.id == neighbor.id && $0.isActive && !$0.isUnconfirmed })
-        XCTAssertTrue(store.unavailableSources.contains(.claude))
-    }
-
-    @MainActor
-    func testUnmatchedLossReportsIncompleteSourceWithoutInventingTask() throws {
-        let root = try codexSyntheticDirectory(prefix: "aitm-claude-store-")
-        defer { try? FileManager.default.removeItem(at: root) }
-        let file = root.appendingPathComponent("claude-events-v2.jsonl")
-        try Data().write(to: file)
-        XCTAssertTrue(ClaudeHookLossEvidence.record(directory: root, session: "not-in-journal", global: false))
-        let store = TaskStore(codexReader: CodexTaskReader(codexHome: root.appendingPathComponent("no-codex")),
-                              claudeReader: ClaudeTaskReader(eventFile: file), previewTasks: [])
-        store.refresh()
-        waitForClaudeRead(store)
-        XCTAssertTrue(store.tasks.isEmpty)
-        XCTAssertTrue(store.unavailableSources.contains(.claude))
-        XCTAssertEqual(store.compactEmptyMessage,
-                       tr("Часть данных Claude Code недоступна", "Some Claude Code data is unavailable"))
     }
 }
 #endif

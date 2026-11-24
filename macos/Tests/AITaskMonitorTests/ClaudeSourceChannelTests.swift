@@ -35,6 +35,20 @@ final class ClaudeSourceChannelTests: XCTestCase {
         }
     }
 
+    func testSyntheticSocketOverrideRejectsPathsOutsideVerifiedRoot() throws {
+        let root = try codexSyntheticDirectory(prefix: "aitm-claude-channel-")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let environment = ProcessInfo.processInfo.environment
+        let expected = root.deletingLastPathComponent().path
+        XCTAssertEqual(try ClaudeLoopSocket.syntheticSocketBase(environment: environment), expected)
+        var wrong = environment
+        wrong["AITM_CLAUDE_SOCKET_TEST_ROOT"] = root.deletingLastPathComponent().deletingLastPathComponent().path
+        XCTAssertThrowsError(try ClaudeLoopSocket.syntheticSocketBase(environment: wrong))
+        wrong = environment
+        wrong["AITM_MACOS_TEST_SANDBOX"] = "0"
+        XCTAssertThrowsError(try ClaudeLoopSocket.syntheticSocketBase(environment: wrong))
+    }
+
     @MainActor
     private func wait(_ worker: ClaudeSourceWorker) throws -> ClaudeSourceRead {
         var result: ClaudeSourceRead?
@@ -73,7 +87,11 @@ final class ClaudeSourceChannelTests: XCTestCase {
         }
         let digest = SHA256.hash(data: Data(profile.path.utf8))
         let suffix = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
-        let expectedSocketDirectory = "/private/tmp/aitm-loop-\(geteuid())-\(suffix)"
+        let socketBase = ProcessInfo.processInfo.environment["AITM_CLAUDE_SOCKET_TEST_ROOT"] ?? "/private/tmp"
+        let expectedSocketDirectory = socketBase + "/aitm-loop-\(geteuid())-\(suffix)"
+        let address = sockaddr_un()
+        XCTAssertLessThanOrEqual((expectedSocketDirectory + "/events.sock").utf8CString.count,
+                                 MemoryLayout.size(ofValue: address.sun_path))
         var before = stat()
         let lookup = expectedSocketDirectory.withCString { lstat($0, &before) }
         let lookupError = errno
@@ -99,7 +117,7 @@ final class ClaudeSourceChannelTests: XCTestCase {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.01))
             }
             if worker.channelStoppedForTesting, let directory = socketDirectory,
-               directory.hasPrefix("/private/tmp/aitm-loop-\(geteuid())-"),
+               directory == expectedSocketDirectory,
                let names = try? FileManager.default.contentsOfDirectory(atPath: directory),
                Set(names).isSubset(of: ["owner.lock"]) {
                 _ = (directory + "/owner.lock").withCString { unlink($0) }
@@ -149,7 +167,8 @@ final class ClaudeSourceChannelTests: XCTestCase {
               values.isDirectory == true, values.isSymbolicLink == false else { throw CocoaError(.fileReadNoPermission) }
         let digest = SHA256.hash(data: Data(profile.path.utf8))
         let suffix = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
-        let expectedSocketDirectory = "/private/tmp/aitm-loop-\(geteuid())-\(suffix)"
+        let socketBase = ProcessInfo.processInfo.environment["AITM_CLAUDE_SOCKET_TEST_ROOT"] ?? "/private/tmp"
+        let expectedSocketDirectory = socketBase + "/aitm-loop-\(geteuid())-\(suffix)"
         var before = stat()
         guard expectedSocketDirectory.withCString({ lstat($0, &before) }) != 0, errno == ENOENT else {
             throw CocoaError(.fileWriteNoPermission)

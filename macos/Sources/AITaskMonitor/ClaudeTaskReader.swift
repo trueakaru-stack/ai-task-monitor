@@ -106,19 +106,6 @@ private final class ClaudeSourceLossLatch {
     }
 }
 
-private final class ClaudeHookLossLatch {
-    private let lock = NSLock()
-    private var scope = ClaudeHookLossEvidence.Scope()
-    func observe(_ new: ClaudeHookLossEvidence.Scope) -> ClaudeHookLossEvidence.Scope {
-        lock.lock(); defer { lock.unlock() }
-        scope.global = scope.global || new.global
-        scope.hashes.formUnion(new.hashes)
-        if scope.hashes.count > 4_096 { scope.global = true; scope.hashes.removeAll() }
-        return scope
-    }
-    func state() -> ClaudeHookLossEvidence.Scope { lock.lock(); defer { lock.unlock() }; return scope }
-}
-
 // Capture bounded bytes under the shared journal lock. JSON parsing happens
 // after unlocking so a slow parse does not needlessly hold up Claude hooks.
 private func readClaudeFile(_ url: URL) throws -> ClaudeFileBytes {
@@ -471,8 +458,6 @@ struct ClaudeTaskSnapshot {
     var neutralEndedIDs: Set<String> = []
     var sourceUncertain = false
     var titleHistoryOverflowIDs: Set<String> = []
-    var hookLossSessionIDs: Set<String> = []
-    var hookLossPresent = false
 }
 
 struct ClaudeTaskReader {
@@ -480,7 +465,6 @@ struct ClaudeTaskReader {
     let legacyFile: URL?
     let usesExplicitFile: Bool
     private let sourceLossLatch: ClaudeSourceLossLatch
-    private let hookLossLatch: ClaudeHookLossLatch
     private let readLockTiming: ((UInt64) -> Void)?
     private let afterJournalLockForTests: (() -> Void)?
 
@@ -490,17 +474,12 @@ struct ClaudeTaskReader {
         self.legacyFile = legacyFile ?? (eventFile == nil ? AppPaths.legacyClaudeEvents : nil)
         self.usesExplicitFile = eventFile != nil
         self.sourceLossLatch = ClaudeSourceLossLatch()
-        self.hookLossLatch = ClaudeHookLossLatch()
         self.readLockTiming = readLockTiming
         self.afterJournalLockForTests = afterJournalLockForTests
     }
 
     // Called when a previously present journal disappears between polls.
     func noteSourceLoss() { sourceLossLatch.markSaturated() }
-
-    func inspectHookLoss() throws -> ClaudeHookLossEvidence.Scope {
-        hookLossLatch.observe(try ClaudeHookLossEvidence.inspect(directory: eventFile.deletingLastPathComponent()))
-    }
 
     func readTasks(now: Date = Date(), observedSince: Date? = nil) -> [MonitoredTask] {
         (try? readSnapshot(now: now, observedSince: observedSince).tasks) ?? []
@@ -509,32 +488,7 @@ struct ClaudeTaskReader {
     func readSnapshot(now: Date = Date(), observedSince: Date? = nil,
                       phaseEvidence: ClaudePhaseEvidence? = nil) throws -> ClaudeTaskSnapshot {
         do {
-            let before = try inspectHookLoss()
-            var snapshot = try readSnapshotImpl(now: now, observedSince: observedSince, phaseEvidence: phaseEvidence)
-            let after = try inspectHookLoss()
-            if before != after {
-                let allIDs = Set(snapshot.tasks.map(\.id)).union(snapshot.terminalIDs)
-                    .union(snapshot.interruptedIDs).union(snapshot.neutralEndedIDs)
-                let affected = Set(allIDs.filter { id in
-                    guard id.hasPrefix("claude:"),
-                          let hash = ClaudeHookLossEvidence.hash(sessionKey: String(id.dropFirst(7))) else { return false }
-                    return after.hashes.contains(hash)
-                })
-                snapshot.hookLossPresent = after.hasLoss
-                snapshot.hookLossSessionIDs.formUnion(affected)
-                if after.global {
-                    snapshot.sourceUncertain = true
-                    snapshot.terminalIDs.removeAll(); snapshot.interruptedIDs.removeAll(); snapshot.neutralEndedIDs.removeAll()
-                } else {
-                    snapshot.terminalIDs.subtract(affected); snapshot.interruptedIDs.subtract(affected)
-                    snapshot.neutralEndedIDs.subtract(affected)
-                }
-                snapshot.tasks = snapshot.tasks.map { task in
-                    guard after.global || affected.contains(task.id) else { return task }
-                    return TaskSnapshotMerger.merge(previous: [task], current: [], terminalIDs: [])[0]
-                }
-            }
-            return snapshot
+            return try readSnapshotImpl(now: now, observedSince: observedSince, phaseEvidence: phaseEvidence)
         } catch ClaudeReadError.journalBusy {
             // A cooperative writer holding the shared lock is not a loss.
             throw ClaudeReadError.journalBusy
@@ -586,8 +540,7 @@ struct ClaudeTaskReader {
             legacy = prior.records
         }
         if currentInput.truncated || legacyTruncated { sourceLossLatch.markSaturated() }
-        let hookLoss = hookLossLatch.state()
-        let sourceUncertain = sourceLossLatch.state().known || hookLoss.global
+        let sourceUncertain = sourceLossLatch.state().known
         if sourceUncertain && scopeIncomplete { sourceLossLatch.markSaturated() }
         // No documented event generation/order proves a fresh scope after a
         // source loss. Until such evidence exists, keep all observed Claude
@@ -621,12 +574,7 @@ struct ClaudeTaskReader {
         var latestActive: [[String: Observation]] = [[:], [:]]
         let uncertainIDs = (currentInput.truncated || legacyTruncated) ? observedIDs :
             (sourceUncertain ? observedIDs.subtracting(freshStartIDs) : [])
-        let hookLossIDs = Set((legacy + current).compactMap { event, _, id -> String? in
-            guard let hash = ClaudeHookLossEvidence.hash(session: event.string("session_id")),
-                  hookLoss.hashes.contains(hash) else { return nil }
-            return id
-        })
-        var timeUncertain: Set<String> = uncertainIDs.union(hookLossIDs)
+        var timeUncertain: Set<String> = uncertainIDs
         // Plan ordering is separate from session activity. A short reversal of
         // two plan mutations can make progress unsafe without proving the
         // session itself stopped or became inactive.
@@ -774,15 +722,12 @@ struct ClaudeTaskReader {
                 state.backgroundUncertain = true
             }
             let phaseLost = phaseEvidence?.isSessionUncertain(id) ?? false
-            updateSteps(event, state: &state,
-                        retainHistoricalTitles: sourceUncertain || phaseLost || hookLossIDs.contains(id))
+            updateSteps(event, state: &state, retainHistoricalTitles: sourceUncertain || phaseLost)
             sessions[id] = state
         }
 
         var result = ClaudeTaskSnapshot()
         result.sourceUncertain = sourceUncertain
-        result.hookLossSessionIDs = Set(hookLossIDs.map { "claude:" + $0 })
-        result.hookLossPresent = hookLoss.hasLoss
         for state in sessions.values {
             let age = now.timeIntervalSince(state.updatedAt)
             let timeAnomaly = age < -60 || (!state.isActive && age < 0) || timeUncertain.contains(state.id)
