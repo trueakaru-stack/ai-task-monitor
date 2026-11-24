@@ -248,7 +248,21 @@ try {
  $rogue=[Diagnostics.Process]::Start($start)
  $failure=Wait-Result $rogueOwner
  Require (-not $failure.Success -and -not $rogueGates.Started.WaitOne(0)) 'An unrelated synthetic client was accepted or received source configuration.'
- Require ($rogue.WaitForExit(5000) -and $rogue.ExitCode -eq 0 -and $rogue.StandardOutput.ReadToEnd().Trim() -ceq 'NO_DATA') 'The unrelated synthetic client was not cleanly rejected.'
+ $rogueWait=[Diagnostics.Stopwatch]::StartNew()
+ $rogueExited=$rogue.WaitForExit(5000)
+ $rogueWait.Stop()
+ $rogueCode=$null;$rogueOutput='';$rogueError=''
+ if($rogueExited){
+  $rogueCode=$rogue.ExitCode
+  $rogueOutput=$rogue.StandardOutput.ReadToEnd().Trim()
+  $rogueError=$rogue.StandardError.ReadToEnd()
+ }
+ $rogueElapsed=$rogueWait.ElapsedMilliseconds
+ $rogueOutputOK=($rogueExited -and $rogueOutput -ceq 'NO_DATA')
+ $rogueTimeoutHint=($rogueError -match '(?i)timed?\s*out|timeout')
+ $rogueAccessHint=($rogueError -match '(?i)access\s+(is\s+)?denied|unauthorizedaccess')
+ $rogueDataHint=($rogueError -match 'Unexpected data was sent to the unrelated synthetic client')
+ Require ($rogueExited -and $rogueCode -eq 0 -and $rogueOutputOK) ('The unrelated synthetic client was not cleanly rejected: waited_ms={0}; exited={1}; exited_after_wait={2}; exit_code={3}; stdout_no_data={4}; stdout_length={5}; stderr_length={6}; timeout_hint={7}; access_hint={8}; unexpected_data_hint={9}; {10}.' -f $rogueElapsed,$rogueExited,$rogue.HasExited,$rogueCode,$rogueOutputOK,$rogueOutput.Length,$rogueError.Length,$rogueTimeoutHint,$rogueAccessHint,$rogueDataHint,(Owner-Diagnostics $rogueOwner))
  $delayedId=$rogueOwner.OwnedProcessId
 }finally{
  $rogueOwner.Dispose();$delayGate.Dispose()
