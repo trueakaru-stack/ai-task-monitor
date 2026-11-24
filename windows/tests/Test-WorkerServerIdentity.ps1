@@ -83,8 +83,10 @@ try{
      if($mode -ceq 'valid-cleanup'){
       $invalid=[BitConverter]::GetBytes([int]0);$write=$server.WriteAsync($invalid,0,$invalid.Length)
       Require ($write.Wait(3000)) 'The verified synthetic worker did not receive the invalid frame.'
-      Require ($child.WaitForExit(10000) -and $child.ExitCode -ne 0 -and [IO.File]::Exists($finallyMarker) -and
-       [IO.File]::Exists($cleanupMarker) -and [IO.File]::Exists($disposeMarker) -and [IO.File]::Exists($afterCloseMarker)) 'Verified worker failure did not clean up its synthetic reader and pipe.'
+       $exited=$child.WaitForExit(10000);$exitCode=if($exited){$child.ExitCode}else{$null}
+       $finallyReached=[IO.File]::Exists($finallyMarker);$cleanupReached=[IO.File]::Exists($cleanupMarker)
+       $disposed=[IO.File]::Exists($disposeMarker);$beforeClose=[IO.File]::Exists($beforeCloseMarker);$afterClose=[IO.File]::Exists($afterCloseMarker)
+       Require ($exited -and $exitCode -ne 0 -and $finallyReached -and $cleanupReached -and $disposed -and $afterClose) ('Verified worker failure did not clean up its synthetic reader and pipe: worker={0}; mode={1}; exited={2}; exit_code={3}; finally={4}; cleanup={5}; disposed={6}; before_close={7}; after_close={8}.' -f $file,$mode,$exited,$exitCode,$finallyReached,$cleanupReached,$disposed,$beforeClose,$afterClose)
      }
     }
     else{
