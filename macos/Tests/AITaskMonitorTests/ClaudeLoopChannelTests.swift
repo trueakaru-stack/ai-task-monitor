@@ -108,7 +108,8 @@ final class ClaudeLoopChannelTests: XCTestCase {
         let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
         let foreignPath = directory + "/events.sock"
         let value = "synthetic foreign content"
-        XCTAssertTrue(FileManager.default.createFile(atPath: foreignPath, contents: Data(value.utf8)))
+        try createFixtureFile(value, at: foreignPath)
+        XCTAssertEqual(try String(contentsOfFile: foreignPath, encoding: .utf8), value)
         defer {
             if (try? String(contentsOfFile: foreignPath, encoding: .utf8)) == value { _ = foreignPath.withCString { unlink($0) } }
         }
@@ -121,7 +122,8 @@ final class ClaudeLoopChannelTests: XCTestCase {
         let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
         let target = directory + "/sentinel"
         let socketPath = directory + "/events.sock"
-        XCTAssertTrue(FileManager.default.createFile(atPath: target, contents: Data("keep".utf8)))
+        try createFixtureFile("keep", at: target)
+        XCTAssertEqual(try String(contentsOfFile: target, encoding: .utf8), "keep")
         try FileManager.default.createSymbolicLink(atPath: socketPath, withDestinationPath: target)
         defer {
             _ = socketPath.withCString { unlink($0) }
@@ -150,7 +152,8 @@ final class ClaudeLoopChannelTests: XCTestCase {
         let directory = try ClaudeLoopSocket.directory(profile: profile, create: true)
         let target = directory + "/sentinel"
         let lock = directory + "/owner.lock"
-        XCTAssertTrue(FileManager.default.createFile(atPath: target, contents: Data("keep".utf8)))
+        try createFixtureFile("keep", at: target)
+        XCTAssertEqual(try String(contentsOfFile: target, encoding: .utf8), "keep")
         try FileManager.default.createSymbolicLink(atPath: lock, withDestinationPath: target)
         defer {
             _ = lock.withCString { unlink($0) }
@@ -245,6 +248,18 @@ final class ClaudeLoopChannelTests: XCTestCase {
         for secret in ["synthetic secret command", "/synthetic/private", "synthetic secret output"] {
             XCTAssertFalse(persisted.contains(secret))
         }
+    }
+
+    private func createFixtureFile(_ contents: String, at path: String) throws {
+        let descriptor = path.withCString {
+            open($0, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
+        }
+        guard descriptor >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno), userInfo: [NSFilePathErrorKey: path])
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        try handle.write(contentsOf: Data(contents.utf8))
     }
 
     private func awaitEvent(_ channel: ClaudeLoopChannel) throws -> ClaudeLoopEvent {
