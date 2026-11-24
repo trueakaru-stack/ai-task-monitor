@@ -912,6 +912,8 @@ $script:translations=@{
  'Журнал недоступен'='Journal unavailable'
  'Журнал очищен, но недоступен'='Journal was cleared but is unavailable'
  'Не удалось обновить журнал'='Could not update the journal'
+ 'Журнал может быть неполным'='The journal may be incomplete'
+ 'Результат очистки журнала не подтверждён'='Journal clearing could not be confirmed'
  'Не удалось сохранить настройки журнала'='Could not save journal settings'
  'Не удалось применить очистку журнала'='Could not apply journal cleanup'
  'Не удалось очистить журнал'='Could not clear the journal'
@@ -4033,8 +4035,11 @@ function Refresh-Diagnostics($tasks) {
   try{
    Get-DiagnosticClientUpdate $client $observations $script:sourceErrors
    $script:diagnosticRuntime.LoopStates=$client.Warnings
-   $script:diagnosticError=if($client.Error){"Не удалось обновить журнал"}else{""}
-   if($client.LastClearCompleted){
+   $script:diagnosticError=if($client.Error){"Не удалось обновить журнал"}elseif($client.Gap){"Журнал может быть неполным"}else{""}
+   if($client.LastClearUncertain){
+    $script:journalUiError="Результат очистки журнала не подтверждён";$script:journalFingerprint=""
+    if($script:showingSettings){Update-JournalSettings}
+   }elseif($client.LastClearCompleted){
     $script:journalUiError=if($client.Error){"Журнал очищен, но недоступен"}else{""};$script:journalFingerprint=""
     if($script:showingSettings){Update-JournalSettings}
    }elseif($client.Error -and $client.PendingClear){
@@ -4057,8 +4062,14 @@ function Start-DiagnosticClient {
  try{
   if(-not ('AITaskMonitor.LocalReadOwner.Owner' -as [type])){Add-Type -Path (Join-Path $PSScriptRoot 'LocalReadOwner.cs') -ErrorAction Stop}
   $config=[string[]]@('AITM-DIAGNOSTIC-1',[IO.Path]::GetFullPath($codexHome),[IO.Path]::GetFullPath($env:USERPROFILE),[IO.Path]::GetFullPath($dataDirectory),[IO.Path]::GetFullPath($script:diagnosticDirectory),$script:monitorStartedUtc.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture))
-  $owner=[AITaskMonitor.LocalReadOwner.Owner]::new((Join-Path $PSScriptRoot 'DiagnosticWorker.ps1'),$config)
-  $script:diagnosticClient=New-DiagnosticClient $owner
+  $workerPath=Join-Path $PSScriptRoot 'DiagnosticWorker.ps1'
+  $owner=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$config)
+  $ownerFactory={
+   $nextConfig=[string[]]$config.Clone()
+   $nextConfig[5]=[DateTimeOffset]::UtcNow.ToString('o',[Globalization.CultureInfo]::InvariantCulture)
+   return [AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$nextConfig)
+  }.GetNewClosure()
+  $script:diagnosticClient=New-DiagnosticClient $owner $ownerFactory
  }catch{$script:diagnosticClient=$null;$script:diagnosticError="Не удалось обновить журнал"}
 }
 

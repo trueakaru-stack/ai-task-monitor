@@ -59,9 +59,11 @@ function Update-DiagnosticRuntime {
   [AllowEmptyCollection()][object[]]$Tasks=@(),
   [AllowEmptyCollection()][string[]]$Unavailable=@(),
   [Parameter(Mandatory=$true)][DateTimeOffset]$Now,
+  [Nullable[DateTimeOffset]]$ObservationTime=$null,
   [Parameter(Mandatory=$true)][scriptblock]$SessionResolver,
   [Parameter(Mandatory=$true)][scriptblock]$StateResolver
  )
+ $observed=if($null -ne $ObservationTime){[DateTimeOffset]$ObservationTime}else{$Now}
  $limit=[long]$Runtime.Settings.MaximumMB*1000000
  if($Now -ge $Runtime.NextCleanup){
   Remove-ExpiredDiagnosticEvents -Directory $Runtime.Directory -Now $Now -RetentionDays $Runtime.Settings.RetentionDays -MaximumBytes $limit -UseStoredPolicy
@@ -84,7 +86,7 @@ function Update-DiagnosticRuntime {
   $previous=if($Runtime.TaskStates.ContainsKey($identity)){$Runtime.TaskStates[$identity]}else{$null}
   if($null -eq $previous -or $previous.State -ne $state){
    $type=if($state -eq "active"){"task_observed"}else{"task_unconfirmed"}
-   $events.Add((New-DiagnosticRuntimeEvent $Runtime $provider $taskKey $type $Now))
+   $events.Add((New-DiagnosticRuntimeEvent $Runtime $provider $taskKey $type $observed))
   }
   if($provider -eq "codex"){
    $loop=$null
@@ -112,7 +114,7 @@ function Update-DiagnosticRuntime {
   }
   $state=if($Unavailable -contains "Codex"){"unknown"}else{[string]((& $StateResolver $previous.Id).State)}
   if($state -eq "completed"){$type="task_completed"}elseif($state -eq "interrupted"){$type="task_interrupted"}elseif($previous.State -eq "active"){$type="task_unconfirmed"}else{continue}
-  $events.Add((New-DiagnosticRuntimeEvent $Runtime "codex" $previous.TaskKey $type $Now))
+  $events.Add((New-DiagnosticRuntimeEvent $Runtime "codex" $previous.TaskKey $type $observed))
  }
  $newSources=@{}
  foreach($entry in @(@("codex","Codex"),@("claude","Claude Code"))){
@@ -122,7 +124,7 @@ function Update-DiagnosticRuntime {
   if($isUnavailable -ne $wasUnavailable){
    $sourceKey=Get-DiagnosticTaskKey -Provider $provider -TaskId "source" -Key $Runtime.Key
    $type=if($isUnavailable){"source_unavailable"}else{"source_recovered"}
-   $events.Add((New-DiagnosticRuntimeEvent $Runtime $provider $sourceKey $type $Now))
+   $events.Add((New-DiagnosticRuntimeEvent $Runtime $provider $sourceKey $type $observed))
   }
  }
  $batch=New-Object 'Collections.Generic.List[object]'

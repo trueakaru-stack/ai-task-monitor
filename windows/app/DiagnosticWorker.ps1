@@ -43,10 +43,13 @@ try{
   $request=@($message.Request)
   if($request.Count -lt 1 -or $request.Count -gt 32 -or [string]$request[0] -cne 'poll'){throw 'Unsupported diagnostic request.'}
   $tasks=New-Object 'Collections.Generic.List[object]';$unavailable=New-Object 'Collections.Generic.List[string]'
-  $dismiss=New-Object 'Collections.Generic.List[object]';$clearId=''
+  $dismiss=New-Object 'Collections.Generic.List[object]';$clearId='';$observationTime=[DateTimeOffset]::UtcNow;$observedProvided=$false
   for($index=1;$index -lt $request.Count;$index++){
    $part=[string]$request[$index]
-   if($part.StartsWith('clear:',[StringComparison]::Ordinal)){
+   if($part.StartsWith('observed:',[StringComparison]::Ordinal)){
+    if($observedProvided -or -not [DateTimeOffset]::TryParseExact($part.Substring(9),'o',[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind,[ref]$observationTime)){throw 'Invalid observation time.'}
+    $observedProvided=$true
+   }elseif($part.StartsWith('clear:',[StringComparison]::Ordinal)){
     $clearId=$part.Substring(6)
     if($clearId -cnotmatch '^[a-f0-9]{32}$'){throw 'Invalid clear operation.'}
    }elseif($part.StartsWith('unavailable:',[StringComparison]::Ordinal)){
@@ -84,6 +87,7 @@ try{
    $settings=Get-DiagnosticSettings -Directory $diagnosticDirectory
    if($settings.RetentionDays -ne $runtime.Settings.RetentionDays -or $settings.MaximumMB -ne $runtime.Settings.MaximumMB){$runtime.NextCleanup=[DateTimeOffset]::MinValue}
    $runtime.Settings=$settings
+   if($observationTime -lt $runtime.Since){$observationTime=$runtime.Since}
    foreach($entry in $dismiss){
     $key='dismiss:'+ [string]$entry.Operation
     if(-not $seen.Contains($key)){
@@ -97,7 +101,7 @@ try{
    $phase='update'
    $resolver={param($id) return (Session-File $id)}
    $stateResolver={param($id) return (Thread-State $id)}
-   Update-DiagnosticRuntime -Runtime $runtime -Tasks $tasks.ToArray() -Unavailable $unavailable.ToArray() -Now ([DateTimeOffset]::UtcNow) -SessionResolver $resolver -StateResolver $stateResolver
+   Update-DiagnosticRuntime -Runtime $runtime -Tasks $tasks.ToArray() -Unavailable $unavailable.ToArray() -Now ([DateTimeOffset]::UtcNow) -ObservationTime $observationTime -SessionResolver $resolver -StateResolver $stateResolver
   }catch{$failed=$true;$failureStage=$phase;$failureKind=$_.Exception.GetBaseException().GetType().Name}
   $warnings=New-Object 'Collections.Generic.List[object]';$present=@{}
   if(-not $failed){
