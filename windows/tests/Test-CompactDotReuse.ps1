@@ -19,7 +19,10 @@ $script:palette=[PSCustomObject]@{Scroll='#888888'}
 $script:accentHex='#0066CC';$script:resolvedLanguage='ru';$script:compactTaskId='first';$script:renderCount=0
 function Tr([string]$value){return $value}
 function Brush([string]$value){return [Windows.Media.BrushConverter]::new().ConvertFromString($value)}
-function Localized-TaskTitle($task){return [string]$task.Title}
+function Localized-TaskTitle($task,[switch]$BaseOnly){
+    if($BaseOnly){return [string]$task.Title}
+    return ([string]$task.Title+' (3 agents)')
+}
 function Render-CompactTasks($tasks){$script:renderCount++;Sync-CompactDots $tasks}
 $tasks=@([PSCustomObject]@{Id='first';Title='First'},[PSCustomObject]@{Id='second';Title='Second'})
 $script:lastAllTasks=$tasks
@@ -30,7 +33,7 @@ $tasks[1].Title='Renamed second'
 Sync-CompactDots $tasks
 if(-not [object]::ReferenceEquals($first,$compactDotsPanel.Children[0]) -or
    -not [object]::ReferenceEquals($second,$compactDotsPanel.Children[1])){throw 'A refresh replaced unchanged task buttons.'}
-if([Windows.Automation.AutomationProperties]::GetName($second) -cne 'Показать задачу: Renamed second'){throw 'The accessible button name was not refreshed.'}
+if([Windows.Automation.AutomationProperties]::GetName($second) -cne 'Показать задачу: Renamed second'){throw 'The accessible button name was not refreshed or exposed agent details.'}
 Sync-CompactDots @($tasks[1],$tasks[0])
 if(-not [object]::ReferenceEquals($first,$compactDotsPanel.Children[0]) -or
    -not [object]::ReferenceEquals($second,$compactDotsPanel.Children[1])){throw 'Reordering unchanged tasks replaced or moved their buttons.'}
