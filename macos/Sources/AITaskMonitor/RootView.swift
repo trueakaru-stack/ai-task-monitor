@@ -178,7 +178,7 @@ struct RootView: View {
                         if task.codexAgentCountAtTitle, let count = task.codexAgentCountLabel(includingStatus: false) {
                             HStack(alignment: .firstTextBaseline, spacing: 0) {
                                 TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
-                                    .frame(minHeight: 18, alignment: .leading)
+                                    .frame(maxWidth: measuredTaskLabelWidth(task.title, font: .systemFont(ofSize: 16, weight: .semibold)), minHeight: 18, alignment: .leading)
                                 Text(" " + count).font(.system(size: 16, weight: .semibold)).lineLimit(1).fixedSize()
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -256,8 +256,7 @@ struct RootView: View {
         // The compact window and its horizontal insets are fixed above; leave
         // part of the same row for the task title when the label is very long.
         let available: CGFloat = 372 - 2 * 18 - 10
-        let measured = (text as NSString).size(withAttributes: [.font: font]).width
-        return min(ceil(measured) + 2, available * 0.60)
+        return min(measuredTaskLabelWidth(text, font: font), available * 0.60)
     }
 
     private var compactHeight: CGFloat {

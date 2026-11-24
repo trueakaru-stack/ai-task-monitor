@@ -1,6 +1,10 @@
 import AppKit
 import SwiftUI
 
+func measuredTaskLabelWidth(_ text: String, font: NSFont) -> CGFloat {
+    ceil((text as NSString).size(withAttributes: [.font: font]).width) + 2
+}
+
 func cursorHintOrigin(pointer: NSPoint, size: NSSize, workArea: NSRect) -> NSPoint {
     let gap: CGFloat = 4
     let maximumX = max(workArea.minX, workArea.maxX - size.width)

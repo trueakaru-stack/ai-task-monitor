@@ -29,7 +29,7 @@ struct TaskCardView: View {
                 if task.codexAgentCountAtTitle {
                     HStack(alignment: .firstTextBaseline, spacing: 0) {
                         TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
-                            .frame(minHeight: 20, alignment: .leading)
+                            .frame(maxWidth: measuredTaskLabelWidth(task.title, font: .systemFont(ofSize: 16, weight: .semibold)), minHeight: 20, alignment: .leading)
                         CodexAgentDisclosureButton(task: task, compact: false)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -82,7 +82,7 @@ struct TaskCardView: View {
                                    task.codexAgentCountLabel(includingStatus: false) != nil {
                                     HStack(spacing: 0) {
                                         TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: .labelColor)
-                                            .frame(minHeight: 16, alignment: .leading)
+                                            .frame(maxWidth: measuredTaskLabelWidth(step.title, font: .systemFont(ofSize: 12)), minHeight: 16, alignment: .leading)
                                         CodexAgentDisclosureButton(task: task, compact: false, fontSize: 12)
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
