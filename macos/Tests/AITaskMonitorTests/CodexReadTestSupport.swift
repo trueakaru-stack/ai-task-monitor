@@ -43,6 +43,29 @@ func codexSyntheticDirectory(prefix: String) throws -> URL {
     return root
 }
 
+// Foundation's atomic writer may place its staging file outside the fixture
+// sandbox. Keep staging and rename in the destination's verified directory.
+func codexAtomicFixtureWrite(_ data: Data, to destination: URL) throws {
+    let directory = destination.deletingLastPathComponent()
+    let staging = directory.appendingPathComponent(".aitm-stage-" + UUID().uuidString)
+    let descriptor = staging.path.withCString {
+        open($0, O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, mode_t(0o600))
+    }
+    guard descriptor >= 0 else { throw CocoaError(.fileWriteUnknown) }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    defer { try? handle.close(); _ = staging.path.withCString { unlink($0) } }
+    try handle.write(contentsOf: data)
+    try handle.close()
+    let result = staging.path.withCString { from in destination.path.withCString { to in rename(from, to) } }
+    guard result == 0 else { throw CocoaError(.fileWriteUnknown) }
+}
+
+extension String {
+    func writeSyntheticAtomically(to destination: URL) throws {
+        try codexAtomicFixtureWrite(Data(utf8), to: destination)
+    }
+}
+
 @MainActor
 func waitForCodexRead(_ store: TaskStore, timeout: TimeInterval = 5,
                       file: StaticString = #filePath, line: UInt = #line) {

@@ -253,4 +253,30 @@ final class CompactTaskSelectionTests: XCTestCase {
         XCTAssertTrue(CodexTaskGrouping.compactSnapshotChanged([first, duplicate], [updated, duplicate], confirmedChildren: [:]))
         XCTAssertFalse(CodexTaskGrouping.compactSnapshotChanged([first, duplicate], [first, duplicate], confirmedChildren: [:]))
     }
+
+    func testManualRefreshMatchesChangedTurnOnlyWithUniqueFileIdentity() {
+        var selected = task("thread")
+        selected.lastActivityFileIdentity = CodexFileIdentity(device: 1, inode: 10)
+        var next = selected
+        next.startKey = "turn-next"
+        let neighbor = task("neighbor")
+        XCTAssertEqual(CodexTaskGrouping.manualRefreshMatch([neighbor, next], previous: [selected], selected: selected), 1)
+
+        var oldDuplicate = selected
+        oldDuplicate.startKey = "another-old-turn"
+        XCTAssertNil(CodexTaskGrouping.manualRefreshMatch([neighbor, next], previous: [selected, oldDuplicate], selected: selected))
+        XCTAssertNil(CodexTaskGrouping.manualRefreshMatch([selected], previous: [selected, oldDuplicate], selected: selected))
+        var newDuplicate = next
+        newDuplicate.startKey = "another-new-turn"
+        XCTAssertNil(CodexTaskGrouping.manualRefreshMatch([next, newDuplicate], previous: [selected], selected: selected))
+        XCTAssertNil(CodexTaskGrouping.manualRefreshMatch([selected, newDuplicate], previous: [selected], selected: selected))
+        var unknown = selected
+        unknown.lastActivityFileIdentity = nil
+        var unknownNext = unknown
+        unknownNext.startKey = "turn-next"
+        XCTAssertNil(CodexTaskGrouping.manualRefreshMatch([unknownNext], previous: [unknown], selected: unknown))
+        var otherFile = next
+        otherFile.lastActivityFileIdentity = CodexFileIdentity(device: 1, inode: 11)
+        XCTAssertNil(CodexTaskGrouping.manualRefreshMatch([otherFile], previous: [selected], selected: selected))
+    }
 }

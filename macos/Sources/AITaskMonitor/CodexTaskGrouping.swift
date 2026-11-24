@@ -44,6 +44,31 @@ enum CodexTaskGrouping {
         return visible.first
     }
 
+    // Preserve a click made during a source read. A new turn can change its
+    // selection key, so a unique verified file may identify the same chat.
+    // Duplicates and missing file identity are never resolved by guessing.
+    static func manualRefreshMatch(_ current: [MonitoredTask], previous: [MonitoredTask], selected: MonitoredTask) -> Int? {
+        let oldExact = previous.indices.filter { previous[$0].compactSelectionKey == selected.compactSelectionKey }
+        let exact = current.indices.filter { current[$0].compactSelectionKey == selected.compactSelectionKey }
+        guard oldExact.count == 1 else { return nil }
+        guard selected.provider == .codex, let file = selected.lastActivityFileIdentity else {
+            let oldSource = previous.filter { $0.provider == selected.provider && $0.id == selected.id }
+            let source = current.filter { $0.provider == selected.provider && $0.id == selected.id }
+            return oldSource.count == 1 && source.count == 1 && exact.count == 1 ? exact[0] : nil
+        }
+        let oldSameFile = previous.indices.filter {
+            previous[$0].provider == selected.provider && previous[$0].id == selected.id &&
+                previous[$0].lastActivityFileIdentity == file
+        }
+        let sameFile = current.indices.filter {
+            current[$0].provider == selected.provider && current[$0].id == selected.id &&
+                current[$0].lastActivityFileIdentity == file
+        }
+        guard oldSameFile.count == 1, sameFile.count == 1 else { return nil }
+        guard exact.isEmpty || (exact.count == 1 && exact[0] == sameFile[0]) else { return nil }
+        return sameFile[0]
+    }
+
     static func compactSnapshotChanged(_ previous: [MonitoredTask], _ current: [MonitoredTask],
                                        confirmedChildren: [String: CodexFileIdentity]) -> Bool {
         let old = compactVisibleIndices(previous, confirmedChildren: confirmedChildren).prefix(3).map { previous[$0] }

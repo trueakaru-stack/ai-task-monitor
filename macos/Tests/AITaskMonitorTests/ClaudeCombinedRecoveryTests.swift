@@ -96,7 +96,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
             let replacement = try encode([prompt("case", time: time.addingTimeInterval(0.4)),
                                           created("case", title: "New title", time: time.addingTimeInterval(0.5)),
                                           completed("case", time: time.addingTimeInterval(0.6))])
-            try replacement.write(to: file, options: .atomic)
+            try codexAtomicFixtureWrite(replacement, to: file)
             store.refresh()
             let task = try XCTUnwrap(store.tasks.first(where: { $0.id == "claude:case" }))
             XCTAssertEqual(task.steps.map(\.title), ["Old title", "New title"], "replaceDirectly=\(replaceDirectly)")

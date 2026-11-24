@@ -1413,6 +1413,7 @@ final class TaskStore: ObservableObject {
                                         selectableKeys: selectable)
         combined = focus.tasks
         var chosen = focus.selectedID
+        var manualRefreshKey: CompactTaskSelectionKey?
         if let mappedSelection, mappedSelection != selectedID,
            let position = combined.firstIndex(where: { $0.id == mappedSelection }) {
             // The compact carousel only exposes its first three cards. Carry
@@ -1425,21 +1426,28 @@ final class TaskStore: ObservableObject {
             chosen = mappedSelection
         }
         if let codexRead, codexRead.selectionGeneration != compactManualSelectionGeneration,
-           let selectedTask {
-            let matches = combined.indices.filter { combined[$0].compactSelectionKey == selectedTask.compactSelectionKey }
-            if matches.count == 1, let position = matches.first {
+           let selectedTask,
+           let position = CodexTaskGrouping.manualRefreshMatch(combined, previous: previousTasks, selected: selectedTask) {
                 let visible = CodexTaskGrouping.compactVisibleIndices(combined, confirmedChildren: confirmedCodexChildrenForCompact)
                 if let compactPosition = visible.firstIndex(of: position) {
                     taskFocus.prioritize(selectedTask.id)
+                    manualRefreshKey = combined[position].compactSelectionKey
                     if compactPosition >= 3 {
                         let manuallySelected = combined.remove(at: position)
                         combined.insert(manuallySelected, at: 0)
                     }
                     chosen = selectedTask.id
                 }
-            }
         }
-        let selectedSourceIndex = CodexTaskGrouping.compactSelectionSourceIndex(combined,
+        let manualSourceIndex: Int?
+        if let key = manualRefreshKey {
+            let matches = CodexTaskGrouping.compactVisibleIndices(combined, confirmedChildren: confirmedCodexChildrenForCompact)
+                .prefix(3).filter { combined[$0].compactSelectionKey == key }
+            manualSourceIndex = matches.count == 1 ? matches.first : nil
+        } else {
+            manualSourceIndex = nil
+        }
+        let selectedSourceIndex = manualSourceIndex ?? CodexTaskGrouping.compactSelectionSourceIndex(combined,
             confirmedChildren: confirmedCodexChildrenForCompact, chosenID: chosen,
             previous: selectedTask, previousVisibleIndex: previousCompactIndex)
         tasks = combined

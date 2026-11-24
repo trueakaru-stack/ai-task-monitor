@@ -103,7 +103,7 @@ final class CodexBackgroundReadTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let stamp = formatter.string(from: Date().addingTimeInterval(1))
+        let stamp = formatter.string(from: Date().addingTimeInterval(30))
         var index = Data()
         for (id, title) in rows {
             index.append(try JSONSerialization.data(withJSONObject: ["id": id, "thread_name": title], options: [.sortedKeys]))
@@ -119,7 +119,7 @@ final class CodexBackgroundReadTests: XCTestCase {
             }
             let rollout = directory.appendingPathComponent("rollout-2026-11-16T15-31-00-\(id).jsonl")
             try write(data, to: rollout)
-            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(5)], ofItemAtPath: rollout.path)
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(35)], ofItemAtPath: rollout.path)
         }
         try write(index, to: root.appendingPathComponent("session_index.jsonl"))
     }
@@ -132,7 +132,7 @@ final class CodexBackgroundReadTests: XCTestCase {
         defer { try? handle.close() }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let event: [String: Any] = ["timestamp": formatter.string(from: Date().addingTimeInterval(2)),
+        let event: [String: Any] = ["timestamp": formatter.string(from: Date().addingTimeInterval(31)),
                                     "type": "event_msg", "payload": ["type": kind, "turn_id": turn]]
         var data = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
         data.append(0x0a)
@@ -242,6 +242,41 @@ final class CodexBackgroundReadTests: XCTestCase {
         waitForRead(store)
         XCTAssertTrue(store.tasks.contains { $0.id == fourth })
         XCTAssertEqual(store.tasks[store.compactIndex].id, fourth, "A subsequently started task can still take focus")
+    }
+
+    @MainActor
+    func testManualSelectionSurvivesNewTurnAndNewNeighborDuringRead() throws {
+        let root = try root()
+        let first = "019127f4-35ae-7c73-9e72-a10123456781"
+        let selected = "019127f4-35ae-7c73-9e72-a10123456782"
+        let neighbor = "019127f4-35ae-7c73-9e72-a10123456783"
+        try writeTasks([(first, "First"), (selected, "Selected")], root: root)
+        let gate = OneReadGate()
+        defer { gate.release.signal() }
+        let reader = CodexTaskReader(codexHome: root, afterSnapshotForTests: { snapshot in
+            if snapshot.tasks.contains(where: { $0.id == neighbor }) { gate.waitOnce() }
+        })
+        let store = TaskStore(codexReader: reader,
+            claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("no-claude")), previewTasks: [])
+        store.refresh()
+        waitForRead(store)
+        let old = try XCTUnwrap(store.tasks.first { $0.id == selected })
+        let oldFile = try XCTUnwrap(old.lastActivityFileIdentity)
+        try writeTasks([(first, "First"), (selected, "Selected"), (neighbor, "New neighbor")], root: root)
+        try appendEvent("task_started", turn: "selected-next", id: selected, root: root)
+        try appendEvent("task_started", turn: "neighbor-next", id: neighbor, root: root)
+        store.refresh()
+        XCTAssertEqual(gate.entered.wait(timeout: .now() + 3), .success)
+        let dot = try XCTUnwrap(store.compactDots.first { $0.task.id == selected })
+        store.selectCompactTask(dot: dot)
+        XCTAssertEqual(store.tasks[store.compactIndex].id, selected)
+        gate.release.signal()
+        waitForRead(store)
+        XCTAssertTrue(store.tasks.contains { $0.id == neighbor && $0.isActive })
+        let actual = store.tasks[store.compactIndex]
+        XCTAssertEqual(actual.id, selected, "A newer neighboring task must not override the in-flight click")
+        XCTAssertEqual(actual.lastActivityFileIdentity, oldFile)
+        XCTAssertEqual(actual.startKey, "turn:selected-next")
     }
 
     @MainActor

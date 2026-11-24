@@ -13,7 +13,7 @@ final class CodexSourceStalePlanTests: XCTestCase {
         let sessions = codex.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         let index = codex.appendingPathComponent("session_index.jsonl")
-        try Data(#"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic"}"#.utf8).write(to: index, options: .atomic)
+        try Data(#"{"id":"019127f4-35ae-7c73-9e72-a10123456001","thread_name":"Synthetic"}"#.utf8).write(to: index)
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let timestamp = formatter.string(from: Date().addingTimeInterval(2))
