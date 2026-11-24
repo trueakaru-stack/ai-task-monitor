@@ -51,6 +51,13 @@ enum CodexTaskGrouping {
         let oldExact = previous.indices.filter { previous[$0].compactSelectionKey == selected.compactSelectionKey }
         let exact = current.indices.filter { current[$0].compactSelectionKey == selected.compactSelectionKey }
         guard oldExact.count == 1 else { return nil }
+        if selected.provider == .claude {
+            // A Claude card represents the same unique session even when a
+            // newer prompt changes its turn key during a source read.
+            let oldSession = previous.indices.filter { previous[$0].provider == .claude && previous[$0].id == selected.id }
+            let session = current.indices.filter { current[$0].provider == .claude && current[$0].id == selected.id }
+            return oldSession.count == 1 && session.count == 1 ? session[0] : nil
+        }
         guard selected.provider == .codex, let file = selected.lastActivityFileIdentity else {
             let oldSource = previous.filter { $0.provider == selected.provider && $0.id == selected.id }
             let source = current.filter { $0.provider == selected.provider && $0.id == selected.id }

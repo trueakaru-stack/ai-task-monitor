@@ -244,6 +244,7 @@ final class TaskStore: ObservableObject {
     private var codexAgentRetention = CodexAgentRetention()
     private var codexAgentGroups: [CodexAgentRetention.Group] = []
     private var codexAgentRootBindings: [String: UUID] = [:]
+    private var codexAgentFallbackRoots: [String: MonitoredTask] = [:]
     private var codexAgentCardBindings: [String: CodexRetainedAgentCard] = [:] {
         didSet { if oldValue != codexAgentCardBindings { compactSnapshotGeneration &+= 1 } }
     }
@@ -259,6 +260,7 @@ final class TaskStore: ObservableObject {
     private var claudeReadGeneration: UInt64 = 0
     private var claudeHasCompletedRead = false
     private var claudeSourceUnavailable = false
+    private var claudeScopedLossPresent = false
     private let diagnosticWorker: DiagnosticWorker?
     private let claudeRetentionWorker: ClaudeRetentionWorker?
     private let externalProvidersEnabled: Bool
@@ -337,9 +339,11 @@ final class TaskStore: ObservableObject {
     private var timer: Timer?
 
     private func codexGroupKey(_ id: String) -> String {
-        let prefix = "codex-group:"
         let lower = id.lowercased()
-        return lower.hasPrefix(prefix) ? String(lower.dropFirst(prefix.count)) : lower
+        for prefix in ["codex-group:", "codex-retained:"] where lower.hasPrefix(prefix) {
+            return String(lower.dropFirst(prefix.count))
+        }
+        return lower
     }
 
     func isCodexGroupExpanded(_ id: String) -> Bool {
@@ -1067,8 +1071,8 @@ final class TaskStore: ObservableObject {
 
     private func sourceUnavailableMessage(includeCodexPartial: Bool) -> String {
         var messages: [String] = []
-        let partial = unavailableSources.filter { partialExternalSources.contains($0) }
-        let absent = unavailableSources.filter { !partialExternalSources.contains($0) }
+        let partial = unavailableSources.filter { partialExternalSources.contains($0) || ($0 == .claude && claudeScopedLossPresent) }
+        let absent = unavailableSources.filter { !partial.contains($0) }
         if !absent.isEmpty {
             messages.append(tr("Нет данных от ", "No data from ") + absent.map(\.displayName).joined(separator: ", "))
         }
@@ -1300,6 +1304,7 @@ final class TaskStore: ObservableObject {
                 codexAgentGroups = []
                 codexAgentRootBindings.removeAll()
                 codexAgentCardBindings.removeAll()
+                codexAgentFallbackRoots.removeAll()
                 codexParentEvidence.removeAll()
                 codexParentConflicts.removeAll()
                 codexParentTitles.removeAll()
@@ -1393,8 +1398,10 @@ final class TaskStore: ObservableObject {
                 previousClaude = []
                 claudeRetainedTitlesOverflow = false
                 claudeSourceUnavailable = false
+                claudeScopedLossPresent = false
             case .noEvents:
                 claudeSourceUnavailable = response.connection != .connected
+                claudeScopedLossPresent = false
                 if !previousClaude.isEmpty {
                     previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
                 }
@@ -1409,7 +1416,8 @@ final class TaskStore: ObservableObject {
                     response.phasePoisoned || snapshot.sourceUncertain ||
                     mappedAfter.count != afterPhases.count || lifecycleUnknownAll
                 let affected = response.changedSessionIDs.union(response.phaseUncertainSessions)
-                    .union(snapshot.titleHistoryOverflowIDs).union(mappedAfter).union(mappedLifecycle)
+                    .union(snapshot.titleHistoryOverflowIDs).union(snapshot.hookLossSessionIDs)
+                    .union(mappedAfter).union(mappedLifecycle)
                 var current = Self.clearClaudePlanConfirmations(snapshot.tasks, affected: uncertainAll ? nil : affected)
                 current = current.map { task in
                     guard lifecycleUnknownAll || mappedLifecycle.contains(task.id) else { return task }
@@ -1436,12 +1444,14 @@ final class TaskStore: ObservableObject {
                 previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: current,
                                                            terminalIDs: ended.union(neutral))
                 claudeSourceUnavailable = response.connection != .connected || snapshot.sourceUncertain ||
-                    !snapshot.titleHistoryOverflowIDs.isEmpty || claudeRetainedTitlesOverflow
+                    snapshot.hookLossPresent || !snapshot.titleHistoryOverflowIDs.isEmpty || claudeRetainedTitlesOverflow
+                claudeScopedLossPresent = response.connection == .connected && snapshot.hookLossPresent && !snapshot.sourceUncertain
                 if response.connection != .connected {
                     previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
                 }
             case .failed, .changed:
                 claudeSourceUnavailable = true
+                claudeScopedLossPresent = false
                 previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
             }
         }
@@ -1500,10 +1510,21 @@ final class TaskStore: ObservableObject {
         let isLocalCodex: (MonitoredTask) -> Bool = { $0.provider == .codex && UUID(uuidString: $0.id) != nil }
         let projection = CodexTaskGrouping.makeRetainedProjection(combined.filter(isLocalCodex),
                                                                   groups: codexAgentGroups, titles: codexParentTitles,
-                                                                  retainedCards: codexAgentCardBindings)
+                                                                  retainedCards: codexAgentCardBindings,
+                                                                  fallbackRoots: codexAgentFallbackRoots)
         combined = projection.tasks + combined.filter { !isLocalCodex($0) }
         let selectedID = selectedTask?.id
         var mappedSelection = selectedID.flatMap { projection.displayIDBySourceID[$0.lowercased()] }
+        if let selectedTask, selectedTask.provider == .codex,
+           let old = codexAgentFallbackRoots[selectedTask.id.lowercased()],
+           selectedTask.lastActivityFileIdentity == old.lastActivityFileIdentity,
+           selectedTask.startKey == old.startKey {
+            let fallback = "codex-retained:" + selectedTask.id.lowercased()
+            if !previousTasks.contains(where: { $0.id == fallback }) &&
+                combined.contains(where: { $0.id == fallback }) {
+                mappedSelection = fallback
+            }
+        }
         if mappedSelection == nil, let selectedID, selectedID.hasPrefix("codex-group:") {
             let root = String(selectedID.dropFirst("codex-group:".count))
             mappedSelection = combined.first(where: { $0.provider == .codex && $0.id.lowercased() == root })?.id
@@ -1584,6 +1605,13 @@ final class TaskStore: ObservableObject {
             sourceUnavailable: sourceUnavailable,
             conflictedIDs: conflicts,
             retainedRootBindings: carried)
+        for group in retained.groups where group.canAttach {
+            guard let proof = snapshot?.verifiedAgentIdentities[group.rootID], proof == group.rootIdentity,
+                  let root = current[group.rootID], root.count == 1,
+                  root[0].lastActivityIdentityConfirmed == true,
+                  root[0].lastActivityFileIdentity == proof.file else { continue }
+            codexAgentFallbackRoots[group.rootID] = root[0]
+        }
         var agentCards: [String: CodexRetainedAgentCard] = [:]
         for group in retained.groups {
             for member in group.members {
@@ -1616,11 +1644,11 @@ final class TaskStore: ObservableObject {
         let currentTasksByID = Dictionary(grouping: snapshot.tasks, by: { $0.id.lowercased() })
         var confirmedChildren: [String: CodexFileIdentity] = [:]
         var conflictingFiles: Set<String> = []
-        for id in snapshot.subagentParents.keys {
+        for (id, identity) in snapshot.verifiedAgentIdentities where !identity.isRoot && identity.parentID != nil {
             let key = id.lowercased()
             guard !conflictingFiles.contains(key), let matches = currentTasksByID[key], matches.count == 1,
-                  let file = matches[0].lastActivityFileIdentity,
-                  let verified = snapshot.verifiedActivityFiles[id], file == verified else { continue }
+                  matches[0].lastActivityIdentityConfirmed == true,
+                  let file = matches[0].lastActivityFileIdentity, file == identity.file else { continue }
             if let previous = confirmedChildren[key], previous != file {
                 confirmedChildren.removeValue(forKey: key)
                 conflictingFiles.insert(key)

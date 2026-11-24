@@ -141,6 +141,17 @@ enum ClaudeLoopSocket {
 }
 
 enum ClaudeLoopClient {
+    // Last-resort notice when a hook cannot persist even an empty loss marker.
+    // The receiver already treats an invalid-length frame as a global gap.
+    static func signalGap(profile: URL = AppPaths.supportDirectory) {
+        guard let directory = try? ClaudeLoopSocket.directory(profile: profile, create: false),
+              let descriptor = ClaudeLoopSocket.connect(path: directory + "/events.sock") else { return }
+        defer { Darwin.close(descriptor) }
+        guard var key = ClaudeLoopSocket.read(descriptor, count: 32) else { return }
+        defer { key.resetBytes(in: 0..<key.count) }
+        _ = ClaudeLoopSocket.write(descriptor, data: Data([0, 0, 0, 0]))
+    }
+
     static func send(_ input: [String: Any], profile: URL = AppPaths.supportDirectory, record: Data? = nil) {
         let name = input.string("hook_event_name"), toolName = input.string("tool_name")
         let phase = ["PreToolUse", "PostToolUse", "PostToolUseFailure"].contains(name) &&

@@ -6,6 +6,41 @@ import XCTest
 final class CodexAgentReaderProofTests: XCTestCase {
     private let rootID = "10000000-0000-0000-0000-000000000001"
 
+    private final class MetadataGate {
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        private let lock = NSLock()
+        private var armed = false
+        private var blocked = false
+        func arm() { lock.lock(); armed = true; lock.unlock() }
+        func pause(_ id: String, target: String) {
+            lock.lock()
+            let shouldWait = armed && !blocked && id == target
+            if shouldWait { blocked = true }
+            lock.unlock()
+            guard shouldWait else { return }
+            entered.signal()
+            _ = release.wait(timeout: .now() + 10)
+        }
+    }
+
+    private final class Mutation {
+        private let lock = NSLock()
+        private var action: (() throws -> Void)?
+        private(set) var performed = false
+        private(set) var failure: Error?
+        func schedule(_ action: @escaping () throws -> Void) {
+            lock.lock(); self.action = action; lock.unlock()
+        }
+        func run() {
+            lock.lock(); let next = action; action = nil; lock.unlock()
+            guard let next else { return }
+            do { try next(); lock.lock(); performed = true; lock.unlock() }
+            catch { lock.lock(); performed = true; failure = error; lock.unlock() }
+        }
+        func result() -> (Bool, Error?) { lock.lock(); defer { lock.unlock() }; return (performed, failure) }
+    }
+
     private func childID(_ index: Int) -> String {
         String(format: "20000000-0000-0000-0000-%012d", index)
     }
@@ -150,6 +185,51 @@ final class CodexAgentReaderProofTests: XCTestCase {
         XCTAssertTrue(snapshot.agentIdentityPartial)
     }
 
+    @MainActor
+    func testChildRewrittenAsRootCannotBeHiddenByStaleCachedMetadata() throws {
+        let (root, ids, files) = try fixture(children: 1)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = try XCTUnwrap(files[ids[0]])
+        let gate = MetadataGate()
+        defer { gate.release.signal() }
+        let reader = CodexTaskReader(codexHome: root, beforeSubagentMetadataLoadForTests: { id in
+            gate.pause(id, target: ids[0])
+        })
+        _ = try awaitProof(reader, id: ids[0])
+        reader.waitForAmbiguousObservationForTests()
+        let before = try FileManager.default.attributesOfItem(atPath: file.path)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let header: [String: Any] = ["type": "session_meta", "payload":
+            ["id": ids[0], "source": "cli", "thread_source": "user", "agent_path": "/root"]]
+        let start: [String: Any] = ["timestamp": formatter.string(from: Date()), "type": "event_msg",
+                                    "payload": ["type": "task_started", "turn_id": "new-root"]]
+        let filler: [String: Any] = ["timestamp": formatter.string(from: Date()), "type": "event_msg",
+                                     "payload": ["type": "agent_reasoning", "text": String(repeating: "x", count: 2_048)]]
+        var data = Data()
+        for row in [header, start, filler] {
+            data.append(try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])); data.append(10)
+        }
+        let handle = try FileHandle(forUpdating: file)
+        try handle.truncate(atOffset: 0); try handle.seek(toOffset: 0)
+        try handle.write(contentsOf: data); try handle.close()
+        let after = try FileManager.default.attributesOfItem(atPath: file.path)
+        XCTAssertEqual(before[.systemFileNumber] as? NSNumber, after[.systemFileNumber] as? NSNumber)
+        XCTAssertGreaterThan((after[.size] as? NSNumber)?.intValue ?? 0, (before[.size] as? NSNumber)?.intValue ?? 0)
+        gate.arm()
+        let snapshot = try reader.readSnapshot(observedSince: Date().addingTimeInterval(-60),
+                                               previouslyObserved: Set([rootID] + ids))
+        XCTAssertEqual(gate.entered.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(snapshot.subagentParents[ids[0]], rootID, "The old cached link must be present in this interleaving")
+        XCTAssertNil(snapshot.verifiedAgentIdentities[ids[0]], "A stale link is not a fresh child proof")
+        let store = TaskStore(codexReader: reader, claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("unused")),
+                              previewTasks: snapshot.tasks)
+        store.testSetCompactSnapshot(snapshot)
+        XCTAssertTrue(store.compactTasks.contains { $0.id == ids[0] }, "The rewritten root must remain visible")
+        gate.release.signal()
+        reader.waitForAmbiguousObservationForTests()
+    }
+
     func testRewrittenTaskWithSameHeaderSizeAndMtimeCannotUseOldSnapshot() throws {
         let (root, ids, files) = try fixture(children: 1)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -254,5 +334,67 @@ final class CodexAgentReaderProofTests: XCTestCase {
         XCTAssertEqual(parent.codexAgents?.first?.isUnconfirmed, true)
         XCTAssertEqual(store.compactTasks.map(\.id), [rootID])
         XCTAssertFalse(store.tasks.contains { $0.id == ids[0] }, "The carried assistant remains inside its parent")
+    }
+
+    @MainActor
+    func testTaskStoreKeepsEarlierCountSeparateUntilRootProofReturns() throws {
+        let (root, ids, files) = try fixture(children: 1)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let mutation = Mutation()
+        let reader = CodexTaskReader(codexHome: root, afterAgentProofSelectionForTests: { mutation.run() })
+        let store = TaskStore(codexReader: reader,
+                              claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("no-claude")),
+                              previewTasks: [])
+        Thread.sleep(forTimeInterval: 0.02)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let start: [String: Any] = ["timestamp": formatter.string(from: Date().addingTimeInterval(1)), "type": "event_msg",
+                                    "payload": ["type": "task_started", "turn_id": "store-turn"]]
+        var startBytes = try JSONSerialization.data(withJSONObject: start, options: [.sortedKeys])
+        startBytes.append(10)
+        for file in files.values {
+            let handle = try FileHandle(forWritingTo: file)
+            try handle.seekToEnd(); try handle.write(contentsOf: startBytes); try handle.close()
+        }
+        var found = false
+        for _ in 0..<20 {
+            store.refresh(); waitForCodexRead(store); reader.waitForAmbiguousObservationForTests()
+            if store.tasks.first(where: { $0.id == rootID })?.codexAgentCount == 1 { found = true; break }
+        }
+        XCTAssertTrue(found)
+        guard found else { return }
+        let selected = try XCTUnwrap(store.compactDots.first { $0.task.id == rootID })
+        store.selectCompactTask(dot: selected)
+        let rootFile = try XCTUnwrap(files[rootID])
+        mutation.schedule {
+            let event: [String: Any] = ["timestamp": formatter.string(from: Date().addingTimeInterval(2)), "type": "event_msg",
+                                        "payload": ["type": "agent_reasoning", "text": "Synthetic new activity"]]
+            var bytes = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
+            bytes.append(10)
+            let handle = try FileHandle(forWritingTo: rootFile)
+            try handle.seekToEnd(); try handle.write(contentsOf: bytes); try handle.close()
+        }
+        store.refresh(); waitForCodexRead(store)
+        let result = mutation.result()
+        XCTAssertTrue(result.0)
+        XCTAssertNil(result.1)
+        let retainedID = "codex-retained:" + rootID
+        let retained = try XCTUnwrap(store.tasks.first { $0.id == retainedID })
+        XCTAssertTrue(retained.isUnconfirmed)
+        XCTAssertEqual(retained.codexAgentCount, 1)
+        XCTAssertEqual(retained.codexAgentCountUnconfirmed, true)
+        XCTAssertTrue(store.tasks.contains { $0.id == rootID })
+        XCTAssertEqual(store.tasks[store.compactIndex].id, retainedID)
+
+        reader.waitForAmbiguousObservationForTests()
+        var recovered = false
+        for _ in 0..<20 {
+            store.refresh(); waitForCodexRead(store); reader.waitForAmbiguousObservationForTests()
+            if store.tasks.first(where: { $0.id == rootID })?.codexAgentCount == 1 &&
+                !store.tasks.contains(where: { $0.id == retainedID }) { recovered = true; break }
+        }
+        XCTAssertTrue(recovered)
+        XCTAssertEqual(store.tasks[store.compactIndex].id, rootID)
+        XCTAssertFalse(store.tasks.contains { $0.id == ids[0] })
     }
 }

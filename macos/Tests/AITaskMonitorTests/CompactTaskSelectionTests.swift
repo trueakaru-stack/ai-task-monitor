@@ -11,6 +11,15 @@ final class CompactTaskSelectionTests: XCTestCase {
                       startedAt: Date(timeIntervalSince1970: start), startKey: "turn-\(id)")
     }
 
+    func testManualClaudeSelectionFollowsUniqueSessionAcrossNewTurn() {
+        let old = task("claude:session", provider: .claude)
+        var updated = old
+        updated.startKey = "another-turn"
+        let neighbor = task("claude:neighbor", provider: .claude)
+        XCTAssertEqual(CodexTaskGrouping.manualRefreshMatch([neighbor, updated], previous: [old], selected: old), 1)
+        XCTAssertNil(CodexTaskGrouping.manualRefreshMatch([updated, updated], previous: [old], selected: old))
+    }
+
     @MainActor
     func testCompactHidesVerifiedChildAndMapsVisibleSelection() {
         let root = "019127f4-35ae-7c73-9e72-a10123456789"
@@ -22,15 +31,21 @@ final class CompactTaskSelectionTests: XCTestCase {
         let derivedFile = CodexFileIdentity(device: 1, inode: 11)
         var childTask = task(child)
         childTask.lastActivityFileIdentity = childFile
+        childTask.lastActivityIdentityConfirmed = true
         var disputed = task(derived, title: "Parent (agent Curie)")
         disputed.usesDerivedCodexParentTitle = true
         disputed.lastActivityFileIdentity = derivedFile
+        disputed.lastActivityIdentityConfirmed = true
         let source = [childTask, task(root, title: "Parent"), disputed,
                       task(unknown, title: "Parent (agent Curie)"), task(other, provider: .claude)]
         var snapshot = CodexTaskSnapshot()
         snapshot.subagentParents = [child: root, derived: root]
         snapshot.tasks = [childTask, disputed]
         snapshot.verifiedActivityFiles = [child: childFile, derived: derivedFile]
+        snapshot.verifiedAgentIdentities = [
+            child: CodexVerifiedAgentIdentity(file: childFile, headerDigest: Data(repeating: 1, count: 32), parentID: root, isRoot: false),
+            derived: CodexVerifiedAgentIdentity(file: derivedFile, headerDigest: Data(repeating: 2, count: 32), parentID: root, isRoot: false)
+        ]
 
         XCTAssertEqual(CodexTaskGrouping.compactVisibleIndices(source, confirmedChildren: [child: childFile, derived: derivedFile]), [1, 3, 4])
         // Identical text without a current structural observation remains visible.
@@ -68,17 +83,22 @@ final class CompactTaskSelectionTests: XCTestCase {
         let childFile = CodexFileIdentity(device: 1, inode: 10)
         var confirmedChild = task(child)
         confirmedChild.lastActivityFileIdentity = childFile
+        confirmedChild.lastActivityIdentityConfirmed = true
         let store = TaskStore(previewTasks: [confirmedChild])
         var snapshot = CodexTaskSnapshot()
         // No parent title or nickname is needed to establish child identity.
         snapshot.subagentParents = [child: firstParent]
         snapshot.tasks = [confirmedChild]
         snapshot.verifiedActivityFiles = [child: childFile]
+        snapshot.verifiedAgentIdentities = [child: CodexVerifiedAgentIdentity(
+            file: childFile, headerDigest: Data(repeating: 1, count: 32), parentID: firstParent, isRoot: false)]
         store.testSetCompactSnapshot(snapshot)
         XCTAssertEqual(store.testGroupingParent(child), firstParent)
         XCTAssertTrue(store.compactTasks.isEmpty)
 
         snapshot.subagentParents = [child: otherParent]
+        snapshot.verifiedAgentIdentities[child] = CodexVerifiedAgentIdentity(
+            file: childFile, headerDigest: Data(repeating: 2, count: 32), parentID: otherParent, isRoot: false)
         store.testSetCompactSnapshot(snapshot)
         XCTAssertNil(store.testGroupingParent(child), "A conflicting parent must not group tasks")
         XCTAssertTrue(store.compactTasks.isEmpty, "A current child observation still identifies an assistant")
@@ -112,7 +132,10 @@ final class CompactTaskSelectionTests: XCTestCase {
 
         var otherChild = task(id, title: "Assistant")
         otherChild.lastActivityFileIdentity = childFile
+        otherChild.lastActivityIdentityConfirmed = true
         snapshot.tasks = [otherChild]
+        snapshot.verifiedAgentIdentities[id] = CodexVerifiedAgentIdentity(
+            file: childFile, headerDigest: Data(repeating: 1, count: 32), parentID: parent, isRoot: false)
         store.testSetCompactSnapshot(snapshot)
         XCTAssertEqual(store.compactTasks.map(\.id), [id], "A retained task from a different file must remain visible")
         XCTAssertEqual(store.compactTasks.first?.title, "Root task")

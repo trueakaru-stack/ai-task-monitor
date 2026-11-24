@@ -10,7 +10,8 @@ extension CodexTaskGrouping {
     // to this root. A retained count is not proof of current agent activity.
     static func makeRetainedProjection(_ source: [MonitoredTask], groups: [CodexAgentRetention.Group],
                                        titles: [String: String],
-                                       retainedCards: [String: CodexRetainedAgentCard] = [:]) -> Projection {
+                                       retainedCards: [String: CodexRetainedAgentCard] = [:],
+                                       fallbackRoots: [String: MonitoredTask] = [:]) -> Projection {
         let visible = source.filter { $0.isActive || $0.isUnconfirmed || $0.isWaiting }
         let codex = visible.filter { $0.provider == .codex && UUID(uuidString: $0.id) != nil }
         guard codex.count <= 2_048, groups.count <= 256 else {
@@ -68,6 +69,7 @@ extension CodexTaskGrouping {
             roots[rootID] = projected
             displayIDs[rootID] = projected.id
             displayIDs["codex-group:" + rootID] = projected.id
+            displayIDs["codex-retained:" + rootID] = projected.id
         }
         for (child, target) in childTargets { displayIDs[child] = target }
         var emitted: Set<String> = []
@@ -84,6 +86,24 @@ extension CodexTaskGrouping {
         }
         for (id, parent) in roots where tasksByID[id] == nil {
             if emitted.insert(id).inserted { result.append(parent) }
+        }
+        for group in groups where !group.canAttach && group.knownCount > 0 {
+            let id = group.rootID.lowercased()
+            guard let old = fallbackRoots[id], old.id.lowercased() == id,
+                  old.lastActivityFileIdentity == group.rootIdentity.file else { continue }
+            let details = group.members.map { member in
+                CodexAgentDetail(id: member.id, title: member.title.isEmpty ? tr("Агент", "Agent") : member.title,
+                                 activity: tr("Статус не подтверждён", "Status unconfirmed"),
+                                 isActive: false, isUnconfirmed: true)
+            }
+            let retained = MonitoredTask(id: "codex-retained:" + id, provider: .codex, title: old.title,
+                activity: tr("Статус не подтверждён", "Status unconfirmed"), isActive: false,
+                progress: nil, progressKind: .none, steps: old.steps, updatedAt: old.updatedAt,
+                isUnconfirmed: true, startedAt: old.startedAt, startKey: old.startKey, planConfirmed: false,
+                codexAgentCount: group.knownCount, codexAgentCountUnconfirmed: true,
+                codexAgentsUnconfirmed: true, codexAgents: details,
+                lastActivityIdentityConfirmed: false, lastActivityFileIdentity: group.rootIdentity.file)
+            result.append(retained)
         }
         return Projection(tasks: result.sorted { $0.updatedAt > $1.updatedAt }, displayIDBySourceID: displayIDs)
     }

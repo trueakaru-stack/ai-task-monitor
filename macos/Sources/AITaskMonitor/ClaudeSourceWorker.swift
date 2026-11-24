@@ -296,12 +296,14 @@ final class ClaudeSourceWorker {
         changed.formUnion(first.neutralEndedIDs.union(second.neutralEndedIDs))
         changed.formUnion(first.interruptedIDs.union(second.interruptedIDs))
         changed.formUnion(first.titleHistoryOverflowIDs.union(second.titleHistoryOverflowIDs))
+        changed.formUnion(first.hookLossSessionIDs.union(second.hookLossSessionIDs))
         changed = Set(changed.filter { id in
             old[id]?.first != new[id]?.first ||
                 first.terminalIDs.contains(id) != second.terminalIDs.contains(id) ||
                 first.neutralEndedIDs.contains(id) != second.neutralEndedIDs.contains(id) ||
                 first.interruptedIDs.contains(id) != second.interruptedIDs.contains(id) ||
-                first.titleHistoryOverflowIDs.contains(id) != second.titleHistoryOverflowIDs.contains(id)
+                first.titleHistoryOverflowIDs.contains(id) != second.titleHistoryOverflowIDs.contains(id) ||
+                first.hookLossSessionIDs.contains(id) != second.hookLossSessionIDs.contains(id)
         })
         for session in middle.affectedSessions.union(middle.lifecycleSessions) {
             guard let key = claudeSessionKey(session) else { all = true; continue }
@@ -370,8 +372,10 @@ final class ClaudeSourceWorker {
                 channelUnavailable = !prepareChannel(connected: connected, generation: requested)
                 guard isCurrent(requested) else { return invalidatedRead(requested) }
                 before = drain()
+                let hookLoss = try reader.inspectHookLoss()
                 let exists = try journalExists()
                 guard isCurrent(requested) else { return invalidatedRead(requested) }
+                if !exists && hookLoss.hasLoss { throw ClaudeReadError.incomplete }
                 if !exists && sawEvents {
                     reader.noteSourceLoss()
                     throw CocoaError(.fileReadNoSuchFile)

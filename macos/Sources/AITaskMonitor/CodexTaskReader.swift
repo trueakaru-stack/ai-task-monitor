@@ -90,6 +90,7 @@ struct CodexTaskReader {
     private let afterUnindexedTailForTests: ((String) -> Void)?
     private let beforeUnindexedTerminalRecheckForTests: ((String) -> Void)?
     private let afterAgentProofSelectionForTests: (() -> Void)?
+    private let beforeSubagentMetadataLoadForTests: ((String) -> Void)?
 
     init(codexHome: URL? = nil, afterDiscoveryForTests: (() -> Void)? = nil,
          beforeTerminalRecheckForTests: (() -> Void)? = nil,
@@ -97,7 +98,8 @@ struct CodexTaskReader {
          afterSnapshotForTests: ((CodexTaskSnapshot) -> Void)? = nil,
          afterUnindexedTailForTests: ((String) -> Void)? = nil,
          beforeUnindexedTerminalRecheckForTests: ((String) -> Void)? = nil,
-         afterAgentProofSelectionForTests: (() -> Void)? = nil) {
+         afterAgentProofSelectionForTests: (() -> Void)? = nil,
+         beforeSubagentMetadataLoadForTests: ((String) -> Void)? = nil) {
         self.afterDiscoveryForTests = afterDiscoveryForTests
         self.beforeTerminalRecheckForTests = beforeTerminalRecheckForTests
         self.afterIndexedAttributesForTests = afterIndexedAttributesForTests
@@ -105,6 +107,7 @@ struct CodexTaskReader {
         self.afterUnindexedTailForTests = afterUnindexedTailForTests
         self.beforeUnindexedTerminalRecheckForTests = beforeUnindexedTerminalRecheckForTests
         self.afterAgentProofSelectionForTests = afterAgentProofSelectionForTests
+        self.beforeSubagentMetadataLoadForTests = beforeSubagentMetadataLoadForTests
         if let codexHome {
             self.codexHome = codexHome
         } else if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
@@ -520,6 +523,7 @@ struct CodexTaskReader {
         result.subagentCandidates = visibleIDs
         let knownIDs = visibleIDs.union(previouslyObserved.filter { UUID(uuidString: $0) != nil })
         let metadata = subagentMetadata.poll(candidates: metadataCandidates, visibleIDs: knownIDs) { id, file in
+            self.beforeSubagentMetadataLoadForTests?(id)
             let before = try self.fileManager.attributesOfItem(atPath: file.path)
             guard let stamp = CodexSubagentMetadataWorker.Stamp(before) else { throw CocoaError(.fileReadUnknown) }
             let metadata = try self.readSubagentParent(file, id: id)
@@ -1371,7 +1375,13 @@ struct CodexTaskReader {
                 cursor = parent
             }
             if foundRoot && chain.count >= 2 { chains[id] = chain }
-            else { partial = true }
+            else {
+                // A fresh child header can establish only that this card is
+                // an assistant even when its complete ancestry is unavailable.
+                // Retention still requires the whole chain in one snapshot.
+                if node.observation.parentID != nil && !node.observation.isConfirmedRoot { chains[id] = [id] }
+                partial = true
+            }
         }
         let batch = agentProofSelection.next(chains: chains)
         partial = partial || batch.incomplete

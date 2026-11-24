@@ -85,4 +85,29 @@ final class CodexRetainedProjectionTests: XCTestCase {
         XCTAssertNil(result.tasks.first { $0.id == root }?.codexAgentCount)
         XCTAssertNil(result.displayIDBySourceID[child])
     }
+
+    func testMissingFreshRootProofKeepsOldCountSeparatelyUntilRecovery() throws {
+        let parent = task(root, inode: 1), assistant = task(child, inode: 2)
+        let rootProof = identity(1, root: true), childProof = identity(2, parent: root)
+        var retention = CodexAgentRetention()
+        _ = retention.observe(tasks: [parent, assistant], identities: [root: rootProof, child: childProof])
+        let missing = retention.observe(tasks: [parent, assistant], identities: [child: childProof], sourcePartial: true)
+        XCTAssertFalse(try XCTUnwrap(missing.groups.first).canAttach)
+        let shown = CodexTaskGrouping.makeRetainedProjection([parent, assistant], groups: missing.groups,
+                                                              titles: [:], fallbackRoots: [root: parent])
+        let held = try XCTUnwrap(shown.tasks.first { $0.id == "codex-retained:" + root })
+        XCTAssertTrue(held.isUnconfirmed)
+        XCTAssertEqual(held.codexAgentCount, 1)
+        XCTAssertEqual(held.codexAgentCountUnconfirmed, true)
+        XCTAssertEqual(held.codexAgentsUnconfirmed, true)
+        XCTAssertTrue(shown.tasks.contains { $0.id == root }, "The newly unverified root remains separate")
+
+        let restored = retention.observe(tasks: [parent, assistant], identities: [root: rootProof, child: childProof])
+        let recovered = CodexTaskGrouping.makeRetainedProjection([parent, assistant], groups: restored.groups,
+                                                                  titles: [:], fallbackRoots: [root: parent])
+        XCTAssertEqual(recovered.tasks.count, 1)
+        XCTAssertEqual(recovered.tasks.first?.id, root)
+        XCTAssertEqual(recovered.tasks.first?.codexAgentCount, 1)
+        XCTAssertEqual(recovered.displayIDBySourceID["codex-retained:" + root], root)
+    }
 }
