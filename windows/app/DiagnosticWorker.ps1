@@ -19,8 +19,8 @@ try{
  $reader=[IO.BinaryReader]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)
  $writer=[IO.BinaryWriter]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)
  $initialized=$false;$runtime=$null;$clearBoundary=$null;$warningTokens=@{}
- $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
- $seenOrder=New-Object 'Collections.Generic.Queue[string]'
+ $seen=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+ $seenOrder=[Collections.Generic.Queue[string]]::new()
  while($true){
   try{$length=$reader.ReadInt32()}catch [IO.EndOfStreamException]{break}
   if($length -le 0 -or $length -gt 16777216){throw 'Invalid request frame.'}

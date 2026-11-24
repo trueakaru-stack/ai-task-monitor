@@ -37,7 +37,7 @@ try{
     $source=[IO.File]::ReadAllText((Join-Path $app $file))
     $compileNeedle=' $identityName=[Reflection.AssemblyName]::new('
     $compileGate='$identityStarted=[Threading.EventWaitHandle]::OpenExisting($env:AITM_ID_STARTED);$identityRelease=[Threading.EventWaitHandle]::OpenExisting($env:AITM_ID_RELEASE);try{[void]$identityStarted.Set();if(-not $identityRelease.WaitOne(30000)){throw "Synthetic identity gate timed out."}}finally{$identityStarted.Dispose();$identityRelease.Dispose()}'
-    $readNeedle='$reader=[IO.BinaryReader]::new('
+    $readNeedle='try{$length=$reader.ReadInt32()}'
     $compiledNeedle='$server=[uint32]0'
     $checkNeedle='if(-not $identityType::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw ''Unexpected owner.''}'
     $checkProbe='[IO.File]::WriteAllText($env:AITM_ID_CALL,"call");$identityResult=$identityType::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server);[IO.File]::WriteAllText($env:AITM_ID_RETURNED,"returned");if(-not $identityResult -or $server -ne [uint32]$ParentId){[IO.File]::WriteAllText($env:AITM_ID_REJECTED,"rejected");throw ''Unexpected owner.''};[IO.File]::WriteAllText($env:AITM_ID_ACCEPTED,"accepted")'
