@@ -11,7 +11,7 @@ $names=@('Prop','Lock-State','Find-PriorLifecycle','Thread-State','Codex-Uncerta
  'Session-File','Session-Workspace','Progress-Files','Manual-Tasks','Read-TailText','Codex-Plan','Codex-TurnStartIndex',
  'Codex-ContainsIdentifier','Codex-CurrentToolActivity','Codex-FigmaCompleted','Codex-FirstFigmaCompletion','Codex-Activity',
  'Read-ObservedCodexTail','Codex-ObservedActivity','Plan-Progress','Codex-IndexCandidates','Codex-SubagentMetadata',
- 'Codex-ReadSubagentMetadata','Codex-UnindexedCandidates','Group-CodexTasks','Codex-Tasks','Claude-Tasks','Unconfirmed-Tasks')
+ 'Codex-ReadSubagentMetadata','Codex-UnindexedCandidates','Group-CodexTasks','Codex-Tasks','Claude-Tasks','Test-ClaudePartialData','Unconfirmed-Tasks')
 foreach($name in $names){
  $fromApp=@($appAst.FindAll({param($item)$item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -ceq $name},$true))
  $fromShared=@($sharedAst.FindAll({param($item)$item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -ceq $name},$true))

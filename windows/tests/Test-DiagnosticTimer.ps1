@@ -11,8 +11,8 @@ Require ($errors.Count -eq 0) 'The production UI source did not parse.'
 $definitions=foreach($name in @('Prop','Brush','Text','Localized-TaskTitle','Localized-TaskActivity','Localized-CompactTaskActivity',
  'Plan-StatusNote','Progress-Label','Get-LoopWarning','Add-LoopWarning','Add-ConditionalHint','New-ActivityIndicator','New-TaskTitleLine',
  'Active-PlanStepIndex','Compact-AgentStepLabel','Compact-ProgressLabel','Compact-ExtraAgentStepLabel','Related-AgentStatus','New-RelatedAgentToggle',
- 'Compact-VisibleTasks','Compact-ShowProviderLabels','Compact-HasHiddenAgentTasks','Source-WarningText','Compact-Height',
- 'Add-CompactTask','Add-CompactDot','Sync-CompactDots','Render-CompactTasks','Related-AgentFingerprint','Refresh-Diagnostics','Save-LoopControls','Update-View')){
+ 'Compact-VisibleTasks','Compact-ShowProviderLabels','Compact-HasHiddenAgentTasks','Update-ClaudeWarningDeferral','Source-WarningText','Compact-Height',
+ 'Add-CompactTask','Add-CompactDot','Sync-CompactDots','Render-CompactTasks','Related-AgentFingerprint','Refresh-Diagnostics','Update-ClaudeSourceStatus','Save-LoopControls','Update-View')){
  $node=$ast.Find({param($item)$item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -ceq $name},$true)
  if($null -eq $node){throw ('Missing production function: '+$name)};$node.Extent.Text
 }
@@ -31,9 +31,13 @@ function Invoke-UpdateCheckTick {}
 function Save-DiagnosticSettings {param($Directory,[int]$LoopThreshold,[int]$LoopWindowMinutes);$script:savedThreshold=$LoopThreshold}
 function Get-DiagnosticSettings {param($Directory);return [PSCustomObject]@{LoopThreshold=8;LoopWindowMinutes=10}}
 function Update-LoopSettings {}
+function Update-JournalSettings {}
+function Update-ClaudeRetentionSettings {}
+function Update-SourceSettings {$script:forbiddenReadCalled=$true;throw 'The timer must not re-read source settings.'}
+function Claude-ConnectionState {$script:forbiddenReadCalled=$true;throw 'The timer must not re-read the Claude connection.'}
 function Session-File([string]$id){throw 'The UI must not synchronously read a diagnostic session.'}
 function Thread-State([string]$id){throw 'The UI must not synchronously read a diagnostic state.'}
-function Source-Snapshot {$script:snapshots++;return [PSCustomObject]@{Tasks=$script:syntheticTasks;Unavailable=@();PartialConnection=@();PartialData=@();CodexIncomplete=$false}}
+function Source-Snapshot {$script:snapshots++;return [PSCustomObject]@{Tasks=$script:syntheticTasks;Unavailable=@($script:syntheticUnavailable);PartialConnection=@();PartialData=@($script:syntheticPartial);CodexIncomplete=$false}}
 function Resolve-CurrentTaskOrder($tasks,$previous,[string]$selectedId,$client,[long]$selectionRevision){return [PSCustomObject]@{Tasks=@($tasks);SelectedId=$selectedId}}
 function Sync-ClaudeLoopChannel {}
 function Render-ProviderTabs($tasks) {}
@@ -46,7 +50,11 @@ $script:resolvedLanguage='en';$script:isCompact=$true;$script:motionEnabled=$fal
 $script:sourceErrors=@();$script:sourcePartialConnections=@();$script:sourcePartialData=@();$script:sourceCodexIncomplete=$false
 $script:diagnosticRuntime=[PSCustomObject]@{LoopStates=@{};Settings=[PSCustomObject]@{LoopThreshold=5;LoopWindowMinutes=10}};$script:diagnosticError='';$script:journalUiError='';$script:journalFingerprint=''
 $script:diagnosticDirectory='synthetic';$script:updatingLoopControls=$false;$script:loopUiError='';$script:savedThreshold=0
-$loopThresholdCombo=[PSCustomObject]@{SelectedItem=[PSCustomObject]@{Tag=8}};$loopWindowCombo=[PSCustomObject]@{SelectedItem=[PSCustomObject]@{Tag=10}}
+$loopThresholdCombo=[PSCustomObject]@{SelectedItem=[PSCustomObject]@{Tag=8};IsDropDownOpen=$false};$loopWindowCombo=[PSCustomObject]@{SelectedItem=[PSCustomObject]@{Tag=10};IsDropDownOpen=$false}
+$journalDaysCombo=[PSCustomObject]@{IsDropDownOpen=$false};$journalSizeCombo=[PSCustomObject]@{IsDropDownOpen=$false}
+$claudeRetentionDaysCombo=[PSCustomObject]@{IsDropDownOpen=$false};$claudeRetentionSizeCombo=[PSCustomObject]@{IsDropDownOpen=$false}
+$claudeSourceStatus=[Windows.Controls.TextBlock]::new();$script:claudeSourceStatusContext=[PSCustomObject]@{Connection='connected';Installation='available'}
+$script:syntheticUnavailable=@();$script:syntheticPartial=@();$script:forbiddenReadCalled=$false
 $script:claudeLoopStates=@{};$script:showingSettings=$false;$script:showingJournal=$false;$script:compactSelectionRevision=[long]0
 $script:compactTaskId='first';$script:selectedProvider='all';$script:fingerprint='';$script:scheduled=0;$script:snapshots=0
 $PreviewRelatedAgents=$false;$CompactMode=$true;$PreviewActiveTasks=-1;$PreviewLoopWarning=$false;$SnapshotFile=''
@@ -81,6 +89,12 @@ try{
  do{& $tick;if($script:diagnosticClient.Fresh){break};Start-Sleep -Milliseconds 20}while($clock.ElapsedMilliseconds -lt 10000)
  Require ($script:diagnosticClient.Fresh -and -not $script:diagnosticError -and $script:compactTaskId -ceq 'second' -and
   $script:diagnosticClient.Warnings.ContainsKey('codex:first') -and $script:diagnosticClient.Warnings['codex:first'].Threshold -eq 8) 'The diagnostic client failed to recover with the updated threshold or changed the selected task.'
+ $script:showingSettings=$true;$script:syntheticUnavailable=@('Claude Code');$script:syntheticPartial=@('Claude Code');& $tick
+ $partialText=-join @([int[]]@(1063,1072,1089,1090,1100,32,1076,1072,1085,1085,1099,1093,32,1085,1077,1076,1086,1089,1090,1091,1087,1085,1072)|ForEach-Object {[char]$_})
+ Require ($claudeSourceStatus.Text -ceq $partialText) 'Open settings did not show the new partial Claude status.'
+ $script:syntheticPartial=@();& $tick
+ $missingText=-join @([int[]]@(1053,1077,1090,32,1076,1072,1085,1085,1099,1093)|ForEach-Object {[char]$_})
+ Require ($claudeSourceStatus.Text -ceq $missingText -and -not $script:forbiddenReadCalled) 'Open settings did not update from the snapshot or re-read source settings.'
  Write-Output ('Actual timer callback and compact dot: synthetic source snapshot, real UI update and blocked diagnostic worker verified ('+$tickMs+' ms timer).')
 }finally{
  [void]$release.Set();$owner.Dispose();$clock=[Diagnostics.Stopwatch]::StartNew()

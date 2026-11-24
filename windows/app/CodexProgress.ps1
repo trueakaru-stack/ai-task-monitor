@@ -636,6 +636,9 @@ $script:lastClaudeTasks = @()
 $script:sourceErrors = @()
 $script:sourcePartialConnections = @()
 $script:sourcePartialData = @()
+$script:sourceWarningDeferred = @()
+$script:claudePartialStartedAt = [long]0
+$script:claudePartialWarningShown = $false
 $script:sourceCodexIncomplete = $false
 $script:compactTaskId = ""
 $script:compactSelectionRevision = [long]0
@@ -2080,6 +2083,13 @@ function Claude-InstallationState([string]$profile,[string]$appData,[string]$loc
  return 'not-found'
 }
 
+function Update-ClaudeSourceStatus {
+ $contextVariable=Get-Variable -Scope Script -Name claudeSourceStatusContext -ErrorAction SilentlyContinue
+ if($null -eq $contextVariable -or $null -eq $contextVariable.Value){return}
+ $context=$contextVariable.Value;$connected=[string]$context.Connection -eq 'connected'
+ $claudeSourceStatus.Text=Tr $(if($context.Connection -eq 'partial'){'Подключён частично'}elseif($connected -and $script:sourcePartialData -contains 'Claude Code'){'Часть данных недоступна'}elseif($connected -and $script:sourceErrors -contains 'Claude Code'){'Нет данных'}elseif($connected){'Подключён'}elseif($context.Installation -eq 'unconfirmed'){'Установка не подтверждена'}else{'Не подключён'})
+}
+
 function Update-SourceSettings {
  $codexSourceStatus.Text=Tr $(if($script:sourcePartialData -contains "Codex"){"Часть данных недоступна"}elseif($script:sourceCodexIncomplete){"Статус не подтверждён"}elseif($script:sourceErrors -contains "Codex"){"Нет данных"}elseif(Test-Path -LiteralPath $sessionIndex){"Подключён"}else{"Не найден"})
  Update-CodexCloudSourceSettings
@@ -2087,6 +2097,7 @@ function Update-SourceSettings {
  Update-KimiSourceSettings
  Update-DeepSeekSourceSettings
  Update-HermesSourceSettings
+ $script:claudeSourceStatusContext=$null
  $installation=Claude-InstallationState $env:USERPROFILE $env:APPDATA $env:LOCALAPPDATA $env:PATH
  try{$connectionState=Claude-ConnectionState;$connected=$connectionState -eq "connected"}
  catch{
@@ -2103,7 +2114,8 @@ function Update-SourceSettings {
   [Windows.Automation.AutomationProperties]::SetName($claudeSourceAction,([string]$claudeSourceAction.ToolTip))
   return
  }
- $claudeSourceStatus.Text=Tr $(if($connectionState -eq "partial"){"Подключён частично"}elseif($connected -and $script:sourceErrors -contains "Claude Code"){"Нет данных"}elseif($connected){"Подключён"}elseif($installation -eq 'unconfirmed'){"Установка не подтверждена"}else{"Не подключён"})
+ $script:claudeSourceStatusContext=[PSCustomObject]@{Connection=$connectionState;Installation=$installation}
+ Update-ClaudeSourceStatus
  $claudeSourceAction.Visibility="Visible";$claudeSourceAction.IsEnabled=$true;$claudeSourceAction.ToolTip=$null
  $claudeSourceAction.Content=Tr $(if($connected){"Отключить"}else{"Подключить"})
  $claudeSourceAction.Tag=$(if($connected){"Remove"}else{"Install"})
@@ -3723,6 +3735,7 @@ function Codex-Tasks {
 }
 
 function Claude-Tasks {
+ $script:claudeSourceTransientPartial=$false
  # A bounded digest records continuity, not task content. It is held in memory only.
  $readSource={
   param([string]$path,$prior)
@@ -3803,6 +3816,7 @@ function Claude-Tasks {
    }catch{$script:claudeReaderSession.MarkSourceLoss();throw}
   }
  }
+ $script:claudeSourceTransientPartial=$transientUncertain
  $sessions=@($script:claudeReaderSession.Read($tail,$legacyTail,[DateTime]::UtcNow,$script:monitorStartedUtc))
  $items=New-Object Collections.Generic.List[object]
  foreach($state in $sessions){
@@ -3817,6 +3831,14 @@ function Claude-Tasks {
   $items.Add([PSCustomObject]@{Id="claude:"+$state.Id;Title=$title;Activity=$activity;Active=(-not $unconfirmed);Paused=$false;Progress=$progress;ProgressKind=$kind;ProgressBasis=$(if($steps.Count -gt 0){"steps"}else{"task"});Provider="claude";ProviderName="Claude Code";Status=$status;Updated=$state.Updated.ToLocalTime();Started=$state.Started;StartKey=$state.StartKey;Steps=$steps;Source="Claude Code";PlanConfirmed=$planConfirmed;KnownStepCount=$(if($planConfirmed){[int]$state.KnownStepCount}else{0});KnownDoneCount=$(if($planConfirmed){[int]$state.KnownDoneCount}else{0});UnknownStepCount=$(if($planConfirmed){[int]$state.UnknownStepCount}else{$steps.Count});RetainedPlanIncomplete=[bool]$state.RetainedPlanIncomplete})
  }
  return @($items|Sort-Object Updated -Descending)
+}
+
+function Test-ClaudePartialData([string]$connectionState) {
+ if($connectionState -notin @('connected','partial')){return $false}
+ $transientVariable=Get-Variable -Scope Script -Name claudeSourceTransientPartial -ErrorAction SilentlyContinue
+ $readerVariable=Get-Variable -Scope Script -Name claudeReaderSession -ErrorAction SilentlyContinue
+ $reader=if($null -ne $readerVariable){$readerVariable.Value}else{$null}
+ return ([bool](Prop $reader 'RetentionOverflow' $false) -or [bool](Prop $reader 'SourceUncertain' $false) -or ($null -ne $transientVariable -and [bool]$transientVariable.Value))
 }
 
 function Local-SourceSnapshot {
@@ -3875,10 +3897,20 @@ function Local-SourceSnapshot {
  $connectionState='unknown'
  try{
   $connectionState=if($ClaudeEventFile){"connected"}else{Claude-ConnectionState}
-  if($connectionState -eq "connected"){$claude=@(Claude-Tasks);$script:lastClaudeTasks=$claude}
-  elseif($connectionState -eq "partial"){$claude=@(Unconfirmed-Tasks @(Claude-Tasks));$script:lastClaudeTasks=$claude;[void]$unavailable.Add("Claude Code")}
-  else{$script:lastClaudeTasks=@()}
-  if($null -ne (Get-Variable -Scope Script -Name claudeReaderSession -ErrorAction SilentlyContinue) -and $null -ne $script:claudeReaderSession -and $script:claudeReaderSession.RetentionOverflow){[void]$unavailable.Add("Claude Code")}
+  $previousClaude=@($script:lastClaudeTasks)
+  if($connectionState -in @('connected','partial')){
+   $claude=@(Claude-Tasks);$claudePartial=Test-ClaudePartialData $connectionState
+   if($connectionState -eq 'partial'){$claude=@(Unconfirmed-Tasks $claude);[void]$unavailable.Add('Claude Code')}
+   if($claudePartial -or $connectionState -eq 'partial'){
+    $seenClaude=@{};foreach($task in $claude){$seenClaude[[string]$task.Id]=$true}
+    foreach($task in $previousClaude){$id=[string]$task.Id;if($id -and -not $seenClaude.ContainsKey($id)){$claude+=@(Unconfirmed-Tasks @($task));$seenClaude[$id]=$true}}
+   }
+   $script:lastClaudeTasks=$claude
+  }else{$script:lastClaudeTasks=@();$claudePartial=$false}
+  if($claudePartial){
+   if(-not $unavailable.Contains('Claude Code')){[void]$unavailable.Add('Claude Code')}
+   if(-not $partialData.Contains('Claude Code')){[void]$partialData.Add('Claude Code')}
+  }
  }catch{
   if($null -ne (Get-Variable -Scope Script -Name claudeReaderSession -ErrorAction SilentlyContinue) -and $null -ne $script:claudeReaderSession){$script:claudeReaderSession.MarkSourceLoss()}
   [void]$unavailable.Add("Claude Code");$claude=@(Unconfirmed-Tasks $script:lastClaudeTasks)
@@ -3964,7 +3996,7 @@ function Sync-ClaudeLoopChannel {
  try{
   $clientVariable=Get-Variable -Scope Script -Name localSourceClient -ErrorAction SilentlyContinue
   $wanted=if($PreviewClaudeLoopPipe){$true}elseif($PreviewActiveTasks -ge 0){$false}elseif($null -ne $clientVariable){$null -ne $clientVariable.Value -and [string]$clientVariable.Value.Snapshot.ClaudeConnection -eq 'connected'}else{(Claude-ConnectionState) -eq 'connected'}
-  if(-not $wanted -or $script:sourceErrors -contains 'Claude Code'){
+  if(-not $wanted -or ($script:sourceErrors -contains 'Claude Code' -and $script:sourcePartialData -notcontains 'Claude Code')){
    if($null -ne $script:claudeLoopChannel){$script:claudeLoopChannel.SetEnabled($false)}
    $script:claudeLoopStates.Clear();$script:claudeLoopError=''
    return
@@ -4020,6 +4052,7 @@ function Sync-ClaudeLoopChannel {
 
 function Refresh-Diagnostics($tasks) {
  if($null -eq $script:diagnosticRuntime){return}
+ $diagnosticUnavailable=@($script:sourceErrors | Where-Object {$_ -cne 'Claude Code' -or $script:sourcePartialData -cnotcontains 'Claude Code'})
  $observations=@(foreach($task in $tasks){
   $provider=[string](Prop $task "Provider" "")
   $id=[string](Prop $task "Id" "")
@@ -4033,7 +4066,7 @@ function Refresh-Diagnostics($tasks) {
   if($null -eq $clientVariable.Value){$script:diagnosticRuntime.LoopStates=@{};$script:diagnosticError="Не удалось обновить журнал";return}
   $client=$clientVariable.Value
   try{
-   Get-DiagnosticClientUpdate $client $observations $script:sourceErrors
+   Get-DiagnosticClientUpdate $client $observations $diagnosticUnavailable
    $script:diagnosticRuntime.LoopStates=$client.Warnings
    $script:diagnosticError=if($client.Error){"Не удалось обновить журнал"}elseif($client.Gap){"Журнал может быть неполным"}else{""}
    if($client.LastClearUncertain){
@@ -4052,7 +4085,7 @@ function Refresh-Diagnostics($tasks) {
  $resolver=if($PreviewActiveTasks -ge 0){{param($id) return ""}}else{{param($id) return (Session-File $id)}}
  $stateResolver=if($PreviewActiveTasks -ge 0){{param($id) return [PSCustomObject]@{State="unknown"}}}else{{param($id) return (Thread-State $id)}}
  try{
-  Update-DiagnosticRuntime -Runtime $script:diagnosticRuntime -Tasks $observations -Unavailable $script:sourceErrors -Now ([DateTimeOffset]::UtcNow) -SessionResolver $resolver -StateResolver $stateResolver
+  Update-DiagnosticRuntime -Runtime $script:diagnosticRuntime -Tasks $observations -Unavailable $diagnosticUnavailable -Now ([DateTimeOffset]::UtcNow) -SessionResolver $resolver -StateResolver $stateResolver
   $script:diagnosticError=""
  }catch{$script:diagnosticError="Не удалось обновить журнал"}
 }
@@ -4786,7 +4819,22 @@ function Compact-HasHiddenAgentTasks($tasks) {
  }).Count -gt 0
 }
 
-function Source-WarningText([string[]]$Unavailable,[string[]]$PartialConnection,[string[]]$PartialData,[bool]$CodexIncomplete=$false,[bool]$Compact=$false) {
+function Update-ClaudeWarningDeferral($tasks,[long]$now=[Diagnostics.Stopwatch]::GetTimestamp()) {
+ $script:sourceWarningDeferred=@()
+ $partialClaude=$script:sourceErrors -ccontains 'Claude Code' -and $script:sourcePartialData -ccontains 'Claude Code'
+ if($partialClaude){
+  $startedVariable=Get-Variable -Scope Script -Name claudePartialStartedAt -ErrorAction SilentlyContinue
+  if($null -eq $startedVariable -or [long]$startedVariable.Value -eq 0){$script:claudePartialStartedAt=$now;$script:claudePartialWarningShown=$false}
+  $shownVariable=Get-Variable -Scope Script -Name claudePartialWarningShown -ErrorAction SilentlyContinue
+  if($null -eq $shownVariable){$script:claudePartialWarningShown=$false}
+  $hasClaudeCard=@($tasks|Where-Object {[string](Prop $_ 'Provider' '') -ceq 'claude'}).Count -gt 0
+  if(-not $hasClaudeCard -or ($now-$script:claudePartialStartedAt) -ge (2*[Diagnostics.Stopwatch]::Frequency)){$script:claudePartialWarningShown=$true}
+  if(-not $script:claudePartialWarningShown){$script:sourceWarningDeferred=@('Claude Code')}
+ }else{$script:claudePartialStartedAt=[long]0;$script:claudePartialWarningShown=$false}
+}
+
+function Source-WarningText([string[]]$Unavailable,[string[]]$PartialConnection,[string[]]$PartialData,[bool]$CodexIncomplete=$false,[bool]$Compact=$false,[string[]]$Deferred=@()) {
+ $Unavailable=@($Unavailable | Where-Object {$Deferred -cnotcontains $_})
  $coverage=$CodexIncomplete -and $Unavailable -ccontains 'Codex' -and $PartialData -cnotcontains 'Codex'
  $data=@($Unavailable | Where-Object {$PartialData -ccontains $_})
  $connection=@($Unavailable | Where-Object {$PartialConnection -ccontains $_ -and $data -cnotcontains $_})
@@ -4805,7 +4853,7 @@ function Render-CompactTasks($tasks) {
  $compactTasks=@(Compact-VisibleTasks $tasks)
  $script:compactShowProviderLabels=Compact-ShowProviderLabels $compactTasks
  $visibleTasks=@($compactTasks|Select-Object -First 3)
- $warningText=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete $true
+ $warningText=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete $true $script:sourceWarningDeferred
  if($visibleTasks.Count -eq 0){
   $script:compactTaskId=""
   $hiddenCodexPartial=$script:sourceErrors -ccontains 'Codex' -and $script:sourcePartialData -ccontains 'Codex'
@@ -4871,7 +4919,7 @@ function Set-CompactMode([bool]$compact) {
   $hasUnconfirmedPlan=$selectedTask.Count -gt 0 -and [bool](Plan-StatusNote $selectedTask[0])
   $hasAgentStatus=$selectedTask.Count -gt 0 -and [bool](Related-AgentStatus $selectedTask[0])
   $hasExtraAgentStep=$selectedTask.Count -gt 0 -and [bool](Compact-ExtraAgentStepLabel $selectedTask[0])
-  $compactWarning=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete $true
+  $compactWarning=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete $true $script:sourceWarningDeferred
   $window.Height=Compact-Height $compactCount ([bool]$compactWarning) $hasLoopWarning $hasUnconfirmedPlan $hasAgentStatus $hasExtraAgentStep
   $windowFrame.Margin=New-Object Windows.Thickness(16)
   $script:isCompact=$true; $window.Topmost=$true; Move-CompactWindow
@@ -5419,7 +5467,8 @@ function Render-CurrentTasks($tasks,$allTasks) {
   $focusKey=[string]$focused.Tag.Mode+'|'+[string]$focused.Tag.Id
  }
  $script:relatedAgentButtons=@{};$tasksPanel.Children.Clear()
- if($script:sourceErrors.Count -gt 0){$warning=Text (Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete) 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
+ $sourceWarning=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete $false $script:sourceWarningDeferred
+ if($sourceWarning){$warning=Text $sourceWarning 14 $script:palette.Secondary; $warning.Margin=New-Object Windows.Thickness(4,0,0,12); $tasksPanel.Children.Add($warning)|Out-Null}
  foreach($task in @($tasks)){Add-Card $task}
  if(@($tasks).Count -eq 0 -and $script:sourceErrors.Count -eq 0){$empty=Text (Tr "Активных задач сейчас нет") 14 $script:palette.Secondary; $empty.Margin=New-Object Windows.Thickness(4,24,0,0); $tasksPanel.Children.Add($empty)|Out-Null}
  Render-CompactTasks $allTasks
@@ -5439,6 +5488,7 @@ function Update-View {
   $script:sourcePartialConnections=@($sourceSnapshot.PartialConnection)
   $script:sourcePartialData=@($sourceSnapshot.PartialData)
   $script:sourceCodexIncomplete=[bool](Prop $sourceSnapshot 'CodexIncomplete' $false)
+  if($script:showingSettings){Update-ClaudeSourceStatus}
   if($PreviewActiveTasks -ge 0){
    $previewTitles=@((Preview-Text 'Создать индикатор прогресса задач' 'Create a task progress indicator'),(Preview-Text 'Задача Claude Code' 'Claude Code task'),(Preview-Text 'Задача Claude Code' 'Claude Code task'),(Preview-Text 'Задача DeepSeek Harness' 'DeepSeek Harness task'),(Preview-Text 'Задача Hermes Agent' 'Hermes Agent task'),(Preview-Text 'Задача OpenCode' 'OpenCode task'))
    $previewActivities=@((Preview-Text 'Проверяю карточки планов, переключение источников и прокрутку этапов перед публикацией новой версии, светлую тему и поведение длинных описаний' 'Checking plan cards, source filters, scrolling, the light theme and long descriptions before release'),(Preview-Text 'Запускаю визуальную проверку' 'Running visual checks'),(Preview-Text 'Собираю данные для переноса' 'Preparing migration data'),(Preview-Text 'Проверяю план' 'Checking the plan'),(Preview-Text 'Проверяю данные' 'Checking data'),(Preview-Text 'Выполняю действие' 'Performing an action'))
@@ -5562,12 +5612,13 @@ function Update-View {
   $ordered=Resolve-CurrentTaskOrder $allTasks $previousAllTasks $script:compactTaskId $orderingClient $script:compactSelectionRevision
   $allTasks=@($ordered.Tasks);$script:compactTaskId=[string]$ordered.SelectedId
   $script:lastAllTasks=$allTasks
+  Update-ClaudeWarningDeferral $allTasks
   Sync-ClaudeLoopChannel
   Refresh-Diagnostics $allTasks
   Render-ProviderTabs $allTasks
   $tasks=@(Filtered-Tasks $allTasks)
   $script:lastTasks=$tasks
-  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+$script:sourceCodexIncomplete+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$(Prop $_ 'RelatedAgentCount' 0):$(Prop $_ 'RelatedAgentsUnconfirmed' $false):$(Prop $_ 'RelatedAgentCountUnconfirmed' $false):$(Related-AgentFingerprint $_):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$(Prop $_ 'ActivityObserved' $false):$(Prop $_ 'ActivityIsLast' $false):$stepState`:$loopState"})-join"|")
+  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+($script:sourceWarningDeferred -join ",")+"|"+$script:sourceCodexIncomplete+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$(Prop $_ 'RelatedAgentCount' 0):$(Prop $_ 'RelatedAgentsUnconfirmed' $false):$(Prop $_ 'RelatedAgentCountUnconfirmed' $false):$(Related-AgentFingerprint $_):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$(Prop $_ 'ActivityObserved' $false):$(Prop $_ 'ActivityIsLast' $false):$stepState`:$loopState"})-join"|")
   if($next -ne $script:fingerprint){
    $script:fingerprint=$next
    Render-CurrentTasks $tasks $allTasks
@@ -5671,7 +5722,7 @@ $codexCloudSourceAction.Add_Click({
 $claudeSourceAction.Add_Click({
  $mode=[string]$claudeSourceAction.Tag
  $configScript=Join-Path $PSScriptRoot "Configure-ClaudeIntegration.ps1"
- if(-not (Test-Path -LiteralPath $configScript)){$claudeSourceStatus.Text=Tr "Файл настройки не найден";return}
+ if(-not (Test-Path -LiteralPath $configScript)){$script:claudeSourceStatusContext=$null;$claudeSourceStatus.Text=Tr "Файл настройки не найден";return}
  $clientVariable=Get-Variable -Scope Script -Name localSourceClient -ErrorAction SilentlyContinue
  if($null -ne $clientVariable -and $null -ne $clientVariable.Value){Set-LocalSourceClientConnection $clientVariable.Value $false}
  try{
@@ -5681,6 +5732,7 @@ $claudeSourceAction.Add_Click({
   Update-View
  }catch{
   if($null -ne $clientVariable -and $null -ne $clientVariable.Value){Set-LocalSourceClientConnection $clientVariable.Value $true}
+  $script:claudeSourceStatusContext=$null
   $claudeSourceStatus.Text=Tr "Ошибка подключения"
  }
 })

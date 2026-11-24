@@ -1463,6 +1463,7 @@ function Codex-Tasks {
 }
 
 function Claude-Tasks {
+ $script:claudeSourceTransientPartial=$false
  # A bounded digest records continuity, not task content. It is held in memory only.
  $readSource={
   param([string]$path,$prior)
@@ -1543,6 +1544,7 @@ function Claude-Tasks {
    }catch{$script:claudeReaderSession.MarkSourceLoss();throw}
   }
  }
+ $script:claudeSourceTransientPartial=$transientUncertain
  $sessions=@($script:claudeReaderSession.Read($tail,$legacyTail,[DateTime]::UtcNow,$script:monitorStartedUtc))
  $items=New-Object Collections.Generic.List[object]
  foreach($state in $sessions){
@@ -1557,6 +1559,14 @@ function Claude-Tasks {
   $items.Add([PSCustomObject]@{Id="claude:"+$state.Id;Title=$title;Activity=$activity;Active=(-not $unconfirmed);Paused=$false;Progress=$progress;ProgressKind=$kind;ProgressBasis=$(if($steps.Count -gt 0){"steps"}else{"task"});Provider="claude";ProviderName="Claude Code";Status=$status;Updated=$state.Updated.ToLocalTime();Started=$state.Started;StartKey=$state.StartKey;Steps=$steps;Source="Claude Code";PlanConfirmed=$planConfirmed;KnownStepCount=$(if($planConfirmed){[int]$state.KnownStepCount}else{0});KnownDoneCount=$(if($planConfirmed){[int]$state.KnownDoneCount}else{0});UnknownStepCount=$(if($planConfirmed){[int]$state.UnknownStepCount}else{$steps.Count});RetainedPlanIncomplete=[bool]$state.RetainedPlanIncomplete})
  }
  return @($items|Sort-Object Updated -Descending)
+}
+
+function Test-ClaudePartialData([string]$connectionState) {
+ if($connectionState -notin @('connected','partial')){return $false}
+ $transientVariable=Get-Variable -Scope Script -Name claudeSourceTransientPartial -ErrorAction SilentlyContinue
+ $readerVariable=Get-Variable -Scope Script -Name claudeReaderSession -ErrorAction SilentlyContinue
+ $reader=if($null -ne $readerVariable){$readerVariable.Value}else{$null}
+ return ([bool](Prop $reader 'RetentionOverflow' $false) -or [bool](Prop $reader 'SourceUncertain' $false) -or ($null -ne $transientVariable -and [bool]$transientVariable.Value))
 }
 
 function Unconfirmed-Tasks($tasks) {
@@ -1649,10 +1659,20 @@ function Local-SourceSnapshot([bool]$ClaudeEnabled=$true,[string]$ClaudeConnecti
  try{
   $connectionState=if(-not $ClaudeEnabled){"disconnected"}elseif($ClaudeConnectionOverride){$ClaudeConnectionOverride}elseif($ClaudeEventFile){"connected"}else{Claude-ConnectionState}
   if($connectionState -notin @('connected','disconnected','partial')){throw 'Claude connection is unavailable.'}
-  if($connectionState -eq "connected"){$claude=@(Claude-Tasks);$script:lastClaudeTasks=$claude}
-  elseif($connectionState -eq "partial"){$claude=@(Unconfirmed-Tasks @(Claude-Tasks));$script:lastClaudeTasks=$claude;[void]$unavailable.Add("Claude Code")}
-  else{$script:lastClaudeTasks=@()}
-  if($null -ne (Get-Variable -Scope Script -Name claudeReaderSession -ErrorAction SilentlyContinue) -and $null -ne $script:claudeReaderSession -and $script:claudeReaderSession.RetentionOverflow){[void]$unavailable.Add("Claude Code")}
+  $previousClaude=@($script:lastClaudeTasks)
+  if($connectionState -in @('connected','partial')){
+   $claude=@(Claude-Tasks);$claudePartial=Test-ClaudePartialData $connectionState
+   if($connectionState -eq 'partial'){$claude=@(Unconfirmed-Tasks $claude);[void]$unavailable.Add('Claude Code')}
+   if($claudePartial -or $connectionState -eq 'partial'){
+    $seenClaude=@{};foreach($task in $claude){$seenClaude[[string]$task.Id]=$true}
+    foreach($task in $previousClaude){$id=[string]$task.Id;if($id -and -not $seenClaude.ContainsKey($id)){$claude+=@(Unconfirmed-Tasks @($task));$seenClaude[$id]=$true}}
+   }
+   $script:lastClaudeTasks=$claude
+  }else{$script:lastClaudeTasks=@();$claudePartial=$false}
+  if($ClaudeEnabled -and $claudePartial){
+   if(-not $unavailable.Contains('Claude Code')){[void]$unavailable.Add('Claude Code')}
+   if(-not $partialData.Contains('Claude Code')){[void]$partialData.Add('Claude Code')}
+  }
  }catch{
   if($null -ne (Get-Variable -Scope Script -Name claudeReaderSession -ErrorAction SilentlyContinue) -and $null -ne $script:claudeReaderSession){$script:claudeReaderSession.MarkSourceLoss()}
   [void]$unavailable.Add("Claude Code");$claude=@(Unconfirmed-Tasks $script:lastClaudeTasks)

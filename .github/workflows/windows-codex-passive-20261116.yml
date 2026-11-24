@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks-identity, checks-source, checks-queue, checks-restart, checks-clear, checks-worker, checks-timer]
+        part: [checks-gap, checks-live, checks-controls, checks-parity]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
@@ -115,20 +115,17 @@ jobs:
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if($env:AITM_TEST_PART -like 'checks*'){
               switch($env:AITM_TEST_PART){
-                'checks-identity' {$tests=@('Test-PipeServerIdentityEmit.ps1','Test-WorkerServerIdentity.ps1')}
-                'checks-source' {$tests=@('Test-ProductionLocalSourceWorker.ps1')}
-                'checks-queue' {$tests=@('Test-DiagnosticClientQueue.ps1','Test-DiagnosticStoreIsolated.ps1')}
-                'checks-restart' {$tests=@('Test-DiagnosticClientRestart.ps1')}
-                'checks-clear' {$tests=@('Test-DiagnosticClearBoundary.ps1','Test-DiagnosticPolicyRace.ps1')}
-                'checks-worker' {$tests=@('Test-DiagnosticWorker.ps1','Test-DiagnosticStoreIsolated.ps1')}
-                'checks-timer' {$tests=@('Test-DiagnosticTimer.ps1')}
+                'checks-gap' {$tests=@('Test-ClaudeGlobalGapRetention.ps1','Test-ClaudeReconnectContinuity.ps1')}
+                'checks-live' {$tests=@('Test-ProductionClaudeGlobalGap.ps1')}
+                'checks-controls' {$tests=@('Test-ClaudePartialDiagnostics.ps1','Test-ClaudeLoopBackgroundWiring.ps1','Test-ClaudeSourceControls.ps1','Test-ClaudeSourceActionError.ps1','Test-DiagnosticTimer.ps1')}
+                'checks-parity' {$tests=@('Test-LocalSourceModuleParity.ps1','Test-LocalSourceClient.ps1','Test-DiagnosticStoreIsolated.ps1')}
                 default {throw 'Unexpected synthetic check group.'}
               }
               $failed=New-Object 'Collections.Generic.List[string]'
               foreach($test in $tests){
                 Write-Output ('Running '+$test)
                 $taskArguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
-                if($test -eq 'Test-DiagnosticStoreIsolated.ps1'){$target=if($env:AITM_TEST_PART -eq 'checks-queue'){'queue'}else{'worker'};$taskArguments+=@('-Target',$target)}
+                if($test -eq 'Test-DiagnosticStoreIsolated.ps1'){$taskArguments+=@('-Target','gap')}
                 try{Invoke-Isolated $powershell $taskArguments}
                 catch{[void]$failed.Add($test);Write-Warning ('Synthetic failure in '+$test+': '+$_.Exception.Message)}
               }

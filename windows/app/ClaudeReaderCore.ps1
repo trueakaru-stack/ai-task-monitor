@@ -666,11 +666,11 @@ namespace AITaskMonitor.Claude {
      }
      retained.Remove(id);
     }
-    // Do not revive stopped/absent sessions on the first source-loss marker.
-    // For a still-visible session, keep its previous titles when the new
-    // readable suffix carries only part of the plan.
+    // A newly observed source-wide gap can hide a later continuation after a
+    // Stop in the same read. Retain only cards visible in a previous snapshot;
+    // sessions already stopped before that snapshot remain in stoppedHistory.
     var visible = new HashSet<string>(tasks.Select(item => item.Id), StringComparer.Ordinal);
-    if(!prior) foreach(string id in retained.Keys.Where(id => !uncertainSessions.Contains(id) &&
+    if(!sourceLoss) foreach(string id in retained.Keys.Where(id => !uncertainSessions.Contains(id) &&
         !((sourceLoss || uncertainPlans.Contains(id)) && visible.Contains(id))).ToArray()) retained.Remove(id);
     for(int index = 0; index < tasks.Length; index++) {
      Task item = tasks[index];
@@ -684,7 +684,7 @@ namespace AITaskMonitor.Claude {
      }
     }
     var result = new List<Task>(tasks);
-    foreach(var entry in retained) if((prior || uncertainSessions.Contains(entry.Key)) && !visible.Contains(entry.Key)) result.Add(Freeze(entry.Value, null, sourceLoss || nameHistorySessions.Contains(entry.Key)));
+    foreach(var entry in retained) if((sourceLoss || uncertainSessions.Contains(entry.Key)) && !visible.Contains(entry.Key)) result.Add(Freeze(entry.Value, null, sourceLoss || nameHistorySessions.Contains(entry.Key)));
     foreach(Task item in tasks) {
      Task frozen = Freeze(item, null, sourceLoss || nameHistorySessions.Contains(item.Id));
      if(retained.ContainsKey(item.Id)) { retained[item.Id] = frozen; stoppedHistory.Remove(item.Id); }
