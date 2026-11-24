@@ -116,29 +116,36 @@ try {
     } finally { Remove-Item -LiteralPath $junction -Force }
 
     $parallelDirectory = Join-Path $expectedRoot "parallel"
-    $jobs = @(1..8 | ForEach-Object {
-        Start-Job -ArgumentList $policy,$store,$parallelDirectory,$_,$now.ToString("o") -ScriptBlock {
-            param($policyPath,$storePath,$directory,$number,$time)
-            $ErrorActionPreference = "Stop"
-            . $policyPath
-            . $storePath
-            $event = [PSCustomObject]@{
-                version=1; time=$time; source="codex"; task=("a"*64)
-                type="tool_started"; id=('{0:x64}' -f $number)
-            }
-            Write-DiagnosticEvent -Directory $directory -Event $event -Now ([DateTimeOffset]::Parse($time)) -RetentionDays 7 -MaximumBytes 10000
-        }
-    })
+    $gateName='Local\AITMDiagnosticWriters-'+[Guid]::NewGuid().ToString('N')
+    $gate=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$gateName)
+    $children=New-Object 'Collections.Generic.List[Diagnostics.Process]'
+    $readySignals=New-Object 'Collections.Generic.List[Threading.EventWaitHandle]'
     try {
-        [void]($jobs | Wait-Job -Timeout 30)
-        foreach ($job in $jobs) {
-            if ($job.State -ne "Completed") { throw "Concurrent diagnostic writer did not complete." }
-            [void](Receive-Job -Job $job -ErrorAction Stop)
+        $fixture=Join-Path $PSScriptRoot 'fixtures\DiagnosticStoreWriter.ps1'
+        $exe=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        foreach($index in 1..8){
+            $readyName=$gateName+'-ready-'+$index
+            $readySignals.Add([Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$readyName))
+            $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$exe
+            $start.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$fixture+'" -PolicyPath "'+$policy+'" -StorePath "'+$store+'" -Directory "'+$parallelDirectory+'" -Number '+$index+' -Time "'+$now.ToString('o')+'" -GateName "'+$gateName+'" -ReadyName "'+$readyName+'"'
+            $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+            $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+            $children.Add([Diagnostics.Process]::Start($start))
+        }
+        $clock=[Diagnostics.Stopwatch]::StartNew()
+        foreach($ready in $readySignals){$remaining=[Math]::Max(0,30000-[int]$clock.ElapsedMilliseconds);if(-not $ready.WaitOne($remaining)){throw 'A concurrent synthetic diagnostic writer did not reach the gate.'}}
+        [void]$gate.Set();$clock.Restart()
+        foreach($child in $children){
+            $remaining=[Math]::Max(0,30000-[int]$clock.ElapsedMilliseconds)
+            if(-not $child.WaitForExit($remaining) -or $child.ExitCode -ne 0){throw 'A concurrent synthetic diagnostic writer failed or timed out.'}
         }
         $parallel = @(Read-DiagnosticEvents -Directory $parallelDirectory -Now $now -RetentionDays 7 -MaximumBytes 10000)
         if ($parallel.Count -ne 8) { throw "Concurrent diagnostic writes lost events." }
     } finally {
-        $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+        [void]$gate.Set()
+        foreach($child in $children){if(-not $child.HasExited){$child.Kill();[void]$child.WaitForExit(3000)};$child.Dispose()}
+        foreach($ready in $readySignals){$ready.Dispose()}
+        $gate.Dispose()
     }
     Write-Output "Diagnostic store: safe fields, deduplication, retention, size and foreign-file protection verified."
 } finally {
