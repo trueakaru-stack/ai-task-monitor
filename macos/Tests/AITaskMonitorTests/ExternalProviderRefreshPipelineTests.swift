@@ -35,7 +35,8 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
                 entered.signal()
                 _ = release.wait(timeout: .now() + 10)
                 return ExternalProviderRefreshPipelineTests.batch(
-                    [ExternalProviderRefreshPipelineTests.task("new", .opencode)],
+                    [ExternalProviderRefreshPipelineTests.task("new", .opencode),
+                     ExternalProviderRefreshPipelineTests.task("two", .deepseek)],
                     terminals: [.opencode: ["one"]])
             }
             if request == 1 {
@@ -189,5 +190,46 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(second.cache.tasks.first { $0.id == "drained" }).isUnconfirmed)
         XCTAssertTrue(try XCTUnwrap(second.cache.tasks.first { $0.id == "one" }).isUnconfirmed)
         XCTAssertEqual(source.count, 2)
+    }
+
+    @MainActor
+    func testOldHandoffAfterDisconnectCannotReviveOldCardOrLoseAmbiguousEvidence() throws {
+        let source = Source(), finished = DispatchSemaphore(value: 0)
+        let lease = ExternalProviderRefreshLease<ExternalProviderPipelineBatch>()
+        defer { source.release.signal() }
+        var changes = 0
+        let first = ExternalProviderRefreshPipeline<Int>(lease: lease, read: { source.read($0) }, finish: {
+            finished.signal()
+            return Self.batch([Self.task("drained", .deepseek)], gaps: [.deepseek])
+        }, onChange: { _ in changes += 1 })
+        first.poll(1, providers: Self.providers)
+        wait { !first.isInFlight && changes > 0 }
+        first.poll(2, providers: Self.providers)
+        XCTAssertEqual(source.entered.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(first.confirmDisconnected(.opencode), 1)
+        XCTAssertFalse(first.cache.tasks.contains { $0.provider == .opencode })
+        XCTAssertEqual(first.beginReconnection(.opencode), 2)
+        let previous = first.cache
+        first.close()
+
+        let second = ExternalProviderRefreshPipeline<Int>(lease: lease, initialCache: previous,
+            read: { source.read($0) }, onChange: { _ in })
+        defer { second.close() }
+        second.poll(3, providers: Self.providers)
+        XCTAssertTrue(second.isWaitingForLease)
+        XCTAssertEqual(source.count, 2)
+        source.release.signal()
+        XCTAssertEqual(finished.wait(timeout: .now() + 3), .success)
+        wait {
+            if second.isWaitingForLease { second.poll(3, providers: Self.providers) }
+            return source.count == 3 && !second.isInFlight
+        }
+        XCTAssertEqual(second.cache.pendingTerminalIDs[.opencode], ["one"])
+        XCTAssertEqual(second.cache.quarantinedTaskCount, 1)
+        let current = try XCTUnwrap(second.cache.tasks.first { $0.provider == .opencode && $0.id == "one" })
+        XCTAssertEqual(current.startKey, "turn-2")
+        XCTAssertTrue(current.isUnconfirmed)
+        XCTAssertTrue(second.cache.tasks.contains { $0.provider == .deepseek && $0.id == "two" })
+        XCTAssertEqual(source.count, 3)
     }
 }

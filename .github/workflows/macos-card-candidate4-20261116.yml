@@ -258,7 +258,7 @@ jobs:
           set -euo pipefail
           task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
           failed=""
-          for suite in ExternalProviderRefreshOwnerTests ExternalProviderRefreshPipelineTests; do
+          for suite in ExternalProviderRefreshOwnerTests ExternalProviderRefreshCacheTests ExternalProviderRefreshPipelineTests; do
             log="$AITM_TEST_TASK_ROOT/$suite.log"
             if ! AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"; then
               failed="$failed $suite"
