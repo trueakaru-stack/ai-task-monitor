@@ -38,7 +38,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testCodexReaderFiltersQuietPreexistingSessions() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         let sessions = directory.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -67,7 +67,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testCodexReaderKeepsObservedQuietTaskAsUnconfirmed() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         let sessions = directory.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -139,7 +139,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testClaudeStartIdentityChangesOnlyForANewPrompt() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("events.jsonl")
@@ -161,7 +161,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testClaudeReaderHidesStoppedAndMarksObservedQuietSessionsUnconfirmed() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("events.jsonl")
@@ -192,7 +192,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testLegacyClaudeSessionsRequireANewEventAndPreservePlan() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let legacyFile = directory.appendingPathComponent("legacy.jsonl")
@@ -246,7 +246,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testClaudeHookBoundsInputWhileReading() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let file = directory.appendingPathComponent("input.json")
@@ -276,7 +276,7 @@ final class ParserTests: XCTestCase {
     }
 
     func testClaudeConnectionDistinguishesDisconnectedAndInvalidSettings() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let settings = directory.appendingPathComponent("settings.json")
@@ -349,7 +349,7 @@ final class ParserTests: XCTestCase {
 
     @MainActor
     func testCodexLoopWarningTracksAndResetsPerTask() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         let codexHome = directory.appendingPathComponent("codex", isDirectory: true)
         let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
@@ -404,7 +404,7 @@ final class ParserTests: XCTestCase {
 
     @MainActor
     func testSourceFailurePreservesObservedTaskAndOtherProvider() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try codexSyntheticDirectory(prefix: "aitm-parser-")
         let codexHome = directory.appendingPathComponent("codex", isDirectory: true)
         let sessions = codexHome.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)

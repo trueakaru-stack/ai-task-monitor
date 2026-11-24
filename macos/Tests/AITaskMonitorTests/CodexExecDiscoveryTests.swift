@@ -71,11 +71,11 @@ final class CodexExecDiscoveryTests: XCTestCase {
         try handle.write(contentsOf: data)
     }
 
-    private func append(_ event: String, to file: URL) throws {
+    private func append(_ event: String, to file: URL, turn: String = "fixture-turn") throws {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let row: [String: Any] = ["timestamp": formatter.string(from: Date()), "type": "event_msg",
-                                  "payload": ["type": event, "turn_id": "fixture-turn",
+                                  "payload": ["type": event, "turn_id": turn,
                                               "text": event == "agent_reasoning" ? "**Synthetic detail**" : ""]]
         var data = try JSONSerialization.data(withJSONObject: row)
         data.append(0x0a)
@@ -1020,6 +1020,40 @@ final class CodexExecDiscoveryTests: XCTestCase {
         XCTAssertFalse(snapshot.tasks.contains { $0.id == first })
         XCTAssertTrue(snapshot.terminalIDs.contains(first))
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("session_index.jsonl").path))
+    }
+
+    func testUnindexedNewStartDuringTerminalReadNeverClosesOldCard() throws {
+        for point in ["tail", "recheck"] {
+            let root = try makeRoot()
+            let since = Date().addingTimeInterval(-1)
+            let file = try rollout(root, fileID: first)
+            var armed = false
+            var appended = false
+            var appendError: Error?
+            let inject: (String) -> Void = { id in
+                guard id == self.first, armed, !appended else { return }
+                appended = true
+                do { try self.append("task_started", to: file, turn: "next-turn") }
+                catch { appendError = error }
+            }
+            let reader = CodexTaskReader(codexHome: root,
+                afterUnindexedTailForTests: point == "tail" ? inject : nil,
+                beforeUnindexedTerminalRecheckForTests: point == "recheck" ? inject : nil)
+            let previous = try reader.readSnapshot(observedSince: since).tasks
+            XCTAssertTrue(previous.contains { $0.id == first && $0.isUnconfirmed })
+            try append("task_complete", to: file)
+            armed = true
+            let raced = try reader.readSnapshot(observedSince: since, previouslyObserved: [first])
+            XCTAssertTrue(appended, "The fixture must write at the selected race point")
+            XCTAssertNil(appendError)
+            XCTAssertTrue(raced.isPartial)
+            XCTAssertFalse(raced.terminalIDs.contains(first))
+            let retained = TaskSnapshotMerger.merge(previous: previous, current: raced.tasks, terminalIDs: raced.terminalIDs)
+            XCTAssertTrue(retained.contains { $0.id == first && $0.isUnconfirmed })
+            armed = false
+            let next = try reader.readSnapshot(observedSince: since, previouslyObserved: [first])
+            XCTAssertTrue(next.tasks.contains { $0.id == first && $0.startKey == "turn:next-turn" })
+        }
     }
 
     func testUnindexedOtherSourcesAndMismatchedIdentityAreNotClaimed() throws {

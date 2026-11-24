@@ -5,7 +5,7 @@ import XCTest
 final class CodexCloudStoreTests: XCTestCase {
     @MainActor
     func testCloudOptInFailurePartialAndDisconnectKeepLocalTaskAccurate() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-cloud-store-\(UUID().uuidString)")
+        let root = try codexSyntheticDirectory(prefix: "aitm-cloud-store-")
         let codexHome = root.appendingPathComponent("codex")
         let sessions = codexHome.appendingPathComponent("sessions")
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)

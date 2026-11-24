@@ -7,8 +7,7 @@ import XCTest
 final class CodexSourceStalePlanTests: XCTestCase {
     @MainActor
     func testMissingIndexDoesNotLeaveConfirmedPlanOnRetainedCodexCard() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("aitm-codex-stale-plan-" + UUID().uuidString)
+        let root = try codexSyntheticDirectory(prefix: "aitm-codex-stale-plan-")
         defer { try? FileManager.default.removeItem(at: root) }
         let codex = root.appendingPathComponent("codex", isDirectory: true)
         let sessions = codex.appendingPathComponent("sessions", isDirectory: true)

@@ -5,9 +5,7 @@ import XCTest
 // Synthetic-only fixtures; run through the real hook, reader, store and view model.
 final class ClaudeCombinedRecoveryTests: XCTestCase {
     private func directory() throws -> URL {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-combined-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+        try codexSyntheticDirectory(prefix: "aitm-combined-")
     }
 
     private func record(_ input: [String: Any], time: Date) -> [String: Any] {

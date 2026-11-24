@@ -82,15 +82,21 @@ struct CodexTaskReader {
     private let beforeTerminalRecheckForTests: (() -> Void)?
     private let afterIndexedAttributesForTests: ((String) -> Void)?
     private let afterSnapshotForTests: ((CodexTaskSnapshot) -> Void)?
+    private let afterUnindexedTailForTests: ((String) -> Void)?
+    private let beforeUnindexedTerminalRecheckForTests: ((String) -> Void)?
 
     init(codexHome: URL? = nil, afterDiscoveryForTests: (() -> Void)? = nil,
          beforeTerminalRecheckForTests: (() -> Void)? = nil,
          afterIndexedAttributesForTests: ((String) -> Void)? = nil,
-         afterSnapshotForTests: ((CodexTaskSnapshot) -> Void)? = nil) {
+         afterSnapshotForTests: ((CodexTaskSnapshot) -> Void)? = nil,
+         afterUnindexedTailForTests: ((String) -> Void)? = nil,
+         beforeUnindexedTerminalRecheckForTests: ((String) -> Void)? = nil) {
         self.afterDiscoveryForTests = afterDiscoveryForTests
         self.beforeTerminalRecheckForTests = beforeTerminalRecheckForTests
         self.afterIndexedAttributesForTests = afterIndexedAttributesForTests
         self.afterSnapshotForTests = afterSnapshotForTests
+        self.afterUnindexedTailForTests = afterUnindexedTailForTests
+        self.beforeUnindexedTerminalRecheckForTests = beforeUnindexedTerminalRecheckForTests
         if let codexHome {
             self.codexHome = codexHome
         } else if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
@@ -372,7 +378,8 @@ struct CodexTaskReader {
                 guard let record = try readUnindexedSession(file, id: id) else { continue }
                 guard let attributes = try? fileManager.attributesOfItem(atPath: file.path),
                       let stamp = CodexSubagentMetadataWorker.Stamp(attributes),
-                      stamp.device == record.device, stamp.inode == record.inode, stamp.size >= record.size else {
+                      stamp.device == record.device, stamp.inode == record.inode,
+                      stamp.size == record.size, unindexedFileUnchanged(record, at: file) else {
                     result.isPartial = true
                     continue
                 }
@@ -417,6 +424,11 @@ struct CodexTaskReader {
                         state.terminalDate.map { $0 >= since } ?? false
                     } ?? true
                     if recognized {
+                        beforeUnindexedTerminalRecheckForTests?(id)
+                        guard unindexedFileUnchanged(record, at: file) else {
+                            result.isPartial = true
+                            continue
+                        }
                         result.terminalIDs.insert(id)
                         result.terminalEvidence[id] = CodexTerminalEvidence(
                             file: CodexFileIdentity(device: record.device, inode: record.inode),
@@ -1070,8 +1082,24 @@ struct CodexTaskReader {
         var device: UInt64
         var inode: UInt64
         var size: UInt64
+        var modifiedSeconds: Int64
+        var modifiedNanoseconds: Int64
+        var changedSeconds: Int64
+        var changedNanoseconds: Int64
         var subagent: SubagentReference?
         var headerDigest: Data
+    }
+
+    private func unindexedFileUnchanged(_ record: UnindexedSessionRecord, at url: URL) -> Bool {
+        guard let descriptor = try? openSessionFile(url) else { return false }
+        defer { Darwin.close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_size >= 0 else { return false }
+        return UInt64(bitPattern: Int64(info.st_dev)) == record.device && UInt64(info.st_ino) == record.inode &&
+            UInt64(info.st_size) == record.size && Int64(info.st_mtimespec.tv_sec) == record.modifiedSeconds &&
+            Int64(info.st_mtimespec.tv_nsec) == record.modifiedNanoseconds &&
+            Int64(info.st_ctimespec.tv_sec) == record.changedSeconds &&
+            Int64(info.st_ctimespec.tv_nsec) == record.changedNanoseconds
     }
 
     private func subagentReference(_ payload: [String: Any], id: String) -> SubagentReference? {
@@ -1243,6 +1271,8 @@ struct CodexTaskReader {
         let descriptor = try openSessionFile(url)
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
+        var before = stat()
+        guard fstat(descriptor, &before) == 0, before.st_size >= 0 else { throw CocoaError(.fileReadUnknown) }
         let prefix = try handle.read(upToCount: 65_536) ?? Data()
         guard let newline = prefix.firstIndex(of: 0x0a),
               let header = try? JSONSerialization.jsonObject(with: Data(prefix[..<newline])) as? [String: Any],
@@ -1259,17 +1289,28 @@ struct CodexTaskReader {
         let classifiedCLIChild = source == "cli" && payload.string("thread_source") == "subagent"
         guard ["exec", "vscode"].contains(source) || classifiedCLIChild || subagent != nil || unconfirmedSubagent else { return nil }
         let end = try handle.seekToEnd()
+        guard end == UInt64(before.st_size) else { throw CocoaError(.fileReadUnknown) }
         let count = min(end, UInt64(262_144))
         try handle.seek(toOffset: end - count)
         let bytes = try handle.read(upToCount: Int(count)) ?? Data()
+        afterUnindexedTailForTests?(id)
         var info = stat()
         guard bytes.count == Int(count), fstat(descriptor, &info) == 0,
-              info.st_size >= 0, UInt64(info.st_size) >= end else { throw CocoaError(.fileReadUnknown) }
+              info.st_dev == before.st_dev, info.st_ino == before.st_ino,
+              info.st_size >= 0, UInt64(info.st_size) == end,
+              info.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec,
+              info.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec,
+              info.st_ctimespec.tv_sec == before.st_ctimespec.tv_sec,
+              info.st_ctimespec.tv_nsec == before.st_ctimespec.tv_nsec else { throw CocoaError(.fileReadUnknown) }
         let modified = Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec) +
                             Double(info.st_mtimespec.tv_nsec) / 1_000_000_000)
         return UnindexedSessionRecord(tail: String(decoding: bytes, as: UTF8.self), modified: modified,
                                       truncated: end > count, device: UInt64(bitPattern: Int64(info.st_dev)),
-                                      inode: UInt64(info.st_ino), size: UInt64(info.st_size), subagent: subagent,
+                                      inode: UInt64(info.st_ino), size: UInt64(info.st_size),
+                                      modifiedSeconds: Int64(info.st_mtimespec.tv_sec),
+                                      modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec),
+                                      changedSeconds: Int64(info.st_ctimespec.tv_sec),
+                                      changedNanoseconds: Int64(info.st_ctimespec.tv_nsec), subagent: subagent,
                                       headerDigest: Data(SHA256.hash(data: Data(prefix[...newline]))))
     }
 

@@ -50,6 +50,7 @@ private struct CodexHomeObservation: Equatable {
 struct CodexTerminalGuard {
     static let maximumPendingIDs = 1_024
     static let maximumTurnsPerID = 8
+    static let maximumIdentityBytes = 256
 
     struct Pending: Hashable {
         let file: CodexFileIdentity?
@@ -68,6 +69,11 @@ struct CodexTerminalGuard {
     mutating func remember(_ ids: Set<String>, previous: [MonitoredTask]) {
         guard !overflowed else { return }
         for task in previous where ids.contains(task.id) {
+            guard task.id.utf8.prefix(Self.maximumIdentityBytes + 1).count <= Self.maximumIdentityBytes,
+                  task.startKey.utf8.prefix(Self.maximumIdentityBytes + 1).count <= Self.maximumIdentityBytes else {
+                overflowed = true
+                return
+            }
             let candidate = Pending(file: task.lastActivityFileIdentity, startKey: task.startKey)
             if pending[task.id] == nil && pending.count >= Self.maximumPendingIDs {
                 overflowed = true
@@ -113,16 +119,8 @@ struct CodexTerminalGuard {
             }, terminalIDs: [], isPartial: true)
         }
 
-        let currentByID = Dictionary(grouping: snapshot.tasks, by: \.id)
-        for (id, candidates) in pending {
-            guard let current = currentByID[id], current.count == 1 else { continue }
-            let task = current[0]
-            guard task.isActive, !task.isUnconfirmed, task.lastActivityIdentityConfirmed == true,
-                  let file = task.lastActivityFileIdentity, !task.startKey.isEmpty,
-                  candidates.allSatisfy({ $0.file == file && !$0.startKey.isEmpty && $0.startKey != task.startKey }) else { continue }
-            pending.removeValue(forKey: id)
-        }
-
+        // A different start key on the same inode may come from rewritten
+        // history. It does not establish that this start followed the ending.
         let safeTasks = snapshot.tasks.map { task in
             guard pending[task.id] != nil else { return task }
             return TaskSnapshotMerger.merge(previous: [task], current: [], terminalIDs: [])[0]
@@ -1176,8 +1174,9 @@ final class TaskStore: ObservableObject {
             var result = first
             var revalidated = false
             var agrees = false
-            if ProcessInfo.processInfo.systemUptime - startedAtUptime >= pollInterval,
-               case .success(let initial) = first {
+            if case .success(let initial) = first,
+               (ProcessInfo.processInfo.systemUptime - startedAtUptime >= pollInterval ||
+                !initial.terminalIDs.isDisjoint(with: previouslyObserved)) {
                 result = readSnapshot()
                 revalidated = true
                 if case .success(let later) = result { agrees = initial.agreesWith(later) }
@@ -1224,7 +1223,7 @@ final class TaskStore: ObservableObject {
           let slow = codexReadWasDelayed || codexRead.finishedAtUptime - codexRead.startedAtUptime >= Self.sourcePollInterval
           let late = nowUptime - codexRead.finishedAtUptime >= Self.sourcePollInterval
           let invalid = !codexRead.homeStable || codexRead.language != AppLanguage.current || late ||
-              (slow && !(codexRead.revalidated && codexRead.agrees))
+              (codexRead.revalidated && !codexRead.agrees) || (slow && !codexRead.revalidated)
           if invalid {
             if codexRead.language != AppLanguage.current { codexReadPending = true }
             if case .success(let first) = codexRead.firstResult {

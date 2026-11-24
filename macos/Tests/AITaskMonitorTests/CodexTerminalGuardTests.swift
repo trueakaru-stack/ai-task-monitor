@@ -11,7 +11,7 @@ final class CodexTerminalGuardTests: XCTestCase {
                       startKey: key, lastActivityIdentityConfirmed: true, lastActivityFileIdentity: file)
     }
 
-    func testDiscardedEndingKeepsSameTurnUnknownUntilNewStart() {
+    func testDiscardedEndingKeepsSameAndDifferentTurnsUnknown() {
         let old = task("turn:old")
         var guarder = CodexTerminalGuard()
         guarder.remember([old.id], previous: [old])
@@ -25,9 +25,9 @@ final class CodexTerminalGuardTests: XCTestCase {
         let restarted = task("turn:new")
         snapshot.tasks = [restarted]
         let next = guarder.reconcile(snapshot, previous: same.tasks)
-        XCTAssertTrue(next.tasks[0].isActive)
-        XCTAssertFalse(next.tasks[0].isUnconfirmed)
-        XCTAssertTrue(guarder.pending.isEmpty)
+        XCTAssertFalse(next.tasks[0].isActive)
+        XCTAssertTrue(next.tasks[0].isUnconfirmed)
+        XCTAssertNotNil(guarder.pending[old.id])
     }
 
     func testOnlySameFileAndTurnCanConfirmDiscardedEnding() {
@@ -101,5 +101,16 @@ final class CodexTerminalGuardTests: XCTestCase {
         let result = guarder.reconcile(snapshot, previous: [])
         XCTAssertTrue(result.tasks[0].isUnconfirmed)
         XCTAssertTrue(result.terminalIDs.isEmpty)
+    }
+
+    func testOverlongTurnIdentityDoesNotEnterPendingStorage() {
+        let old = task(String(repeating: "x", count: CodexTerminalGuard.maximumIdentityBytes + 1))
+        var guarder = CodexTerminalGuard()
+        guarder.remember([old.id], previous: [old])
+        XCTAssertTrue(guarder.overflowed)
+        XCTAssertTrue(guarder.pending.isEmpty)
+        var snapshot = CodexTaskSnapshot()
+        snapshot.tasks = [task("turn:new")]
+        XCTAssertTrue(guarder.reconcile(snapshot, previous: [old]).tasks[0].isUnconfirmed)
     }
 }

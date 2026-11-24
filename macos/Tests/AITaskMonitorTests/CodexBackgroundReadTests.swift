@@ -291,8 +291,80 @@ final class CodexBackgroundReadTests: XCTestCase {
         XCTAssertTrue(store.tasks.contains { $0.id == id && $0.isUnconfirmed && !$0.isActive })
         store.refresh()
         waitForRead(store)
-        XCTAssertFalse(store.testPendingCodexTerminalIDs.contains(id))
-        XCTAssertTrue(store.tasks.contains { $0.id == id && $0.isActive && $0.startKey == "turn:new-turn" })
+        XCTAssertTrue(store.testPendingCodexTerminalIDs.contains(id))
+        XCTAssertTrue(store.tasks.contains { $0.id == id && $0.isUnconfirmed && $0.startKey == "turn:new-turn" })
+    }
+
+    @MainActor
+    func testFastEndingIsRecheckedBeforePublishingNewTurn() throws {
+        let root = try root()
+        let id = "019127f4-35ae-7c73-9e72-a10123456781"
+        try writeTasks([(id, "Synthetic")], root: root)
+        let gate = OneReadGate()
+        defer { gate.release.signal() }
+        let reader = CodexTaskReader(codexHome: root, afterSnapshotForTests: { snapshot in
+            if snapshot.terminalIDs.contains(id) { gate.waitOnce() }
+        })
+        let store = TaskStore(codexReader: reader,
+            claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("no-claude")), previewTasks: [])
+        store.refresh()
+        waitForRead(store)
+        XCTAssertTrue(store.tasks.contains { $0.id == id && $0.isActive })
+        try appendEvent("task_complete", turn: "turn-\(id)", id: id, root: root)
+        store.refresh()
+        XCTAssertEqual(gate.entered.wait(timeout: .now() + 3), .success)
+        try appendEvent("task_started", turn: "new-turn", id: id, root: root)
+        gate.release.signal()
+        waitForRead(store)
+        XCTAssertTrue(store.testPendingCodexTerminalIDs.contains(id))
+        XCTAssertTrue(store.tasks.contains { $0.id == id && $0.isUnconfirmed && !$0.isActive })
+        store.refresh()
+        waitForRead(store)
+        XCTAssertTrue(store.tasks.contains { $0.id == id && $0.isUnconfirmed && $0.startKey == "turn:new-turn" })
+    }
+
+    @MainActor
+    func testRewrittenSameInodeDoesNotConfirmAnOlderTurn() throws {
+        let root = try root()
+        let id = "019127f4-35ae-7c73-9e72-a10123456781"
+        try writeTasks([(id, "Synthetic")], root: root)
+        let file = root.appendingPathComponent("sessions/2026/11/16/rollout-2026-11-16T15-31-00-\(id).jsonl")
+        let gate = OneReadGate()
+        defer { gate.release.signal() }
+        let reader = CodexTaskReader(codexHome: root, afterSnapshotForTests: { snapshot in
+            if snapshot.terminalIDs.contains(id) { gate.waitOnce() }
+        })
+        let store = TaskStore(codexReader: reader,
+            claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("no-claude")), previewTasks: [])
+        store.refresh()
+        waitForRead(store)
+        XCTAssertTrue(store.tasks.contains { $0.id == id && $0.isActive })
+        try appendEvent("task_complete", turn: "turn-\(id)", id: id, root: root)
+        store.refresh()
+        XCTAssertEqual(gate.entered.wait(timeout: .now() + 3), .success)
+        let before = try FileManager.default.attributesOfItem(atPath: file.path)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let timestamp = formatter.string(from: Date().addingTimeInterval(-30))
+        let rows: [[String: Any]] = [
+            ["timestamp": timestamp, "type": "session_meta", "payload": ["id": id, "source": "exec", "thread_source": "user"]],
+            ["timestamp": timestamp, "type": "event_msg", "payload": ["type": "task_started", "turn_id": "older-turn"]]
+        ]
+        var data = Data()
+        for row in rows {
+            data.append(try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]))
+            data.append(0x0a)
+        }
+        try write(data, to: file)
+        let after = try FileManager.default.attributesOfItem(atPath: file.path)
+        XCTAssertEqual(before[.systemFileNumber] as? NSNumber, after[.systemFileNumber] as? NSNumber)
+        gate.release.signal()
+        waitForRead(store)
+        XCTAssertTrue(store.testPendingCodexTerminalIDs.contains(id))
+        store.refresh()
+        waitForRead(store)
+        XCTAssertTrue(store.tasks.contains { $0.id == id && $0.isUnconfirmed && !$0.isActive })
+        XCTAssertFalse(store.tasks.contains { $0.id == id && $0.isActive })
     }
 
     @MainActor
