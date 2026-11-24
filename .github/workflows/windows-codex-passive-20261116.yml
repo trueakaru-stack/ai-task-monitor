@@ -1,4 +1,4 @@
-name: Windows passive Codex safety
+name: Windows compact agent count preview
 on:
   workflow_dispatch:
   push:
@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks, screenshots-related, screenshots-showcase]
+        part: [screenshots-related, screenshots-showcase]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
@@ -160,6 +160,16 @@ jobs:
                   Invoke-Isolated $powershell $arguments
                   if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Long-activity synthetic screenshot is missing.'}
                 }
+              }
+              if($env:AITM_TEST_PART -eq 'screenshots-related'){
+                Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/tests/Test-RelatedAgentPlacement.ps1'))
+                foreach($theme in @('dark','light')){foreach($mode in @('expanded','compact')){
+                  $stem="related-agents-no-active-$theme-$mode"
+                  $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsNoActive','-PreviewRelatedAgentsNamedTitle','-PreviewRelatedAgentsUiTest','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride','ru','-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
+                  if($mode -eq 'compact'){$arguments+='-CompactMode'}
+                  Invoke-Isolated $powershell $arguments
+                  if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'No-active-step screenshot is missing.'}
+                }}
               }
               if($env:AITM_TEST_PART -eq 'screenshots-showcase'){
                 foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($frame in @('expanded-closed','expanded-open','compact-closed','compact-open','compact-claude')){

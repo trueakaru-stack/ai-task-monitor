@@ -50,6 +50,7 @@
  [switch]$PreviewRelatedAgentsUiTest,
  [switch]$PreviewRelatedAgentsExpanded,
  [switch]$PreviewRelatedAgentsNamedTitle,
+ [switch]$PreviewRelatedAgentsNoActive,
  [switch]$PreviewRelatedAgentsLongActivity,
  [switch]$PreviewRelatedAgentsShowcase,
  [switch]$PreviewRelatedAgentsSelectClaude,
@@ -155,6 +156,7 @@ if(($PreviewPlanUnconfirmed -or $PreviewPlanUiTest) -and (-not $SnapshotFile -or
 if($PreviewRelatedAgents -and (-not $SnapshotFile -or $PreviewScenario -ne 'planned' -or $(if($PreviewRelatedAgentsShowcase){$PreviewActiveTasks -ne 2}else{$PreviewActiveTasks -ne 1}))){throw 'Agent grouping previews require synthetic planned tasks and a snapshot.'}
 if($PreviewRelatedAgentsExpanded -and -not $PreviewRelatedAgents){throw 'Expanded agent previews require synthetic grouped agents.'}
 if($PreviewRelatedAgentsNamedTitle -and -not $PreviewRelatedAgents){throw 'A named agent preview requires synthetic grouped agents.'}
+if($PreviewRelatedAgentsNoActive -and -not $PreviewRelatedAgents){throw 'A paused-plan preview requires synthetic grouped agents.'}
 if($PreviewRelatedAgentsLongActivity -and (-not $PreviewRelatedAgents -or $CompactMode)){throw 'Long agent activity requires an expanded synthetic agent preview.'}
 if($PreviewRelatedAgentsShowcase -and -not $PreviewRelatedAgents){throw 'The agent showcase requires synthetic grouped agents.'}
 if($PreviewRelatedAgentsSelectClaude -and (-not $PreviewRelatedAgentsShowcase -or -not $CompactMode)){throw 'Claude selection requires a compact synthetic agent showcase.'}
@@ -4145,6 +4147,41 @@ function Progress-Label($task) {
  return $prefix+([int]$value).ToString()+"%"
 }
 
+function Active-PlanStepIndex($task) {
+ if(-not [bool](Prop $task 'PlanConfirmed' $true) -or [string](Prop $task 'Status' '') -eq 'Статус не подтверждён'){return -1}
+ $steps=@(Prop $task 'Steps' @());$active=-1
+ for($index=0;$index -lt $steps.Count;$index++){
+  $state=[string](Prop $steps[$index] 'status' '')
+  if($state -notin @('done','active','pending')){return -1}
+  if($state -eq 'active'){if($active -ge 0){return -1};$active=$index}
+ }
+ return $active
+}
+
+function Compact-AgentStepLabel($task) {
+ if([int](Prop $task 'RelatedAgentCount' 0) -le 0){return ''}
+ $index=Active-PlanStepIndex $task
+ if($index -lt 0){return ''}
+ $count=@(Prop $task 'Steps' @()).Count
+ $step=if($script:resolvedLanguage -eq 'en'){"Step $($index+1) of $count"}else{"Этап $($index+1) из $count"}
+ return $step+(Localized-TaskTitle $task -SuffixOnly)
+}
+
+function Compact-ProgressLabel($task) {
+ $progress=Progress-Label $task
+ $agentStep=Compact-AgentStepLabel $task
+ if(-not $agentStep){return $progress}
+ $suffix=Localized-TaskTitle $task -SuffixOnly
+ if($suffix -and $agentStep.Substring(0,$agentStep.Length-$suffix.Length) -ceq $progress){return $agentStep}
+ return $progress
+}
+
+function Compact-ExtraAgentStepLabel($task) {
+ $agentStep=Compact-AgentStepLabel $task
+ if(-not $agentStep -or $agentStep -ceq (Compact-ProgressLabel $task)){return ''}
+ return $agentStep
+}
+
 function Plan-StatusNote($task) {
  if(@(Prop $task 'Steps' @()).Count -eq 0){return ''}
  if([bool](Prop $task 'RetainedPlanIncomplete' $false)){return (Tr 'План не подтверждён; список может быть неполным')}
@@ -4263,7 +4300,7 @@ function Add-LoopWarning($container,$task,[bool]$compact) {
  $container.Children.Add($row)|Out-Null
 }
 
-function Add-Steps($container, $steps, [bool]$hidePlanState=$false) {
+function Add-Steps($container, $steps, [bool]$hidePlanState=$false, $task=$null) {
  $all = @($steps)
  if($all.Count -eq 0){
   $empty = Text (Tr "План ещё не опубликован этой задачей") 12.5 $script:palette.Activity
@@ -4273,6 +4310,7 @@ function Add-Steps($container, $steps, [bool]$hidePlanState=$false) {
  $scroll = New-Object Windows.Controls.ScrollViewer; $scroll.Height=110; $scroll.Margin=New-Object Windows.Thickness(0,11,0,0); $scroll.VerticalScrollBarVisibility=$(if($all.Count -gt 5){"Auto"}else{"Hidden"}); $scroll.HorizontalScrollBarVisibility="Disabled"
  $rail = New-Object Windows.Controls.StackPanel
  $activeIndex=-1; $pendingIndex=-1; $stepIndex=0
+ $agentStepIndex=if($null -ne $task -and -not $hidePlanState -and [int](Prop $task 'RelatedAgentCount' 0) -gt 0){Active-PlanStepIndex $task}else{-1}
  foreach ($step in $all) {
   $row=New-Object Windows.Controls.Grid; $row.Height=22
   $c1=New-Object Windows.Controls.ColumnDefinition; $c1.Width=New-Object Windows.GridLength(22)
@@ -4295,8 +4333,18 @@ function Add-Steps($container, $steps, [bool]$hidePlanState=$false) {
   $stepTitle=[string](Prop $step "title" (Tr "Без названия"))
   if($script:resolvedLanguage -eq 'en' -and [bool](Prop $step 'generated' $false)){$stepTitle='Step '+[string](Prop $step 'id' '')}
   $label=Text $stepTitle 13 $labelColor $labelWeight
-  $label.Margin=New-Object Windows.Thickness(4,0,0,0); $label.TextWrapping="NoWrap"; $label.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $label $stepTitle "line"; $label.VerticalAlignment="Center"; [Windows.Controls.Grid]::SetColumn($label,1)
-  $row.Children.Add($marker)|Out-Null; $row.Children.Add($label)|Out-Null; $rail.Children.Add($row)|Out-Null
+  $label.Margin=New-Object Windows.Thickness(4,0,0,0); $label.TextWrapping="NoWrap"; $label.TextTrimming="CharacterEllipsis"; Add-ConditionalHint $label $stepTitle "line"; $label.VerticalAlignment="Center"
+  $row.Children.Add($marker)|Out-Null
+  if($stepIndex -eq $agentStepIndex){
+   $stepLine=New-Object Windows.Controls.Grid;$stepLine.HorizontalAlignment='Left';$stepLine.Tag='related-agent-step'
+   $stepTextColumn=New-Object Windows.Controls.ColumnDefinition;$stepTextColumn.Width=New-Object Windows.GridLength(1,'Star')
+   $stepCountColumn=New-Object Windows.Controls.ColumnDefinition;$stepCountColumn.Width=[Windows.GridLength]::Auto
+   $stepLine.ColumnDefinitions.Add($stepTextColumn);$stepLine.ColumnDefinitions.Add($stepCountColumn)
+   $agentToggle=New-RelatedAgentToggle $task 13;[Windows.Controls.Grid]::SetColumn($agentToggle,1)
+   $stepLine.Children.Add($label)|Out-Null;$stepLine.Children.Add($agentToggle)|Out-Null
+   [Windows.Controls.Grid]::SetColumn($stepLine,1);$row.Children.Add($stepLine)|Out-Null
+  }else{[Windows.Controls.Grid]::SetColumn($label,1);$row.Children.Add($label)|Out-Null}
+  $rail.Children.Add($row)|Out-Null
   $stepIndex++
  }
  $focusIndex=if($activeIndex -ge 0){$activeIndex}elseif($pendingIndex -ge 0){$pendingIndex}else{[Math]::Max(0,$all.Count-2)}
@@ -4340,30 +4388,14 @@ function New-ActivityIndicator([bool]$active) {
  return $track
 }
 
-function New-TaskTitleLine($task,[double]$rightMargin,[bool]$fixedHeight) {
- $baseTitle=Localized-TaskTitle $task -BaseOnly
- $suffix=if($fixedHeight){Localized-TaskTitle $task -SuffixOnly}else{''}
- $displayTitle=if($fixedHeight){Localized-TaskTitle $task}else{$baseTitle}
- $title=Text $baseTitle 16 $script:palette.Primary 'SemiBold'
- $title.TextWrapping='NoWrap';$title.TextTrimming='CharacterEllipsis';$title.MaxWidth=390
- Add-ConditionalHint $title $baseTitle 'line'
- [Windows.Automation.AutomationProperties]::SetName($title,$displayTitle)
- if($PreviewRelatedAgents -and (($CompactMode -and -not $fixedHeight) -or (-not $CompactMode -and $fixedHeight))){$script:previewHintTarget=$title}
- if(-not $suffix){
-  $title.Margin=New-Object Windows.Thickness(0,0,$rightMargin,0)
-  if($fixedHeight){$title.Height=22;$title.HorizontalAlignment='Left'}
-  return $title
- }
- $line=New-Object Windows.Controls.Grid;$line.Margin=New-Object Windows.Thickness(0,0,$rightMargin,0);$line.MaxWidth=390;$line.HorizontalAlignment='Left'
- if($fixedHeight){$line.Height=22}
- $nameColumn=New-Object Windows.Controls.ColumnDefinition;$nameColumn.Width=New-Object Windows.GridLength(1,'Star')
- $countColumn=New-Object Windows.Controls.ColumnDefinition;$countColumn.Width=[Windows.GridLength]::Auto
- $line.ColumnDefinitions.Add($nameColumn);$line.ColumnDefinitions.Add($countColumn)
+function New-RelatedAgentToggle($task,[double]$fontSize) {
+ $suffix=Localized-TaskTitle $task -SuffixOnly
+ if(-not $suffix){return $null}
  $id=[string](Prop $task 'Id' '');$expanded=$script:relatedAgentsExpanded.ContainsKey($id)
  $button=New-Object Windows.Controls.Button;$button.Style=$window.Resources['ProviderTabStyle'];$button.Height=22;$button.Padding=New-Object Windows.Thickness(0);$button.Margin=New-Object Windows.Thickness(0);$button.Cursor=[Windows.Input.Cursors]::Hand
- $mode=if($fixedHeight){'expanded'}else{'compact'};$button.Tag=[PSCustomObject]@{Id=$id;Mode=$mode}
+ $mode='expanded';$button.Tag=[PSCustomObject]@{Id=$id;Mode=$mode}
  $buttonContent=New-Object Windows.Controls.StackPanel;$buttonContent.Orientation='Horizontal'
- $count=Text $suffix 16 $script:palette.Primary 'SemiBold';$count.TextWrapping='NoWrap';$count.Tag='related-agent-count'
+ $count=Text $suffix $fontSize $script:palette.Primary 'SemiBold';$count.TextWrapping='NoWrap';$count.Tag='related-agent-count'
  $arrow=New-Object Windows.Shapes.Path;$arrow.Data=[Windows.Media.Geometry]::Parse('M 4,7 L 10,13 L 16,7');$arrow.Width=9;$arrow.Height=6;$arrow.Stretch='Uniform';$arrow.Stroke=Brush $script:palette.Secondary;$arrow.StrokeThickness=1.3;$arrow.StrokeStartLineCap='Round';$arrow.StrokeEndLineCap='Round';$arrow.StrokeLineJoin='Round';$arrow.Margin=New-Object Windows.Thickness(4,0,0,0);$arrow.VerticalAlignment='Center'
  if($expanded){$arrow.RenderTransformOrigin=[Windows.Point]::new(0.5,0.5);$arrow.RenderTransform=[Windows.Media.ScaleTransform]::new(1,-1)}
  $buttonContent.Children.Add($count)|Out-Null;$buttonContent.Children.Add($arrow)|Out-Null;$button.Content=$buttonContent
@@ -4378,8 +4410,32 @@ function New-TaskTitleLine($task,[double]$rightMargin,[bool]$fixedHeight) {
   if($script:relatedAgentButtons.ContainsKey($key)){[void]$script:relatedAgentButtons[$key].Focus()}
  })
  $script:relatedAgentButtons[$mode+'|'+$id]=$button
- [Windows.Controls.Grid]::SetColumn($button,1)
- $line.Children.Add($title)|Out-Null;$line.Children.Add($button)|Out-Null
+ return $button
+}
+
+function New-TaskTitleLine($task,[double]$rightMargin,[bool]$fixedHeight) {
+ $baseTitle=Localized-TaskTitle $task -BaseOnly
+ $suffix=if((Active-PlanStepIndex $task) -lt 0){Localized-TaskTitle $task -SuffixOnly}else{''}
+ $displayTitle=$baseTitle+$suffix
+ $title=Text $baseTitle 16 $script:palette.Primary 'SemiBold'
+ $title.TextWrapping='NoWrap';$title.TextTrimming='CharacterEllipsis';$title.MaxWidth=390
+ Add-ConditionalHint $title $baseTitle 'line'
+ [Windows.Automation.AutomationProperties]::SetName($title,$displayTitle)
+ if($PreviewRelatedAgents -and (($CompactMode -and -not $fixedHeight) -or (-not $CompactMode -and $fixedHeight))){$script:previewHintTarget=$title}
+ if(-not $suffix){
+  $title.Margin=New-Object Windows.Thickness(0,0,$rightMargin,0)
+  if($fixedHeight){$title.Height=22;$title.HorizontalAlignment='Left'}
+  return $title
+ }
+ $line=New-Object Windows.Controls.Grid;$line.Margin=New-Object Windows.Thickness(0,0,$rightMargin,0);$line.MaxWidth=390;$line.HorizontalAlignment='Left';$line.Tag='related-agent-title'
+ if($fixedHeight){$line.Height=22}
+ $nameColumn=New-Object Windows.Controls.ColumnDefinition;$nameColumn.Width=New-Object Windows.GridLength(1,'Star')
+ $countColumn=New-Object Windows.Controls.ColumnDefinition;$countColumn.Width=[Windows.GridLength]::Auto
+ $line.ColumnDefinitions.Add($nameColumn);$line.ColumnDefinitions.Add($countColumn)
+ if($fixedHeight){$countView=New-RelatedAgentToggle $task 16}
+ else{$countView=Text $suffix 16 $script:palette.Primary 'SemiBold';$countView.TextWrapping='NoWrap';$countView.Tag='related-agent-count'}
+ [Windows.Controls.Grid]::SetColumn($countView,1)
+ $line.Children.Add($title)|Out-Null;$line.Children.Add($countView)|Out-Null
  return $line
 }
 
@@ -4468,7 +4524,7 @@ function Add-Card($task) {
  Add-LoopWarning $stack $task $false
  if(-not $hideClaudePlanState -and $task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Margin=New-Object Windows.Thickness(0,14,0,0); $stack.Children.Add($bar)|Out-Null}
  if($stepCount -gt 0){
-  Add-Steps $stack $task.Steps $hideClaudePlanState
+  Add-Steps $stack $task.Steps $hideClaudePlanState $task
   $planNote=Plan-StatusNote $task
   $metaText=$(if($planNote){$planNote}else{Tr 'План задачи'})+' · '+(Plan-StepCount $stepCount)
   if($task.Updated -ne [DateTime]::MinValue){$metaText += " · "+$task.Updated.ToString("HH:mm")}
@@ -4491,10 +4547,19 @@ function Add-CompactTask($task) {
  $c2=New-Object Windows.Controls.ColumnDefinition; $c2.Width=[Windows.GridLength]::Auto
  $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2)
  $title=New-TaskTitleLine $task 10 $false
- $progressLabel=Progress-Label $task
+ $progressLabel=Compact-ProgressLabel $task
  $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.VerticalAlignment="Center"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip=Tr "Приблизительная оценка"}
- [Windows.Controls.Grid]::SetColumn($title,0); [Windows.Controls.Grid]::SetColumn($percent,1)
- $header.Children.Add($title)|Out-Null; $header.Children.Add($percent)|Out-Null
+ $extraAgentStep=Compact-ExtraAgentStepLabel $task
+ if($extraAgentStep){
+  $progressView=New-Object Windows.Controls.StackPanel;$progressView.HorizontalAlignment='Right'
+  $percent.HorizontalAlignment='Right';$progressView.Children.Add($percent)|Out-Null
+  $agentStep=Text $extraAgentStep 11.5 $script:palette.Activity;$agentStep.HorizontalAlignment='Right';$agentStep.Tag='related-agent-count';$progressView.Children.Add($agentStep)|Out-Null
+ }else{
+  $progressView=$percent
+  if((Compact-AgentStepLabel $task) -and $progressLabel -ceq (Compact-AgentStepLabel $task)){$percent.Tag='related-agent-count'}
+ }
+ [Windows.Controls.Grid]::SetColumn($title,0); [Windows.Controls.Grid]::SetColumn($progressView,1)
+ $header.Children.Add($title)|Out-Null; $header.Children.Add($progressView)|Out-Null
  [Windows.Controls.Grid]::SetRow($header,0); $container.Children.Add($header)|Out-Null
 
  $activityText=Localized-CompactTaskActivity $task; if(-not $activityText){$activityText=Tr "Выполняется"}
@@ -4509,6 +4574,8 @@ function Add-CompactTask($task) {
  $warningPanel=New-Object Windows.Controls.StackPanel
  $planNoteText=Plan-StatusNote $task
  if($planNoteText){$planNote=Text $planNoteText 11.5 $script:palette.Muted;$planNote.Margin=New-Object Windows.Thickness(0,4,0,0);$warningPanel.Children.Add($planNote)|Out-Null}
+ $agentStatusText=Related-AgentStatus $task
+ if($agentStatusText){$agentStatus=Text $agentStatusText 11.5 $script:palette.Muted;$agentStatus.Margin=New-Object Windows.Thickness(0,4,0,0);$agentStatus.Tag='related-agent-status';$warningPanel.Children.Add($agentStatus)|Out-Null}
  Add-LoopWarning $warningPanel $task $true; [Windows.Controls.Grid]::SetRow($warningPanel,2); $container.Children.Add($warningPanel)|Out-Null
  $hideClaudePlanState=([string]$task.Provider -in @('claude','codex') -and (-not [bool](Prop $task 'PlanConfirmed' $true) -or [string](Prop $task 'Status' '') -eq 'Статус не подтверждён'))
  if(-not $hideClaudePlanState -and $task.ProgressKind -ne "none" -and $null -ne $task.Progress){$bar=New-Object Windows.Controls.ProgressBar; $bar.Maximum=100; $bar.Value=$task.Progress; $bar.Height=2; $bar.Margin=New-Object Windows.Thickness(0,7,0,0); [Windows.Controls.Grid]::SetRow($bar,3); $container.Children.Add($bar)|Out-Null}
@@ -4659,10 +4726,12 @@ function Render-CompactTasks($tasks) {
  $compactMoreText.Text=$(if($hiddenCount -gt 0){if($script:resolvedLanguage -eq 'en'){"$hiddenCount more tasks"}else{"Ещё $hiddenCount задач"}}else{""})
  $hasLoopWarning=$visibleTasks.Count -gt 0 -and $null -ne (Get-LoopWarning $selected[0])
  $hasUnconfirmedPlan=$visibleTasks.Count -gt 0 -and [bool](Plan-StatusNote $selected[0])
- if($script:isCompact){$window.Height=Compact-Height $compactTasks.Count ([bool]$warningText) $hasLoopWarning $hasUnconfirmedPlan;Move-CompactWindow}
+ $hasAgentStatus=$visibleTasks.Count -gt 0 -and [bool](Related-AgentStatus $selected[0])
+ $hasExtraAgentStep=$visibleTasks.Count -gt 0 -and [bool](Compact-ExtraAgentStepLabel $selected[0])
+ if($script:isCompact){$window.Height=Compact-Height $compactTasks.Count ([bool]$warningText) $hasLoopWarning $hasUnconfirmedPlan $hasAgentStatus $hasExtraAgentStep;Move-CompactWindow}
 }
 
-function Compact-Height([int]$activeCount,[bool]$hasSourceErrors=$false,[bool]$hasLoopWarning=$false,[bool]$hasUnconfirmedPlan=$false) {
+function Compact-Height([int]$activeCount,[bool]$hasSourceErrors=$false,[bool]$hasLoopWarning=$false,[bool]$hasUnconfirmedPlan=$false,[bool]$hasAgentStatus=$false,[bool]$hasExtraAgentStep=$false) {
  if($activeCount -le 0){return 132}
  $dots=if($activeCount -gt 1){18}else{0}
  $more=if($activeCount -gt 3){20}else{0}
@@ -4670,7 +4739,9 @@ function Compact-Height([int]$activeCount,[bool]$hasSourceErrors=$false,[bool]$h
  $warning=if($hasSourceErrors){20}else{0}
  $loopSpace=if($hasLoopWarning){72}else{0}
  $planSpace=if($hasUnconfirmedPlan){20}else{0}
- return 162+$dots+$more+$provider+$warning+$loopSpace+$planSpace
+ $agentSpace=if($hasAgentStatus){20}else{0}
+ $stepSpace=if($hasExtraAgentStep){20}else{0}
+ return 162+$dots+$more+$provider+$warning+$loopSpace+$planSpace+$agentSpace+$stepSpace
 }
 
 function Move-CompactWindow {
@@ -4693,8 +4764,10 @@ function Set-CompactMode([bool]$compact) {
   $selectedTask=@($script:lastAllTasks|Where-Object {[string]$_.Id -eq $script:compactTaskId}|Select-Object -First 1)
   $hasLoopWarning=$selectedTask.Count -gt 0 -and $null -ne (Get-LoopWarning $selectedTask[0])
   $hasUnconfirmedPlan=$selectedTask.Count -gt 0 -and [bool](Plan-StatusNote $selectedTask[0])
+  $hasAgentStatus=$selectedTask.Count -gt 0 -and [bool](Related-AgentStatus $selectedTask[0])
+  $hasExtraAgentStep=$selectedTask.Count -gt 0 -and [bool](Compact-ExtraAgentStepLabel $selectedTask[0])
   $compactWarning=Source-WarningText $script:sourceErrors $script:sourcePartialConnections $script:sourcePartialData $script:sourceCodexIncomplete $true
-  $window.Height=Compact-Height $compactCount ([bool]$compactWarning) $hasLoopWarning $hasUnconfirmedPlan
+  $window.Height=Compact-Height $compactCount ([bool]$compactWarning) $hasLoopWarning $hasUnconfirmedPlan $hasAgentStatus $hasExtraAgentStep
   $windowFrame.Margin=New-Object Windows.Thickness(16)
   $script:isCompact=$true; $window.Topmost=$true; Move-CompactWindow
  }else{
@@ -5327,6 +5400,9 @@ function Update-View {
      $allTasks[1].Activity=Preview-Text 'Проверяю работу уведомлений' 'Checking notifications'
      $allTasks[1].Steps=@();$allTasks[1].Progress=$null;$allTasks[1].ProgressKind='none'
     }
+    if($PreviewRelatedAgentsNoActive){
+     $rootTask.Steps=@($rootTask.Steps|ForEach-Object{$copy=$_.PSObject.Copy();if([string]$copy.status -eq 'active'){$copy.status='pending'};$copy})
+    }
     $previewTasks=@($rootTask)
     $agentIndex=0
     foreach($agentId in @($first,$second,$nested)){
@@ -5608,7 +5684,7 @@ if ($SnapshotFile) {
     if($kind -eq 'action' -and [Windows.Automation.AutomationProperties]::GetAutomationId($parent) -ceq 'related-agent-action'){return $parent}
     if($kind -eq 'activity' -and [Windows.Automation.AutomationProperties]::GetAutomationId($parent) -ceq 'related-parent-activity'){return $parent}
     if($kind -eq 'compact-activity' -and [Windows.Automation.AutomationProperties]::GetAutomationId($parent) -ceq 'compact-task-activity'){return $parent}
-    if($kind -eq 'progress' -and $parent.Text -ceq (Progress-Label $script:lastAllTasks[0])){return $parent}
+    if($kind -eq 'progress' -and $parent.Text -ceq $(if($CompactMode){Compact-ProgressLabel $script:lastAllTasks[0]}else{Progress-Label $script:lastAllTasks[0]})){return $parent}
    }
    for($index=0;$index -lt [Windows.Media.VisualTreeHelper]::GetChildrenCount($parent);$index++){
     $found=Find-RelatedPreview ([Windows.Media.VisualTreeHelper]::GetChild($parent,$index)) $kind
@@ -5623,10 +5699,13 @@ if ($SnapshotFile) {
      $title.TextTrimming -ne [Windows.TextTrimming]::CharacterEllipsis){throw 'The task title or progress is not visible.'}
   if($CompactMode){
    $activity=Find-RelatedPreview $surface 'compact-activity'
-   if($null -ne $count -or $null -ne $status -or $null -ne (Find-RelatedPreview $surface 'action') -or
+   $expectedCount=if($PreviewRelatedAgentsNoActive){Localized-TaskTitle $script:lastAllTasks[0] -SuffixOnly}else{Compact-AgentStepLabel $script:lastAllTasks[0]}
+   $expectedTitle=if($PreviewRelatedAgentsNoActive){Localized-TaskTitle $script:lastAllTasks[0]}else{Localized-TaskTitle $script:lastAllTasks[0] -BaseOnly}
+   if($null -eq $count -or $count.Text -cne $expectedCount -or
+      $null -eq $status -or $status.Text -cne (Related-AgentStatus $script:lastAllTasks[0]) -or $null -ne (Find-RelatedPreview $surface 'action') -or
       $null -eq $activity -or $activity.Text -cne (Localized-CompactTaskActivity $script:lastAllTasks[0]) -or
-      [Windows.Automation.AutomationProperties]::GetName($title) -cne (Localized-TaskTitle $script:lastAllTasks[0] -BaseOnly)){
-    throw 'Compact view exposed agent details or lost the task activity.'
+      [Windows.Automation.AutomationProperties]::GetName($title) -cne $expectedTitle){
+    throw 'Compact view lost the task count, uncertainty or activity, or exposed agent actions.'
    }
   }elseif($null -eq $count -or $count.ActualWidth -le 0 -or $count.ActualWidth+0.5 -lt $count.DesiredSize.Width -or
          $null -eq $status -or $status.Text -cne (Related-AgentStatus $script:lastAllTasks[0])){
@@ -5658,14 +5737,16 @@ if ($SnapshotFile) {
    $beforeHeight=$window.Height
    if($script:relatedAgentsExpanded.ContainsKey($id)){[void]$script:relatedAgentsExpanded.Remove($id)}else{$script:relatedAgentsExpanded[$id]=$true}
    Render-CompactTasks $script:lastAllTasks;$window.UpdateLayout()
-   if($window.Height -ne $beforeHeight -or $null -ne (Find-RelatedPreview $compactTasksPanel 'count') -or
-      $null -ne (Find-RelatedPreview $compactTasksPanel 'status') -or $null -ne (Find-RelatedPreview $compactTasksPanel 'action')){
+   if($window.Height -ne $beforeHeight -or $null -eq (Find-RelatedPreview $compactTasksPanel 'count') -or
+      $null -eq (Find-RelatedPreview $compactTasksPanel 'status') -or $null -ne (Find-RelatedPreview $compactTasksPanel 'action')){
     throw 'Agent expansion changed the compact view.'
    }
-   Write-Output 'Compact view: current task and progress visible; agent count, status, actions and expansion hidden.'
+   Write-Output 'Compact view: task count on the current step, uncertainty and current activity visible; agent actions hidden.'
   }else{
   $button=$script:relatedAgentButtons[$key]
   if($null -eq $button -or -not $button.Focusable -or -not $button.IsTabStop -or $null -ne $button.ToolTip){throw 'The agent action control is not keyboard reachable or has an unexpected hint.'}
+  $expectedParent=if($PreviewRelatedAgentsNoActive){'related-agent-title'}else{'related-agent-step'}
+  if($button.Parent.Tag -cne $expectedParent){throw 'The agent count is not attached to the expected plan or title.'}
   $originalExpanded=$script:relatedAgentsExpanded.ContainsKey($id)
   if($originalExpanded){
    $button.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent));$window.UpdateLayout()
