@@ -10,6 +10,7 @@ public sealed class SyntheticClaudeLoopController
     public readonly ManualResetEventSlim DisposeRelease = new ManualResetEventSlim(true);
     private int created;
     internal int overflow;
+    internal int stopped;
     public int Created { get { return Interlocked.CompareExchange(ref created, 0, 0); } }
     public ILoopSource Create()
     {
@@ -18,6 +19,7 @@ public sealed class SyntheticClaudeLoopController
         return new SyntheticClaudeLoopSource(this, id);
     }
     public void QueueOverflow() { Interlocked.Exchange(ref overflow, 1); }
+    public void SetStopped(bool value) { Interlocked.Exchange(ref stopped, value ? 1 : 0); }
 }
 
 internal sealed class SyntheticClaudeLoopSource : ILoopSource
@@ -26,6 +28,7 @@ internal sealed class SyntheticClaudeLoopSource : ILoopSource
     private readonly int id;
     private bool first = true;
     public SyntheticClaudeLoopSource(SyntheticClaudeLoopController owner, int id) { this.owner = owner; this.id = id; }
+    public bool IsStopped { get { return Interlocked.CompareExchange(ref owner.stopped, 0, 0) != 0; } }
     public LoopBatch Drain()
     {
         if (first)

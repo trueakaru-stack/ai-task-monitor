@@ -31,7 +31,7 @@ try{
   [PSCustomObject]@{Id='second';Title='Second';Provider='synthetic';ProviderName='Synthetic';Active=$true;Status='active';Activity='Working';ProgressKind='none';Progress=$null;Steps=@()}
  )
  $controller=[SyntheticClaudeLoopController]::new();$factory=[Delegate]::CreateDelegate([Func[AITaskMonitor.ClaudeLoop.ILoopSource]],$controller,'Create')
- $script:claudeLoopChannel=[AITaskMonitor.ClaudeLoop.BackgroundChannel]::new($factory)
+ $script:claudeLoopChannel=[AITaskMonitor.ClaudeLoop.BackgroundChannel]::new($factory,350)
  try{
   Render-CompactTasks $script:lastAllTasks
   $clock=[Diagnostics.Stopwatch]::StartNew();Sync-ClaudeLoopChannel;$clock.Stop()
@@ -39,6 +39,9 @@ try{
   $dot=@($compactDotsPanel.Children|Where-Object {[string]$_.Tag -ceq 'second'})[0]
   $clock.Restart();$dot.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent));$clock.Stop()
   Require ($clock.ElapsedMilliseconds -lt 1000 -and $script:compactTaskId -ceq 'second' -and -not $controller.CreateRelease.IsSet) 'The real task-dot handler waited for the blocked Claude channel.'
+  $script:claudeLoopStates['old']=[PSCustomObject]@{Warning=$true}
+  Start-Sleep -Milliseconds 450;Sync-ClaudeLoopChannel
+  Require ($script:claudeLoopError -and $script:claudeLoopStates.Count -eq 0) 'A stuck channel hid its unavailable state or retained a stale warning.'
   $script:sourceErrors=@('Claude Code');$clock.Restart();Sync-ClaudeLoopChannel;$clock.Stop()
   Require ($clock.ElapsedMilliseconds -lt 1000 -and -not $script:claudeLoopChannel.IsReady) 'Disconnect waited for the blocked Claude channel.'
   Write-Output ('Claude loop wiring: production sync and compact dot stayed responsive during blocked channel startup ('+$clock.ElapsedMilliseconds+' ms disconnect).')

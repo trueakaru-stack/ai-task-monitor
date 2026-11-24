@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 
 namespace AITaskMonitor.ClaudeLoop
 {
     public interface ILoopSource : IDisposable
     {
+        bool IsStopped { get; }
         LoopBatch Drain();
     }
 
@@ -13,6 +15,7 @@ namespace AITaskMonitor.ClaudeLoop
     {
         private readonly Channel channel;
         public NativeLoopSource(string pipeName) { channel = new Channel(pipeName); }
+        public bool IsStopped { get { return channel.IsStopped; } }
         public LoopBatch Drain() { return channel.Drain(); }
         public void Dispose() { channel.Dispose(); }
     }
@@ -27,17 +30,21 @@ namespace AITaskMonitor.ClaudeLoop
         private readonly Queue<LoopEvent> events = new Queue<LoopEvent>();
         private readonly Func<ILoopSource> create;
         private readonly Thread thread;
+        private readonly int startupTimeoutMilliseconds;
         private bool enabled, disposed, ready, error, gap;
-        private long generation;
+        private long generation, requestedAt;
 
-        public BackgroundChannel(string pipeName) : this(delegate { return new NativeLoopSource(pipeName); }) { }
+        public BackgroundChannel(string pipeName) : this(delegate { return new NativeLoopSource(pipeName); }, 6000) { }
 
         // An injected factory allows blocked startup and shutdown to be tested
         // without a real pipe, profile, or visible process.
-        public BackgroundChannel(Func<ILoopSource> factory)
+        public BackgroundChannel(Func<ILoopSource> factory) : this(factory, 6000) { }
+        public BackgroundChannel(Func<ILoopSource> factory, int timeoutMilliseconds)
         {
             if (factory == null) throw new ArgumentNullException("factory");
+            if (timeoutMilliseconds < 1 || timeoutMilliseconds > 60000) throw new ArgumentOutOfRangeException("timeoutMilliseconds");
             create = factory;
+            startupTimeoutMilliseconds = timeoutMilliseconds;
             thread = new Thread(Run);
             thread.Name = "AI Task Monitor Claude loop owner";
             thread.IsBackground = true;
@@ -50,12 +57,22 @@ namespace AITaskMonitor.ClaudeLoop
             {
                 if (disposed || enabled == value) return;
                 enabled = value; generation++; ready = false; error = false; gap = false;
+                requestedAt = value ? Stopwatch.GetTimestamp() : 0;
                 events.Clear(); wake.Set();
             }
         }
 
         public bool IsReady { get { lock (gate) return !disposed && enabled && ready; } }
-        public bool HasError { get { lock (gate) return !disposed && enabled && error; } }
+        public bool HasError {
+            get {
+                lock (gate) {
+                    if (disposed || !enabled) return false;
+                    bool overdue = !ready && requestedAt > 0 &&
+                        (Stopwatch.GetTimestamp() - requestedAt) >= Stopwatch.Frequency * (double)startupTimeoutMilliseconds / 1000.0;
+                    return error || overdue;
+                }
+            }
+        }
 
         public LoopBatch Drain()
         {
@@ -118,6 +135,7 @@ namespace AITaskMonitor.ClaudeLoop
                     }
                     try
                     {
+                        if (source.IsStopped) throw new InvalidOperationException("The loop source stopped.");
                         LoopBatch batch = source.Drain();
                         lock (gate)
                         {

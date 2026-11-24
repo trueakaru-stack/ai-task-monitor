@@ -7,10 +7,12 @@ try{
  function Require([bool]$condition,[string]$message){if(-not $condition){throw $message}}
  $controller=[SyntheticClaudeLoopController]::new()
  $factory=[Delegate]::CreateDelegate([Func[AITaskMonitor.ClaudeLoop.ILoopSource]],$controller,'Create')
- $owner=[AITaskMonitor.ClaudeLoop.BackgroundChannel]::new($factory)
+ $owner=[AITaskMonitor.ClaudeLoop.BackgroundChannel]::new($factory,350)
  try{
   $owner.SetEnabled($true)
   Require ($controller.CreateEntered.Wait(10000)) 'The synthetic channel did not block during startup.'
+  Start-Sleep -Milliseconds 450
+  Require ($owner.HasError -and -not $owner.IsReady -and $controller.Created -eq 1) 'A stuck startup was reported as available or started another owner.'
   $clock=[Diagnostics.Stopwatch]::StartNew();$owner.SetEnabled($false);[void]$owner.Drain();$owner.SetEnabled($true);$clock.Stop()
   Require ($clock.ElapsedMilliseconds -lt 1000 -and $controller.Created -eq 1) 'The UI waited for startup or created a concurrent channel.'
   $controller.CreateRelease.Set();$deadline=[Diagnostics.Stopwatch]::StartNew();$seen=@()
@@ -22,6 +24,13 @@ try{
   $controller.QueueOverflow();$deadline.Restart();$overflow=$null
   do{Start-Sleep -Milliseconds 10;$batch=$owner.Drain();if($batch.Gap){$overflow=$batch;break}}while($deadline.ElapsedMilliseconds -lt 10000)
   Require ($null -ne $overflow -and @($overflow.Events).Count -le 2048) 'Overflow did not report an event gap or exceeded its bound.'
+  $controller.SetStopped($true);$deadline.Restart()
+  while(-not $owner.HasError -and $deadline.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
+  Require $owner.HasError 'A receiver that stopped without a Drain exception remained available.'
+  $controller.SetStopped($false);$deadline.Restart()
+  while(-not $owner.IsReady -and $deadline.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
+  $afterStop=$owner.Drain()
+  Require ($owner.IsReady -and $afterStop.Gap) 'Receiver recovery did not report the interrupted event sequence.'
   $controller.DisposeEntered.Reset();$controller.DisposeRelease.Reset()
   $clock.Restart();$owner.SetEnabled($false);$clock.Stop()
   Require ($clock.ElapsedMilliseconds -lt 1000 -and $controller.DisposeEntered.Wait(10000)) 'Disabling waited for channel shutdown.'
