@@ -72,7 +72,16 @@ try{
    $owner=[AITaskMonitor.LocalReadOwner.Owner]::new((Join-Path $work 'LocalSourceWorker.ps1'),$config)
    $client=New-LocalSourceClient $owner 'ru';$clock=[Diagnostics.Stopwatch]::StartNew()
    do{$snapshot=Get-LocalSourceClientSnapshot $client 'ru' 0;if($client.Fresh -and @($snapshot.Claude).Count -eq 1){break};Start-Sleep -Milliseconds 15}while($clock.ElapsedMilliseconds -lt 15000)
-   Require ($client.Fresh -and @($snapshot.Claude).Count -eq 1 -and $snapshot.Claude[0].Active) ('The synthetic Claude baseline failed: mode='+$mode+'; elapsed_ms='+$clock.ElapsedMilliseconds+'; owner='+$owner.Stage+'; failure='+$owner.FailureStage+'; kind='+$owner.FailureKind+'; warmup_ready='+$client.WarmupReady+'; warmup_pending='+$client.WarmupPending+'; timed_out='+$client.TimedOut+'; polling='+$owner.IsPolling+'; pending='+$owner.HasPendingRequest+'; result='+$owner.HasResult+'; '+(Get-SyntheticSourceStages))
+   if(-not ($client.Fresh -and @($snapshot.Claude).Count -eq 1 -and $snapshot.Claude[0].Active)){
+    $elapsed=$clock.ElapsedMilliseconds;$initialStages=Get-SyntheticSourceStages;$observed=@{}
+    $diagnostic=[Diagnostics.Stopwatch]::StartNew()
+    while($diagnostic.ElapsedMilliseconds -lt 15000 -and -not $owner.HasExited){
+     foreach($name in @('CORE_END','INIT_END','ACK_END')){if(-not $observed.ContainsKey($name) -and $stageHandles[$name].WaitOne(0)){$observed[$name]=$diagnostic.ElapsedMilliseconds}}
+     if($observed.ContainsKey('ACK_END')){break};Start-Sleep -Milliseconds 20
+    }
+    $observedText=@(foreach($name in @('CORE_END','INIT_END','ACK_END')){$value=if($observed.ContainsKey($name)){$observed[$name]}else{'not-seen'};$name+'='+$value}) -join '; '
+    throw ('The synthetic Claude baseline failed: mode='+$mode+'; elapsed_ms='+$elapsed+'; owner='+$owner.Stage+'; failure='+$owner.FailureStage+'; kind='+$owner.FailureKind+'; warmup_ready='+$client.WarmupReady+'; warmup_pending='+$client.WarmupPending+'; timed_out='+$client.TimedOut+'; polling='+$owner.IsPolling+'; pending='+$owner.HasPendingRequest+'; result='+$owner.HasResult+'; after_deadline_ms=['+$observedText+']; initial=['+$initialStages+']; later=['+(Get-SyntheticSourceStages)+']')
+   }
    foreach($stage in @('CONNECTED','PID_DONE','CORE_BEGIN','CORE_END','INIT_BEGIN','TITLES_BEGIN','TITLES_END','OBSERVER_BEGIN','OBSERVER_END','CLAUDE_BEGIN','CLAUDE_END','INIT_END','ACK_BEGIN','ACK_END','POLL_BEGIN','POLL_END')){
     Require ($stageHandles[$stage].WaitOne(0)) ('A synthetic source stage was not observed: '+$stage)
    }

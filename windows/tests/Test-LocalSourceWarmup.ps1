@@ -17,7 +17,11 @@ function Get-SyntheticStages {
 function Wait-Gate($gate,$owner,[string]$message){
  $clock=[Diagnostics.Stopwatch]::StartNew()
  while($clock.ElapsedMilliseconds -lt 15000){if($gate.WaitOne(20)){return};if($owner.HasExited){break}}
- throw ($message+'; stage='+$owner.Stage+'; failed_at='+$owner.FailureStage+'; kind='+$owner.FailureKind+'; '+(Get-SyntheticStages))
+ $initialStages=Get-SyntheticStages;$diagnostic=[Diagnostics.Stopwatch]::StartNew();$eventually=$false
+ if(-not $owner.HasExited){$eventually=$gate.WaitOne(15000)}
+ throw ($message+'; stage='+$owner.Stage+'; failed_at='+$owner.FailureStage+'; kind='+$owner.FailureKind+
+  '; gate_after_deadline='+$eventually+'; diagnostic_wait_ms='+$diagnostic.ElapsedMilliseconds+
+  '; initial=['+$initialStages+']; later=['+(Get-SyntheticStages)+']')
 }
 $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
 $root=[IO.Path]::GetFullPath((Join-Path $temp ('aitm-source-warmup-'+[Guid]::NewGuid().ToString('N'))))

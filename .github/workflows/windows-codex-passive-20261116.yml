@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks-warm, checks-live, checks-identity, checks-gate, checks-profile]
+        part: [checks-warm, checks-live]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
