@@ -18,6 +18,10 @@ struct CodexTaskSnapshot {
     var verifiedActivityFiles: [String: CodexFileIdentity] = [:]
     var subagentCandidates: Set<String> = []
     var subagentTitles: [String: String] = [:]
+    // Proofs describe one freshly checked file/header only. They do not
+    // establish complete coverage or uninterrupted agent lifetime.
+    var verifiedAgentIdentities: [String: CodexVerifiedAgentIdentity] = [:]
+    var agentIdentityPartial = false
     var isPartial = false
     var didCompleteUnindexedSweep = false
 
@@ -78,25 +82,29 @@ struct CodexTaskReader {
     private let ambiguousRollouts = CodexAmbiguousRolloutWorker()
     private let subagentMetadata = CodexSubagentMetadataWorker()
     private let ambiguousRootMetadata = CodexAmbiguousRootMetadataWorker()
+    private let agentProofSelection = CodexAgentProofSelection()
     private let afterDiscoveryForTests: (() -> Void)?
     private let beforeTerminalRecheckForTests: (() -> Void)?
     private let afterIndexedAttributesForTests: ((String) -> Void)?
     private let afterSnapshotForTests: ((CodexTaskSnapshot) -> Void)?
     private let afterUnindexedTailForTests: ((String) -> Void)?
     private let beforeUnindexedTerminalRecheckForTests: ((String) -> Void)?
+    private let afterAgentProofSelectionForTests: (() -> Void)?
 
     init(codexHome: URL? = nil, afterDiscoveryForTests: (() -> Void)? = nil,
          beforeTerminalRecheckForTests: (() -> Void)? = nil,
          afterIndexedAttributesForTests: ((String) -> Void)? = nil,
          afterSnapshotForTests: ((CodexTaskSnapshot) -> Void)? = nil,
          afterUnindexedTailForTests: ((String) -> Void)? = nil,
-         beforeUnindexedTerminalRecheckForTests: ((String) -> Void)? = nil) {
+         beforeUnindexedTerminalRecheckForTests: ((String) -> Void)? = nil,
+         afterAgentProofSelectionForTests: (() -> Void)? = nil) {
         self.afterDiscoveryForTests = afterDiscoveryForTests
         self.beforeTerminalRecheckForTests = beforeTerminalRecheckForTests
         self.afterIndexedAttributesForTests = afterIndexedAttributesForTests
         self.afterSnapshotForTests = afterSnapshotForTests
         self.afterUnindexedTailForTests = afterUnindexedTailForTests
         self.beforeUnindexedTerminalRecheckForTests = beforeUnindexedTerminalRecheckForTests
+        self.afterAgentProofSelectionForTests = afterAgentProofSelectionForTests
         if let codexHome {
             self.codexHome = codexHome
         } else if let configured = ProcessInfo.processInfo.environment["CODEX_HOME"], !configured.isEmpty {
@@ -157,6 +165,7 @@ struct CodexTaskReader {
         var result = CodexTaskSnapshot()
         result.didCompleteUnindexedSweep = extra.didCompleteSweep
         var visibleMetadataStamps: [String: CodexSubagentMetadataWorker.Stamp] = [:]
+        var visibleAgentStamps: [String: AgentProofStamp] = [:]
         var candidateSubagentTitles: [String: CandidateSubagentTitle] = [:]
         var indexedEndings: [String: (file: URL, identity: TerminalFileIdentity, startKey: String, interrupted: Bool, toolEvents: [CodexToolEvent]?)] = [:]
         result.isPartial = indexFailure != nil || discovered.isPartial || extra.isPartial || extraFiles.isPartial
@@ -183,6 +192,9 @@ struct CodexTaskReader {
                 result.isPartial = true
                 continue
             }
+            let expectedAgentStamp: AgentProofStamp?
+            if visibleAgentStamps.count < 2_048 { expectedAgentStamp = try? agentProofStamp(file) }
+            else { expectedAgentStamp = nil }
             afterIndexedAttributesForTests?(id)
             if let recovered {
                 guard recovered.path == file.standardizedFileURL.path,
@@ -328,6 +340,10 @@ struct CodexTaskReader {
                 lastActivityFileIdentity: CodexFileIdentity(device: expectedStamp.device, inode: expectedStamp.inode)
             ))
             visibleMetadataStamps[id] = CodexSubagentMetadataWorker.Stamp(attributes)
+            if let expectedAgentStamp, expectedAgentStamp.device == expectedStamp.device,
+               expectedAgentStamp.inode == expectedStamp.inode, expectedAgentStamp.size == expectedStamp.size {
+                visibleAgentStamps[id] = expectedAgentStamp
+            }
         }
         if !indexedEndings.isEmpty {
             beforeTerminalRecheckForTests?()
@@ -474,6 +490,11 @@ struct CodexTaskReader {
                     lastActivityFileIdentity: CodexFileIdentity(device: record.device, inode: record.inode)
                 ))
                 visibleMetadataStamps[id] = stamp
+                if visibleAgentStamps.count < 2_048 {
+                    visibleAgentStamps[id] = AgentProofStamp(device: record.device, inode: record.inode, size: record.size,
+                        modifiedSeconds: record.modifiedSeconds, modifiedNanoseconds: record.modifiedNanoseconds,
+                        changedSeconds: record.changedSeconds, changedNanoseconds: record.changedNanoseconds)
+                }
             } catch {
                 // A changing, inaccessible or linked file is not evidence that
                 // a previously observed task finished.
@@ -553,6 +574,18 @@ struct CodexTaskReader {
         if !result.subagentParents.isEmpty && !visibleIDs.subtracting(verifiedMetadata).isEmpty {
             result.isPartial = true
         }
+        // Cached links only nominate a complete chain. A separate strict read
+        // proves every node, including the root, in this same snapshot.
+        var proofCandidates = discovered.files
+        if !extraFiles.didHitLimit { proofCandidates.merge(extraFiles.files) { first, _ in first } }
+        let ambiguousProofIDs = discovered.ambiguousIDs.union(extraFiles.ambiguousIDs)
+            .union(discovered.rootCandidates.keys).union(extraFiles.rootCandidates.keys)
+        let agentProofs = verifiedAgentProofs(tasks: result.tasks, candidates: proofCandidates,
+                                               observations: metadata, visibleStamps: visibleMetadataStamps,
+                                               visibleAgentStamps: visibleAgentStamps,
+                                               ambiguousIDs: ambiguousProofIDs)
+        result.verifiedAgentIdentities = agentProofs.identities
+        result.agentIdentityPartial = agentProofs.partial || discovered.didHitLimit || extraFiles.didHitLimit
         let ambiguousRootIDs = ambiguousRootMetadata.poll(candidates: discovered.rootCandidates,
             targets: Set(result.subagentParents.values)) { id, files in
                 self.verifyAmbiguousRoot(id: id, files: files)
@@ -1213,6 +1246,178 @@ struct CodexTaskReader {
               before.st_dev == after.st_dev, before.st_ino == after.st_ino,
               after.st_size >= 0, UInt64(after.st_size) >= length else { throw CocoaError(.fileReadUnknown) }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    private struct AgentProofStamp: Equatable {
+        let device: UInt64
+        let inode: UInt64
+        let size: UInt64
+        let modifiedSeconds: Int64
+        let modifiedNanoseconds: Int64
+        let changedSeconds: Int64
+        let changedNanoseconds: Int64
+    }
+
+    private struct AgentProofRead: Equatable {
+        let identity: CodexVerifiedAgentIdentity
+        let stamp: AgentProofStamp
+    }
+
+    private struct AgentProofCandidate {
+        let rawID: String
+        let file: URL
+        let observation: CodexSubagentMetadataWorker.Observation
+    }
+
+    private func agentProofStamp(_ file: URL) throws -> AgentProofStamp {
+        let descriptor = try openSessionFile(file)
+        defer { Darwin.close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_size >= 0,
+              (info.st_mode & S_IFMT) == S_IFREG else { throw CocoaError(.fileReadUnknown) }
+        return AgentProofStamp(device: UInt64(bitPattern: Int64(info.st_dev)), inode: UInt64(info.st_ino),
+                               size: UInt64(info.st_size), modifiedSeconds: Int64(info.st_mtimespec.tv_sec),
+                               modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec),
+                               changedSeconds: Int64(info.st_ctimespec.tv_sec),
+                               changedNanoseconds: Int64(info.st_ctimespec.tv_nsec))
+    }
+
+    private func readFreshAgentProof(_ candidate: AgentProofCandidate,
+                                     expectedTaskStamp: CodexSubagentMetadataWorker.Stamp?,
+                                     expectedAgentStamp: AgentProofStamp?) throws -> AgentProofRead {
+        if let expectedTaskStamp {
+            let attributes = try fileManager.attributesOfItem(atPath: candidate.file.path)
+            guard CodexSubagentMetadataWorker.Stamp(attributes) == expectedTaskStamp else { throw CocoaError(.fileReadUnknown) }
+        }
+        let before = try agentProofStamp(candidate.file)
+        if let expectedAgentStamp, before != expectedAgentStamp { throw CocoaError(.fileReadUnknown) }
+        let header = try readSubagentParent(candidate.file, id: candidate.rawID)
+        let after = try agentProofStamp(candidate.file)
+        guard before == after, before.device == header.device, before.inode == header.inode,
+              before.size == header.size, before.device == candidate.observation.stamp.device,
+              before.inode == candidate.observation.stamp.inode,
+              candidate.observation.headerDigest == header.headerDigest,
+              candidate.observation.parentID?.lowercased() == header.parentID?.lowercased(),
+              candidate.observation.isConfirmedRoot == (header.rootClassification != nil),
+              (header.parentID != nil) != (header.rootClassification != nil) else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        if let expectedTaskStamp {
+            let attributes = try fileManager.attributesOfItem(atPath: candidate.file.path)
+            guard CodexSubagentMetadataWorker.Stamp(attributes) == expectedTaskStamp else { throw CocoaError(.fileReadUnknown) }
+        }
+        let identity = CodexVerifiedAgentIdentity(file: CodexFileIdentity(device: before.device, inode: before.inode),
+                                                  headerDigest: header.headerDigest,
+                                                  parentID: header.parentID?.lowercased(),
+                                                  isRoot: header.rootClassification != nil)
+        return AgentProofRead(identity: identity, stamp: before)
+    }
+
+    private func verifiedAgentProofs(tasks: [MonitoredTask], candidates: [String: URL],
+                                     observations: [String: CodexSubagentMetadataWorker.Observation],
+                                     visibleStamps: [String: CodexSubagentMetadataWorker.Stamp],
+                                     visibleAgentStamps: [String: AgentProofStamp],
+                                     ambiguousIDs: Set<String>) -> (identities: [String: CodexVerifiedAgentIdentity], partial: Bool) {
+        func normalized(_ value: String) -> String? {
+            guard value.utf8.count == 36, let uuid = UUID(uuidString: value) else { return nil }
+            return uuid.uuidString.lowercased()
+        }
+        let taskGroups = Dictionary(grouping: tasks.filter { $0.provider == .codex && normalized($0.id) != nil }) {
+            normalized($0.id)!
+        }
+        let candidateGroups = Dictionary(grouping: candidates.keys.compactMap { id in normalized(id).map { ($0, id) } }, by: { $0.0 })
+        let observationGroups = Dictionary(grouping: observations.keys.compactMap { id in normalized(id).map { ($0, id) } }, by: { $0.0 })
+        let stampGroups = Dictionary(grouping: visibleStamps.keys.compactMap { id in normalized(id).map { ($0, id) } }, by: { $0.0 })
+        let ambiguous = Set(ambiguousIDs.compactMap(normalized))
+        var nodes: [String: AgentProofCandidate] = [:]
+        for (id, variants) in observationGroups where variants.count == 1 && !ambiguous.contains(id) {
+            guard let candidateKeys = candidateGroups[id], candidateKeys.count == 1,
+                  let file = candidates[candidateKeys[0].1], let observation = observations[variants[0].1],
+                  candidateKeys[0].1 == variants[0].1,
+                  file.standardizedFileURL == observation.file.standardizedFileURL,
+                  (taskGroups[id]?.count ?? 0) <= 1 else { continue }
+            nodes[id] = AgentProofCandidate(rawID: variants[0].1, file: file, observation: observation)
+        }
+        let taskIDs = taskGroups.keys.sorted()
+        var partial = taskIDs.count > 2_048
+        var chains: [String: [String]] = [:]
+        for id in taskIDs.prefix(2_048) {
+            guard let task = taskGroups[id]?.first, taskGroups[id]?.count == 1,
+                  task.lastActivityIdentityConfirmed == true, let taskFile = task.lastActivityFileIdentity,
+                  let node = nodes[id], taskFile == CodexFileIdentity(device: node.observation.stamp.device,
+                                                                       inode: node.observation.stamp.inode) else {
+                partial = true
+                continue
+            }
+            if node.observation.isConfirmedRoot && node.observation.parentID == nil {
+                // A fresh root proof lets an already known group retain its
+                // count while a child temporarily disappears from the scan.
+                chains[id] = [id]
+                continue
+            }
+            var chain: [String] = []
+            var seen: Set<String> = []
+            var cursor = id
+            var foundRoot = false
+            for _ in 0..<128 {
+                guard seen.insert(cursor).inserted, let entry = nodes[cursor] else { break }
+                chain.append(cursor)
+                if entry.observation.isConfirmedRoot && entry.observation.parentID == nil {
+                    foundRoot = true
+                    break
+                }
+                guard !entry.observation.isConfirmedRoot, let rawParent = entry.observation.parentID,
+                      let parent = normalized(rawParent) else { break }
+                cursor = parent
+            }
+            if foundRoot && chain.count >= 2 { chains[id] = chain }
+            else { partial = true }
+        }
+        let batch = agentProofSelection.next(chains: chains)
+        partial = partial || batch.incomplete
+        if !batch.nodeIDs.isEmpty { afterAgentProofSelectionForTests?() }
+        var firstReads: [String: AgentProofRead] = [:]
+        for id in batch.nodeIDs.sorted() {
+            guard let entry = nodes[id] else { partial = true; continue }
+            let expected: CodexSubagentMetadataWorker.Stamp?
+            let expectedAgent: AgentProofStamp?
+            if taskGroups[id] != nil {
+                guard let keys = stampGroups[id], keys.count == 1, let value = visibleStamps[keys[0].1],
+                      let agentStamp = visibleAgentStamps[keys[0].1] else {
+                    partial = true; continue
+                }
+                expected = value
+                expectedAgent = agentStamp
+            } else { expected = nil; expectedAgent = nil }
+            guard let proof = try? readFreshAgentProof(entry, expectedTaskStamp: expected,
+                                                       expectedAgentStamp: expectedAgent) else { partial = true; continue }
+            if let task = taskGroups[id]?.first, task.lastActivityFileIdentity != proof.identity.file {
+                partial = true; continue
+            }
+            firstReads[id] = proof
+        }
+        var checked: [String: CodexVerifiedAgentIdentity] = [:]
+        for (id, first) in firstReads {
+            guard let entry = nodes[id] else { partial = true; continue }
+            let expected = stampGroups[id].flatMap { $0.count == 1 ? visibleStamps[$0[0].1] : nil }
+            let expectedAgent = stampGroups[id].flatMap { $0.count == 1 ? visibleAgentStamps[$0[0].1] : nil }
+            guard let second = try? readFreshAgentProof(entry, expectedTaskStamp: expected,
+                                                        expectedAgentStamp: expectedAgent), first == second else {
+                partial = true; continue
+            }
+            checked[id] = second.identity
+        }
+        let fileOwners = Dictionary(grouping: checked.keys, by: { checked[$0]!.file })
+        let sharedFiles = Set(fileOwners.filter { $0.value.count > 1 }.keys)
+        var accepted: [String: CodexVerifiedAgentIdentity] = [:]
+        for child in batch.childIDs {
+            guard let chain = chains[child], chain.allSatisfy({ id in
+                guard let proof = checked[id] else { return false }
+                return !sharedFiles.contains(proof.file)
+            }) else { partial = true; continue }
+            for id in chain { accepted[id] = checked[id] }
+        }
+        return (accepted, partial)
     }
 
     private func readSubagentParent(_ url: URL, id: String) throws -> (parentID: String?, rootClassification: String?, device: UInt64, inode: UInt64, size: UInt64, headerDigest: Data) {

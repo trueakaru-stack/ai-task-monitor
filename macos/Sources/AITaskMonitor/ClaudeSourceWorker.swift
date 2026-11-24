@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 // The worker owns the reader, its source-loss latch and phase evidence on one
 // serial queue. It returns only bounded observations; phase keys stay private.
@@ -19,7 +20,7 @@ struct ClaudeSourceEvents {
 }
 
 // A snapshot is not, by itself, proof of a complete source or a confirmed
-// plan. Consumers must honor connection, phase uncertainty and all three
+// plan. Consumers must honor connection, phase uncertainty and all four
 // event batches even when the journal read fails. A batch gap resets its
 // associated diagnostics before any later events are consumed.
 struct ClaudeSourceRead {
@@ -29,6 +30,7 @@ struct ClaudeSourceRead {
     let before: ClaudeSourceEvents
     let middle: ClaudeSourceEvents
     let after: ClaudeSourceEvents
+    let final: ClaudeSourceEvents
     let earlierTasks: [MonitoredTask]
     let changedSessionIDs: Set<String>
     let changesAffectAll: Bool
@@ -41,6 +43,7 @@ struct ClaudeSourceRead {
                          before: ClaudeSourceEvents(gap: true, affectsAll: true),
                          middle: ClaudeSourceEvents(gap: true, affectsAll: true),
                          after: ClaudeSourceEvents(gap: true, affectsAll: true),
+                         final: ClaudeSourceEvents(gap: true, affectsAll: true),
                          earlierTasks: [], changedSessionIDs: [], changesAffectAll: true,
                          phaseUncertainSessions: [], phasePoisoned: true, channelUnavailable: true)
     }
@@ -63,6 +66,7 @@ final class ClaudeSourceWorker {
     private let requiresChannel: Bool
     private let beforeOpenChannelForTests: (() -> Void)?
     private let beforeDeliveryForTests: (() -> Void)?
+    private let afterSecondReadForTests: (() -> Void)?
     private var channel: ClaudeLoopChannel?
     private var evidence = ClaudePhaseEvidence()
     private var sawEvents = false
@@ -73,12 +77,14 @@ final class ClaudeSourceWorker {
     init(reader: ClaudeTaskReader, channelProfile: URL?, requiresChannel: Bool,
          beforeOpenChannelForTests: (() -> Void)? = nil,
          beforeDeliveryForTests: (() -> Void)? = nil,
+         afterSecondReadForTests: (() -> Void)? = nil,
          connection: @escaping () throws -> ClaudeIntegration.ConnectionState) {
         self.reader = reader
         self.channelProfile = channelProfile
         self.requiresChannel = requiresChannel
         self.beforeOpenChannelForTests = beforeOpenChannelForTests
         self.beforeDeliveryForTests = beforeDeliveryForTests
+        self.afterSecondReadForTests = afterSecondReadForTests
         self.connection = connection
     }
 
@@ -159,6 +165,17 @@ final class ClaudeSourceWorker {
     private func isCurrent(_ requested: UInt64) -> Bool {
         control.lock(); defer { control.unlock() }
         return !closed && generation == requested
+    }
+
+    private func journalExists() throws -> Bool {
+        var info = stat()
+        if reader.eventFile.path.withCString({ lstat($0, &info) }) == 0 {
+            guard (info.st_mode & S_IFMT) == S_IFREG else { throw ClaudeReadError.incomplete }
+            return true
+        }
+        let reason = errno
+        if reason == ENOENT { return false }
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(reason))
     }
 
     // XCTest uses the real receiver to verify that queued frames are not
@@ -244,9 +261,11 @@ final class ClaudeSourceWorker {
         result.affectsAll = result.affectsAll || batch.gap
         if batch.gap { evidence.invalidate() }
         for event in batch.events {
+            // Any frame may have been emitted after an earlier Stop. Frame
+            // arrival does not establish ordering, so its session is unknown.
+            result.lifecycleSessions.insert(event.sessionID)
             guard event.kind == .phase else {
                 result.ordinary.append(event)
-                if event.kind == .stop { result.lifecycleSessions.insert(event.sessionID) }
                 continue
             }
             if let fingerprint = event.fingerprint,
@@ -311,6 +330,7 @@ final class ClaudeSourceWorker {
                          before: ClaudeSourceEvents(gap: true, affectsAll: true),
                          middle: ClaudeSourceEvents(gap: true, affectsAll: true),
                          after: ClaudeSourceEvents(gap: true, affectsAll: true),
+                         final: ClaudeSourceEvents(gap: true, affectsAll: true),
                          earlierTasks: [], changedSessionIDs: [], changesAffectAll: true,
                          phaseUncertainSessions: [], phasePoisoned: true, channelUnavailable: true)
     }
@@ -327,6 +347,8 @@ final class ClaudeSourceWorker {
         var before = ClaudeSourceEvents()
         var middle = ClaudeSourceEvents()
         var after = ClaudeSourceEvents()
+        var final = ClaudeSourceEvents()
+        var drainedAfter = false
         var uncertain: Set<String> = []
         var earlierTasks: [MonitoredTask] = []
         var changedSessions: Set<String> = []
@@ -348,7 +370,7 @@ final class ClaudeSourceWorker {
                 channelUnavailable = !prepareChannel(connected: connected, generation: requested)
                 guard isCurrent(requested) else { return invalidatedRead(requested) }
                 before = drain()
-                let exists = FileManager.default.fileExists(atPath: reader.eventFile.path)
+                let exists = try journalExists()
                 guard isCurrent(requested) else { return invalidatedRead(requested) }
                 if !exists && sawEvents {
                     reader.noteSourceLoss()
@@ -366,15 +388,44 @@ final class ClaudeSourceWorker {
                     earlierTasks = first.tasks
                     changedSessions = compared.changed
                     affectsAll = compared.affectsAll
-                    outcome = .snapshot(compared.snapshot)
-                    for task in second.tasks where task.id.hasPrefix("claude:") {
+                    var latest = compared.snapshot
+                    afterSecondReadForTests?()
+                    after = drain()
+                    drainedAfter = true
+                    // A tool that the live channel does not classify can
+                    // still resume a session after Stop. Read the journal a
+                    // third time before publishing an ending; an event after
+                    // the final read can only be noticed on a later poll.
+                    if !latest.terminalIDs.isEmpty || !latest.neutralEndedIDs.isEmpty {
+                        guard isCurrent(requested) else { return invalidatedRead(requested) }
+                        lastObservationStartedAt = ProcessInfo.processInfo.systemUptime
+                        let third = try reader.readSnapshot(observedSince: observedSince, phaseEvidence: evidence)
+                        guard isCurrent(requested) else { return invalidatedRead(requested) }
+                        let endingCheck = Self.compareSnapshots(second, third, middle: after)
+                        changedSessions.formUnion(endingCheck.changed)
+                        affectsAll = affectsAll || endingCheck.affectsAll
+                        latest = endingCheck.snapshot
+                        if affectsAll {
+                            latest.terminalIDs.removeAll(); latest.interruptedIDs.removeAll(); latest.neutralEndedIDs.removeAll()
+                        } else {
+                            latest.terminalIDs.subtract(changedSessions)
+                            latest.interruptedIDs.subtract(changedSessions)
+                            latest.neutralEndedIDs.subtract(changedSessions)
+                        }
+                        latest.tasks = latest.tasks.map { task in
+                            guard affectsAll || changedSessions.contains(task.id) else { return task }
+                            return TaskSnapshotMerger.merge(previous: [task], current: [], terminalIDs: [])[0]
+                        }
+                    }
+                    outcome = .snapshot(latest)
+                    for task in latest.tasks where task.id.hasPrefix("claude:") {
                         let session = String(task.id.dropFirst(7))
                         if evidence.isSessionUncertain(session) { uncertain.insert(task.id) }
                     }
                 } else {
                     outcome = .noEvents
                 }
-                after = drain()
+                if drainedAfter { final = drain() } else { after = drain() }
                 guard isCurrent(requested) else { return invalidatedRead(requested) }
                 if try connection() != initial {
                     outcome = .changed
@@ -383,14 +434,16 @@ final class ClaudeSourceWorker {
             }
         } catch ClaudeReadError.journalBusy {
             outcome = .failed(ClaudeReadError.journalBusy)
-            after = drain()
+            if drainedAfter { final = drain() } else { after = drain() }
         } catch {
             outcome = .failed(error)
+            if sawEvents { reader.noteSourceLoss() }
             invalidateEvidenceAndRequestStop()
-            after = ClaudeSourceEvents(gap: true, affectsAll: true)
+            if drainedAfter { final = ClaudeSourceEvents(gap: true, affectsAll: true) }
+            else { after = ClaudeSourceEvents(gap: true, affectsAll: true) }
         }
         let result = ClaudeSourceRead(generation: requested, connection: state, outcome: outcome,
-                                      before: before, middle: middle, after: after,
+                                      before: before, middle: middle, after: after, final: final,
                                       earlierTasks: earlierTasks, changedSessionIDs: changedSessions, changesAffectAll: affectsAll,
                                       phaseUncertainSessions: uncertain,
                                       phasePoisoned: evidence.poisoned, channelUnavailable: channelUnavailable)

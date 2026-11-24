@@ -13,6 +13,28 @@ final class ClaudeSourceChannelTests: XCTestCase {
         func disconnect() { lock.lock(); value = .disconnected; lock.unlock() }
     }
 
+    private final class Injection {
+        private let lock = NSLock()
+        private weak var worker: ClaudeSourceWorker?
+        private var claimed = false
+        private var received = false
+        private var failure: Error?
+        func configure(_ worker: ClaudeSourceWorker) { lock.lock(); self.worker = worker; lock.unlock() }
+        func claim() -> ClaudeSourceWorker? {
+            lock.lock(); defer { lock.unlock() }
+            guard !claimed, let worker else { return nil }
+            claimed = true
+            return worker
+        }
+        func finish(received: Bool, failure: Error?) {
+            lock.lock(); self.received = received; self.failure = failure; lock.unlock()
+        }
+        func result() -> (Bool, Bool, Error?) {
+            lock.lock(); defer { lock.unlock() }
+            return (claimed, received, failure)
+        }
+    }
+
     @MainActor
     private func wait(_ worker: ClaudeSourceWorker) throws -> ClaudeSourceRead {
         var result: ClaudeSourceRead?
@@ -102,6 +124,7 @@ final class ClaudeSourceChannelTests: XCTestCase {
             return XCTFail("The synthetic journal lock must produce journalBusy")
         }
         XCTAssertTrue(busy.before.ordinary.contains { $0.sessionID == "fixture" && $0.kind == .start })
+        XCTAssertTrue(busy.before.lifecycleSessions.contains("fixture"))
         XCTAssertFalse(busy.before.gap)
 
         sendAndWait(worker, profile: profile, toolID: "second")
@@ -110,6 +133,88 @@ final class ClaudeSourceChannelTests: XCTestCase {
         guard case .disconnected = disconnected.outcome else { return XCTFail("The source must disconnect") }
         XCTAssertTrue(disconnected.before.gap, "Stopping a channel with queued events must report a gap")
         XCTAssertTrue(disconnected.before.affectsAll)
+    }
+
+    @MainActor
+    func testQueuedBashAfterSecondSnapshotPreventsApplyingOldStop() throws {
+        let root = try codexSyntheticDirectory(prefix: "aitm-claude-channel-")
+        defer { try? FileManager.default.removeItem(at: root) }
+        guard let configured = ProcessInfo.processInfo.environment["AITM_CLAUDE_CHANNEL_PROFILE"] else {
+            throw CocoaError(.fileReadNoPermission)
+        }
+        let profile = URL(fileURLWithPath: configured, isDirectory: true).standardizedFileURL
+        let expected = root.deletingLastPathComponent().appendingPathComponent("claude-channel-profile", isDirectory: true)
+        let values = try profile.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard profile == expected, profile.resolvingSymlinksInPath().standardizedFileURL == profile,
+              values.isDirectory == true, values.isSymbolicLink == false else { throw CocoaError(.fileReadNoPermission) }
+        let digest = SHA256.hash(data: Data(profile.path.utf8))
+        let suffix = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        let expectedSocketDirectory = "/private/tmp/aitm-loop-\(geteuid())-\(suffix)"
+        var before = stat()
+        guard expectedSocketDirectory.withCString({ lstat($0, &before) }) != 0, errno == ENOENT else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        let file = root.appendingPathComponent("claude-events-v2.jsonl")
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var bytes = Data()
+        for (name, offset) in [("UserPromptSubmit", -3.0), ("Stop", -2.0)] {
+            var input: [String: Any] = ["session_id": "fixture", "hook_event_name": name]
+            if name == "Stop" { input["background_tasks"] = [String](); input["session_crons"] = [String]() }
+            var record = ClaudeHook.makeRecord(from: input)
+            record["timestamp"] = formatter.string(from: Date().addingTimeInterval(offset))
+            bytes.append(try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])); bytes.append(10)
+        }
+        try bytes.write(to: file)
+        let precheck = try ClaudeTaskReader(eventFile: file).readSnapshot(observedSince: Date().addingTimeInterval(-60))
+        XCTAssertTrue(precheck.neutralEndedIDs.contains("claude:fixture"))
+        let injection = Injection()
+        let input: [String: Any] = ["session_id": "fixture", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                    "tool_use_id": "synthetic-tool", "cwd": "/synthetic",
+                                    "tool_input": ["command": "synthetic command"]]
+        let worker = ClaudeSourceWorker(reader: ClaudeTaskReader(eventFile: file), channelProfile: profile,
+                                        requiresChannel: true, afterSecondReadForTests: {
+            guard let owner = injection.claim() else { return }
+            do {
+                var record = ClaudeHook.makeRecord(from: input)
+                record["timestamp"] = formatter.string(from: Date().addingTimeInterval(-1))
+                var data = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
+                data.append(10)
+                let handle = try FileHandle(forWritingTo: file)
+                try handle.seekToEnd(); try handle.write(contentsOf: data); try handle.close()
+                ClaudeLoopClient.send(input, profile: profile)
+                let deadline = Date().addingTimeInterval(3)
+                while !owner.hasPendingOrdinaryForTesting("fixture") && Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+                injection.finish(received: owner.hasPendingOrdinaryForTesting("fixture"), failure: nil)
+            } catch { injection.finish(received: false, failure: error) }
+        }, connection: { .connected })
+        injection.configure(worker)
+        var socketDirectory: String?
+        defer {
+            worker.close()
+            let deadline = Date().addingTimeInterval(4)
+            while !worker.channelStoppedForTesting && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+            if worker.channelStoppedForTesting, let directory = socketDirectory,
+               directory == expectedSocketDirectory,
+               let names = try? FileManager.default.contentsOfDirectory(atPath: directory),
+               Set(names).isSubset(of: ["owner.lock"]) {
+                _ = (directory + "/owner.lock").withCString { unlink($0) }
+                _ = directory.withCString { rmdir($0) }
+            }
+        }
+        let result = try wait(worker)
+        socketDirectory = try ClaudeLoopSocket.directory(profile: profile, create: false)
+        let state = injection.result()
+        XCTAssertTrue(state.0 && state.1, "The synthetic Bash event must reach the actual channel")
+        XCTAssertNil(state.2)
+        XCTAssertTrue(result.after.lifecycleSessions.contains("fixture"))
+        guard case .snapshot(let snapshot) = result.outcome else { return XCTFail("The changed session must be retained") }
+        XCTAssertTrue(snapshot.tasks.contains { $0.id == "claude:fixture" && $0.isUnconfirmed })
+        XCTAssertFalse(snapshot.neutralEndedIDs.contains("claude:fixture"))
     }
 }
 #endif

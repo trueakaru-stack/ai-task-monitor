@@ -4,6 +4,7 @@ import Foundation
 private struct CodexBackgroundRead {
     let homeExists: Bool
     let homeStable: Bool
+    let homeObservation: CodexHomeObservation
     let firstResult: Result<CodexTaskSnapshot, Error>
     let result: Result<CodexTaskSnapshot, Error>
     let revalidated: Bool
@@ -182,7 +183,7 @@ final class TaskStore: ObservableObject {
     private var compactManualSelectionGeneration: UInt64 = 0
     @Published private(set) var tasks: [MonitoredTask] = [] {
         didSet {
-            if CodexTaskGrouping.compactSnapshotChanged(oldValue, tasks, confirmedChildren: confirmedCodexChildrenForCompact) {
+            if CodexTaskGrouping.compactSnapshotChanged(oldValue, tasks, confirmedChildren: compactCodexChildren) {
                 compactSnapshotGeneration &+= 1
             }
         }
@@ -240,6 +241,13 @@ final class TaskStore: ObservableObject {
     private var codexReadGeneration: UInt64 = 0
     private var codexHasCompletedRead = false
     private var codexTerminalGuard = CodexTerminalGuard()
+    private var codexAgentRetention = CodexAgentRetention()
+    private var codexAgentGroups: [CodexAgentRetention.Group] = []
+    private var codexAgentRootBindings: [String: UUID] = [:]
+    private var codexAgentCardBindings: [String: CodexRetainedAgentCard] = [:] {
+        didSet { if oldValue != codexAgentCardBindings { compactSnapshotGeneration &+= 1 } }
+    }
+    private var lastCodexHome: CodexHomeObservation?
     private var codexSourceUnavailable = false
     private var codexSourcePartial = false
     private let claudeSourceWorker: ClaudeSourceWorker
@@ -285,6 +293,15 @@ final class TaskStore: ObservableObject {
     private var codexRootsForDisplay: Set<String> = []
     private var confirmedCodexChildrenForCompact: [String: CodexFileIdentity] = [:] {
         didSet { if oldValue != confirmedCodexChildrenForCompact { compactSnapshotGeneration &+= 1 } }
+    }
+
+    private var compactCodexChildren: [String: CodexFileIdentity] {
+        var result = confirmedCodexChildrenForCompact
+        for (id, binding) in codexAgentCardBindings {
+            if let other = result[id], other != binding.file { result.removeValue(forKey: id) }
+            else { result[id] = binding.file }
+        }
+        return result
     }
     private var previousClaude: [MonitoredTask] = []
     private var claudeRetainedTitlesOverflow = false
@@ -983,7 +1000,7 @@ final class TaskStore: ObservableObject {
 
     var providers: Set<TaskProvider> { Set(tasks.map(\.provider)) }
     private var compactTaskIndices: [Int] {
-        CodexTaskGrouping.compactVisibleIndices(tasks, confirmedChildren: confirmedCodexChildrenForCompact)
+        CodexTaskGrouping.compactVisibleIndices(tasks, confirmedChildren: compactCodexChildren)
     }
     var compactTasks: [MonitoredTask] { compactTaskIndices.map { tasks[$0] } }
     var compactDots: [CompactTaskDot] {
@@ -1194,7 +1211,9 @@ final class TaskStore: ObservableObject {
                !codexReadDelayed {
                 codexReadDelayed = true
                 codexSourcePartial = true
+                let oldTasks = previousCodex
                 previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
+                updateCodexAgentRetention(snapshot: nil, previous: oldTasks, replacedIDs: [], sourceUnavailable: true)
             }
             return
         }
@@ -1240,6 +1259,7 @@ final class TaskStore: ObservableObject {
             let finishedAtUptime = ProcessInfo.processInfo.systemUptime
             let read = CodexBackgroundRead(homeExists: before.exists || after.exists,
                                            homeStable: before.hasIdentity && after.hasIdentity && before == after,
+                                           homeObservation: before,
                                            firstResult: first, result: result, revalidated: revalidated, agrees: agrees,
                                            selectionGeneration: selectionGeneration, language: language,
                                            startedAtUptime: startedAtUptime, finishedAtUptime: finishedAtUptime)
@@ -1274,12 +1294,27 @@ final class TaskStore: ObservableObject {
         if let codexRead {
           codexHasCompletedRead = true
           if codexRead.homeExists { sawCodexHome = true }
+          if codexRead.homeStable && codexRead.homeObservation.exists {
+            if let old = lastCodexHome, old != codexRead.homeObservation {
+                codexAgentRetention = CodexAgentRetention()
+                codexAgentGroups = []
+                codexAgentRootBindings.removeAll()
+                codexAgentCardBindings.removeAll()
+                codexParentEvidence.removeAll()
+                codexParentConflicts.removeAll()
+                codexParentTitles.removeAll()
+                clearCodexDisplayEvidence()
+            }
+            lastCodexHome = codexRead.homeObservation
+          }
           let nowUptime = ProcessInfo.processInfo.systemUptime
           let slow = codexReadWasDelayed || codexRead.finishedAtUptime - codexRead.startedAtUptime >= Self.sourcePollInterval
           let late = nowUptime - codexRead.finishedAtUptime >= Self.sourcePollInterval
           let invalid = !codexRead.homeStable || codexRead.language != AppLanguage.current || late ||
               (codexRead.revalidated && !codexRead.agrees) || (slow && !codexRead.revalidated)
           if invalid {
+            let oldTasks = previousCodex
+            var replacedIDs: Set<String> = []
             if codexRead.language != AppLanguage.current { codexReadPending = true }
             if case .success(let first) = codexRead.firstResult {
                 codexTerminalGuard.remember(first.terminalIDs, previous: previousCodex)
@@ -1288,6 +1323,7 @@ final class TaskStore: ObservableObject {
                 codexTerminalGuard.remember(latest.terminalIDs, previous: previousCodex)
                 if codexRead.homeStable && codexRead.language == AppLanguage.current {
                     let uncertain = TaskSnapshotMerger.merge(previous: latest.tasks, current: [], terminalIDs: [])
+                    replacedIDs = Set(uncertain.map { $0.id.lowercased() })
                     previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: uncertain, terminalIDs: [])
                 } else {
                     previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
@@ -1299,9 +1335,11 @@ final class TaskStore: ObservableObject {
             }
             codexSourcePartial = true
             clearCodexDisplayEvidence()
+            updateCodexAgentRetention(snapshot: nil, previous: oldTasks, replacedIDs: replacedIDs, sourceUnavailable: true)
           } else {
            switch codexRead.result {
            case .success(let snapshot):
+            let oldTasks = previousCodex
             let safe = codexTerminalGuard.reconcile(snapshot, previous: previousCodex)
             updateCodexParentEvidence(snapshot)
             codexSourceUnavailable = false
@@ -1314,22 +1352,31 @@ final class TaskStore: ObservableObject {
             let verifiedFiles = codexTerminalGuard.overflowed ? [:] :
                 snapshot.verifiedActivityFiles.filter { codexTerminalGuard.pending[$0.key] == nil }
             previousCodex = TaskSnapshotMerger.confirmCodexActivities(previousCodex, files: verifiedFiles)
+            let replaced = Set(safe.tasks.map { $0.id.lowercased() }).union(safe.terminalIDs.map { $0.lowercased() })
+            updateCodexAgentRetention(snapshot: snapshot, previous: oldTasks, replacedIDs: replaced,
+                                      sourceUnavailable: codexTerminalGuard.overflowed)
            case .failure:
+            let oldTasks = previousCodex
             codexSourceUnavailable = true
             codexSourcePartial = false
             clearCodexDisplayEvidence()
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
+            updateCodexAgentRetention(snapshot: nil, previous: oldTasks, replacedIDs: [], sourceUnavailable: true)
            }
           }
         }
         var expiredCodex = false
         let nowForCodex = Date()
+        let beforeExpiration = previousCodex
         previousCodex = previousCodex.map { task in
             guard task.isActive && nowForCodex.timeIntervalSince(task.updatedAt) >= CodexTaskReader.maximumConfirmedAge else { return task }
             expiredCodex = true
             return TaskSnapshotMerger.merge(previous: [task], current: [], terminalIDs: [])[0]
         }
-        if expiredCodex { codexSourcePartial = true }
+        if expiredCodex {
+            codexSourcePartial = true
+            updateCodexAgentRetention(snapshot: nil, previous: beforeExpiration, replacedIDs: [], sourceUnavailable: true)
+        }
         if codexSourceUnavailable { unavailable.append(.codex) }
         if let response = claudeRead?.result {
             claudeHasCompletedRead = true
@@ -1337,6 +1384,7 @@ final class TaskStore: ObservableObject {
             applyClaudeEvents(response.before, now: eventTime)
             applyClaudeEvents(response.middle, now: eventTime)
             applyClaudeEvents(response.after, now: eventTime)
+            applyClaudeEvents(response.final, now: eventTime)
             claudeLoopError = response.channelUnavailable && diagnosticWorker != nil
                 ? tr("Предупреждение Claude Code недоступно. Проверьте доступ или перезапустите приложение.",
                      "Claude Code loop warnings are unavailable. Check access or restart the app.") : ""
@@ -1351,12 +1399,15 @@ final class TaskStore: ObservableObject {
                     previousClaude = TaskSnapshotMerger.merge(previous: previousClaude, current: [], terminalIDs: [])
                 }
             case .snapshot(let snapshot):
-                let mappedAfter = Set(response.after.affectedSessions.compactMap { claudeSessionKey($0).map { "claude:" + $0 } })
-                let mappedLifecycle = Set(response.after.lifecycleSessions.compactMap { claudeSessionKey($0).map { "claude:" + $0 } })
-                let lifecycleUnknownAll = response.after.gap || mappedLifecycle.count != response.after.lifecycleSessions.count
-                let uncertainAll = response.changesAffectAll || response.after.affectsAll || response.after.gap ||
+                let afterPhases = response.after.affectedSessions.union(response.final.affectedSessions)
+                let afterLifecycle = response.after.lifecycleSessions.union(response.final.lifecycleSessions)
+                let mappedAfter = Set(afterPhases.compactMap { claudeSessionKey($0).map { "claude:" + $0 } })
+                let mappedLifecycle = Set(afterLifecycle.compactMap { claudeSessionKey($0).map { "claude:" + $0 } })
+                let lifecycleUnknownAll = response.after.gap || response.final.gap || mappedLifecycle.count != afterLifecycle.count
+                let uncertainAll = response.changesAffectAll || response.after.affectsAll || response.final.affectsAll ||
+                    response.after.gap || response.final.gap ||
                     response.phasePoisoned || snapshot.sourceUncertain ||
-                    mappedAfter.count != response.after.affectedSessions.count || lifecycleUnknownAll
+                    mappedAfter.count != afterPhases.count || lifecycleUnknownAll
                 let affected = response.changedSessionIDs.union(response.phaseUncertainSessions)
                     .union(snapshot.titleHistoryOverflowIDs).union(mappedAfter).union(mappedLifecycle)
                 var current = Self.clearClaudePlanConfirmations(snapshot.tasks, affected: uncertainAll ? nil : affected)
@@ -1447,9 +1498,9 @@ final class TaskStore: ObservableObject {
         let previousDiagnosticTasks = diagnosticTasks
         diagnosticTasks = combined
         let isLocalCodex: (MonitoredTask) -> Bool = { $0.provider == .codex && UUID(uuidString: $0.id) != nil }
-        let projection = CodexTaskGrouping.makeProjection(combined.filter(isLocalCodex),
-                                                          parents: codexParentsForDisplay, titles: codexParentTitles,
-                                                          confirmedRoots: codexRootsForDisplay)
+        let projection = CodexTaskGrouping.makeRetainedProjection(combined.filter(isLocalCodex),
+                                                                  groups: codexAgentGroups, titles: codexParentTitles,
+                                                                  retainedCards: codexAgentCardBindings)
         combined = projection.tasks + combined.filter { !isLocalCodex($0) }
         let selectedID = selectedTask?.id
         var mappedSelection = selectedID.flatMap { projection.displayIDBySourceID[$0.lowercased()] }
@@ -1457,7 +1508,7 @@ final class TaskStore: ObservableObject {
             let root = String(selectedID.dropFirst("codex-group:".count))
             mappedSelection = combined.first(where: { $0.provider == .codex && $0.id.lowercased() == root })?.id
         }
-        let selectable = Set(CodexTaskGrouping.compactVisibleIndices(combined, confirmedChildren: confirmedCodexChildrenForCompact).map { combined[$0].compactSelectionKey })
+        let selectable = Set(CodexTaskGrouping.compactVisibleIndices(combined, confirmedChildren: compactCodexChildren).map { combined[$0].compactSelectionKey })
         let focus = taskFocus.reconcile(current: combined, previous: previousTasks,
                                         selectedID: mappedSelection ?? selectedID, monitoringStartedAt: monitoringStartedAt,
                                         selectableKeys: selectable)
@@ -1479,7 +1530,7 @@ final class TaskStore: ObservableObject {
         if let readSelectionGeneration, readSelectionGeneration != compactManualSelectionGeneration,
            let selectedTask,
            let position = CodexTaskGrouping.manualRefreshMatch(combined, previous: previousTasks, selected: selectedTask) {
-                let visible = CodexTaskGrouping.compactVisibleIndices(combined, confirmedChildren: confirmedCodexChildrenForCompact)
+                let visible = CodexTaskGrouping.compactVisibleIndices(combined, confirmedChildren: compactCodexChildren)
                 if let compactPosition = visible.firstIndex(of: position) {
                     taskFocus.prioritize(selectedTask.id)
                     manualRefreshKey = combined[position].compactSelectionKey
@@ -1492,14 +1543,14 @@ final class TaskStore: ObservableObject {
         }
         let manualSourceIndex: Int?
         if let key = manualRefreshKey {
-            let matches = CodexTaskGrouping.compactVisibleIndices(combined, confirmedChildren: confirmedCodexChildrenForCompact)
+            let matches = CodexTaskGrouping.compactVisibleIndices(combined, confirmedChildren: compactCodexChildren)
                 .prefix(3).filter { combined[$0].compactSelectionKey == key }
             manualSourceIndex = matches.count == 1 ? matches.first : nil
         } else {
             manualSourceIndex = nil
         }
         let selectedSourceIndex = manualSourceIndex ?? CodexTaskGrouping.compactSelectionSourceIndex(combined,
-            confirmedChildren: confirmedCodexChildrenForCompact, chosenID: chosen,
+            confirmedChildren: compactCodexChildren, chosenID: chosen,
             previous: selectedTask, previousVisibleIndex: previousCompactIndex)
         tasks = combined
         compactIndex = selectedSourceIndex ?? 0
@@ -1512,6 +1563,52 @@ final class TaskStore: ObservableObject {
         codexParentsForDisplay = [:]
         codexRootsForDisplay = []
         confirmedCodexChildrenForCompact = [:]
+    }
+
+    private func updateCodexAgentRetention(snapshot: CodexTaskSnapshot?, previous: [MonitoredTask],
+                                           replacedIDs: Set<String>, sourceUnavailable: Bool) {
+        let old = Dictionary(grouping: previous.filter { $0.provider == .codex }, by: { $0.id.lowercased() })
+        let current = Dictionary(grouping: previousCodex.filter { $0.provider == .codex }, by: { $0.id.lowercased() })
+        var carried: [String: UUID] = [:]
+        for (id, token) in codexAgentRootBindings where !replacedIDs.contains(id) {
+            guard let before = old[id], before.count == 1, let after = current[id], after.count == 1,
+                  before[0].lastActivityFileIdentity == after[0].lastActivityFileIdentity,
+                  before[0].startKey == after[0].startKey, after[0].isUnconfirmed,
+                  !after[0].isActive && !after[0].isWaiting else { continue }
+            carried[id] = token
+        }
+        let conflicts = codexParentConflicts.union(codexTerminalGuard.pending.keys.map { $0.lowercased() })
+        let retained = codexAgentRetention.observe(tasks: previousCodex,
+            identities: snapshot?.verifiedAgentIdentities ?? [:],
+            sourcePartial: snapshot?.agentIdentityPartial ?? true,
+            sourceUnavailable: sourceUnavailable,
+            conflictedIDs: conflicts,
+            retainedRootBindings: carried)
+        var agentCards: [String: CodexRetainedAgentCard] = [:]
+        for group in retained.groups {
+            for member in group.members {
+                let id = member.id
+                guard let after = current[id], after.count == 1,
+                      after[0].lastActivityFileIdentity == member.identity.file,
+                      !after[0].startKey.isEmpty, after[0].startKey.utf8.count <= 512 else { continue }
+                if member.current && after[0].lastActivityIdentityConfirmed == true {
+                    agentCards[id] = CodexRetainedAgentCard(file: member.identity.file, startKey: after[0].startKey)
+                } else if !replacedIDs.contains(id), let before = old[id], before.count == 1,
+                          let prior = codexAgentCardBindings[id], prior.file == member.identity.file,
+                          prior.startKey == before[0].startKey, prior.startKey == after[0].startKey,
+                          before[0].lastActivityFileIdentity == prior.file,
+                          after[0].isUnconfirmed && !after[0].isActive && !after[0].isWaiting {
+                    agentCards[id] = prior
+                }
+            }
+        }
+        codexAgentCardBindings = agentCards
+        codexAgentGroups = retained.groups
+        let bindings: [(String, UUID)] = retained.groups.compactMap { group -> (String, UUID)? in
+            guard group.canAttach, let token = group.rootBinding else { return nil }
+            return (group.rootID, token)
+        }
+        codexAgentRootBindings = Dictionary(uniqueKeysWithValues: bindings)
     }
 
     private func updateCodexParentEvidence(_ snapshot: CodexTaskSnapshot) {
