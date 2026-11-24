@@ -4,7 +4,7 @@ $setup=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../app/Configure-OpenCod
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($app,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'Application source could not be parsed.'}
-$definitions=foreach($name in @('Prop','Unconfirmed-Tasks','Unconfirmed-ExternalTasks','Source-Snapshot')){
+$definitions=foreach($name in @('Prop','Unconfirmed-Tasks','Unconfirmed-ExternalTasks','Local-SourceSnapshot','Source-Snapshot')){
  $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
  if($null -eq $function){throw "Missing function: $name"}
  $function.Extent.Text

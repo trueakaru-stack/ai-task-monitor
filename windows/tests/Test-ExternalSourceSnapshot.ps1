@@ -3,7 +3,7 @@ $source=Join-Path $PSScriptRoot '../app/CodexProgress.ps1'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'Application source could not be parsed.'}
-$names=@('Prop','Unconfirmed-Tasks','Unconfirmed-ExternalTasks','Source-Snapshot')
+$names=@('Prop','Unconfirmed-Tasks','Unconfirmed-ExternalTasks','Local-SourceSnapshot','Source-Snapshot')
 $definitions=foreach($name in $names){
  $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
  if($null -eq $function){throw "Missing function: $name"}

@@ -84,8 +84,9 @@ public static class SyntheticCodex {
  $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $app '../CodexProgress.ps1'),[ref]$null,[ref]$parseErrors)
  if($parseErrors.Count){throw 'The application source failed to parse.'}
  $snapshotDefinition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Source-Snapshot'},$true)
- if($null -eq $snapshotDefinition){throw 'Source snapshot is missing.'}
- . ([scriptblock]::Create($snapshotDefinition.Extent.Text))
+ $localDefinition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Local-SourceSnapshot'},$true)
+ if($null -eq $snapshotDefinition -or $null -eq $localDefinition){throw 'Source snapshot is missing.'}
+ . ([scriptblock]::Create($localDefinition.Extent.Text+"`n"+$snapshotDefinition.Extent.Text))
  function Tr([string]$value){return $value}
  function Codex-Tasks {return [PSCustomObject]@{Id='local-codex';Provider='codex';Active=$true}}
  function Claude-Tasks {return [PSCustomObject]@{Id='local-claude';Provider='claude';Active=$true}}

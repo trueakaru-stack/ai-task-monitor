@@ -7,7 +7,7 @@ Add-Type -TypeDefinition $readerSource.Groups[1].Value -ErrorAction Stop
 Add-Type -Path (Join-Path $PSScriptRoot '..\app\CodexRecentEventObserver.cs') -ErrorAction Stop
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'The application source did not parse.'}
-$names=@('Prop','Lock-State','Find-PriorLifecycle','Read-TailText','Thread-State','Update-CodexRolloutPaths','Confirm-CodexTerminal','Session-File','Codex-Uncertain','Group-CodexTasks','Codex-Tasks','Unconfirmed-Tasks','Source-Snapshot')
+$names=@('Prop','Lock-State','Find-PriorLifecycle','Read-TailText','Thread-State','Update-CodexRolloutPaths','Confirm-CodexTerminal','Session-File','Codex-Uncertain','Group-CodexTasks','Codex-Tasks','Unconfirmed-Tasks','Local-SourceSnapshot','Source-Snapshot')
 $definitions=foreach($name in $names){
  $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)
  if($null -eq $function){throw "Missing function: $name"};$function.Extent.Text

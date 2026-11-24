@@ -13,12 +13,15 @@ using Microsoft.Win32.SafeHandles;
 
 namespace AITaskMonitor.LocalReadOwner {
     public sealed class PollResult {
-        internal PollResult(bool success, object value, Guid generation) {
+        internal PollResult(bool success, object value, Guid generation, long requestStamp, bool hasRequestStamp) {
             Success = success; Value = value; Generation = generation;
+            RequestStamp = requestStamp; HasRequestStamp = hasRequestStamp;
         }
         public bool Success { get; private set; }
         public object Value { get; private set; }
         public Guid Generation { get; private set; }
+        public long RequestStamp { get; private set; }
+        public bool HasRequestStamp { get; private set; }
     }
 
     // This transport is not connected to production sources yet. Its worker
@@ -37,6 +40,7 @@ namespace AITaskMonitor.LocalReadOwner {
         private readonly Thread thread;
         private Guid generation = Guid.NewGuid();
         private string[] pending;
+        private long pendingStamp;
         private PollResult latest;
         private bool hasPending, busy, closed, exited, broken, cleanupStarted, cleanupFinished, cleanupFailed, beforeResume;
         private int cleanupFailureCode;
@@ -63,11 +67,14 @@ namespace AITaskMonitor.LocalReadOwner {
             thread.Start();
         }
 
-        public bool Request(string[] request) {
+        public bool Request(string[] request) { return Request(request, 0); }
+
+        public bool Request(string[] request, long stamp) {
             string[] copy = CopyArguments(request);
             lock (gate) {
                 if (closed || broken || exited) return false;
                 pending = copy;
+                pendingStamp = stamp;
                 hasPending = true;
                 if (latest == null) pendingSignal.Set();
                 return true;
@@ -80,6 +87,7 @@ namespace AITaskMonitor.LocalReadOwner {
                 generation = Guid.NewGuid();
                 hasPending = false;
                 pending = null;
+                pendingStamp = 0;
                 latest = null;
             }
         }
@@ -111,6 +119,7 @@ namespace AITaskMonitor.LocalReadOwner {
                 closed = true;
                 generation = Guid.NewGuid();
                 pending = null;
+                pendingStamp = 0;
                 latest = null;
                 hasPending = false;
                 if (!exited) { closingSignal.Set(); pendingSignal.Set(); }
@@ -127,12 +136,15 @@ namespace AITaskMonitor.LocalReadOwner {
                     int signalled = WaitHandle.WaitAny(new WaitHandle[] { closingSignal, pendingSignal });
                     if (signalled == 0) return;
                     string[] input;
+                    long inputStamp;
                     Guid requestGeneration;
                     lock (gate) {
                         if (closed) return;
                         if (!hasPending || latest != null) continue;
                         input = pending;
+                        inputStamp = pendingStamp;
                         pending = null;
+                        pendingStamp = 0;
                         hasPending = false;
                         busy = true;
                         requestGeneration = generation;
@@ -141,7 +153,7 @@ namespace AITaskMonitor.LocalReadOwner {
                     lock (gate) {
                         busy = false;
                         if (closed) return;
-                        if (requestGeneration == generation) latest = new PollResult(true, result, requestGeneration);
+                        if (requestGeneration == generation) latest = new PollResult(true, result, requestGeneration, inputStamp, true);
                         if (hasPending && latest == null) pendingSignal.Set();
                     }
                 }
@@ -152,7 +164,8 @@ namespace AITaskMonitor.LocalReadOwner {
                     broken = true;
                     hasPending = false;
                     pending = null;
-                    if (!closed) latest = new PollResult(false, null, generation);
+                    pendingStamp = 0;
+                    if (!closed) latest = new PollResult(false, null, generation, 0, false);
                 }
             } finally {
                 CloseOwnedResources();
@@ -184,10 +197,12 @@ namespace AITaskMonitor.LocalReadOwner {
                     throw;
                 }
                 lock (gate) {
+                    // Keep the identifier even if close wins before handoff,
+                    // so cleanup and its tests can observe this worker.
+                    ownedProcessId = child.Id;
                     if (closed) throw new InvalidOperationException("Owner is closed.");
                     pipe = server; job = ownedJob; process = child;
                     pipeName = name;
-                    ownedProcessId = child.Id;
                     transferred = true;
                 }
                 bool assigned;

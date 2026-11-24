@@ -106,12 +106,12 @@ $config=[string[]]@($gates.StartedName,$gates.ReleaseName)
 $owner=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$config)
 $config[0]='changed-after-construction'
 try{
- Require ($owner.Request([string[]]@('block','ru','true'))) 'The first synthetic request was rejected.'
+ Require ($owner.Request([string[]]@('block','ru','true'),[long]10)) 'The first synthetic request was rejected.'
  Require ($gates.Started.WaitOne(10000)) 'The synthetic worker did not enter the blocked read.'
  [LocalReadTestRelay]::Watchdog($gates.LocalRelease,8000)
  $childId=$owner.OwnedProcessId
  Require ($childId -gt 0 -and $owner.IsPolling) 'The single worker is not polling.'
- foreach($index in 1..50){Require ($owner.Request([string[]]@('obsolete','ru','true'))) 'A repeated refresh was rejected.'}
+ foreach($index in 1..50){Require ($owner.Request([string[]]@('obsolete','ru','true'),[long]20)) 'A repeated refresh was rejected.'}
  Require ($owner.HasPendingRequest -and $owner.OwnedProcessId -eq $childId) 'Refresh requests started another worker.'
 
  $dot=@($compactDotsPanel.Children|Where-Object {[string]$_.Tag -ceq 'second'})[0]
@@ -127,13 +127,14 @@ try{
  $owner.Invalidate()
  Require ($owner.Generation -ne $oldGeneration -and -not $owner.HasPendingRequest) 'Disconnect or language invalidation did not clear stale pending work.'
  $latestRequest=[string[]]@('latest','en','false')
- Require ($owner.Request($latestRequest)) 'The new generation was not accepted.'
+ Require ($owner.Request($latestRequest,[long]30)) 'The new generation was not accepted.'
  $latestRequest[1]='changed-after-request'
  Require (-not $gates.LocalRelease.IsSet -and $null -eq $owner.TryReceive()) 'A stale result was published before the blocked read finished.'
  $gates.LocalRelease.Set()
  $result=Wait-Result $owner
  Require ($result.Success -and $result.Generation -eq $owner.Generation -and $result.Value.Sequence -eq 2 -and
-  $result.Value.Kind -ceq 'latest' -and $result.Value.Language -ceq 'en' -and -not $result.Value.Connected) 'A stale, incorrectly localized or uncoalesced result was published.'
+  $result.Value.Kind -ceq 'latest' -and $result.Value.Language -ceq 'en' -and -not $result.Value.Connected -and
+  $result.HasRequestStamp -and $result.RequestStamp -eq 30) 'A stale, incorrectly localized or uncoalesced result was published.'
 }finally{
  $gates.LocalRelease.Set()
  $owner.Dispose()
@@ -147,22 +148,42 @@ $orderedGates=New-TestGates
 $orderedConfig=[string[]]@($orderedGates.StartedName,$orderedGates.ReleaseName)
 $ordered=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$orderedConfig)
 try{
- Require ($ordered.Request([string[]]@('terminal','ru','true'))) 'The terminal request was rejected.'
+ Require ($ordered.Request([string[]]@('terminal','ru','true'),[long]100)) 'The terminal request was rejected.'
  Wait-HasResult $ordered
- Require ($ordered.Request([string[]]@('error','en','false'))) 'The pending error request was rejected.'
+ Require ($ordered.Request([string[]]@('error','en','false'),[long]101)) 'The pending error request was rejected.'
  Require ($ordered.HasPendingRequest -and -not $ordered.IsPolling) 'The unread result did not hold back the next poll.'
  $terminal=$ordered.TryReceive()
- Require ($terminal.Success -and $terminal.Value.Sequence -eq 1 -and $terminal.Value.Kind -ceq 'terminal') 'The unread terminal result was overwritten.'
+ Require ($terminal.Success -and $terminal.Value.Sequence -eq 1 -and $terminal.Value.Kind -ceq 'terminal' -and $terminal.RequestStamp -eq 100) 'The unread terminal result was overwritten.'
  Wait-HasResult $ordered
- Require ($ordered.Request([string[]]@('after-error','en','true'))) 'The request after error was rejected.'
+ Require ($ordered.Request([string[]]@('after-error','en','true'),[long]102)) 'The request after error was rejected.'
  $errorResult=$ordered.TryReceive()
- Require ($errorResult.Success -and $errorResult.Value.Sequence -eq 2 -and $errorResult.Value.IsError) 'The unread source error was overwritten.'
+ Require ($errorResult.Success -and $errorResult.Value.Sequence -eq 2 -and $errorResult.Value.IsError -and $errorResult.RequestStamp -eq 101) 'The unread source error was overwritten.'
  $afterError=Wait-Result $ordered
- Require ($afterError.Success -and $afterError.Value.Sequence -eq 3 -and $afterError.Value.Kind -ceq 'after-error') 'The queued request did not follow the error result.'
+ Require ($afterError.Success -and $afterError.Value.Sequence -eq 3 -and $afterError.Value.Kind -ceq 'after-error' -and $afterError.RequestStamp -eq 102) 'The queued request did not follow the error result.'
  $orderedId=$ordered.OwnedProcessId
 }finally{$ordered.Dispose()}
 Wait-Exit $ordered -name 'ordered'
 Wait-ProcessGone $orderedId
+
+# Repeated pending refreshes coalesce along with their own revision; the
+# completion must be paired with the request that actually ran.
+$coalescedGates=New-TestGates
+$coalesced=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,[string[]]@($coalescedGates.StartedName,$coalescedGates.ReleaseName))
+try{
+ Require ($coalesced.Request([string[]]@('block','ru','true'),[long]1)) 'The coalescing test request was rejected.'
+ Require ($coalescedGates.Started.WaitOne(10000)) 'The coalescing test did not block its first read.'
+ Require ($coalesced.Request([string[]]@('obsolete','ru','true'),[long]2)) 'The first pending revision was rejected.'
+ Require ($coalesced.Request([string[]]@('latest','en','true'),[long]3)) 'The latest pending revision was rejected.'
+ [void]$coalescedGates.Release.Set()
+ $first=Wait-Result $coalesced
+ $last=Wait-Result $coalesced
+ Require ($first.Success -and $first.RequestStamp -eq 1 -and $first.Value.Sequence -eq 1 -and
+  $last.Success -and $last.RequestStamp -eq 3 -and $last.Value.Sequence -eq 2 -and
+  $last.Value.Kind -ceq 'latest') 'The coalesced result did not retain the revision of the executed request.'
+ $coalescedId=$coalesced.OwnedProcessId
+}finally{[void]$coalescedGates.Release.Set();$coalesced.Dispose()}
+Wait-Exit $coalesced -name 'coalesced'
+Wait-ProcessGone $coalescedId
 
 # Exercise the ACL and PID check on the actual owner, with an unrelated process
 # connecting before the intentionally delayed legitimate synthetic worker.
@@ -234,6 +255,20 @@ try{
 }finally{$suspended.Dispose()}
 Wait-Exit $suspended -name 'suspended'
 Wait-ProcessGone $suspendedId
+
+# Race window close against creation and resource handoff. Every worker that
+# actually starts must be gone before the owner can be replaced.
+foreach($delay in @(0,1,2,5,10,20)){
+ $raceGates=New-TestGates
+ $racing=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,[string[]]@($raceGates.StartedName,$raceGates.ReleaseName))
+ try{
+  Require ($racing.Request([string[]]@('block','ru','true'))) 'A startup-race request was rejected.'
+  if($delay -gt 0){Start-Sleep -Milliseconds $delay}
+  $racing.Dispose()
+ }finally{$racing.Dispose()}
+ Wait-Exit $racing -name ('startup-race-'+$delay)
+ if($racing.OwnedProcessId -gt 0){Wait-ProcessGone $racing.OwnedProcessId}
+}
 
 # Disposal is nonblocking even while the worker is stuck; the job releases only
 # this worker, without requiring the synthetic source to unblock itself.

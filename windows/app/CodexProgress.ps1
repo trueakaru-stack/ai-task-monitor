@@ -636,6 +636,7 @@ $script:sourcePartialConnections = @()
 $script:sourcePartialData = @()
 $script:sourceCodexIncomplete = $false
 $script:compactTaskId = ""
+$script:compactSelectionRevision = [long]0
 $script:compactShowProviderLabels = $false
 $script:taskPriority = @{}
 $script:taskPriorityCounter = 0
@@ -3809,8 +3810,8 @@ function Claude-Tasks {
  return @($items|Sort-Object Updated -Descending)
 }
 
-function Source-Snapshot {
- $codex=@(); $claude=@(); $external=@(); $cloud=@(); $unavailable=New-Object Collections.Generic.List[string]
+function Local-SourceSnapshot {
+ $codex=@(); $claude=@(); $unavailable=New-Object Collections.Generic.List[string]
  $partialConnection=New-Object Collections.Generic.List[string];$partialData=New-Object Collections.Generic.List[string]
  $codexIncomplete=$false
  try{
@@ -3862,6 +3863,7 @@ function Source-Snapshot {
  if($hasRelation -and $null -ne $titles -and $null -ne $titles.Value){
   $codex=@(Group-CodexTasks $codex $links.Value $titles.Value)
  }
+ $connectionState='unknown'
  try{
   $connectionState=if($ClaudeEventFile){"connected"}else{Claude-ConnectionState}
   if($connectionState -eq "connected"){$claude=@(Claude-Tasks);$script:lastClaudeTasks=$claude}
@@ -3872,6 +3874,27 @@ function Source-Snapshot {
   if($null -ne (Get-Variable -Scope Script -Name claudeReaderSession -ErrorAction SilentlyContinue) -and $null -ne $script:claudeReaderSession){$script:claudeReaderSession.MarkSourceLoss()}
   [void]$unavailable.Add("Claude Code");$claude=@(Unconfirmed-Tasks $script:lastClaudeTasks)
  }
+ return [PSCustomObject]@{Codex=@($codex);Claude=@($claude);Unavailable=$unavailable.ToArray();PartialConnection=$partialConnection.ToArray();PartialData=$partialData.ToArray();CodexIncomplete=$codexIncomplete;ClaudeConnection=$connectionState}
+}
+
+function Source-Snapshot {
+ $clientVariable=Get-Variable -Scope Script -Name localSourceClient -ErrorAction SilentlyContinue
+ if($null -eq $clientVariable){$local=Local-SourceSnapshot}
+ elseif($null -eq $clientVariable.Value){
+  # A failed background owner is unavailable; never block the UI by falling
+  # back to source reads here.
+  $local=[PSCustomObject]@{Codex=@();Claude=@();Unavailable=@('Codex');PartialConnection=@();PartialData=@('Codex');CodexIncomplete=$false;ClaudeConnection='unknown'}
+ }else{
+  $local=Get-LocalSourceClientSnapshot $clientVariable.Value $script:resolvedLanguage $script:compactSelectionRevision
+  $script:lastCodexTasks=@($local.Codex);$script:lastClaudeTasks=@($local.Claude)
+ }
+ $codex=@($local.Codex);$claude=@($local.Claude);$external=@();$cloud=@()
+ $unavailable=New-Object Collections.Generic.List[string]
+ $partialConnection=New-Object Collections.Generic.List[string];$partialData=New-Object Collections.Generic.List[string]
+ foreach($name in @($local.Unavailable)){[void]$unavailable.Add($name)}
+ foreach($name in @($local.PartialConnection)){[void]$partialConnection.Add($name)}
+ foreach($name in @($local.PartialData)){[void]$partialData.Add($name)}
+ $codexIncomplete=[bool]$local.CodexIncomplete
  if($script:codexCloudModulesAvailable -and $script:codexCloudController.Enabled){
   try{Update-CodexCloudController $script:codexCloudController}catch{$script:codexCloudController.LastError='unavailable'}
   try{$cloud=@(ConvertTo-CodexCloudMonitorTasks $script:codexCloudController.Tasks (Tr 'Облако: ') (Tr 'Задача Codex') 'Статус не подтверждён')}
@@ -3930,7 +3953,8 @@ function Source-Snapshot {
 
 function Sync-ClaudeLoopChannel {
  try{
-  $wanted=if($PreviewClaudeLoopPipe){$true}elseif($PreviewActiveTasks -ge 0){$false}else{(Claude-ConnectionState) -eq 'connected'}
+  $clientVariable=Get-Variable -Scope Script -Name localSourceClient -ErrorAction SilentlyContinue
+  $wanted=if($PreviewClaudeLoopPipe){$true}elseif($PreviewActiveTasks -ge 0){$false}elseif($null -ne $clientVariable){$null -ne $clientVariable.Value -and [string]$clientVariable.Value.Snapshot.ClaudeConnection -eq 'connected'}else{(Claude-ConnectionState) -eq 'connected'}
   if(-not $wanted -or $script:sourceErrors -contains 'Claude Code'){
    if($null -ne $script:claudeLoopChannel){$script:claudeLoopChannel.Dispose();$script:claudeLoopChannel=$null}
    $script:claudeLoopStates.Clear();$script:claudeLoopError=''
@@ -4006,9 +4030,10 @@ function Refresh-Diagnostics($tasks) {
 
 function Unconfirmed-Tasks($tasks) {
  foreach($task in $tasks){
-  if(-not $task.Active -and [string](Prop $task "Status" "") -ne "Статус не подтверждён"){continue}
+  if($null -eq $task){continue}
   $copy=$task.PSObject.Copy()
   $copy.Active=$false; $copy.Status="Статус не подтверждён"
+  if($null -ne $copy.PSObject.Properties['Paused']){$copy.Paused=$false}
   $keepLast=[string](Prop $copy 'Provider' '') -eq 'codex' -and -not [bool](Prop $copy 'ActivityGenerated' $false) -and
    -not [string]::IsNullOrWhiteSpace([string](Prop $copy 'Activity' '')) -and
    ([bool](Prop $task 'Active' $false) -or [bool](Prop $copy 'ActivityObserved' $false) -or [bool](Prop $copy 'ActivityIsLast' $false))
@@ -4221,8 +4246,17 @@ function Localized-TaskTitle($task,[switch]$BaseOnly,[switch]$SuffixOnly) {
 }
 
 function Related-AgentStatus($task) {
- if(-not [bool](Prop $task 'RelatedAgentsUnconfirmed' $false) -or [int](Prop $task 'RelatedAgentCount' 0) -le 0){return ''}
- if($script:resolvedLanguage -eq 'en'){return 'Agent status unconfirmed'}
+ if([int](Prop $task 'RelatedAgentCount' 0) -le 0){return ''}
+ $unknownCount=[bool](Prop $task 'RelatedAgentCountUnconfirmed' $false)
+ $unknownStatus=[bool](Prop $task 'RelatedAgentsUnconfirmed' $false)
+ if(-not $unknownCount -and -not $unknownStatus){return ''}
+ if($script:resolvedLanguage -eq 'en'){
+  if($unknownCount -and $unknownStatus){return 'Agent count and status unconfirmed'}
+  if($unknownCount){return 'Agent count unconfirmed'}
+  return 'Agent status unconfirmed'
+ }
+ if($unknownCount -and $unknownStatus){return 'Число и статус агентов не подтверждены'}
+ if($unknownCount){return 'Число агентов не подтверждено'}
  if([int](Prop $task 'RelatedAgentCount' 0) -eq 1){return 'Статус агента не подтверждён'}
  return 'Статус агентов не подтверждён'
 }
@@ -4592,7 +4626,12 @@ function Add-CompactDot($task,[bool]$selected) {
  $dot.Width=7; $dot.Height=7; $dot.CornerRadius=New-Object Windows.CornerRadius(3.5)
  $dot.Background=Brush $(if($selected){$script:accentHex}else{$script:palette.Scroll})
  $button.Content=$dot
- $button.Add_Click({param($sender,$eventArgs) $script:compactTaskId=[string]$sender.Tag; Render-CompactTasks $script:lastAllTasks})
+ $button.Add_Click({param($sender,$eventArgs)
+  $revision=Get-Variable -Scope Script -Name compactSelectionRevision -ErrorAction SilentlyContinue
+  if($null -eq $revision){$script:compactSelectionRevision=[long]0}
+  $script:compactSelectionRevision++
+  $script:compactTaskId=[string]$sender.Tag;Render-CompactTasks $script:lastAllTasks
+ })
  $compactDotsPanel.Children.Add($button)|Out-Null
 }
 
@@ -4662,6 +4701,17 @@ function Prioritize-Tasks($tasks,$previous,[string]$selectedId) {
  if($activatedVisible.Count -gt 0 -and -not $remappedSelection){$selectedId=[string]$activatedVisible[$activatedVisible.Count-1].Id}
  elseif(-not @($selectable | Where-Object {[string]$_.Id -eq $selectedId}).Count){$selectedId=if($selectable.Count){[string]$selectable[0].Id}else{""}}
  return [PSCustomObject]@{Tasks=$ordered;SelectedId=$selectedId}
+}
+
+function Resolve-CurrentTaskOrder($tasks,$previous,[string]$selectedId,$client,[long]$selectionRevision) {
+ $ordered=Prioritize-Tasks $tasks $previous $selectedId
+ if($null -ne $client -and $client.Fresh -and $client.HasRequestStamp -and $client.RequestStamp -lt $selectionRevision){
+  $visible=@(Compact-VisibleTasks $tasks)
+  $retained=@($visible|Where-Object {[string]$_.Id -ceq $selectedId}|Select-Object -First 1)
+  if(-not $retained.Count){$retained=@($visible|Where-Object {@(Prop $_ 'RelatedAgentIds' @()) -ccontains $selectedId}|Select-Object -First 1)}
+  if($retained.Count){$ordered.SelectedId=[string]$retained[0].Id}
+ }
+ return $ordered
 }
 
 function Compact-VisibleTasks($tasks) {
@@ -5292,6 +5342,7 @@ function Preview-Text([string]$russian,[string]$english) {
 
 function Related-AgentFingerprint($task) {
  $parts=New-Object 'Collections.Generic.List[string]'
+ $parts.Add('count-unconfirmed:'+([string][bool](Prop $task 'RelatedAgentCountUnconfirmed' $false)))
  foreach($agent in @(Prop $task 'RelatedAgents' @())){
   foreach($value in @([string](Prop $agent 'Id' ''),[string](Prop $agent 'AgentNickname' ''),[string](Prop $agent 'Status' ''),
                      [string](Prop $agent 'Activity' ''),[string][bool](Prop $agent 'Active' $false),[string][bool](Prop $agent 'Paused' $false),[string][bool](Prop $agent 'ActivityObserved' $false),[string][bool](Prop $agent 'ActivityIsLast' $false))){
@@ -5444,7 +5495,9 @@ function Update-View {
     $allTasks+=@(Convert-ExternalProviderStates -States @($state.Snapshot([DateTimeOffset]::UtcNow)) -Language $script:resolvedLanguage)
    }
   }
-  $ordered=Prioritize-Tasks $allTasks $previousAllTasks $script:compactTaskId
+  $clientVariable=Get-Variable -Scope Script -Name localSourceClient -ErrorAction SilentlyContinue
+  $orderingClient=if($null -ne $clientVariable){$clientVariable.Value}else{$null}
+  $ordered=Resolve-CurrentTaskOrder $allTasks $previousAllTasks $script:compactTaskId $orderingClient $script:compactSelectionRevision
   $allTasks=@($ordered.Tasks);$script:compactTaskId=[string]$ordered.SelectedId
   $script:lastAllTasks=$allTasks
   Sync-ClaudeLoopChannel
@@ -5452,7 +5505,7 @@ function Update-View {
   Render-ProviderTabs $allTasks
   $tasks=@(Filtered-Tasks $allTasks)
   $script:lastTasks=$tasks
-  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+$script:sourceCodexIncomplete+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$(Prop $_ 'RelatedAgentCount' 0):$(Prop $_ 'RelatedAgentsUnconfirmed' $false):$(Related-AgentFingerprint $_):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$(Prop $_ 'ActivityObserved' $false):$(Prop $_ 'ActivityIsLast' $false):$stepState`:$loopState"})-join"|")
+  $next=$script:selectedProvider+"|"+$script:compactTaskId+"|"+($script:sourceErrors -join ",")+"|"+($script:sourcePartialConnections -join ",")+"|"+($script:sourcePartialData -join ",")+"|"+$script:sourceCodexIncomplete+"|"+(($allTasks|ForEach-Object{$stepState=(@($_.Steps)|ForEach-Object{"$(Prop $_ 'title' '')=$(Prop $_ 'status' '')"})-join","; $loop=Get-LoopWarning $_;$loopState=if($null -ne $loop){"$($loop.Threshold):$($loop.WindowMinutes)"}else{"none"}; "$($_.Id):$($_.Provider):$($_.Title):$(Prop $_ 'RelatedAgentCount' 0):$(Prop $_ 'RelatedAgentsUnconfirmed' $false):$(Prop $_ 'RelatedAgentCountUnconfirmed' $false):$(Related-AgentFingerprint $_):$($_.Active):$($_.ProgressKind):$(Prop $_ 'ProgressBasis' ''):$($_.Progress):$(Prop $_ 'PlanConfirmed' $true):$(Prop $_ 'RetainedPlanIncomplete' $false):$($_.Status):$($_.Activity):$(Prop $_ 'ActivityObserved' $false):$(Prop $_ 'ActivityIsLast' $false):$stepState`:$loopState"})-join"|")
   if($next -ne $script:fingerprint){
    $script:fingerprint=$next
    Render-CurrentTasks $tasks $allTasks
@@ -5551,11 +5604,17 @@ $claudeSourceAction.Add_Click({
  $mode=[string]$claudeSourceAction.Tag
  $configScript=Join-Path $PSScriptRoot "Configure-ClaudeIntegration.ps1"
  if(-not (Test-Path -LiteralPath $configScript)){$claudeSourceStatus.Text=Tr "Файл настройки не найден";return}
+ $clientVariable=Get-Variable -Scope Script -Name localSourceClient -ErrorAction SilentlyContinue
+ if($null -ne $clientVariable -and $null -ne $clientVariable.Value){Set-LocalSourceClientConnection $clientVariable.Value $false}
  try{
   Invoke-HiddenProviderSetup $configScript $mode
+  if($null -ne $clientVariable -and $null -ne $clientVariable.Value){Set-LocalSourceClientConnection $clientVariable.Value $true}
   Update-SourceSettings
   Update-View
- }catch{$claudeSourceStatus.Text=Tr "Ошибка подключения"}
+ }catch{
+  if($null -ne $clientVariable -and $null -ne $clientVariable.Value){Set-LocalSourceClientConnection $clientVariable.Value $true}
+  $claudeSourceStatus.Text=Tr "Ошибка подключения"
+ }
 })
 $openCodeSourceAction.Add_Click({
  $mode=[string]$openCodeSourceAction.Tag
@@ -5646,12 +5705,28 @@ $window.Add_Closed({if($null -ne $script:codexTitleReader){$script:codexTitleRea
 $window.Add_Closed({if($null -ne $script:codexRolloutReader){$script:codexRolloutReader.Dispose()}})
 $window.Add_Closed({if($null -ne $script:codexRecentEventObserver){$script:codexRecentEventObserver.Dispose()}})
 $window.Add_Closed({if($null -ne $script:codexRootEvidenceReader){$script:codexRootEvidenceReader.Dispose()}})
+$window.Add_Closed({
+ $clientVariable=Get-Variable -Scope Script -Name localSourceClient -ErrorAction SilentlyContinue
+ if($null -ne $clientVariable -and $null -ne $clientVariable.Value -and $null -ne $clientVariable.Value.Owner){$clientVariable.Value.Owner.Dispose()}
+})
 if($script:codexCloudModulesAvailable -and -not $SnapshotFile -and $PreviewActiveTasks -lt 0 -and (Load-CodexCloudEnabled)){Set-CodexCloudControllerEnabled $script:codexCloudController $true}
 $initialTheme=if($ThemeOverride){$ThemeOverride}else{Load-ThemeMode}
 Apply-Theme $initialTheme $false
 if($script:diagnosticModulesAvailable -and (($PreviewActiveTasks -lt 0 -and -not $SnapshotFile) -or $DiagnosticDirectory)){
  try{$script:diagnosticRuntime=New-DiagnosticRuntime -Directory $script:diagnosticDirectory -Since ([DateTimeOffset]$script:monitorStartedUtc) -Now ([DateTimeOffset]::UtcNow);$script:diagnosticError=""}
  catch{$script:diagnosticError="Журнал недоступен";if($PreviewStartupReadyFile){$script:previewDiagnosticFailure=$_.Exception.ToString()}}
+}
+if($PreviewActiveTasks -lt 0 -and -not $SnapshotFile){
+ # Create a serial source owner before the first view update. Source failures
+ # remain visible as unavailable and do not fall back to reading on the UI.
+ $script:localSourceClient=$null
+ try{
+  . (Join-Path $PSScriptRoot 'LocalSourceClient.ps1')
+  if(-not ('AITaskMonitor.LocalReadOwner.Owner' -as [type])){Add-Type -Path (Join-Path $PSScriptRoot 'LocalReadOwner.cs') -ErrorAction Stop}
+  $sourceConfig=[string[]]@('AITM-LOCAL-SOURCE-1',[IO.Path]::GetFullPath($codexHome),[IO.Path]::GetFullPath($env:USERPROFILE),[IO.Path]::GetFullPath($dataDirectory),$(if($ProgressFile){[IO.Path]::GetFullPath($ProgressFile)}else{''}),$(if($ClaudeEventFile){[IO.Path]::GetFullPath($ClaudeEventFile)}else{''}),$script:monitorStartedUtc.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture))
+  $sourceOwner=[AITaskMonitor.LocalReadOwner.Owner]::new((Join-Path $PSScriptRoot 'LocalSourceWorker.ps1'),$sourceConfig)
+  $script:localSourceClient=New-LocalSourceClient $sourceOwner $script:resolvedLanguage
+ }catch{$script:localSourceClient=$null}
 }
 $initialLanguage=if($LanguageOverride){$LanguageOverride}elseif($SnapshotFile -or $PreviewActiveTasks -ge 0){'ru'}else{Load-LanguageMode}
 Apply-Language $initialLanguage $false

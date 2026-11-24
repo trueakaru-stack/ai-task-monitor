@@ -5,7 +5,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "Unable to parse the application." }
-$definitions = foreach ($name in @("Prop", "Source-Snapshot", "Unconfirmed-Tasks")) {
+$definitions = foreach ($name in @("Prop", "Local-SourceSnapshot", "Source-Snapshot", "Unconfirmed-Tasks")) {
     $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if ($null -eq $function) { throw "Missing source function: $name" }
     $function.Extent.Text
