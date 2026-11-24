@@ -36,8 +36,12 @@ final class ExternalProviderRefreshOwnerTests: XCTestCase {
     @MainActor
     private func wait(_ condition: () -> Bool, timeout: TimeInterval = 5) {
         let deadline = Date().addingTimeInterval(timeout)
-        while !condition() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
-        XCTAssertTrue(condition(), "The synthetic owner did not deliver its result")
+        var satisfied = condition()
+        while !satisfied && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            satisfied = condition()
+        }
+        XCTAssertTrue(satisfied, "The synthetic owner did not deliver its result")
     }
 
     @MainActor
@@ -138,8 +142,9 @@ final class ExternalProviderRefreshOwnerTests: XCTestCase {
             if let value = second.takeHandoff() { handoff.append(value) }
             return !handoff.isEmpty
         }
-        XCTAssertEqual(handoff[0].quality, .invalidated)
-        XCTAssertEqual(handoff[0].capture,
+        let received = try XCTUnwrap(handoff.first)
+        XCTAssertEqual(received.quality, .invalidated)
+        XCTAssertEqual(received.capture,
                        Capture(v1Events: ["v1-started"], v2Events: ["v2-finished"], gap: true))
         XCTAssertFalse(second.tryRead(2) { _ in XCTFail("Shutdown evidence must be reconciled first") })
         let drained = try XCTUnwrap(second.takeHandoff())

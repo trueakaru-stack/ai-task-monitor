@@ -55,8 +55,12 @@ final class ExternalProviderRefreshPipelineTests: XCTestCase {
     @MainActor
     private func wait(_ condition: () -> Bool, timeout: TimeInterval = 5) {
         let deadline = Date().addingTimeInterval(timeout)
-        while !condition() && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
-        XCTAssertTrue(condition(), "The synthetic refresh did not complete")
+        var satisfied = condition()
+        while !satisfied && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            satisfied = condition()
+        }
+        XCTAssertTrue(satisfied, "The synthetic refresh did not complete")
     }
 
     @MainActor
