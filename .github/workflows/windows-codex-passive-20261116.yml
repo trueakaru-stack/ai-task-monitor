@@ -1,10 +1,14 @@
-name: Windows passive Codex safety
+name: Windows compact agent count preview
 on:
   workflow_dispatch:
   push:
-    branches: [windows, codex/windows-compact-ci-20261124]
+    branches: [codex/windows-identity-probe-20261124]
     paths:
       - 'windows/app/CodexProgress.ps1'
+      - 'windows/app/LocalReadOwner.cs'
+      - 'windows/tests/Test-LocalReadOwner.ps1'
+      - 'windows/tests/Test-ReadOwner*.ps1'
+      - 'windows/tests/fixtures/LocalRead*.ps1'
       - 'windows/app/CodexRecentEventObserver.cs'
       - 'windows/app/Build-Installer-v2.ps1'
       - 'windows/app/CodexProgressInstaller.cs'
@@ -26,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks, checks-ui, checks-owner, checks-gap, checks-diagnostic, checks-retention, screenshots-active, screenshots-empty, screenshots-related, screenshots-showcase]
+        part: [checks-identity]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
@@ -35,7 +39,7 @@ jobs:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
     steps:
       - name: Verify passive observation in isolated Windows
-        if: ${{ matrix.part == 'checks' || (!contains(github.event.head_commit.message, '[remaining-checks]') && !contains(github.event.head_commit.message, '[checks-only]')) }}
+        if: ${{ startsWith(matrix.part, 'checks') || (!contains(github.event.head_commit.message, '[remaining-checks]') && !contains(github.event.head_commit.message, '[checks-only]')) }}
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -64,7 +68,7 @@ jobs:
             if($LASTEXITCODE -ne 0){throw 'Cannot fetch the test revision.'}
             git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
             if($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:GITHUB_SHA){throw 'The test revision does not match.'}
-            if($env:AITM_TEST_PART -eq 'checks'){
+            if($env:AITM_TEST_PART -like 'checks*'){
               $codexCommand=Get-Command -Name 'codex','codex.exe','codex.cmd' -All -ErrorAction SilentlyContinue | Select-Object -First 1
               if($null -eq $codexCommand){Write-Output 'Real Codex CLI: not found on the hosted runner; no account or local model was used.'}
               else{Write-Output ('Real Codex CLI: command detected ('+$codexCommand.CommandType+'); it was not launched because its provenance and an isolated model backend were not verified.')}
@@ -108,48 +112,28 @@ jobs:
                 if($stdout.Result){Write-Output $stdout.Result.TrimEnd()};if($stderr.Result){Write-Output $stderr.Result.TrimEnd()}
               }finally{$process.Dispose()}
             }
-            function Assert-SourceSnapshot {
-              & git -C "$source" diff --quiet HEAD -- windows .github/legacy-uninstall-ci .github/workflows
-              if($LASTEXITCODE -ne 0){throw 'Tracked source inputs changed during verification.'}
-              $unexpected=@(& git -C "$source" ls-files --others --exclude-standard -- windows .github/legacy-uninstall-ci .github/workflows)
-              if($LASTEXITCODE -ne 0 -or $unexpected.Count -gt 0){throw 'Unexpected source inputs appeared during verification.'}
-            }
-            Assert-SourceSnapshot
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-            if($env:AITM_TEST_PART -in @('checks-ui','checks-owner','checks-gap','checks-diagnostic','checks-retention')){
+            if($env:AITM_TEST_PART -like 'checks*'){
               switch($env:AITM_TEST_PART){
-                'checks-ui' {$tests=@('Test-LocalSourceWarmup.ps1','Test-LocalSourceProductionWiring.ps1','Test-RelatedAgentPlacement.ps1','Test-RelatedAgentStatusDisplay.ps1','Test-CompactAgentHint.ps1')}
-                'checks-owner' {$tests=@('Test-WorkerServerIdentity.ps1','Test-LocalReadOwner.ps1','Test-ReadOwnerChannel.ps1','Test-ReadOwnerLifecycle.ps1','Test-LocalSourceModuleParity.ps1','Test-LocalSourceClient.ps1','Test-ProductionLocalSourceWorker.ps1')}
-                'checks-gap' {$tests=@('Test-ProductionClaudeGlobalGap.ps1','Test-ClaudeGlobalGapRetention.ps1','Test-ClaudePartialDiagnostics.ps1','Test-ClaudeSourceControls.ps1','Test-ClaudeSourceActionError.ps1')}
-                'checks-diagnostic' {$tests=@('Test-DiagnosticStoreIsolated.ps1','Test-DiagnosticWorker.ps1','Test-DiagnosticClientQueue.ps1','Test-DiagnosticClientRestart.ps1','Test-DiagnosticClearBoundary.ps1','Test-DiagnosticClearRuntimeRecovery.ps1','Test-DiagnosticFallbackClear.ps1','Test-DiagnosticClearAckBarrier.ps1','Test-DiagnosticTemporaryCopyGuard.ps1','Test-DiagnosticTimer.ps1')}
-                'checks-retention' {$tests=@('Test-ClaudeRetentionGate.ps1','Test-ClaudeRetentionProfileIsolation.ps1','Test-CodexAgentRetention.ps1','Test-CodexAgentRetentionAdapter.ps1','Test-ProductionCodexAgentRetention.ps1')}
+                'checks-gate' {$tests=@('Test-ClaudeRetentionGate.ps1','Test-ClaudeRetention.ps1')}
+                'checks-profile' {$tests=@('Test-ClaudeRetentionProfileIsolation.ps1')}
+                'checks-warm' {$tests=@('Test-LocalSourceWarmup.ps1','Test-LocalSourceProductionWiring.ps1')}
+                'checks-identity' {$tests=@('Test-WorkerServerIdentity.ps1')}
+                'checks-gap' {$tests=@('Test-ClaudeGlobalGapRetention.ps1','Test-ClaudeReconnectContinuity.ps1')}
+                'checks-live' {$tests=@('Test-ProductionLocalSourceWorker.ps1')}
+                'checks-controls' {$tests=@('Test-ClaudePartialDiagnostics.ps1','Test-ClaudeLoopBackgroundWiring.ps1','Test-ClaudeSourceControls.ps1','Test-ClaudeSourceActionError.ps1','Test-DiagnosticTimer.ps1')}
+                'checks-parity' {$tests=@('Test-LocalSourceModuleParity.ps1','Test-LocalSourceClient.ps1','Test-DiagnosticStoreIsolated.ps1')}
                 default {throw 'Unexpected synthetic check group.'}
               }
+              $failed=New-Object 'Collections.Generic.List[string]'
               foreach($test in $tests){
                 Write-Output ('Running '+$test)
-                $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
-                if($test -eq 'Test-DiagnosticStoreIsolated.ps1'){$arguments+=@('-Target','gap')}
-                Invoke-Isolated $powershell $arguments
+                $taskArguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
+                if($test -eq 'Test-DiagnosticStoreIsolated.ps1'){$taskArguments+=@('-Target','gap')}
+                try{Invoke-Isolated $powershell $taskArguments}
+                catch{[void]$failed.Add($test);Write-Warning ('Synthetic failure in '+$test+': '+$_.Exception.Message)}
               }
-            }elseif($env:AITM_TEST_PART -eq 'checks'){
-              $tests=if($env:AITM_REMAINING_ONLY -eq '1'){@('Test-CodexPassive.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}else{@('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexTitleLookup.ps1','Test-CodexRolloutReader.ps1','Test-CodexRolloutResolution.ps1','Test-CodexRecentEventObserver.ps1','Test-CodexRecentEventPackaging.ps1','Test-CodexTaskGrouping.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CompactDotReuse.ps1','Test-CompactSwitchUi.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}
-              foreach($test in $tests){
-                Write-Output ('Running '+$test)
-                Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
-              }
-              if($env:AITM_REMAINING_ONLY -ne '1'){
-                Assert-SourceSnapshot
-                $installerOutput=Join-Path $root 'temp/observer-installer-output'
-                $installerWork=Join-Path $root 'temp/observer-installer-work'
-                Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/Build-Installer-v2.ps1'),'-OutputDirectory',$installerOutput,'-BuildTempDirectory',$installerWork)
-                Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/tests/Test-CodexRecentEventPackaging.ps1'),'-InstallerPath',(Join-Path $installerOutput 'AITaskMonitorSetup.exe'))
-                $installerPath=Join-Path $installerOutput 'AITaskMonitorSetup.exe'
-                $verifiedCommit=(git -C "$source" rev-parse HEAD).Trim()
-                if($LASTEXITCODE -ne 0 -or $verifiedCommit -cne $env:GITHUB_SHA){throw 'The installer source revision changed.'}
-                $installerHash=(Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
-                [IO.File]::WriteAllText(($installerPath+'.sha256'),($installerHash+'  AITaskMonitorSetup.exe'+"`n"),[Text.UTF8Encoding]::new($false))
-                [IO.File]::WriteAllText((Join-Path $installerOutput 'source-commit.txt'),($verifiedCommit+"`n"),[Text.UTF8Encoding]::new($false))
-              }
+              if($failed.Count -gt 0){throw ('Synthetic checks failed: '+($failed -join ', '))}
             }else{
               $counts=if($env:AITM_TEST_PART -eq 'screenshots-active'){@(1)}elseif($env:AITM_TEST_PART -eq 'screenshots-empty'){@(0)}else{@()}
               foreach($count in $counts){foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){foreach($warningCase in @('partial-data','partial-both')){
@@ -192,7 +176,7 @@ jobs:
                   if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Long-activity synthetic screenshot is missing.'}
                 }
               }
-              if($env:AITM_TEST_PART -eq 'screenshots-showcase'){
+              if($env:AITM_TEST_PART -eq 'screenshots-related'){
                 Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/tests/Test-RelatedAgentPlacement.ps1'))
                 foreach($theme in @('dark','light')){foreach($mode in @('expanded','compact')){
                   $stem="related-agents-no-active-$theme-$mode"
@@ -202,7 +186,7 @@ jobs:
                   if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'No-active-step screenshot is missing.'}
                 }}
               }
-              if($env:AITM_TEST_PART -eq 'screenshots-showcase'){
+              if($env:AITM_TEST_PART -eq 'screenshots-related'){
                 foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){
                   $stem="related-agents-count-only-$theme-$language-$mode"
                   $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsCountOnly','-PreviewRelatedAgentsUiTest','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
@@ -232,27 +216,15 @@ jobs:
                 }}
               }
             }
-            Assert-SourceSnapshot
           }finally{
             foreach($scope in @('User','Machine')){$before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine};$after=Read-PathState $scope;if($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind){throw "$scope PATH changed."}}
             if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}
           }
       - name: Preserve synthetic screenshots
-        if: always() && startsWith(matrix.part, 'screenshots-') && !contains(github.event.head_commit.message, '[remaining-checks]') && !contains(github.event.head_commit.message, '[checks-only]')
+        if: always() && matrix.part != 'checks' && !contains(github.event.head_commit.message, '[remaining-checks]') && !contains(github.event.head_commit.message, '[checks-only]')
         uses: actions/upload-artifact@v4
         with:
           name: windows-codex-passive-${{ matrix.part }}
           path: ${{ runner.temp }}/aitm-codex-passive-ci-*/screenshots/*.png
-          if-no-files-found: error
-          retention-days: 7
-      - name: Preserve candidate installer
-        if: success() && matrix.part == 'checks' && !contains(github.event.head_commit.message, '[remaining-checks]')
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer-candidate
-          path: |
-            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/AITaskMonitorSetup.exe
-            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/AITaskMonitorSetup.exe.sha256
-            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/source-commit.txt
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7

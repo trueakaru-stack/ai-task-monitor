@@ -46,7 +46,7 @@ try{
     $source=$source.Replace(' if($identityVerified){',(' if($identityVerified){'+[Environment]::NewLine+' [IO.File]::WriteAllText($env:AITM_ID_CLEANUP,"cleanup")'))
     $source=$source.Replace('$identityVerified=$true',('$identityVerified=$true;[IO.File]::WriteAllText($env:AITM_ID_READY,"ready")'))
     if($mode -ceq 'valid-cleanup'){
-     $fake='$identityVerified=$true;[IO.File]::WriteAllText($env:AITM_ID_FIXTURE_START,"start");$fake=New-Object PSObject;$fake|Add-Member -MemberType ScriptMethod -Name Dispose -Value {[IO.File]::WriteAllText($env:AITM_ID_DISPOSE,"disposed")};$script:codexTitleReader=$fake;[IO.File]::WriteAllText($env:AITM_ID_FIXTURE_END,"end")'
+      $fake='$identityVerified=$true;[IO.File]::WriteAllText($env:AITM_ID_FIXTURE_START,"start");$fake=[pscustomobject]@{};$fake.PSObject.Members.Add([Management.Automation.PSScriptMethod]::new(''Dispose'',{[IO.File]::WriteAllText($env:AITM_ID_DISPOSE,"disposed")}));$script:codexTitleReader=$fake;[IO.File]::WriteAllText($env:AITM_ID_FIXTURE_END,"end")'
      $source=$source.Replace('$identityVerified=$true',$fake)
     }
     if($mode -ceq 'api-failure'){
