@@ -33,6 +33,18 @@ try{
  Require ([IO.File]::Exists($old) -and [IO.File]::Exists($new) -and
   (Get-FileHash -LiteralPath $old -Algorithm SHA256).Hash -ceq $beforeOld -and
   (Get-FileHash -LiteralPath $new -Algorithm SHA256).Hash -ceq $beforeNew) 'The directly invoked test touched the inherited synthetic profile.'
+ $child.Dispose();$child=$null
+ $preloaded=Join-Path $root 'preloaded.ps1'
+ $fixture='$ErrorActionPreference=''Stop'''+[Environment]::NewLine+
+  'Add-Type -TypeDefinition ''namespace AITaskMonitor.Claude { public static class Retention {} }'''+[Environment]::NewLine+
+  '& '''+$test.Replace("'","''")+''''
+ [IO.File]::WriteAllText($preloaded,$fixture,[Text.UTF8Encoding]::new($false))
+ $start.Arguments='-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "'+$preloaded+'"'
+ $child=[Diagnostics.Process]::Start($start);$output=$child.StandardOutput.ReadToEndAsync();$errors=$child.StandardError.ReadToEndAsync()
+ Require ($child.WaitForExit(45000) -and $child.ExitCode -ne 0 -and $errors.GetAwaiter().GetResult().Contains('requires a fresh process')) 'The test accepted a pre-existing retention implementation.'
+ Require ([IO.File]::Exists($old) -and [IO.File]::Exists($new) -and
+  (Get-FileHash -LiteralPath $old -Algorithm SHA256).Hash -ceq $beforeOld -and
+  (Get-FileHash -LiteralPath $new -Algorithm SHA256).Hash -ceq $beforeNew) 'The rejected preloaded process touched the inherited synthetic profile.'
  Write-Output 'Direct retention gate test: inherited synthetic Claude backups were preserved.'
 }finally{
  if($null -ne $child){if(-not $child.HasExited){$child.Kill();[void]$child.WaitForExit(3000)};$child.Dispose()}

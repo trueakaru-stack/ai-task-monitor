@@ -4,6 +4,8 @@ $priorProfile=[Environment]::GetEnvironmentVariable('USERPROFILE','Process')
 $app=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\app'))
 Add-Type -AssemblyName System.Web.Extensions
 Add-Type -AssemblyName PresentationFramework
+$existingRetention=@([AppDomain]::CurrentDomain.GetAssemblies()|ForEach-Object {$_.GetType('AITaskMonitor.Claude.Retention')}|Where-Object {$null -ne $_})
+if($existingRetention.Count -ne 0){throw 'The synthetic retention test requires a fresh process.'}
 $retentionSource=[IO.File]::ReadAllText((Join-Path $app 'ClaudeRetention.cs'))
 $productionMutex='"Local\\CodexTasksClaudeEvents"'
 $syntheticMutex='"Local\\AITM.Test.Retention.Gate.'+[Guid]::NewGuid().ToString('N')+'"'
