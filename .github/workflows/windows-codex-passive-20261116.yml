@@ -4,6 +4,7 @@ on:
   push:
     branches: [codex/windows-identity-probe-20261124]
     paths:
+      - 'windows/tests/Test-WorkerServerIdentity.ps1'
       - 'windows/app/CodexProgress.ps1'
       - 'windows/app/LocalReadOwner.cs'
       - 'windows/tests/Test-LocalReadOwner.ps1'
