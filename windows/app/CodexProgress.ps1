@@ -730,7 +730,7 @@ try{
  $script:codexCloudController=New-CodexCloudController
  $script:codexCloudModulesAvailable=$true
 }catch{}
-$script:currentVersion='0.2.13'
+$script:currentVersion='0.2.14'
 $script:availableUpdate=$null
 $script:dismissedUpdate=''
 $script:updateRequest=$null
@@ -4094,7 +4094,8 @@ function Start-DiagnosticClient {
  if($null -eq $script:diagnosticRuntime -or $null -ne $script:diagnosticClient){return}
  try{
   if(-not ('AITaskMonitor.LocalReadOwner.Owner' -as [type])){Add-Type -Path (Join-Path $PSScriptRoot 'LocalReadOwner.cs') -ErrorAction Stop}
-  $config=[string[]]@('AITM-DIAGNOSTIC-1',[IO.Path]::GetFullPath($codexHome),[IO.Path]::GetFullPath($env:USERPROFILE),[IO.Path]::GetFullPath($dataDirectory),[IO.Path]::GetFullPath($script:diagnosticDirectory),$script:monitorStartedUtc.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture))
+  $diagnosticSince=[DateTimeOffset]$script:diagnosticRuntime.Since
+  $config=[string[]]@('AITM-DIAGNOSTIC-1',[IO.Path]::GetFullPath($codexHome),[IO.Path]::GetFullPath($env:USERPROFILE),[IO.Path]::GetFullPath($dataDirectory),[IO.Path]::GetFullPath($script:diagnosticDirectory),$diagnosticSince.ToUniversalTime().ToString('o',[Globalization.CultureInfo]::InvariantCulture))
   $workerPath=Join-Path $PSScriptRoot 'DiagnosticWorker.ps1'
   $owner=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$config)
   $ownerFactory={
@@ -5693,13 +5694,14 @@ $journalConfirmClearButton.Add_Click({
   if($null -ne $clientVariable -and $null -ne $clientVariable.Value){[void](Queue-DiagnosticClear $clientVariable.Value)}
   else{
    Clear-DiagnosticEvents -Directory $script:diagnosticDirectory
-   if($null -ne $script:diagnosticRuntime){$script:diagnosticRuntime.NextCleanup=[DateTimeOffset]::MaxValue}
+   $clearedAt=[DateTimeOffset]::UtcNow
+   if($null -ne $script:diagnosticRuntime){$script:diagnosticRuntime.NextCleanup=[DateTimeOffset]::MaxValue;$script:diagnosticRuntime.Since=$clearedAt}
    else{
     try{
-     $script:diagnosticRuntime=New-DiagnosticRuntime -Directory $script:diagnosticDirectory -Since ([DateTimeOffset]$script:monitorStartedUtc) -Now ([DateTimeOffset]::UtcNow);$script:diagnosticError=""
-     if($null -ne $clientVariable){Start-DiagnosticClient}
+     $script:diagnosticRuntime=New-DiagnosticRuntime -Directory $script:diagnosticDirectory -Since $clearedAt -Now ([DateTimeOffset]::UtcNow);$script:diagnosticError=""
     }catch{$script:diagnosticError="Журнал очищен, но недоступен"}
    }
+   if($null -ne $clientVariable -and $null -ne $script:diagnosticRuntime){Start-DiagnosticClient}
   }
   $script:journalUiError="";$script:journalFingerprint=""
  }

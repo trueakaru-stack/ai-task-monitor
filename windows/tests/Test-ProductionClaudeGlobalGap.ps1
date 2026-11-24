@@ -12,6 +12,11 @@ $definitions=foreach($name in @('Prop','Unconfirmed-Tasks')){
 . ([scriptblock]::Create(($definitions -join [Environment]::NewLine)))
 function Require([bool]$condition,[string]$message){if(-not $condition){throw $message}}
 function Get-SyntheticSourceStages {return (($stageHandles.Keys|Sort-Object|ForEach-Object {$_+'='+$stageHandles[$_].WaitOne(0)}) -join '; ')}
+function Wait-SyntheticSourceInitialization($client,$owner){
+ $clock=[Diagnostics.Stopwatch]::StartNew()
+ do{[void](Get-LocalSourceClientSnapshot $client 'ru' 0);if($client.WarmupReady){return};if($owner.HasExited){break};Start-Sleep -Milliseconds 15}while($clock.ElapsedMilliseconds -lt 45000)
+ throw ('The synthetic source initialization did not finish; elapsed_ms='+$clock.ElapsedMilliseconds+'; owner='+$owner.Stage+'; failure='+$owner.FailureStage+'; '+(Get-SyntheticSourceStages))
+}
 function Event([string]$id,[string]$event,[DateTime]$time,[object]$active,[string]$phase=''){
  $data=@{timestamp=$time.ToString('o');session_id=$id;event=$event;active=$active}
  if($phase){$data.stage_version=1;$data.stage_phase=$phase}
@@ -70,7 +75,7 @@ try{
    [IO.File]::WriteAllText($eventPath,($prompt+[Environment]::NewLine),$utf8)
    $config=[string[]]@('AITM-LOCAL-SOURCE-1',$codex,$profile,$data,'',$eventPath,$now.AddMinutes(-1).ToString('o'))
    $owner=[AITaskMonitor.LocalReadOwner.Owner]::new((Join-Path $work 'LocalSourceWorker.ps1'),$config)
-   $client=New-LocalSourceClient $owner 'ru';$clock=[Diagnostics.Stopwatch]::StartNew()
+   $client=New-LocalSourceClient $owner 'ru';Wait-SyntheticSourceInitialization $client $owner;$clock=[Diagnostics.Stopwatch]::StartNew()
    do{$snapshot=Get-LocalSourceClientSnapshot $client 'ru' 0;if($client.Fresh -and @($snapshot.Claude).Count -eq 1){break};Start-Sleep -Milliseconds 15}while($clock.ElapsedMilliseconds -lt 15000)
    if(-not ($client.Fresh -and @($snapshot.Claude).Count -eq 1 -and $snapshot.Claude[0].Active)){
     $elapsed=$clock.ElapsedMilliseconds;$initialStages=Get-SyntheticSourceStages;$observed=@{}
@@ -136,7 +141,7 @@ try{
  [IO.File]::WriteAllText($eventPath,$prompt.Substring(0,$split),$utf8)
  $config=[string[]]@('AITM-LOCAL-SOURCE-1',$codex,$profile,$data,'',$eventPath,$now.AddMinutes(-1).ToString('o'))
  $owner=[AITaskMonitor.LocalReadOwner.Owner]::new((Join-Path $work 'LocalSourceWorker.ps1'),$config)
- $client=New-LocalSourceClient $owner 'ru';$clock=[Diagnostics.Stopwatch]::StartNew()
+ $client=New-LocalSourceClient $owner 'ru';Wait-SyntheticSourceInitialization $client $owner;$clock=[Diagnostics.Stopwatch]::StartNew()
  do{$snapshot=Get-LocalSourceClientSnapshot $client 'ru' 0;if($client.Fresh -and @($snapshot.PartialData) -ccontains 'Claude Code'){break};Start-Sleep -Milliseconds 15}while($clock.ElapsedMilliseconds -lt 15000)
  Require ($client.Fresh -and @($snapshot.Claude).Count -eq 0 -and @($snapshot.Unavailable) -ccontains 'Claude Code' -and @($snapshot.PartialData) -ccontains 'Claude Code') 'An incomplete first Claude record was presented as a confirmed empty source.'
  [IO.File]::AppendAllText($eventPath,($prompt.Substring($split)+[Environment]::NewLine),$utf8);$clock.Restart()

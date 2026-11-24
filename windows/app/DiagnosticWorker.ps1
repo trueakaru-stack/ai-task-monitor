@@ -18,7 +18,7 @@ try{
  $identityVerified=$true
  $reader=[IO.BinaryReader]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)
  $writer=[IO.BinaryWriter]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)
- $initialized=$false;$runtime=$null;$warningTokens=@{}
+ $initialized=$false;$runtime=$null;$clearBoundary=$null;$warningTokens=@{}
  $seen=New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
  $seenOrder=New-Object 'Collections.Generic.Queue[string]'
  while($true){
@@ -78,13 +78,22 @@ try{
     if(-not $seen.Contains($key)){
      Clear-DiagnosticEvents -Directory $diagnosticDirectory
      $clearedAt=[DateTimeOffset]::UtcNow
+     $clearBoundary=$clearedAt
      if($null -ne $runtime){$runtime.NextCleanup=[DateTimeOffset]::MaxValue;$runtime.Since=$clearedAt}
      if($seen.Add($key)){$seenOrder.Enqueue($key)}
     }
     $clearAck=$clearId
+    # A clear acknowledgement must not depend on another source read or
+    # journal write. The client retains its observation for a later poll.
+    $phase='respond-clear'
+    $result=[PSCustomObject]@{Failed=$false;FailureStage='';FailureKind='';Warnings=@();ClearAck=$clearAck;DismissAck=@()}
+    $response=[Text.UTF8Encoding]::new($false,$true).GetBytes([Management.Automation.PSSerializer]::Serialize($result,24))
+    if($response.Length -le 0 -or $response.Length -gt 16777216){throw 'Invalid result frame.'}
+    $writer.Write([int]$response.Length);$writer.Write($response);$writer.Flush()
+    continue
    }
    $phase='runtime'
-   if($null -eq $runtime){$runtime=New-DiagnosticRuntime -Directory $diagnosticDirectory -Since $(if($null -ne $clearedAt){$clearedAt}else{$started}) -Now ([DateTimeOffset]::UtcNow)}
+   if($null -eq $runtime){$runtime=New-DiagnosticRuntime -Directory $diagnosticDirectory -Since $(if($null -ne $clearBoundary){$clearBoundary}else{$started}) -Now ([DateTimeOffset]::UtcNow)}
    $settings=Get-DiagnosticSettings -Directory $diagnosticDirectory
    if($settings.RetentionDays -ne $runtime.Settings.RetentionDays -or $settings.MaximumMB -ne $runtime.Settings.MaximumMB){$runtime.NextCleanup=[DateTimeOffset]::MinValue}
    $runtime.Settings=$settings

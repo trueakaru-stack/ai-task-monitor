@@ -1,7 +1,7 @@
 name: Synthetic legacy uninstall safety
 on:
   push:
-    branches: ['windows', 'codex/legacy-uninstall-check-20261116', 'codex/windows-activity-ci-20261123']
+    branches: ['windows', 'codex/windows-compact-ci-20261124']
 permissions:
   contents: read
 jobs:
@@ -31,10 +31,39 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch exact test revision.' }
           git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
           if ($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:GITHUB_SHA) { throw 'Cannot select exact test revision.' }
-          python -B (Join-Path $source 'windows/tests/Test-DotnetPathSafety.py')
-          if ($LASTEXITCODE -ne 0) { throw '.NET PATH safety guard failed.' }
+          function Read-PathState([string]$scope){
+            $key=if($scope -eq 'User'){[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment',$false)}else{[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment',$false)}
+            try{
+              $value=$key.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+              $kind=if($null -eq $value){'Missing'}else{[string]$key.GetValueKind('Path')}
+              return [PSCustomObject]@{Value=[string]$value;Kind=$kind}
+            }finally{if($null -ne $key){$key.Dispose()}}
+          }
+          $beforeUser=Read-PathState 'User';$beforeMachine=Read-PathState 'Machine'
+          $beforeProcess=[Environment]::GetEnvironmentVariable('Path','Process')
+          try{
+            $pythonRoot=if($env:RUNNER_TOOL_CACHE){Join-Path $env:RUNNER_TOOL_CACHE 'Python'}else{''}
+            $candidate=if($pythonRoot -and [IO.Directory]::Exists($pythonRoot)){Get-ChildItem -LiteralPath $pythonRoot -Filter python.exe -File -Recurse -ErrorAction Stop | Where-Object {$_.FullName -match '\\x64\\python\.exe$'} | Sort-Object FullName -Descending | Select-Object -First 1}else{$null}
+            $verified=$false
+            if($null -ne $candidate){
+              $trusted=[IO.Path]::GetFullPath($pythonRoot).TrimEnd('\')+'\';$path=[IO.Path]::GetFullPath($candidate.FullName)
+              $verified=$path.StartsWith($trusted,[StringComparison]::OrdinalIgnoreCase) -and $path -notmatch '(?i)WindowsApps' -and ($candidate.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and ($candidate.VersionInfo.ProductName -match '(?i)Python' -or $candidate.VersionInfo.FileDescription -match '(?i)Python')
+              $parent=$candidate.Directory
+              while($verified -and $null -ne $parent -and $parent.FullName.Length -ge $pythonRoot.Length){
+                if(($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){$verified=$false;break};$parent=$parent.Parent
+              }
+            }
+            if($verified){
+              & $candidate.FullName -I -B (Join-Path $source 'windows/tests/Test-DotnetPathSafety.py')
+              if($LASTEXITCODE -ne 0){throw 'The PATH safety guard failed.'}
+              Write-Output 'PATH safety guard: passed using a verified hosted tool-cache interpreter.'
+            }else{throw 'No verified hosted tool-cache Python was found.'}
           & (Join-Path $source '.github/legacy-uninstall-ci/Run.ps1')
           & (Join-Path $source 'windows/tests/Test-UninstallPreservesData.ps1')
+          }finally{
+            foreach($scope in @('User','Machine')){$before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine};$after=Read-PathState $scope;if($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind){throw "$scope PATH changed."}}
+            if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}
+          }
 
       - name: Save the exact verified setup
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

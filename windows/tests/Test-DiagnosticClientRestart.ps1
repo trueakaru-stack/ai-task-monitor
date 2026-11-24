@@ -45,11 +45,55 @@ try{
  Require ($blocked.Owner -eq $unsafe -and $blocked.RetryCount -eq 0) 'A replacement started without confirmed cleanup.'
  $blocked.RetryCount=4;$blocked.StableMilliseconds=30000;$tick=[Diagnostics.Stopwatch]::GetTimestamp()
  Confirm-DiagnosticOwnerFresh $blocked $tick
+ Confirm-DiagnosticOwnerFresh $blocked ($tick+[Diagnostics.Stopwatch]::Frequency*4)
+ Confirm-DiagnosticOwnerFresh $blocked ($tick+[Diagnostics.Stopwatch]::Frequency*8)
+ Confirm-DiagnosticOwnerFresh $blocked ($tick+[Diagnostics.Stopwatch]::Frequency*12)
+ Confirm-DiagnosticOwnerFresh $blocked ($tick+[Diagnostics.Stopwatch]::Frequency*16)
+ Confirm-DiagnosticOwnerFresh $blocked ($tick+[Diagnostics.Stopwatch]::Frequency*20)
+ Confirm-DiagnosticOwnerFresh $blocked ($tick+[Diagnostics.Stopwatch]::Frequency*24)
  Confirm-DiagnosticOwnerFresh $blocked ($tick+[Diagnostics.Stopwatch]::Frequency*29)
  Require ($blocked.RetryCount -eq 4) 'The retry limit reset before stable operation.'
  Confirm-DiagnosticOwnerFresh $blocked ($tick+[Diagnostics.Stopwatch]::Frequency*30)
  Require ($blocked.RetryCount -eq 0) 'A stable owner did not restore the retry allowance.'
- Write-Output 'Diagnostic restart: an uncertain clear was not replayed; a later event survived and cleanup was required.'
+ $client.Owner.Dispose();$clock.Restart();while(-not $client.Owner.HasExited -and $clock.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
+ Require $client.Owner.CanReplace 'The replacement owner did not stop before the timeout check.'
+ [void]$started.Reset();[void]$release.Reset()
+ $timeoutTrace=Join-Path $root 'synthetic-timeout-clear.txt'
+ $timeoutConfig=[string[]]@('hold-clear',$journal,$app,$startName,$releaseName,$timeoutTrace)
+ $timeoutOwner=[AITaskMonitor.LocalReadOwner.Owner]::new($worker,$timeoutConfig);$client=New-DiagnosticClient $timeoutOwner
+ [void](Queue-DiagnosticClear $client);Get-DiagnosticClientUpdate $client $tasks @()
+ Require ($started.WaitOne(15000)) 'The synthetic timeout clear did not reach its gate.'
+ Write-DiagnosticEvent -Directory $journal -Event $sentinel -Now ([DateTimeOffset]::UtcNow)
+ $client.PendingStartedAt=[Diagnostics.Stopwatch]::GetTimestamp()-[Diagnostics.Stopwatch]::Frequency
+ $client.TimeoutMilliseconds=10;Get-DiagnosticClientUpdate $client $tasks @()
+ Require ($client.LastClearUncertain -and -not $client.PendingClear) 'A timed-out clear was left for automatic replay.'
+ $client.TimeoutMilliseconds=6000
+ [void]$release.Set();$clock.Restart()
+ do{Get-DiagnosticClientUpdate $client $tasks @();if($client.Fresh){break};Start-Sleep -Milliseconds 10}while($clock.ElapsedMilliseconds -lt 10000)
+ Require ($client.Fresh -and @([IO.File]::ReadAllLines($timeoutTrace)).Count -eq 1 -and @(Read-DiagnosticEvents -Directory $journal -Now ([DateTimeOffset]::UtcNow)).Count -eq 1) 'A timed-out clear was replayed or removed a later event.'
+ $client.Owner.Dispose();$clock.Restart();while(-not $client.Owner.HasExited -and $clock.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
+ Require $client.Owner.CanReplace 'The timeout owner did not stop before the failed-clear check.'
+ $failedTrace=Join-Path $root 'synthetic-failed-clear.txt'
+ $failedConfig=[string[]]@('fail-clear',$journal,$app,$startName,$releaseName,$failedTrace)
+ $failedOwner=[AITaskMonitor.LocalReadOwner.Owner]::new($worker,$failedConfig);$client=New-DiagnosticClient $failedOwner
+ [void](Queue-DiagnosticClear $client);$clock.Restart()
+ do{Get-DiagnosticClientUpdate $client $tasks @();if($client.LastClearUncertain){break};Start-Sleep -Milliseconds 10}while($clock.ElapsedMilliseconds -lt 15000)
+ Require ($client.LastClearUncertain -and -not $client.PendingClear -and -not $client.Owner.HasExited) 'A failed clear was left for automatic replay.'
+ Write-DiagnosticEvent -Directory $journal -Event $sentinel -Now ([DateTimeOffset]::UtcNow)
+ $clock.Restart();do{Get-DiagnosticClientUpdate $client $tasks @();Start-Sleep -Milliseconds 10}while($clock.ElapsedMilliseconds -lt 300)
+ Require (@([IO.File]::ReadAllLines($failedTrace)).Count -eq 1 -and @(Read-DiagnosticEvents -Directory $journal -Now ([DateTimeOffset]::UtcNow)).Count -eq 1) 'A failed clear was replayed or removed a later event.'
+ $failedOwner.Dispose();$clock.Restart();while(-not $failedOwner.HasExited -and $clock.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
+ Require $failedOwner.CanReplace 'The failed-clear synthetic owner did not stop.'
+ $badAckTrace=Join-Path $root 'synthetic-failed-ack.txt'
+ $badAckConfig=[string[]]@('fail-with-ack',$journal,$app,$startName,$releaseName,$badAckTrace)
+ $badAckOwner=[AITaskMonitor.LocalReadOwner.Owner]::new($worker,$badAckConfig);$client=New-DiagnosticClient $badAckOwner
+ [void](Queue-DiagnosticClear $client);$clock.Restart();$completed=$false
+ do{Get-DiagnosticClientUpdate $client $tasks @();if($client.LastClearCompleted){$completed=$true};if($client.LastClearUncertain){break};Start-Sleep -Milliseconds 10}while($clock.ElapsedMilliseconds -lt 15000)
+ Require ($client.LastClearUncertain -and -not $client.PendingClear -and -not $completed) 'A failed response with a matching clear acknowledgement was presented as success.'
+ Write-DiagnosticEvent -Directory $journal -Event $sentinel -Now ([DateTimeOffset]::UtcNow)
+ $clock.Restart();do{Get-DiagnosticClientUpdate $client $tasks @();Start-Sleep -Milliseconds 10}while($clock.ElapsedMilliseconds -lt 300)
+ Require (@([IO.File]::ReadAllLines($badAckTrace)).Count -eq 1 -and @(Read-DiagnosticEvents -Directory $journal -Now ([DateTimeOffset]::UtcNow)).Count -eq 1) 'A failed response with a clear acknowledgement was replayed.'
+ Write-Output 'Diagnostic restart: unacknowledged, timed-out and failed clears were not replayed; later events survived.'
 }finally{
  [void]$release.Set()
  if($null -ne $client -and $null -ne $client.Owner -and $client.Owner -ne $owner){$client.Owner.Dispose();$clock=[Diagnostics.Stopwatch]::StartNew();while(-not $client.Owner.HasExited -and $clock.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10};if(-not $client.Owner.CanReplace){throw 'The replacement synthetic owner did not stop.'}}

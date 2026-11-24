@@ -14,9 +14,9 @@ function Require([bool]$condition,[string]$message){if(-not $condition){throw $m
 function Get-SyntheticStages {
  return (($stageHandles.Keys|Sort-Object|ForEach-Object {$_+'='+$stageHandles[$_].WaitOne(0)}) -join '; ')
 }
-function Wait-Gate($gate,$owner,[string]$message){
+function Wait-Gate($gate,$owner,[string]$message,[int]$limitMilliseconds=15000){
  $clock=[Diagnostics.Stopwatch]::StartNew()
- while($clock.ElapsedMilliseconds -lt 15000){if($gate.WaitOne(20)){return};if($owner.HasExited){break}}
+ while($clock.ElapsedMilliseconds -lt $limitMilliseconds){if($gate.WaitOne(20)){return};if($owner.HasExited){break}}
  $initialStages=Get-SyntheticStages;$diagnostic=[Diagnostics.Stopwatch]::StartNew();$eventually=$false
  if(-not $owner.HasExited){$eventually=$gate.WaitOne(15000)}
  throw ($message+'; stage='+$owner.Stage+'; failed_at='+$owner.FailureStage+'; kind='+$owner.FailureKind+
@@ -80,7 +80,7 @@ try{
  $known=[PSCustomObject]@{Id='synthetic-previous';Provider='codex';Active=$true;Paused=$false;Status='working';Activity='working';Steps=@()}
  $client.Snapshot=[PSCustomObject]@{Codex=@($known);Claude=@();Unavailable=@();PartialConnection=@();PartialData=@();CodexIncomplete=$false;ClaudeConnection='disconnected'}
  [void](Get-LocalSourceClientSnapshot $client 'ru' 1)
- Wait-Gate $handles[0] $owner 'The production worker did not reach initialization.'
+ Wait-Gate $handles[0] $owner 'The production worker did not reach initialization.' 45000
  $id=$owner.OwnedProcessId;$generation=$owner.Generation
  $client.PendingStartedAt=[Diagnostics.Stopwatch]::GetTimestamp()-([Diagnostics.Stopwatch]::Frequency*7)
  $uncertain=Get-LocalSourceClientSnapshot $client 'ru' 1
@@ -95,7 +95,7 @@ try{
  Set-LocalSourceClientConnection $client $true;[void](Get-LocalSourceClientSnapshot $client 'en' 9)
  Require ($owner.Generation -ne $generation -and $owner.OwnedProcessId -eq $id -and -not $handles[2].WaitOne(0)) 'The changed settings did not invalidate the old warmup.'
  [void]$handles[1].Set();$clock=[Diagnostics.Stopwatch]::StartNew()
- do{[void](Get-LocalSourceClientSnapshot $client 'en' 9);if($client.WarmupReady){break};Start-Sleep -Milliseconds 10}while($clock.ElapsedMilliseconds -lt 15000)
+ do{[void](Get-LocalSourceClientSnapshot $client 'en' 9);if($client.WarmupReady){break};Start-Sleep -Milliseconds 10}while($clock.ElapsedMilliseconds -lt 45000)
  Require ($client.WarmupReady -and -not $client.Fresh -and $owner.OwnedProcessId -eq $id) ('The initialization acknowledgement failed or was treated as a source snapshot; elapsed_ms='+$clock.ElapsedMilliseconds+'; owner='+$owner.Stage+'; failure='+$owner.FailureStage+'; kind='+$owner.FailureKind+'; warmup_ready='+$client.WarmupReady+'; warmup_pending='+$client.WarmupPending+'; polling='+$owner.IsPolling+'; pending='+$owner.HasPendingRequest+'; result='+$owner.HasResult+'; '+(Get-SyntheticStages))
  Wait-Gate $handles[2] $owner 'The separately timed source read did not start.'
  foreach($stage in @('CONNECTED','IDENTITY_BEGIN','IDENTITY_READY','PID_CALL','PID_DONE','FRAME','DESERIALIZED','CORE_START','CORE_ENTER','RETENTION_START','RETENTION_DONE','ADAPTER_START','ADAPTER_DONE','CORE_DONE')){

@@ -196,17 +196,16 @@ function Write-DiagnosticFile([string]$Directory,[object[]]$Events) {
   }finally{$existing.Dispose()}
  }
  $temporary=Join-Path $Directory ("diagnostic-"+[Guid]::NewGuid().ToString("N")+".tmp")
+ $stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
  try{
-  $stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
-  try{
-   $stream.Write($bytes,0,$bytes.Length)
-   $stream.Flush($true)
-  }finally{$stream.Dispose()}
-  Assert-DiagnosticNotReparsePoint $path
+  $stream.Write($bytes,0,$bytes.Length)
+  $stream.Flush($true)
+ }finally{$stream.Dispose()}
+ Assert-DiagnosticNotReparsePoint $path
+ # A successful replacement moves the temporary name. On failure, leave the
+ # entry untouched: after closing its handle, its name no longer proves that
+ # it still refers to the file this process created.
   if(Test-Path -LiteralPath $path){[IO.File]::Replace($temporary,$path,[System.Management.Automation.Language.NullString]::Value)}else{[IO.File]::Move($temporary,$path)}
- }finally{
-  if(Test-Path -LiteralPath $temporary){[IO.File]::Delete($temporary)}
- }
 }
 
 function Append-DiagnosticFile([string]$Directory,[string]$Original,[string]$Suffix,[long]$ExpectedBytes) {
@@ -279,9 +278,26 @@ function Remove-ExpiredDiagnosticEvents {
  [void](Invoke-DiagnosticStoreLock $Directory $action)
 }
 
+function Assert-NoDiagnosticTemporaryCopies([string]$Directory) {
+ Assert-DiagnosticNotReparsePoint $Directory
+ try{$attributes=[IO.File]::GetAttributes($Directory)}
+ catch [IO.FileNotFoundException]{return}
+ catch [IO.DirectoryNotFoundException]{return}
+ if(($attributes -band [IO.FileAttributes]::Directory) -eq 0){throw 'The diagnostic directory is not a directory.'}
+ $count=0
+ foreach($entry in [IO.Directory]::EnumerateFileSystemEntries($Directory)){
+  $count++
+  if($count -gt 4096){throw 'The diagnostic directory could not be checked completely.'}
+  if([IO.Path]::GetFileName($entry) -imatch '^diagnostic-[a-f0-9]{32}\.tmp$'){throw 'A possible diagnostic temporary copy remains.'}
+ }
+}
+
 function Clear-DiagnosticEvents([string]$Directory) {
  $action={
   param($root)
+  # Do not claim a complete clear when an earlier interrupted writer may have
+  # left a copy. The entry is never removed based on its name alone.
+  Assert-NoDiagnosticTemporaryCopies $root
   $raw=Read-DiagnosticRaw $root -AllowMalformed
   if($raw.Exists){Write-DiagnosticFile $root @()}
  }.GetNewClosure()

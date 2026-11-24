@@ -37,7 +37,9 @@ try{
     $release=[Threading.EventWaitHandle]::OpenExisting([string]$configuration[4])
     try{[void]$started.Set();[void]$release.WaitOne(30000)}finally{$started.Dispose();$release.Dispose()}
    }
-   if([string]$configuration[0] -ceq 'fail-clear'){$failed=$true}else{$clearAck=[string]$clear[0]}
+   if([string]$configuration[0] -ceq 'fail-clear'){$failed=$true}
+   elseif([string]$configuration[0] -ceq 'fail-with-ack'){$failed=$true;$clearAck=[string]$clear[0]}
+   else{$clearAck=[string]$clear[0]}
   }
   $result=[PSCustomObject]@{Failed=$failed;Warnings=@();ClearAck=$clearAck;DismissAck=@()}
   $payload=[Text.UTF8Encoding]::new($false,$true).GetBytes([Management.Automation.PSSerializer]::Serialize($result,24))

@@ -44,11 +44,15 @@ try{
  $config=[string[]]@('AITM-LOCAL-SOURCE-1',$codex,$profile,$data,'','',$utc.AddMinutes(-1).ToString('o'))
  $owner=[AITaskMonitor.LocalReadOwner.Owner]::new((Join-Path $app 'LocalSourceWorker.ps1'),$config)
  $epoch=[Guid]::NewGuid().ToString('N')
- $deadline=[Diagnostics.Stopwatch]::StartNew();$firstSnapshotMilliseconds=$null
+ $startup=[Diagnostics.Stopwatch]::StartNew();$firstSnapshotMilliseconds=$null
+ Require ($owner.Request([string[]]@('poll',$epoch,'true','ru','false'),[long]10)) 'The source initialization was rejected.'
+ $ready=Wait-Result $owner 45000
+ Require ($ready.Success -and $ready.Value.InitialReady -is [bool] -and $ready.Value.InitialReady) 'The source did not acknowledge initialization separately.'
+ $initializationMilliseconds=$startup.ElapsedMilliseconds;$deadline=[Diagnostics.Stopwatch]::StartNew()
  do{
-  Require ($owner.Request([string[]]@('poll',$epoch,'true','ru'),[long]11)) 'The source poll was rejected.'
+  Require ($owner.Request([string[]]@('poll',$epoch,'true','ru','true'),[long]11)) 'The source poll was rejected.'
   $snapshot=Wait-Result $owner
-  if($null -eq $firstSnapshotMilliseconds){$firstSnapshotMilliseconds=$deadline.ElapsedMilliseconds}
+  if($null -eq $firstSnapshotMilliseconds){$firstSnapshotMilliseconds=$startup.ElapsedMilliseconds}
   Require ($snapshot.Success -and $snapshot.HasRequestStamp -and $snapshot.RequestStamp -eq 11) 'The source worker failed to read the synthetic profile.'
   $codexTasks=@($snapshot.Value.Codex|Where-Object {[string]$_.Id -ceq $id})
   $claudeTasks=@($snapshot.Value.Claude|Where-Object {[string]$_.Id -ceq 'claude:synthetic-claude'})
@@ -78,7 +82,7 @@ try{
  Require ($failed.Success -and @($failed.Value.Unavailable) -ccontains 'Claude Code' -and
   @($failed.Value.Claude|Where-Object {[string]$_.Id -ceq 'claude:synthetic-claude' -and -not $_.Active}).Count -eq 1 -and
   @($failed.Value.Codex|Where-Object {[string]$_.Id -ceq $id}).Count -eq 1) 'A synthetic Claude settings failure lost known tasks.'
- Write-Output ('Production local source worker: synthetic Codex/Claude discovery, read-only access, reconnect and failure verified; first snapshot='+$firstSnapshotMilliseconds+' ms.')
+ Write-Output ('Production local source worker: synthetic Codex/Claude discovery, read-only access, reconnect and failure verified; initialization='+$initializationMilliseconds+' ms; first snapshot='+$firstSnapshotMilliseconds+' ms.')
 }finally{
  if($null -ne $owner){
   $owner.Dispose();$clock=[Diagnostics.Stopwatch]::StartNew()
