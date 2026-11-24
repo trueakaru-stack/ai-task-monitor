@@ -24,6 +24,8 @@ try{
     $beforeCloseMarker=Join-Path $root ('before-close-'+[Guid]::NewGuid().ToString('N'));$afterCloseMarker=Join-Path $root ('after-close-'+[Guid]::NewGuid().ToString('N'))
     $exitMarker=Join-Path $root ('exit-'+[Guid]::NewGuid().ToString('N'));$finallyMarker=Join-Path $root ('finally-'+[Guid]::NewGuid().ToString('N'))
     $cleanupMarker=Join-Path $root ('cleanup-'+[Guid]::NewGuid().ToString('N'));$disposeMarker=Join-Path $root ('dispose-'+[Guid]::NewGuid().ToString('N'))
+    $cursorBeforeMarker=Join-Path $root ('cursor-before-'+[Guid]::NewGuid().ToString('N'));$cursorAfterMarker=Join-Path $root ('cursor-after-'+[Guid]::NewGuid().ToString('N'))
+    $readerBeforeMarker=Join-Path $root ('reader-before-'+[Guid]::NewGuid().ToString('N'));$readerAfterMarker=Join-Path $root ('reader-after-'+[Guid]::NewGuid().ToString('N'))
     $acceptedMarker=Join-Path $root ('accepted-'+[Guid]::NewGuid().ToString('N'));$readyMarker=Join-Path $root ('ready-'+[Guid]::NewGuid().ToString('N'))
     $fixtureStartMarker=Join-Path $root ('fixture-start-'+[Guid]::NewGuid().ToString('N'));$fixtureEndMarker=Join-Path $root ('fixture-end-'+[Guid]::NewGuid().ToString('N'))
     $foreign=Join-Path $root 'PipeServerIdentity.ps1';$foreignMarker=Join-Path $root ('foreign-'+[Guid]::NewGuid().ToString('N'))
@@ -45,6 +47,16 @@ try{
     $source=[regex]::Replace($source,'(?m)^}finally\{',('}finally{'+[Environment]::NewLine+' [IO.File]::WriteAllText($env:AITM_ID_FINALLY,"finally")'))
     $source=$source.Replace(' if($identityVerified){',(' if($identityVerified){'+[Environment]::NewLine+' [IO.File]::WriteAllText($env:AITM_ID_CLEANUP,"cleanup")'))
     $source=$source.Replace('$identityVerified=$true',('$identityVerified=$true;[IO.File]::WriteAllText($env:AITM_ID_READY,"ready")'))
+    $readerNeedle='$variable=Get-Variable -Scope Script -Name $name -ErrorAction SilentlyContinue'
+    Require ($source.Contains($readerNeedle)) 'The synthetic reader cleanup probe could not be instrumented.'
+    $readerProbe='[IO.File]::WriteAllText(($env:AITM_ID_READER_BEFORE+"-"+$name),"before");'+$readerNeedle+';[IO.File]::WriteAllText(($env:AITM_ID_READER_AFTER+"-"+$name),"after")'
+    $source=$source.Replace($readerNeedle,$readerProbe)
+    if($file -ceq 'LocalSourceWorker.ps1'){
+     $cursorNeedle='$cursor=Get-Variable -Scope Script -Name unindexedCursor -ErrorAction SilentlyContinue'
+     Require ($source.Contains($cursorNeedle)) 'The synthetic cursor cleanup probe could not be instrumented.'
+     $cursorProbe='[IO.File]::WriteAllText($env:AITM_ID_CURSOR_BEFORE,"before");'+$cursorNeedle+';[IO.File]::WriteAllText($env:AITM_ID_CURSOR_AFTER,"after")'
+     $source=$source.Replace($cursorNeedle,$cursorProbe)
+    }
     if($mode -ceq 'valid-cleanup'){
       $fake='$identityVerified=$true;[IO.File]::WriteAllText($env:AITM_ID_FIXTURE_START,"start");$fake=[pscustomobject]@{};$fake.PSObject.Members.Add([Management.Automation.PSScriptMethod]::new(''Dispose'',{[IO.File]::WriteAllText($env:AITM_ID_DISPOSE,"disposed")}));$script:codexTitleReader=$fake;[IO.File]::WriteAllText($env:AITM_ID_FIXTURE_END,"end")'
      $source=$source.Replace('$identityVerified=$true',$fake)
@@ -62,6 +74,8 @@ try{
     $start.EnvironmentVariables['AITM_ID_STARTED']=$startName;$start.EnvironmentVariables['AITM_ID_RELEASE']=$releaseName;$start.EnvironmentVariables['AITM_ID_READ']=$marker;$start.EnvironmentVariables['AITM_ID_COMPILED']=$compiledMarker;$start.EnvironmentVariables['AITM_ID_FOREIGN']=$foreignMarker
     $start.EnvironmentVariables['AITM_ID_CALL']=$callMarker;$start.EnvironmentVariables['AITM_ID_RETURNED']=$returnedMarker;$start.EnvironmentVariables['AITM_ID_REJECTED']=$rejectMarker;$start.EnvironmentVariables['AITM_ID_CATCH']=$catchMarker;$start.EnvironmentVariables['AITM_ID_BEFORE_CLOSE']=$beforeCloseMarker;$start.EnvironmentVariables['AITM_ID_AFTER_CLOSE']=$afterCloseMarker
     $start.EnvironmentVariables['AITM_ID_EXIT']=$exitMarker;$start.EnvironmentVariables['AITM_ID_FINALLY']=$finallyMarker;$start.EnvironmentVariables['AITM_ID_CLEANUP']=$cleanupMarker;$start.EnvironmentVariables['AITM_ID_DISPOSE']=$disposeMarker
+    $start.EnvironmentVariables['AITM_ID_CURSOR_BEFORE']=$cursorBeforeMarker;$start.EnvironmentVariables['AITM_ID_CURSOR_AFTER']=$cursorAfterMarker
+    $start.EnvironmentVariables['AITM_ID_READER_BEFORE']=$readerBeforeMarker;$start.EnvironmentVariables['AITM_ID_READER_AFTER']=$readerAfterMarker
     $start.EnvironmentVariables['AITM_ID_ACCEPTED']=$acceptedMarker;$start.EnvironmentVariables['AITM_ID_READY']=$readyMarker;$start.EnvironmentVariables['AITM_ID_FIXTURE_START']=$fixtureStartMarker;$start.EnvironmentVariables['AITM_ID_FIXTURE_END']=$fixtureEndMarker
     $connect=$server.WaitForConnectionAsync();$child=[Diagnostics.Process]::Start($start)
     Require ($connect.Wait(10000) -and $started.WaitOne(10000) -and $server.IsConnected -and -not [IO.File]::Exists($marker)) 'The worker did not connect before compiling its identity check.'
@@ -86,7 +100,7 @@ try{
        $exited=$child.WaitForExit(10000);$exitCode=if($exited){$child.ExitCode}else{$null}
        $finallyReached=[IO.File]::Exists($finallyMarker);$cleanupReached=[IO.File]::Exists($cleanupMarker)
        $disposed=[IO.File]::Exists($disposeMarker);$beforeClose=[IO.File]::Exists($beforeCloseMarker);$afterClose=[IO.File]::Exists($afterCloseMarker)
-       Require ($exited -and $exitCode -ne 0 -and $finallyReached -and $cleanupReached -and $disposed -and $afterClose) ('Verified worker failure did not clean up its synthetic reader and pipe: worker={0}; mode={1}; exited={2}; exit_code={3}; finally={4}; cleanup={5}; disposed={6}; before_close={7}; after_close={8}.' -f $file,$mode,$exited,$exitCode,$finallyReached,$cleanupReached,$disposed,$beforeClose,$afterClose)
+       Require ($exited -and $exitCode -ne 0 -and $finallyReached -and $cleanupReached -and $disposed -and $afterClose) ('Verified worker failure did not clean up its synthetic reader and pipe: worker={0}; mode={1}; exited={2}; exit_code={3}; finally={4}; cleanup={5}; disposed={6}; before_close={7}; after_close={8}; cursor_before={9}; cursor_after={10}; reader_before={11}; reader_after={12}.' -f $file,$mode,$exited,$exitCode,$finallyReached,$cleanupReached,$disposed,$beforeClose,$afterClose,[IO.File]::Exists($cursorBeforeMarker),[IO.File]::Exists($cursorAfterMarker),[IO.File]::Exists($readerBeforeMarker+'-codexTitleReader'),[IO.File]::Exists($readerAfterMarker+'-codexTitleReader'))
      }
     }
     else{
