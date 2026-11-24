@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks-identity, checks-queue, checks-restart, checks-clear, checks-worker, checks-timer, checks-temp]
+        part: [checks-identity, checks-source, checks-queue, checks-restart, checks-clear, checks-worker, checks-timer]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
@@ -115,8 +115,8 @@ jobs:
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if($env:AITM_TEST_PART -like 'checks*'){
               switch($env:AITM_TEST_PART){
-                'checks-identity' {$tests=@('Test-WorkerServerIdentity.ps1')}
-                'checks-temp' {$tests=@('Test-DiagnosticTemporaryLinkFeasibility.ps1')}
+                'checks-identity' {$tests=@('Test-PipeServerIdentityEmit.ps1','Test-WorkerServerIdentity.ps1')}
+                'checks-source' {$tests=@('Test-ProductionLocalSourceWorker.ps1')}
                 'checks-queue' {$tests=@('Test-DiagnosticClientQueue.ps1','Test-DiagnosticStoreIsolated.ps1')}
                 'checks-restart' {$tests=@('Test-DiagnosticClientRestart.ps1')}
                 'checks-clear' {$tests=@('Test-DiagnosticClearBoundary.ps1','Test-DiagnosticPolicyRace.ps1')}

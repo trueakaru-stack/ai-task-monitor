@@ -3,8 +3,8 @@ Add-Type -Path (Join-Path $PSScriptRoot '..\app\LocalReadOwner.cs')
 function Require([bool]$condition,[string]$message){if(-not $condition){throw $message}}
 function Wait-Result($owner,[int]$milliseconds=20000){
  $clock=[Diagnostics.Stopwatch]::StartNew()
- while($clock.ElapsedMilliseconds -lt $milliseconds){$result=$owner.TryReceive();if($null -ne $result){return $result};Start-Sleep -Milliseconds 10}
- throw 'The local source worker did not return a synthetic result.'
+ while($clock.ElapsedMilliseconds -lt $milliseconds){$result=$owner.TryReceive();if($null -ne $result){if(-not $result.Success){throw ('The synthetic source worker failed: stage={0}; failure={1}; kind={2}.' -f $owner.Stage,$owner.FailureStage,$owner.FailureKind)};return $result};Start-Sleep -Milliseconds 10}
+ throw ('The local source worker did not return a synthetic result: stage={0}; failure={1}; kind={2}.' -f $owner.Stage,$owner.FailureStage,$owner.FailureKind)
 }
 $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
 $root=[IO.Path]::GetFullPath((Join-Path $temp ('aitm-production-source-'+[Guid]::NewGuid().ToString('N'))))
@@ -44,10 +44,11 @@ try{
  $config=[string[]]@('AITM-LOCAL-SOURCE-1',$codex,$profile,$data,'','',$utc.AddMinutes(-1).ToString('o'))
  $owner=[AITaskMonitor.LocalReadOwner.Owner]::new((Join-Path $app 'LocalSourceWorker.ps1'),$config)
  $epoch=[Guid]::NewGuid().ToString('N')
- $deadline=[Diagnostics.Stopwatch]::StartNew()
+ $deadline=[Diagnostics.Stopwatch]::StartNew();$firstSnapshotMilliseconds=$null
  do{
   Require ($owner.Request([string[]]@('poll',$epoch,'true','ru'),[long]11)) 'The source poll was rejected.'
   $snapshot=Wait-Result $owner
+  if($null -eq $firstSnapshotMilliseconds){$firstSnapshotMilliseconds=$deadline.ElapsedMilliseconds}
   Require ($snapshot.Success -and $snapshot.HasRequestStamp -and $snapshot.RequestStamp -eq 11) 'The source worker failed to read the synthetic profile.'
   $codexTasks=@($snapshot.Value.Codex|Where-Object {[string]$_.Id -ceq $id})
   $claudeTasks=@($snapshot.Value.Claude|Where-Object {[string]$_.Id -ceq 'claude:synthetic-claude'})
@@ -77,7 +78,7 @@ try{
  Require ($failed.Success -and @($failed.Value.Unavailable) -ccontains 'Claude Code' -and
   @($failed.Value.Claude|Where-Object {[string]$_.Id -ceq 'claude:synthetic-claude' -and -not $_.Active}).Count -eq 1 -and
   @($failed.Value.Codex|Where-Object {[string]$_.Id -ceq $id}).Count -eq 1) 'A synthetic Claude settings failure lost known tasks.'
- Write-Output 'Production local source worker: synthetic Codex/Claude discovery, read-only source access, disconnect, reconnect, language change and source failure verified.'
+ Write-Output ('Production local source worker: synthetic Codex/Claude discovery, read-only access, reconnect and failure verified; first snapshot='+$firstSnapshotMilliseconds+' ms.')
 }finally{
  if($null -ne $owner){
   $owner.Dispose();$clock=[Diagnostics.Stopwatch]::StartNew()

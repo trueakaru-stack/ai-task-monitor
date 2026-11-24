@@ -5,18 +5,17 @@ $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirectio
 try{
  $pipe.Connect(5000)
  if($env:AITM_QUEUE_STAGE_CONNECTED){$stage=[Threading.EventWaitHandle]::OpenExisting($env:AITM_QUEUE_STAGE_CONNECTED);try{[void]$stage.Set()}finally{$stage.Dispose()}}
- Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
-public static class DiagnosticQueueServerIdentity {
- [DllImport("kernel32.dll", SetLastError=true)]
- public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
-}
-'@
+ $identityName=[Reflection.AssemblyName]::new('AITaskMonitor.PipeIdentity.'+[Guid]::NewGuid().ToString('N'))
+ $identityAssembly=[AppDomain]::CurrentDomain.DefineDynamicAssembly($identityName,[Reflection.Emit.AssemblyBuilderAccess]::Run)
+ $identityModule=$identityAssembly.DefineDynamicModule('Identity')
+ $identityBuilder=$identityModule.DefineType('AITaskMonitor.PipeServerIdentity',[Reflection.TypeAttributes]'Public, Abstract, Sealed')
+ $identityArguments=[Type[]]@([Microsoft.Win32.SafeHandles.SafePipeHandle],[uint32].MakeByRefType())
+ $identityMethod=$identityBuilder.DefinePInvokeMethod('GetNamedPipeServerProcessId','kernel32.dll',[Reflection.MethodAttributes]'Public, Static, PinvokeImpl',[Reflection.CallingConventions]::Standard,[bool],$identityArguments,[Runtime.InteropServices.CallingConvention]::Winapi,[Runtime.InteropServices.CharSet]::Unicode)
+ $identityMethod.SetImplementationFlags($identityMethod.GetMethodImplementationFlags() -bor [Reflection.MethodImplAttributes]::PreserveSig)
+ $identityType=$identityBuilder.CreateType()
  if($env:AITM_QUEUE_STAGE_COMPILED){$stage=[Threading.EventWaitHandle]::OpenExisting($env:AITM_QUEUE_STAGE_COMPILED);try{[void]$stage.Set()}finally{$stage.Dispose()}}
  $server=[uint32]0
- if(-not [DiagnosticQueueServerIdentity]::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw 'Unexpected synthetic owner.'}
+ if(-not $identityType::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw 'Unexpected synthetic owner.'}
  $reader=[IO.BinaryReader]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)
  $writer=[IO.BinaryWriter]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true);$first=$true;$sequence=0
  while($true){

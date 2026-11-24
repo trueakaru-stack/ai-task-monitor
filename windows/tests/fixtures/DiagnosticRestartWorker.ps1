@@ -3,17 +3,16 @@ $ErrorActionPreference='Stop'
 $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut)
 try{
  $pipe.Connect(5000)
- Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
-public static class DiagnosticRestartServerIdentity {
- [DllImport("kernel32.dll", SetLastError=true)]
- public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
-}
-'@
+ $identityName=[Reflection.AssemblyName]::new('AITaskMonitor.PipeIdentity.'+[Guid]::NewGuid().ToString('N'))
+ $identityAssembly=[AppDomain]::CurrentDomain.DefineDynamicAssembly($identityName,[Reflection.Emit.AssemblyBuilderAccess]::Run)
+ $identityModule=$identityAssembly.DefineDynamicModule('Identity')
+ $identityBuilder=$identityModule.DefineType('AITaskMonitor.PipeServerIdentity',[Reflection.TypeAttributes]'Public, Abstract, Sealed')
+ $identityArguments=[Type[]]@([Microsoft.Win32.SafeHandles.SafePipeHandle],[uint32].MakeByRefType())
+ $identityMethod=$identityBuilder.DefinePInvokeMethod('GetNamedPipeServerProcessId','kernel32.dll',[Reflection.MethodAttributes]'Public, Static, PinvokeImpl',[Reflection.CallingConventions]::Standard,[bool],$identityArguments,[Runtime.InteropServices.CallingConvention]::Winapi,[Runtime.InteropServices.CharSet]::Unicode)
+ $identityMethod.SetImplementationFlags($identityMethod.GetMethodImplementationFlags() -bor [Reflection.MethodImplAttributes]::PreserveSig)
+ $identityType=$identityBuilder.CreateType()
  $server=[uint32]0
- if(-not [DiagnosticRestartServerIdentity]::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw 'Unexpected synthetic owner.'}
+ if(-not $identityType::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw 'Unexpected synthetic owner.'}
  $reader=[IO.BinaryReader]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)
  $writer=[IO.BinaryWriter]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true);$loaded=$false
  while($true){
@@ -29,7 +28,7 @@ public static class DiagnosticRestartServerIdentity {
    $loaded=$true
   }
   $clear=@($message.Request|Where-Object {[string]$_ -clike 'clear:*'}|ForEach-Object {$_.Substring(6)})
-  $clearAck=''
+  $clearAck='';$failed=$false
   if($clear.Count){
    Clear-DiagnosticEvents -Directory ([string]$configuration[1])
    [IO.File]::AppendAllText([string]$configuration[5],"clear`n",[Text.UTF8Encoding]::new($false))
@@ -38,9 +37,9 @@ public static class DiagnosticRestartServerIdentity {
     $release=[Threading.EventWaitHandle]::OpenExisting([string]$configuration[4])
     try{[void]$started.Set();[void]$release.WaitOne(30000)}finally{$started.Dispose();$release.Dispose()}
    }
-   $clearAck=[string]$clear[0]
+   if([string]$configuration[0] -ceq 'fail-clear'){$failed=$true}else{$clearAck=[string]$clear[0]}
   }
-  $result=[PSCustomObject]@{Failed=$false;Warnings=@();ClearAck=$clearAck;DismissAck=@()}
+  $result=[PSCustomObject]@{Failed=$failed;Warnings=@();ClearAck=$clearAck;DismissAck=@()}
   $payload=[Text.UTF8Encoding]::new($false,$true).GetBytes([Management.Automation.PSSerializer]::Serialize($result,24))
   $writer.Write([int]$payload.Length);$writer.Write($payload);$writer.Flush()
  }

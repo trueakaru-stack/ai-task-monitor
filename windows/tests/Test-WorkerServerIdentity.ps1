@@ -8,7 +8,8 @@ Require ($root.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)) 'Unsafe 
 $app=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\app'))
 try{
  foreach($file in @('LocalSourceWorker.ps1','DiagnosticWorker.ps1')){
-  foreach($valid in @($false,$true)){
+  foreach($mode in @('foreign','valid','api-failure')){
+   $valid=$mode -ceq 'valid'
    $pipeName='AITMWorkerIdentity-'+[Guid]::NewGuid().ToString('N')
    $startName='Local\AITMIdentityStarted-'+[Guid]::NewGuid().ToString('N');$releaseName='Local\AITMIdentityRelease-'+[Guid]::NewGuid().ToString('N')
    $started=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$startName)
@@ -18,20 +19,28 @@ try{
    try{
     $marker=Join-Path $root ('read-'+[Guid]::NewGuid().ToString('N'))
     $compiledMarker=Join-Path $root ('compiled-'+[Guid]::NewGuid().ToString('N'))
+    $foreign=Join-Path $root 'PipeServerIdentity.ps1';$foreignMarker=Join-Path $root ('foreign-'+[Guid]::NewGuid().ToString('N'))
+    if([IO.File]::Exists($foreign)){[IO.File]::Delete($foreign)}
+    if($valid){[IO.File]::WriteAllText($foreign,'[IO.File]::WriteAllText($env:AITM_ID_FOREIGN,"unexpected")',[Text.UTF8Encoding]::new($false))}
     $copy=Join-Path $root ('worker-'+[Guid]::NewGuid().ToString('N')+'.ps1')
     $source=[IO.File]::ReadAllText((Join-Path $app $file))
-    $compileNeedle=" Add-Type -TypeDefinition @'"
+    $compileNeedle=' $identityName=[Reflection.AssemblyName]::new('
     $compileGate='$identityStarted=[Threading.EventWaitHandle]::OpenExisting($env:AITM_ID_STARTED);$identityRelease=[Threading.EventWaitHandle]::OpenExisting($env:AITM_ID_RELEASE);try{[void]$identityStarted.Set();if(-not $identityRelease.WaitOne(30000)){throw "Synthetic identity gate timed out."}}finally{$identityStarted.Dispose();$identityRelease.Dispose()}'
     $readNeedle='$reader=[IO.BinaryReader]::new('
     $compiledNeedle='$server=[uint32]0'
     Require ($source.Contains($compileNeedle) -and $source.Contains($readNeedle) -and $source.Contains($compiledNeedle)) 'The production worker identity checks could not be instrumented.'
     $source=$source.Replace($compileNeedle,$compileGate+[Environment]::NewLine+$compileNeedle).Replace($compiledNeedle,'[IO.File]::WriteAllText($env:AITM_ID_COMPILED,"compiled")'+[Environment]::NewLine+' '+$compiledNeedle).Replace($readNeedle,'[IO.File]::WriteAllText($env:AITM_ID_READ,"verified")'+[Environment]::NewLine+' '+$readNeedle)
+    if($mode -ceq 'api-failure'){
+     $apiNeedle='$identityType=$identityBuilder.CreateType()'
+     Require ($source.Contains($apiNeedle)) 'The synthetic API failure could not be injected.'
+     $source=$source.Replace($apiNeedle,'throw "Synthetic identity API unavailable."')
+    }
     [IO.File]::WriteAllText($copy,$source,[Text.UTF8Encoding]::new($false))
     $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $expected=if($valid){$PID}else{0}
+    $expected=if($mode -ceq 'foreign'){0}else{$PID}
     $start.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$copy+'" -PipeName "'+$pipeName+'" -ParentId '+$expected
     $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
-    $start.EnvironmentVariables['AITM_ID_STARTED']=$startName;$start.EnvironmentVariables['AITM_ID_RELEASE']=$releaseName;$start.EnvironmentVariables['AITM_ID_READ']=$marker;$start.EnvironmentVariables['AITM_ID_COMPILED']=$compiledMarker
+    $start.EnvironmentVariables['AITM_ID_STARTED']=$startName;$start.EnvironmentVariables['AITM_ID_RELEASE']=$releaseName;$start.EnvironmentVariables['AITM_ID_READ']=$marker;$start.EnvironmentVariables['AITM_ID_COMPILED']=$compiledMarker;$start.EnvironmentVariables['AITM_ID_FOREIGN']=$foreignMarker
     $connect=$server.WaitForConnectionAsync();$child=[Diagnostics.Process]::Start($start)
     Require ($connect.Wait(10000) -and $started.WaitOne(10000) -and $server.IsConnected -and -not [IO.File]::Exists($marker)) 'The worker did not connect before compiling its identity check.'
     $unexpectedWrite=$null
@@ -56,6 +65,7 @@ try{
      try{if($unexpectedWrite.Wait(3000)){$received=$unexpectedWrite.GetAwaiter().GetResult();$readFinished=$true}}catch [AggregateException] {if($_.Exception.GetBaseException() -isnot [IO.IOException]){throw};$readFinished=$true}
      Require ($readFinished -and $received -eq 0) 'The worker wrote data to an unverified server or did not close the channel.'
     }
+    Require (-not [IO.File]::Exists($foreignMarker)) 'The worker executed a foreign identity helper.'
    }finally{
     [void]$release.Set()
     if($null -ne $child){if(-not $child.HasExited){$child.Kill();[void]$child.WaitForExit(3000)};$child.Dispose()}
@@ -63,7 +73,7 @@ try{
    }
   }
  }
- Write-Output 'Production worker identity: connection preceded compilation; an incorrect server PID was rejected before reading.'
+ Write-Output 'Production worker identity: incorrect PID and unavailable identity API were rejected before reading or writing.'
 }finally{
  $resolved=[IO.Path]::GetFullPath((Resolve-Path -LiteralPath $root).Path)
  if($resolved -cne $root -or -not $resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)){throw 'Unsafe synthetic identity cleanup.'}
