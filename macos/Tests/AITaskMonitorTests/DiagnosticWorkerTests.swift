@@ -58,9 +58,7 @@ final class DiagnosticWorkerTests: XCTestCase {
     }
 
     private func withWorker(_ body: (DiagnosticWorker, URL) throws -> Void) throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let root = try claudeSyntheticDirectory(prefix: "aitm-diagnostic-worker-")
         let directory = root.appendingPathComponent("diagnostics", isDirectory: true)
         try body(DiagnosticWorker(journal: DiagnosticJournal(directory: directory)), directory)
     }

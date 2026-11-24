@@ -3,9 +3,17 @@ import Foundation
 import XCTest
 @testable import AITaskMonitor
 
+private final class RetentionFixtureDefaults: UserDefaults {
+    var values: [String: Any] = [:]
+
+    override func object(forKey defaultName: String) -> Any? {
+        values[defaultName]
+    }
+}
+
 final class ClaudeRetentionTests: XCTestCase {
     func testCleanupHonorsAgeSizeAndPreservesNewestBackup() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-retention-\(UUID().uuidString)", isDirectory: true)
+        let root = try claudeSyntheticDirectory(prefix: "aitm-retention-")
         let data = root.appendingPathComponent("data", isDirectory: true)
         let backups = root.appendingPathComponent("claude", isDirectory: true)
         try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
@@ -50,7 +58,7 @@ final class ClaudeRetentionTests: XCTestCase {
     }
 
     func testMalformedBusyAndLinkedEventsNeverOverwriteTargets() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-retention-\(UUID().uuidString)", isDirectory: true)
+        let root = try claudeSyntheticDirectory(prefix: "aitm-retention-")
         let data = root.appendingPathComponent("data", isDirectory: true), backups = root.appendingPathComponent("backups", isDirectory: true)
         try FileManager.default.createDirectory(at: data, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
@@ -75,13 +83,14 @@ final class ClaudeRetentionTests: XCTestCase {
     }
 
     func testPolicyDefaultsOverridesAndInvalidValues() throws {
+        let root = try claudeSyntheticDirectory(prefix: "aitm-retention-policy-")
+        defer { try? FileManager.default.removeItem(at: root) }
         let suite = "aitm-retention-\(UUID().uuidString)"
-        guard let defaults = UserDefaults(suiteName: suite) else { return XCTFail("Cannot create isolated defaults") }
-        defer { defaults.removePersistentDomain(forName: suite) }
+        guard let defaults = RetentionFixtureDefaults(suiteName: suite) else { return XCTFail("Cannot create isolated defaults") }
         XCTAssertEqual(ClaudeRetentionPolicy.load(from: defaults), ClaudeRetentionPolicy(days: 7, maximumMB: 10))
-        defaults.set(30, forKey: "claudeRetentionDays"); defaults.set(100, forKey: "claudeMaximumMB")
+        defaults.values = ["claudeRetentionDays": 30, "claudeMaximumMB": 100]
         XCTAssertEqual(ClaudeRetentionPolicy.load(from: defaults), ClaudeRetentionPolicy(days: 30, maximumMB: 100))
-        defaults.set(31, forKey: "claudeRetentionDays")
+        defaults.values = ["claudeRetentionDays": 31, "claudeMaximumMB": 100]
         XCTAssertNil(ClaudeRetentionPolicy.load(from: defaults))
     }
 }

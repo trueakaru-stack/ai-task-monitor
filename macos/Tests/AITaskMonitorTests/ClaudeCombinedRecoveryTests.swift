@@ -2,10 +2,31 @@ import Foundation
 import XCTest
 @testable import AITaskMonitor
 
+// All Claude fixtures in this group must stay in the verified hosted-runner
+// sandbox. A channel test must also use the DEBUG-only socket-root override.
+// Profiles used by background workers remain until the XCTest process exits;
+// the disposable runner then removes the entire verified synthetic root.
+func claudeSyntheticDirectory(prefix: String, requiresSocket: Bool = false) throws -> URL {
+    let environment = ProcessInfo.processInfo.environment
+    guard environment["AITM_SYNTHETIC_REQUIRED"] == "1", environment["AITM_MACOS_TEST_SANDBOX"] == "1" else {
+        throw CocoaError(.fileWriteNoPermission)
+    }
+    if requiresSocket {
+        #if DEBUG
+        guard try ClaudeLoopSocket.syntheticSocketBase(environment: environment) != nil else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        #else
+        throw CocoaError(.fileWriteNoPermission)
+        #endif
+    }
+    return try codexSyntheticDirectory(prefix: prefix)
+}
+
 // Synthetic-only fixtures; run through the real hook, reader, store and view model.
 final class ClaudeCombinedRecoveryTests: XCTestCase {
     private func directory() throws -> URL {
-        try codexSyntheticDirectory(prefix: "aitm-combined-")
+        try claudeSyntheticDirectory(prefix: "aitm-combined-")
     }
 
     private func record(_ input: [String: Any], time: Date) -> [String: Any] {
@@ -57,7 +78,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
 
     @MainActor
     func testPartialTailAndNewPromptPreserveBothPreviouslyVisibleAndNewTitles() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(1)
         try encode([prompt("case", time: time), created("case", title: "Old title", time: time.addingTimeInterval(0.1))]).write(to: file)
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("missing-codex")),
@@ -84,7 +105,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
     @MainActor
     func testDeletionOrAtomicReplacementKeepsOldAndNewTitlesUnconfirmed() throws {
         for replaceDirectly in [false, true] {
-            let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+            let dir = try directory()
             let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(1)
             try encode([prompt("case", time: time), created("case", title: "Old title", time: time.addingTimeInterval(0.1))]).write(to: file)
             let store = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("missing-codex")),
@@ -113,7 +134,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
     }
 
     func testKnownStatusesWithUnknownCompletenessKeepApproximateLabel() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(-3)
         try encode([prompt("case", time: time), created("case", title: "Known title", time: time.addingTimeInterval(0.1)),
                     completed("case", time: time.addingTimeInterval(0.2))]).write(to: file)
@@ -127,7 +148,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
     }
 
     func testNewEventAfterClearStopReopensCardWithoutNewPrompt() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(-3)
         let stop = record(["session_id": "case", "hook_event_name": "Stop", "background_tasks": [], "session_crons": []],
                           time: time.addingTimeInterval(0.4))
@@ -147,7 +168,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
 
     @MainActor
     func testForeignCodexNamespaceDoesNotCaptureClaudeInStore() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let home = dir.appendingPathComponent("codex", isDirectory: true)
         try FileManager.default.createDirectory(at: home.appendingPathComponent("sessions", isDirectory: true), withIntermediateDirectories: true)
         try Data("{\"id\":\"claude:case\",\"thread_name\":\"Foreign\"}\n".utf8).write(to: home.appendingPathComponent("session_index.jsonl"))
@@ -189,7 +210,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
 
     @MainActor
     func testSessionSpecificUncertaintyLeavesCodexAndNeighborClaudeIntact() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let home = dir.appendingPathComponent("codex", isDirectory: true)
         let sessions = home.appendingPathComponent("sessions", isDirectory: true)
         try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
@@ -225,7 +246,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
 
 
     func testUnreadablePartialTailCannotBecomeConfirmedAfterSameFileRepair() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(-3)
         let original = try encode([prompt("case", time: time), created("case", title: "Known title", time: time.addingTimeInterval(0.1))])
         try original.write(to: file)
@@ -250,7 +271,7 @@ final class ClaudeCombinedRecoveryTests: XCTestCase {
 
     @MainActor
     func testNewPromptWithoutSourceLossDoesNotResurrectOldTitle() throws {
-        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let dir = try directory()
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), time = Date().addingTimeInterval(1)
         try encode([prompt("case", time: time), created("case", title: "Old title", time: time.addingTimeInterval(0.1))]).write(to: file)
         let store = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("missing-codex")),

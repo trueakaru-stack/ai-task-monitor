@@ -325,7 +325,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" -e 'import Foundation; import Darwin; guard let root = ProcessInfo.processInfo.environment["AITM_SYNTHETIC_TEST_ROOT"] else { exit(1) }; let base = URL(fileURLWithPath: root).resolvingSymlinksInPath().path; let temp = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path; guard temp == base || temp.hasPrefix(base + "/") else { exit(2) }'
+          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" -e 'import Foundation; import Darwin; guard let root = ProcessInfo.processInfo.environment["AITM_SYNTHETIC_TEST_ROOT"], let suppliedTemp = ProcessInfo.processInfo.environment["TMPDIR"], let denied = ProcessInfo.processInfo.environment["AITM_CI_DENIED_FILE"] else { exit(1) }; let base = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath().path; let envPath = URL(fileURLWithPath: suppliedTemp, isDirectory: true).standardizedFileURL.resolvingSymlinksInPath().path; guard envPath == base, URL(fileURLWithPath: base).lastPathComponent == "temp" else { exit(2) }; let fd = denied.withCString { open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW) }; if fd >= 0 { close(fd); exit(3) }; guard errno == EACCES || errno == EPERM else { exit(4) }; let foundation = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path; print("Verified synthetic root and denied profile; Foundation temp inside root: \(foundation == base || foundation.hasPrefix(base + "/"))")'
       - name: Verify isolated Claude socket
         id: socket_guard
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
@@ -450,11 +450,17 @@ jobs:
         run: |
           set -euo pipefail
           task_policy="$AITM_TEST_CONTROL_ROOT/profile-local-socket.sb"
-          for suite in ClaudeCombinedRecoveryTests ClaudePhaseChannelTests ClaudePhaseIsolationRaceTests ClaudeRecoveryFix5Tests ClaudeSourceLossRecoveryTests; do
+          for suite in ClaudeCombinedRecoveryTests ClaudePhaseChannelTests ClaudePhaseIsolationRaceTests ClaudeRecoveryFix5Tests ClaudeSourceLossRecoveryTests ClaudeHookLockTests ClaudeRetentionTests DiagnosticWorkerTests; do
             log="$AITM_TEST_TASK_ROOT/recovery-$suite.log"
             AITM_TEST_SOCKET=1 AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"
             if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log"; then echo "Recovery test skipped: $suite" >&2; exit 1; fi
             grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$log"
+          done
+          for test in testPrivateChannelDeliveryGapAndFreshKeyAfterRestart testDelayedHandshakeRemainsBoundedAndDoesNotLoseEvent testForeignFileAtSocketPathIsPreserved testSymlinkAtSocketPathIsNotFollowedOrRemoved testRejectsUnsafeDirectoryPermissionsWithoutChangingThem testOwnershipLockSymlinkIsNotFollowed testDeadSocketIsRecoveredButLiveForeignSocketIsPreserved testSyntheticClaudeEventsReachCorrectTaskAndCanBeDismissed; do
+            log="$AITM_TEST_TASK_ROOT/loop-$test.log"
+            AITM_TEST_SOCKET=1 AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.ClaudeLoopChannelTests/$test" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"
+            if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log"; then echo "Loop test skipped: $test" >&2; exit 1; fi
+            grep -Eq 'Executed 1 test, with 0 failures' "$log"
           done
       - name: Verify Codex activity, task names and compact warnings
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}

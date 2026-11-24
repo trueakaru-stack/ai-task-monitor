@@ -5,10 +5,8 @@ import XCTest
 
 // Synthetic fixtures only. These cases require native macOS XCTest.
 final class ClaudeRecoveryFix5Tests: XCTestCase {
-    private func directory() throws -> URL {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-recovery-fix5-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+    private func directory(requiresSocket: Bool = false) throws -> URL {
+        try claudeSyntheticDirectory(prefix: "aitm-recovery-fix5-", requiresSocket: requiresSocket)
     }
 
     private func event(_ input: [String: Any], at date: Date) -> [String: Any] {
@@ -133,22 +131,16 @@ final class ClaudeRecoveryFix5Tests: XCTestCase {
 
     @MainActor
     func testBusyJournalPreservesLivePhaseChannel() throws {
-        let dir = try directory()
+        let dir = try directory(requiresSocket: true)
         let now = Date(), file = dir.appendingPathComponent("claude-events-v2.jsonl")
         try write(observed("neighbor", now.addingTimeInterval(-2)), to: file)
         let journal = DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics"))
         var store: TaskStore? = TaskStore(codexReader: CodexTaskReader(codexHome: dir.appendingPathComponent("codex")),
                                           claudeReader: ClaudeTaskReader(eventFile: file), journal: journal, claudeLoopProfile: dir)
         waitForClaudeRead(try XCTUnwrap(store))
-        let socketDirectory = try ClaudeLoopSocket.directory(profile: dir, create: false)
+        _ = try ClaudeLoopSocket.directory(profile: dir, create: false)
         defer {
             store = nil
-            if let names = try? FileManager.default.contentsOfDirectory(atPath: socketDirectory),
-               socketDirectory.hasPrefix("/private/tmp/aitm-loop-"), Set(names).isSubset(of: ["owner.lock"]) {
-                _ = (socketDirectory + "/owner.lock").withCString { unlink($0) }
-                _ = socketDirectory.withCString { rmdir($0) }
-            }
-            try? FileManager.default.removeItem(at: dir)
         }
         let before = try XCTUnwrap(store?.testClaudeChannel)
         let path = dir.appendingPathComponent("claude-events.lock").path

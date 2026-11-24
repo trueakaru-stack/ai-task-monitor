@@ -57,8 +57,7 @@ final class ClaudePhaseIsolationRaceTests: XCTestCase {
 
     @MainActor
     private func runInterleaving(gap: Bool) throws -> (first: MonitoredTask, neighbor: MonitoredTask) {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("aitm-phase-race-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try claudeSyntheticDirectory(prefix: "aitm-phase-race-", requiresSocket: true)
         let file = dir.appendingPathComponent("claude-events-v2.jsonl"), now = Date().addingTimeInterval(2)
         var data = Data()
         for row in rows("first", time: now) + rows("neighbor", time: now) {
@@ -92,15 +91,9 @@ final class ClaudePhaseIsolationRaceTests: XCTestCase {
                                           claudeReader: reader, journal: DiagnosticJournal(directory: dir.appendingPathComponent("diagnostics")),
                                           claudeLoopProfile: dir)
         waitForClaudeRead(try XCTUnwrap(store))
-        let socketDirectory = try ClaudeLoopSocket.directory(profile: dir, create: false)
+        _ = try ClaudeLoopSocket.directory(profile: dir, create: false)
         defer {
             store = nil
-            if let names = try? FileManager.default.contentsOfDirectory(atPath: socketDirectory),
-               socketDirectory.hasPrefix("/private/tmp/aitm-loop-"), Set(names).isSubset(of: ["owner.lock"]) {
-                _ = (socketDirectory + "/owner.lock").withCString { unlink($0) }
-                _ = socketDirectory.withCString { rmdir($0) }
-            }
-            try? FileManager.default.removeItem(at: dir)
         }
         XCTAssertTrue(try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:first" })).planConfirmed)
         XCTAssertTrue(try XCTUnwrap(store?.tasks.first(where: { $0.id == "claude:neighbor" })).planConfirmed)
