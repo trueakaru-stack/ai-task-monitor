@@ -125,6 +125,7 @@ try {
     try {
         $fixture=Join-Path $PSScriptRoot 'fixtures\DiagnosticStoreWriter.ps1'
         $exe=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $clock=[Diagnostics.Stopwatch]::StartNew()
         foreach($index in 1..8){
             $readyName=$gateName+'-ready-'+$index
             $startedName=$gateName+'-started-'+$index
@@ -137,19 +138,23 @@ try {
             $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
             $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
             $children.Add([Diagnostics.Process]::Start($start))
-        }
-        $clock=[Diagnostics.Stopwatch]::StartNew()
-        foreach($index in 0..($readySignals.Count-1)){
-            while(-not $readySignals[$index].WaitOne(100)){
+            # Load the policy one process at a time. All eight writers still
+            # wait at the same gate before the concurrent journal updates.
+            $waiting=$index-1
+            while(-not $readySignals[$waiting].WaitOne(100)){
                 foreach($childIndex in 0..($children.Count-1)){
                     if($children[$childIndex].HasExited){
                         throw ('A synthetic writer exited before the gate: index={0}; exit={1}; started={2}; policy={3}; ready={4}.' -f ($childIndex+1),$children[$childIndex].ExitCode,$startedSignals[$childIndex].WaitOne(0),$policySignals[$childIndex].WaitOne(0),$readySignals[$childIndex].WaitOne(0))
                     }
                 }
                 if($clock.ElapsedMilliseconds -ge 30000){
-                    throw ('A synthetic writer timed out before the gate: index={0}; started={1}; policy={2}; ready={3}; exited={4}.' -f ($index+1),$startedSignals[$index].WaitOne(0),$policySignals[$index].WaitOne(0),$readySignals[$index].WaitOne(0),$children[$index].HasExited)
+                    throw ('A synthetic writer timed out before the gate: index={0}; started={1}; policy={2}; ready={3}; exited={4}.' -f $index,$startedSignals[$waiting].WaitOne(0),$policySignals[$waiting].WaitOne(0),$readySignals[$waiting].WaitOne(0),$children[$waiting].HasExited)
                 }
             }
+        }
+        if($children.Count -ne 8 -or $readySignals.Count -ne 8){throw 'The synthetic writer set is incomplete.'}
+        foreach($childIndex in 0..7){
+            if($children[$childIndex].HasExited -or -not $readySignals[$childIndex].WaitOne(0)){throw ('A synthetic writer left before the gate: index={0}.' -f ($childIndex+1))}
         }
         [void]$gate.Set();$clock.Restart()
         foreach($child in $children){
