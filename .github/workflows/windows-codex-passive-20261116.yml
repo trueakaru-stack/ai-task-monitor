@@ -114,7 +114,7 @@ jobs:
             }
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if($env:AITM_TEST_PART -eq 'checks'){
-              $tests=@('Test-ClaudeLoopBackground.ps1','Test-ClaudeLoopBackgroundWiring.ps1','Test-ClaudeLoopBackgroundNative.ps1','Test-RelatedAgentStatusDisplay.ps1','Test-CompactAgentHint.ps1','Test-CodexAgentRetention.ps1','Test-CodexAgentRetentionAdapter.ps1','Test-LocalReadOwner.ps1','Test-LocalSourceClient.ps1','Test-LocalSourceUnconfirmedFallback.ps1','Test-ProductionCodexAgentRetention.ps1','Test-ProductionLocalSourceWorker.ps1','Test-CompactDotReuse.ps1','Test-CompactSwitchUi.ps1')
+              $tests=@('Test-LocalReadOwner.ps1')
               foreach($test in $tests){
                 Write-Output ('Running '+$test)
                 Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))

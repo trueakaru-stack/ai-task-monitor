@@ -18,15 +18,46 @@ public static class LocalReadTestRelay {
 }
 '@
 function Require([bool]$condition,[string]$message){if(-not $condition){throw $message}}
+function Owner-Diagnostics($owner){
+ $workerState='not-created'
+ $id=$owner.OwnedProcessId
+ if($id -gt 0){
+  try{$process=[Diagnostics.Process]::GetProcessById($id);try{$workerState=if($process.HasExited){'exited'}else{'alive'}}finally{$process.Dispose()}}
+  catch{$workerState='unavailable'}
+ }
+ return ('stage='+$owner.Stage+'; failed_at='+$owner.FailureStage+'; kind='+$owner.FailureKind+
+  '; hresult='+$owner.FailureHResult+'; polling='+$owner.IsPolling+'; pending='+$owner.HasPendingRequest+
+  '; has_result='+$owner.HasResult+'; worker='+$workerState+'; exited='+$owner.HasExited+
+  '; cleanup_failed='+$owner.CleanupFailed+'; cleanup_code='+$owner.CleanupFailureCode)
+}
+function Wait-SyntheticGate($owner,$gate,[string]$message,[int]$milliseconds=10000){
+ $clock=[Diagnostics.Stopwatch]::StartNew();$reason='timeout'
+ while($clock.ElapsedMilliseconds -lt $milliseconds){
+  if($gate.WaitOne(50)){return}
+  if($owner.FailureStage){$reason='owner-failed';break}
+  if($owner.HasExited){$reason='owner-exited';break}
+ }
+ throw ($message+'; reason='+$reason+'; '+(Owner-Diagnostics $owner))
+}
+function Wait-BeforeResume($owner,$gate,[string]$message,[int]$milliseconds=10000){
+ $clock=[Diagnostics.Stopwatch]::StartNew();$reason='timeout'
+ while($clock.ElapsedMilliseconds -lt $milliseconds){
+  if($owner.IsBeforeResume){Require (-not $gate.WaitOne(0)) $message;return}
+  if($owner.FailureStage){$reason='owner-failed';break}
+  if($owner.HasExited){$reason='owner-exited';break}
+  Start-Sleep -Milliseconds 10
+ }
+ throw ($message+'; reason='+$reason+'; '+(Owner-Diagnostics $owner))
+}
 function Wait-Result($owner,[int]$milliseconds=10000){
  $clock=[Diagnostics.Stopwatch]::StartNew()
  while($clock.ElapsedMilliseconds -lt $milliseconds){$result=$owner.TryReceive();if($null -ne $result){return $result};Start-Sleep -Milliseconds 10}
- throw 'The synthetic transport did not return a result.'
+ throw ('The synthetic transport did not return a result; '+(Owner-Diagnostics $owner))
 }
 function Wait-HasResult($owner,[int]$milliseconds=10000){
  $clock=[Diagnostics.Stopwatch]::StartNew()
  while(-not $owner.HasResult -and $clock.ElapsedMilliseconds -lt $milliseconds){Start-Sleep -Milliseconds 10}
- Require $owner.HasResult 'The synthetic transport did not make a result available.'
+ if(-not $owner.HasResult){throw ('The synthetic transport did not make a result available; '+(Owner-Diagnostics $owner))}
 }
 function Wait-Exit($owner,[int]$milliseconds=10000,[string]$name='unknown'){
  $clock=[Diagnostics.Stopwatch]::StartNew()
@@ -57,10 +88,8 @@ if($ExitProbe -or $PreResumeProbe){
  $probeOwner=if($PreResumeProbe){[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$probeConfig,$false,$true)}else{[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$probeConfig)}
  Require ($probeOwner.Request([string[]]@('block','ru','true'))) 'The exit probe request was rejected.'
  if($PreResumeProbe){
-  $clock=[Diagnostics.Stopwatch]::StartNew()
-  while(-not $probeOwner.IsBeforeResume -and $clock.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
-  Require ($probeOwner.IsBeforeResume -and -not $probeGates.Started.WaitOne(0)) 'The actual owner did not stop before resuming its worker.'
- }else{Require ($probeGates.Started.WaitOne(10000)) 'The exit probe did not enter its synthetic blocked read.'}
+  Wait-BeforeResume $probeOwner $probeGates.Started 'The actual owner did not stop before resuming its worker.'
+ }else{Wait-SyntheticGate $probeOwner $probeGates.Started 'The exit probe did not enter its synthetic blocked read.'}
  Write-Output ('WORKER:'+$probeOwner.OwnedProcessId)
  # Deliberately omit Dispose and leave the synthetic read blocked. The OS must
  # close the job handle when this owner process exits.
@@ -107,7 +136,7 @@ $owner=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$config)
 $config[0]='changed-after-construction'
 try{
  Require ($owner.Request([string[]]@('block','ru','true'),[long]10)) 'The first synthetic request was rejected.'
- Require ($gates.Started.WaitOne(10000)) 'The synthetic worker did not enter the blocked read.'
+ Wait-SyntheticGate $owner $gates.Started 'The synthetic worker did not enter the blocked read.'
  [LocalReadTestRelay]::Watchdog($gates.LocalRelease,8000)
  $childId=$owner.OwnedProcessId
  Require ($childId -gt 0 -and $owner.IsPolling) 'The single worker is not polling.'
@@ -171,7 +200,7 @@ $coalescedGates=New-TestGates
 $coalesced=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,[string[]]@($coalescedGates.StartedName,$coalescedGates.ReleaseName))
 try{
  Require ($coalesced.Request([string[]]@('block','ru','true'),[long]1)) 'The coalescing test request was rejected.'
- Require ($coalescedGates.Started.WaitOne(10000)) 'The coalescing test did not block its first read.'
+ Wait-SyntheticGate $coalesced $coalescedGates.Started 'The coalescing test did not block its first read.'
  Require ($coalesced.Request([string[]]@('obsolete','ru','true'),[long]2)) 'The first pending revision was rejected.'
  Require ($coalesced.Request([string[]]@('latest','en','true'),[long]3)) 'The latest pending revision was rejected.'
  [void]$coalescedGates.Release.Set()
@@ -248,9 +277,7 @@ $suspendedGates=New-TestGates
 $suspended=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,[string[]]@($suspendedGates.StartedName,$suspendedGates.ReleaseName),$false,$true)
 try{
  Require ($suspended.Request([string[]]@('block','ru','true'))) 'The suspended test request was rejected.'
- $clock=[Diagnostics.Stopwatch]::StartNew()
- while(-not $suspended.IsBeforeResume -and $clock.ElapsedMilliseconds -lt 10000){Start-Sleep -Milliseconds 10}
- Require ($suspended.IsBeforeResume -and -not $suspendedGates.Started.WaitOne(0)) 'The synthetic owner did not pause before resuming its worker.'
+ Wait-BeforeResume $suspended $suspendedGates.Started 'The synthetic owner did not pause before resuming its worker.'
  $suspendedId=$suspended.OwnedProcessId
  $suspended.Dispose()
  Require (-not $suspendedGates.Started.WaitOne(0)) 'The suspended synthetic worker executed during disposal.'
@@ -278,7 +305,7 @@ $closingGates=New-TestGates
 $closingConfig=[string[]]@($closingGates.StartedName,$closingGates.ReleaseName)
 $closing=[AITaskMonitor.LocalReadOwner.Owner]::new($workerPath,$closingConfig)
 Require ($closing.Request([string[]]@('block','ru','true'))) 'The closing test request was rejected.'
-Require ($closingGates.Started.WaitOne(10000)) 'The closing test did not start its blocked read.'
+Wait-SyntheticGate $closing $closingGates.Started 'The closing test did not start its blocked read.'
 [LocalReadTestRelay]::Watchdog($closingGates.LocalRelease,8000)
 $closingId=$closing.OwnedProcessId
 $closing.Dispose()
