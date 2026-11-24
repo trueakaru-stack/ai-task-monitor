@@ -55,6 +55,112 @@ final class CodexGroupingVisualTests: XCTestCase {
         XCTAssertEqual(task.compactProgressLabel, "Step 3 of 3 (2 agents)")
     }
 
+    #if DEBUG
+    @MainActor
+    func testExpandedAgentsFollowStepAndReturnToTitleWhenPlanCannotBeConfirmed() throws {
+        let root = try claudeSyntheticDirectory(prefix: "aitm-agent-placement-")
+        let agent = CodexAgentDetail(id: "agent", title: "Synthetic assistant", activity: "Last action",
+                                     isActive: false, isUnconfirmed: true)
+        var task = MonitoredTask(id: "synthetic", provider: .codex, title: "Task", activity: "",
+            isActive: true, progress: nil, progressKind: .none,
+            steps: [TaskStep(id: "first", title: "First", status: .done),
+                    TaskStep(id: "second", title: "Second", status: .active),
+                    TaskStep(id: "third", title: "Third", status: .pending)],
+            updatedAt: .distantPast, codexAgentCount: 1, codexAgentsUnconfirmed: true, codexAgents: [agent])
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: root.appendingPathComponent("missing-codex")),
+                              claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("missing-claude")),
+                              previewTasks: [task])
+        func placement() throws -> CodexAgentListPlacement {
+            let current = try XCTUnwrap(store.tasks.first)
+            return CodexAgentListPlacement(task: current, expanded: store.isCodexGroupExpanded(current.id))
+        }
+        XCTAssertEqual(try placement(), .hidden)
+        store.toggleCodexGroup(task.id)
+        XCTAssertEqual(try placement(), .step("second"))
+        task.steps[1].status = .done
+        task.steps[2].status = .active
+        store.testReplacePreviewTasks([task])
+        XCTAssertTrue(store.isCodexGroupExpanded(task.id))
+        XCTAssertEqual(try placement(), .step("third"))
+        task.steps[2].status = .pending
+        store.testReplacePreviewTasks([task])
+        XCTAssertEqual(try placement(), .title)
+        task.steps[2].status = .active
+        task.planConfirmed = false
+        store.testReplacePreviewTasks([task])
+        XCTAssertEqual(try placement(), .title)
+        task.planConfirmed = true
+        task.isUnconfirmed = true
+        store.testReplacePreviewTasks([task])
+        XCTAssertEqual(try placement(), .title)
+        XCTAssertEqual(store.tasks.first?.codexAgentStatusLabel, task.codexAgentStatusLabel)
+        task.isUnconfirmed = false
+        task.steps[1].status = .active
+        store.testReplacePreviewTasks([task])
+        XCTAssertEqual(try placement(), .title, "Multiple active steps cannot establish a placement")
+        task.steps[1].status = .done
+        store.testReplacePreviewTasks([task])
+        XCTAssertEqual(try placement(), .step("third"))
+        store.toggleCodexGroup(task.id)
+        XCTAssertEqual(try placement(), .hidden)
+        XCTAssertEqual(CodexAgentList.expandedHeight(for: 1), 72)
+        XCTAssertEqual(CodexAgentList.expandedHeight(for: 3), 192)
+        XCTAssertEqual(CodexAgentList.expandedHeight(for: 100), 192)
+    }
+
+    @MainActor
+    func testExpandedAgentsSharePlanScrollerAndCanReachTheEnd() throws {
+        guard ProcessInfo.processInfo.environment["AITM_SYNTHETIC_REQUIRED"] == "1" else {
+            throw XCTSkip("Requires the isolated hosted runner")
+        }
+        let root = try claudeSyntheticDirectory(prefix: "aitm-agent-scroll-")
+        let agents = (1...9).map { number in
+            CodexAgentDetail(id: "agent-\(number)", title: "Assistant \(number)", activity: "Last action \(number)",
+                             isActive: false, isUnconfirmed: true)
+        }
+        let task = MonitoredTask(id: "synthetic", provider: .codex, title: "Task", activity: "",
+            isActive: true, progress: nil, progressKind: .none,
+            steps: [TaskStep(id: "first", title: "First", status: .done),
+                    TaskStep(id: "active", title: "Active", status: .active)],
+            updatedAt: .distantPast, codexAgentCount: agents.count, codexAgentsUnconfirmed: true, codexAgents: agents)
+        let store = TaskStore(codexReader: CodexTaskReader(codexHome: root.appendingPathComponent("missing-codex")),
+                              claudeReader: ClaudeTaskReader(eventFile: root.appendingPathComponent("missing-claude")),
+                              previewTasks: [task])
+        store.toggleCodexGroup(task.id)
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        let size = NSSize(width: 520, height: 600)
+        let hosting = NSHostingView(rootView: TaskCardView(task: task, showProvider: false).environmentObject(store))
+        hosting.frame = NSRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.close() }
+        window.orderFrontRegardless()
+        hosting.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        hosting.layoutSubtreeIfNeeded()
+        func scrollViews(in view: NSView) -> [NSScrollView] {
+            ((view as? NSScrollView).map { [$0] } ?? []) + view.subviews.flatMap { scrollViews(in: $0) }
+        }
+        let views = scrollViews(in: hosting)
+        XCTAssertEqual(views.count, 1, "The agent rows must share the plan's scroll view")
+        let scroll = try XCTUnwrap(views.first)
+        let document = try XCTUnwrap(scroll.documentView)
+        let clip = scroll.contentView
+        let bottom = max(0, document.bounds.height - clip.bounds.height)
+        XCTAssertGreaterThan(bottom, 1, "The fixture must exceed the visible plan area")
+        let topY: CGFloat = document.isFlipped ? 0 : bottom
+        let bottomY: CGFloat = document.isFlipped ? bottom : 0
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: topY))
+        scroll.reflectScrolledClipView(clip)
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: bottomY))
+        scroll.reflectScrolledClipView(clip)
+        XCTAssertEqual(clip.bounds.origin.y, bottomY, accuracy: 1)
+    }
+    #endif
+
     @MainActor
     func testRenderSyntheticGroupedParent() throws {
         let env = ProcessInfo.processInfo.environment
@@ -88,7 +194,9 @@ final class CodexGroupingVisualTests: XCTestCase {
             for dark in [false, true] {
                 for compact in [false, true] {
                   for disclosureOpen in [false, true] {
-                   for scenario in ["normal", "long", "demo", "unavailable", "no-active", "percent", "count-unknown", "both-unknown"] {
+                   let scenarios = ["normal", "long", "demo", "unavailable", "no-active", "percent", "count-unknown", "both-unknown"] +
+                    (compact ? [] : ["plan-unconfirmed", "task-unconfirmed", "many-agents"])
+                   for scenario in scenarios {
                     for selected in (compact && scenario == "demo" ? [0, 1] : [0]) {
                     if selected == 1 && disclosureOpen { continue }
                     if scenario == "unavailable" && disclosureOpen { continue }
@@ -106,8 +214,12 @@ final class CodexGroupingVisualTests: XCTestCase {
                                        TaskStep(title: tr("Проверить обработку ошибок", "Check error handling"), status: .active),
                                        TaskStep(title: tr("Сравнить результаты", "Compare results"), status: .pending)] :
                             [TaskStep(title: tr("Первый этап", "First step"), status: .done),
-                             TaskStep(title: tr("Второй этап", "Second step"), status: scenario == "no-active" ? .pending : .active)],
-                        updatedAt: Date(), progressBasis: scenario == "percent" ? .task : .steps)
+                             TaskStep(title: scenario == "long"
+                                ? tr("Очень длинное название активного этапа для проверки подсказки и счётчика помощников",
+                                     "A very long active step title for checking its tooltip and assistant count")
+                                : tr("Второй этап", "Second step"), status: scenario == "no-active" ? .pending : .active)],
+                        updatedAt: Date(), isUnconfirmed: scenario == "task-unconfirmed",
+                        planConfirmed: scenario != "plan-unconfirmed", progressBasis: scenario == "percent" ? .task : .steps)
                     let agentNames = ["Curie", "Averroes", "Noether"]
                     let exampleActions = [tr("Проверка обработки ошибок", "Checking error handling"),
                                           tr("Проверка загрузки данных", "Checking data loading"),
@@ -128,6 +240,15 @@ final class CodexGroupingVisualTests: XCTestCase {
                         lastActivityIdentityConfirmed: true)
                     var grouped = scenario == "unavailable" ? [unavailable] : CodexTaskGrouping.project([parentTask] + children,
                         parents: [ids[0]: rootID, ids[1]: rootID, ids[2]: ids[0]], titles: [rootID: title], confirmedRoots: [rootID])
+                    if scenario == "many-agents" {
+                        let more = (4...9).map { number in
+                            CodexAgentDetail(id: "extra-\(number)", title: tr("Помощник \(number)", "Assistant \(number)"),
+                                             activity: tr("Последнее проверенное действие \(number)", "Last observed action \(number)"),
+                                             isActive: false, isUnconfirmed: true)
+                        }
+                        grouped[0].codexAgents = (grouped[0].codexAgents ?? []) + more
+                        grouped[0].codexAgentCount = grouped[0].codexAgents?.count
+                    }
                     if scenario == "count-unknown" || scenario == "both-unknown" {
                         grouped[0].codexAgentCountUnconfirmed = true
                         if scenario == "count-unknown" { grouped[0].codexAgentsUnconfirmed = false }
@@ -137,11 +258,12 @@ final class CodexGroupingVisualTests: XCTestCase {
                     if scenario == "unavailable" {
                         XCTAssertTrue(item.displayedActivity.contains(tr("Последнее:", "Last:")))
                     } else {
-                        XCTAssertEqual(item.codexAgentCount, 3)
+                        XCTAssertEqual(item.codexAgentCount, scenario == "many-agents" ? 9 : 3)
                         XCTAssertEqual(item.title, title)
                         XCTAssertEqual(item.progress, parentTask.progress)
-                        XCTAssertEqual(item.codexAgents?.count, 3)
-                        XCTAssertEqual(item.codexAgentCountAtTitle, scenario == "no-active")
+                        XCTAssertEqual(item.codexAgents?.count, scenario == "many-agents" ? 9 : 3)
+                        XCTAssertEqual(item.codexAgentCountAtTitle,
+                                       ["no-active", "plan-unconfirmed", "task-unconfirmed"].contains(scenario))
                         if scenario == "percent" {
                             XCTAssertEqual(item.compactProgressLabel, "50%")
                             XCTAssertNotNil(item.compactExtraAgentStepLabel)

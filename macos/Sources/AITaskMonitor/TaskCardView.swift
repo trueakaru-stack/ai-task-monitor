@@ -1,8 +1,33 @@
 import AppKit
 import SwiftUI
 
+enum CodexAgentListPlacement: Equatable {
+    case hidden
+    case title
+    case step(String)
+
+    var isStep: Bool {
+        if case .step = self { return true }
+        return false
+    }
+
+    init(task: MonitoredTask, expanded: Bool) {
+        guard expanded, let agents = task.codexAgents, !agents.isEmpty else {
+            self = .hidden
+            return
+        }
+        if let index = task.activeAgentPlanStepIndex,
+           task.codexAgentCountLabel(includingStatus: false) != nil {
+            self = .step(task.steps[index].id)
+        } else {
+            self = .title
+        }
+    }
+}
+
 struct TaskCardView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @EnvironmentObject private var store: TaskStore
     let task: MonitoredTask
     let showProvider: Bool
 
@@ -18,6 +43,7 @@ struct TaskCardView: View {
     }
 
     var body: some View {
+        let agentPlacement = CodexAgentListPlacement(task: task, expanded: store.isCodexGroupExpanded(task.id))
         VStack(alignment: .leading, spacing: 0) {
             if showProvider {
                 Text(task.provider.displayName)
@@ -51,7 +77,7 @@ struct TaskCardView: View {
                 Text(status).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
                     .padding(.top, 4)
             }
-            if let agents = task.codexAgents, !agents.isEmpty {
+            if agentPlacement == .title, let agents = task.codexAgents, !agents.isEmpty {
                 CodexAgentList(task: task, agents: agents, compact: false)
             }
             if task.loopWarning != nil {
@@ -71,31 +97,37 @@ struct TaskCardView: View {
                 ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 9) {
                         ForEach(task.steps) { step in
-                            HStack(spacing: 9) {
-                                if task.provider == .claude && hidesUnconfirmedPlanStatus {
-                                    // An empty pending circle is itself a status claim.
-                                    Color.clear.frame(width: 14, height: 16).accessibilityHidden(true)
-                                } else {
-                                    StepMark(status: hidesUnconfirmedPlanStatus ? .pending : step.status)
-                                }
-                                if task.activeAgentPlanStepIndex != nil, step.status == .active,
-                                   task.codexAgentCountLabel(includingStatus: false) != nil {
-                                    HStack(spacing: 0) {
-                                        TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: .labelColor)
-                                            .frame(maxWidth: measuredTaskLabelWidth(step.title, font: .systemFont(ofSize: 12)), minHeight: 16, alignment: .leading)
-                                        CodexAgentDisclosureButton(task: task, compact: false, fontSize: 12)
+                            VStack(alignment: .leading, spacing: 0) {
+                                HStack(spacing: 9) {
+                                    if task.provider == .claude && hidesUnconfirmedPlanStatus {
+                                        // An empty pending circle is itself a status claim.
+                                        Color.clear.frame(width: 14, height: 16).accessibilityHidden(true)
+                                    } else {
+                                        StepMark(status: hidesUnconfirmedPlanStatus ? .pending : step.status)
                                     }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                } else {
-                                    TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: !hidesUnconfirmedPlanStatus && step.status == .active ? .labelColor : .secondaryLabelColor)
-                                        .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
+                                    if task.activeAgentPlanStepIndex != nil, step.status == .active,
+                                       task.codexAgentCountLabel(includingStatus: false) != nil {
+                                        HStack(spacing: 0) {
+                                            TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: .labelColor)
+                                                .frame(maxWidth: measuredTaskLabelWidth(step.title, font: .systemFont(ofSize: 12)), minHeight: 16, alignment: .leading)
+                                            CodexAgentDisclosureButton(task: task, compact: false, fontSize: 12)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    } else {
+                                        TruncatingText(text: step.title, font: .systemFont(ofSize: 12), color: !hidesUnconfirmedPlanStatus && step.status == .active ? .labelColor : .secondaryLabelColor)
+                                            .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
+                                    }
+                                }
+                                if agentPlacement == .step(step.id), let agents = task.codexAgents {
+                                    CodexAgentList(task: task, agents: agents, compact: false, embeddedInPlan: true)
+                                        .padding(.leading, 23)
                                 }
                             }
                         }
                     }
                     .background(OverlayScrollerProbe().frame(width: 0, height: 0))
                 }
-                .frame(height: 116)
+                .frame(height: 116 + (agentPlacement.isStep ? CodexAgentList.expandedHeight(for: task.codexAgents?.count ?? 0) : 0))
                 .padding(.top, 16)
                 Text("\(task.planStatusNote ?? tr("План задачи", "Task plan")) · \(task.stepCountLabel)")
                     .font(.system(size: 11))
@@ -144,37 +176,52 @@ struct CodexAgentList: View {
     let task: MonitoredTask
     let agents: [CodexAgentDetail]
     let compact: Bool
+    var embeddedInPlan = false
+
+    static func expandedHeight(for count: Int) -> CGFloat {
+        min(CGFloat(count) * 60, 180) + 12
+    }
 
     var body: some View {
         if store.isCodexGroupExpanded(task.id) {
-            ScrollView(.vertical) {
-                LazyVStack(alignment: .leading, spacing: 9) {
-                    ForEach(agents) { agent in
-                        VStack(alignment: .leading, spacing: 2) {
-                            TruncatingText(text: agent.title, font: .systemFont(ofSize: 12, weight: .medium), color: .labelColor)
-                                .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
-                            if agent.isUnconfirmed {
-                                Text(tr("Статус не подтверждён", "Status unconfirmed"))
-                                    .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
-                            }
-                            if !agent.activity.isEmpty && agent.activity != "Статус не подтверждён" && agent.activity != "Status unconfirmed" {
-                                let text = agent.isUnconfirmed ? tr("Последнее: ", "Last: ") + agent.activity : agent.activity
-                                ActivityStatusRow(text: text, isActive: agent.isActive, fontSize: compact ? 11.5 : 12)
-                            }
-                            if let warning = agent.loopWarning {
-                                LoopWarningView(task: MonitoredTask(id: agent.id, provider: .codex, title: agent.title,
-                                    activity: agent.activity, isActive: agent.isActive, progress: nil, progressKind: .none,
-                                    steps: [], updatedAt: .distantPast, loopWarning: warning), compact: compact)
-                            }
-                        }
+            Group {
+                if embeddedInPlan {
+                    rows
+                } else {
+                    ScrollView(.vertical) {
+                        rows
+                            .background(OverlayScrollerProbe(alwaysVisible: true).frame(width: 0, height: 0))
                     }
+                    .frame(height: Self.expandedHeight(for: agents.count) - 12)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(OverlayScrollerProbe(alwaysVisible: true).frame(width: 0, height: 0))
             }
-            .frame(height: min(CGFloat(agents.count) * 60, 180))
             .padding(.top, 12)
         }
+    }
+
+    private var rows: some View {
+        LazyVStack(alignment: .leading, spacing: 9) {
+            ForEach(agents) { agent in
+                VStack(alignment: .leading, spacing: 2) {
+                    TruncatingText(text: agent.title, font: .systemFont(ofSize: 12, weight: .medium), color: .labelColor)
+                        .frame(maxWidth: .infinity, minHeight: 16, alignment: .leading)
+                    if agent.isUnconfirmed {
+                        Text(tr("Статус не подтверждён", "Status unconfirmed"))
+                            .font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
+                    }
+                    if !agent.activity.isEmpty && agent.activity != "Статус не подтверждён" && agent.activity != "Status unconfirmed" {
+                        let text = agent.isUnconfirmed ? tr("Последнее: ", "Last: ") + agent.activity : agent.activity
+                        ActivityStatusRow(text: text, isActive: agent.isActive, fontSize: compact ? 11.5 : 12)
+                    }
+                    if let warning = agent.loopWarning {
+                        LoopWarningView(task: MonitoredTask(id: agent.id, provider: .codex, title: agent.title,
+                            activity: agent.activity, isActive: agent.isActive, progress: nil, progressKind: .none,
+                            steps: [], updatedAt: .distantPast, loopWarning: warning), compact: compact)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
