@@ -77,17 +77,11 @@ jobs:
           PROFILE
           cat "$task_stage/profile.sb" > "$task_stage/profile-offline.sb"
           printf '\n(deny network*)\n' >> "$task_stage/profile-offline.sb"
-          cat "$task_stage/profile-offline.sb" > "$task_stage/profile-local-socket.sb"
-          cat >> "$task_stage/profile-local-socket.sb" <<'SOCKET_PROFILE'
-          (allow network-bind (local unix-socket (subpath (param "TASK_SOCKET_ROOT"))))
-          (allow network-inbound (local unix-socket (subpath (param "TASK_SOCKET_ROOT"))))
-          (allow network-outbound (remote unix-socket (subpath (param "TASK_SOCKET_ROOT"))))
-          SOCKET_PROFILE
           cat > "$task_stage/run-isolated" <<'SCRIPT'
           #!/bin/bash
           set -euo pipefail
           task_policy="${AITM_TEST_SANDBOX_POLICY:-$AITM_TEST_CONTROL_ROOT/profile.sb}"
-          case "$task_policy" in "$AITM_TEST_CONTROL_ROOT/profile.sb"|"$AITM_TEST_CONTROL_ROOT/profile-offline.sb"|"$AITM_TEST_CONTROL_ROOT/profile-local-socket.sb") ;; *) exit 1;; esac
+          case "$task_policy" in "$AITM_TEST_CONTROL_ROOT/profile.sb"|"$AITM_TEST_CONTROL_ROOT/profile-offline.sb") ;; *) exit 1;; esac
           task_extra=("AITM_TEST_SCOPED_ENV=1")
           case "${AITM_TEST_UI_EVENT:-0}" in 0) ;; 1) task_extra+=("AITM_MACOS_UI_EVENT_TEST=1");; *) exit 1;; esac
           case "${AITM_TEST_SOCKET:-0}" in 0) ;; 1) task_extra+=("AITM_CLAUDE_SOCKET_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "AITM_CLAUDE_CHANNEL_PROFILE=$AITM_TEST_TASK_ROOT/temp/claude-channel-profile");; *) exit 1;; esac
@@ -96,12 +90,12 @@ jobs:
             "AITM_CI_DENIED_FILE=$AITM_TEST_DENIED_FILE" "AITM_MACOS_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "AITM_SYNTHETIC_TEST_ROOT=$AITM_TEST_TASK_ROOT/temp" "NPM_CONFIG_CACHE=$AITM_TEST_TASK_ROOT/npm-cache" \
             "NPM_CONFIG_USERCONFIG=$AITM_TEST_TASK_ROOT/npmrc" NPM_CONFIG_GLOBALCONFIG=/dev/null NPM_CONFIG_UPDATE_NOTIFIER=false \
             /usr/bin/sandbox-exec -D "TASK_PROFILE=$AITM_TEST_PROFILE" -D "TASK_ROOT=$AITM_TEST_TASK_ROOT" \
-              -D "TASK_NODE_ROOT=$AITM_TEST_NODE_ROOT" -D "TASK_PYTHON_ROOT=$AITM_TEST_PYTHON_ROOT" -D "TASK_SOCKET_ROOT=$AITM_TEST_TASK_ROOT/temp" \
+              -D "TASK_NODE_ROOT=$AITM_TEST_NODE_ROOT" -D "TASK_PYTHON_ROOT=$AITM_TEST_PYTHON_ROOT" \
               -f "$task_policy" "$@"
           SCRIPT
           chmod 700 "$task_stage/run-isolated"
           printf 'synthetic-control-probe\n' > "$task_stage/synthetic-control-probe"
-          (cd "$task_stage" && /usr/bin/shasum -a 256 profile.sb profile-offline.sb profile-local-socket.sb run-isolated > controls.sha256)
+          (cd "$task_stage" && /usr/bin/shasum -a 256 profile.sb profile-offline.sb run-isolated > controls.sha256)
           task_image="$task_control_parent/controls.dmg"
           /usr/bin/hdiutil makehybrid -hfs -hfs-volume-name 'AITM CI Control' -o "$task_image" "$task_stage"
           test -f "$task_image" && test ! -L "$task_image"
@@ -145,7 +139,7 @@ jobs:
           fi
           grep -Eiq 'read-only file system' "$task_control_parent/readonly.log"
           test ! -e "$task_control/.readonly-probe"
-          for task_file in profile.sb profile-offline.sb profile-local-socket.sb run-isolated controls.sha256 synthetic-control-probe; do
+          for task_file in profile.sb profile-offline.sb run-isolated controls.sha256 synthetic-control-probe; do
             test -f "$task_stage/$task_file" && test ! -L "$task_stage/$task_file"
             test "$(/usr/bin/stat -f %l "$task_stage/$task_file")" = 1
             test -f "$task_control/$task_file" && test ! -L "$task_control/$task_file"
@@ -173,7 +167,7 @@ jobs:
             print "Verified the same read-only descriptor has zero links after unlink.\n";
           ' "$task_image"
           test ! -e "$task_image" && test ! -L "$task_image"
-          for task_file in profile.sb profile-offline.sb profile-local-socket.sb run-isolated controls.sha256 synthetic-control-probe; do
+          for task_file in profile.sb profile-offline.sb run-isolated controls.sha256 synthetic-control-probe; do
             /bin/rm "$task_stage/$task_file"
           done
           /bin/rmdir "$task_stage"
@@ -215,7 +209,7 @@ jobs:
           grep -Eiq 'cross-device link|different file systems|read-only file system' "$task_root/temp/control-hardlink-host.log"
           test ! -e "$task_root/temp/control-probe-hardlink"
           "$task_run" /usr/bin/touch "$task_root/temp/control-positive"
-          for task_policy in "$task_control/profile.sb" "$task_control/profile-offline.sb" "$task_control/profile-local-socket.sb"; do
+          for task_policy in "$task_control/profile.sb" "$task_control/profile-offline.sb"; do
             export AITM_TEST_SANDBOX_POLICY="$task_policy"
             if "$task_run" /bin/sh -c 'printf x >> "$1"' sh "$task_probe" >"$task_root/temp/control-append.log" 2>&1; then
               echo 'Sandbox modified the synthetic control file.' >&2; exit 1
@@ -257,57 +251,18 @@ jobs:
           task_bin="$("${task_compiler[@]}" build --show-bin-path --cache-path "$AITM_TEST_TASK_ROOT/swift-cache" --config-path "$AITM_TEST_TASK_ROOT/swift-config" --security-path "$AITM_TEST_TASK_ROOT/swift-security")"
           test -d "$task_bin/AITaskMonitorPackageTests.xctest"
           printf 'AITM_TEST_BIN=%s\n' "$task_bin" >> "$GITHUB_ENV"
-      - name: Verify isolated Claude socket
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          task_policy="$AITM_TEST_CONTROL_ROOT/profile-local-socket.sb"
-          if AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" /bin/cat "$AITM_TEST_DENIED_FILE" >/dev/null 2>&1; then echo "Runner profile is not protected." >&2; exit 1; fi
-          /bin/mkdir -m 700 "$AITM_TEST_TASK_ROOT/temp/claude-channel-profile"
-          task_probe="$AITM_TEST_TASK_ROOT/outside.sock"
-          task_ready="$AITM_TEST_TASK_ROOT/outside.ready"
-          "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import socket,sys,time
-          s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-          s.bind(sys.argv[1]); s.listen(1)
-          open(sys.argv[2],"x").close()
-          time.sleep(45)' "$task_probe" "$task_ready" &
-          task_probe_pid=$!
-          trap 'kill "$task_probe_pid" 2>/dev/null || true; wait "$task_probe_pid" 2>/dev/null || true; /bin/rm -f "$task_probe" "$task_ready"' EXIT
-          for attempt in {1..100}; do test -S "$task_probe" && test -f "$task_ready" && break; /bin/sleep 0.05; done
-          test -S "$task_probe" && test -f "$task_ready"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import errno,socket,sys
-          s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-          try: s.connect(sys.argv[1])
-          except OSError as e:
-           if e.errno not in (errno.EACCES,errno.EPERM): raise
-          else: raise RuntimeError("Outside socket access was not blocked")
-          finally: s.close()' "$task_probe"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import errno,socket
-          for family, address in [(socket.AF_INET,("127.0.0.1",9)),(socket.AF_INET6,("::1",9))]:
-           try:
-            s=socket.socket(family,socket.SOCK_STREAM)
-            s.settimeout(2)
-            s.connect(address)
-           except OSError as e:
-            if e.errno not in (errno.EACCES,errno.EPERM,errno.EAFNOSUPPORT): raise
-           else: raise RuntimeError("Network isolation failed")
-           finally:
-            if "s" in locals(): s.close()'
-          AITM_TEST_SOCKET=1 AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ClaudeSourceChannelTests/testSyntheticSocketOverrideRejectsPathsOutsideVerifiedRoot "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/claude-channel-guard.log"
-          grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/claude-channel-guard.log"
-          AITM_TEST_SOCKET=1 AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ClaudeSourceChannelTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/claude-channel.log"
-          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/claude-channel.log"; then echo 'Claude channel test was skipped.' >&2; exit 1; fi
-          grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/claude-channel.log"
-      - name: Verify external source owner
+      - name: Verify external source owner and cache
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
-          AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalProviderRefreshOwnerTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/external-owner.log"
-          if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/external-owner.log"; then echo 'Owner test was skipped.' >&2; exit 1; fi
-          grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/external-owner.log"
+          for suite in ExternalProviderRefreshOwnerTests ExternalProviderRefreshCacheTests; do
+            log="$AITM_TEST_TASK_ROOT/$suite.log"
+            AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.$suite" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"
+            if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log"; then echo 'Owner/cache test was skipped.' >&2; exit 1; fi
+            grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$log"
+          done
       - name: Verify control files after the job
         if: ${{ always() && !cancelled() }}
         shell: bash

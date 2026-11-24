@@ -94,7 +94,10 @@ final class ExternalProviderRefreshOwnerTests: XCTestCase {
     func testCloseDoesNotWaitAndFinishesAfterBlockedReadWithoutPublishing() {
         let gate = Gate(), finished = DispatchSemaphore(value: 0)
         defer { gate.release.signal() }
-        let owner = ExternalProviderRefreshOwner<Int, Capture>(read: { gate.read($0) }, finish: { finished.signal() })
+        let owner = ExternalProviderRefreshOwner<Int, Capture>(read: { gate.read($0) }, finish: {
+            finished.signal()
+            return nil
+        })
         var published = false
         XCTAssertTrue(owner.tryRead(1) { _ in published = true })
         XCTAssertEqual(gate.entered.wait(timeout: .now() + 3), .success)
@@ -107,5 +110,49 @@ final class ExternalProviderRefreshOwnerTests: XCTestCase {
         XCTAssertEqual(finished.wait(timeout: .now() + 3), .success)
         RunLoop.current.run(until: Date().addingTimeInterval(0.05))
         XCTAssertFalse(published)
+    }
+
+    @MainActor
+    func testReconnectedOwnerWaitsAndReceivesPriorEvidenceBeforeReading() throws {
+        let gate = Gate(), finished = DispatchSemaphore(value: 0)
+        let lease = ExternalProviderRefreshLease<Capture>()
+        defer { gate.release.signal() }
+        let first = ExternalProviderRefreshOwner<Int, Capture>(lease: lease, read: { gate.read($0) }, finish: {
+            finished.signal()
+            return Capture(v1Events: ["v1-drained"], v2Events: ["v2-drained"], gap: false)
+        })
+        let second = ExternalProviderRefreshOwner<Int, Capture>(lease: lease, read: { gate.read($0) })
+        defer { second.close() }
+        var oldPublished = false
+        XCTAssertTrue(first.tryRead(1) { _ in oldPublished = true })
+        XCTAssertEqual(gate.entered.wait(timeout: .now() + 3), .success)
+        first.close()
+        XCTAssertFalse(second.tryRead(2) { _ in XCTFail("The old owner still holds the endpoints") })
+        XCTAssertNil(second.takeHandoff())
+        XCTAssertEqual(gate.count, 1)
+
+        gate.release.signal()
+        XCTAssertEqual(finished.wait(timeout: .now() + 3), .success)
+        var handoff: [ExternalProviderRefreshDelivery<Capture>] = []
+        wait {
+            if let value = second.takeHandoff() { handoff.append(value) }
+            return !handoff.isEmpty
+        }
+        XCTAssertEqual(handoff[0].quality, .invalidated)
+        XCTAssertEqual(handoff[0].capture,
+                       Capture(v1Events: ["v1-started"], v2Events: ["v2-finished"], gap: true))
+        XCTAssertFalse(second.tryRead(2) { _ in XCTFail("Shutdown evidence must be reconciled first") })
+        let drained = try XCTUnwrap(second.takeHandoff())
+        XCTAssertEqual(drained.quality, .invalidated)
+        XCTAssertEqual(drained.capture,
+                       Capture(v1Events: ["v1-drained"], v2Events: ["v2-drained"], gap: false))
+
+        var next: ExternalProviderRefreshDelivery<Capture>?
+        XCTAssertTrue(second.tryRead(2) { next = $0 })
+        wait { next != nil }
+        XCTAssertEqual(next?.quality, .current)
+        XCTAssertEqual(next?.capture, Capture(v1Events: ["v1-new"], v2Events: ["v2-new"], gap: false))
+        XCTAssertEqual(gate.count, 2, "Neither owner may consume the same request twice")
+        XCTAssertFalse(oldPublished)
     }
 }
