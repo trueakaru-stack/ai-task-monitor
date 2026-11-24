@@ -3,7 +3,7 @@ $source = Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens = $null; $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw 'Application source could not be parsed.' }
-$definitions = foreach ($name in @('Prop', 'Prioritize-Tasks')) {
+$definitions = foreach ($name in @('Prop', 'Prioritize-Tasks', 'Compact-VisibleTasks')) {
     $function = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
     if ($null -eq $function) { throw "Missing function: $name" }
     $function.Extent.Text
@@ -76,6 +76,15 @@ $result = Prioritize-Tasks @($early, $later, $waiting) @($early, $later) 'early'
 Require ($result.SelectedId -eq 'waiting' -and $result.Tasks[0].Id -eq 'waiting' -and -not $result.Tasks[0].Active) 'A new approval request was not selected as waiting.'
 $result = Prioritize-Tasks @($early, $later, $waiting) @($early, $later, $waiting) 'early'
 Require ($result.SelectedId -eq 'early') 'An unchanged approval request stole manual selection.'
+$assistant = Task 'assistant' $true 'assistant-turn' 25
+$assistant | Add-Member NoteProperty AgentNickname 'Curie'
+$result = Prioritize-Tasks @($early, $later, $assistant) @($early, $later) 'early'
+Require ($result.SelectedId -eq 'early') 'A hidden assistant stole compact selection.'
+$newRoot = Task 'new-root' $true 'new-root-turn' 26
+$result = Prioritize-Tasks @($early, $later, $assistant, $newRoot) @($early, $later, $assistant) 'early'
+Require ($result.SelectedId -eq 'new-root') 'A newly started task was not selected after an assistant appeared.'
+$result = Prioritize-Tasks @($early, $later, $assistant) @($early, $later, $assistant) 'assistant'
+Require ($result.SelectedId -ne 'assistant' -and $result.SelectedId) 'An invisible assistant remained selected.'
 Write-Output 'Task priority: new tasks, resumed turns, manual selection and source recovery verified.'
 '@
 & ([scriptblock]::Create(($definitions -join "`n") + "`n" + $checks))

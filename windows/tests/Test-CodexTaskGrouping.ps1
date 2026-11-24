@@ -2,7 +2,7 @@ $ErrorActionPreference='Stop'
 $source=Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'The monitor source did not parse.'}
-$names=@('Prop','Group-CodexTasks','Localized-TaskTitle','Localized-TaskActivity','Related-AgentActivity','Related-AgentStatus','Related-AgentFingerprint','Prioritize-Tasks')
+$names=@('Prop','Group-CodexTasks','Localized-TaskTitle','Localized-TaskActivity','Related-AgentActivity','Related-AgentStatus','Related-AgentFingerprint','Prioritize-Tasks','Compact-VisibleTasks','Compact-ShowProviderLabels','Compact-HasHiddenAgentTasks')
 $definitions=foreach($name in $names){
  $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true)
  if($null -eq $node){throw "Missing function: $name"};$node.Extent.Text
@@ -94,6 +94,16 @@ Require ($unresolved.Count -eq 1 -and $unresolved[0].Id -ceq $grand -and $null -
 $visibleIncomplete=@(Group-CodexTasks @($first,$nested) $incomplete $incompleteTitles)
 Require ($visibleIncomplete.Count -eq 2 -and @($visibleIncomplete|Where-Object Id -eq $c1).Count -eq 1 -and @($visibleIncomplete|Where-Object Id -eq $grand).Count -eq 1 -and
  @($visibleIncomplete|Where-Object {$null -ne $_.PSObject.Properties['RelatedAgentCount']}).Count -eq 0) 'A visible intermediate with missing metadata absorbed its descendant.'
+$knownAssistant=Task $grand 'Parent (agent Curie)' $true
+$knownAssistant|Add-Member NoteProperty AgentNickname 'Curie'
+$unknownKind=Task $c1 'Unclassified task' $true
+$visibleCompact=@(Compact-VisibleTasks @($parent,$knownAssistant,$unknownKind))
+Require ($visibleCompact.Count -eq 2 -and @($visibleCompact|Where-Object Id -ceq $grand).Count -eq 0 -and
+ @($visibleCompact|Where-Object Id -ceq $p).Count -eq 1 -and @($visibleCompact|Where-Object Id -ceq $c1).Count -eq 1) 'Compact view did not hide only the verified agent.'
+$claudeTask=Task 'claude-1' 'Claude task' $true 'claude'
+$onlyClaude=@(Compact-VisibleTasks @($claudeTask,$knownAssistant))
+Require (-not (Compact-ShowProviderLabels $onlyClaude) -and (Compact-ShowProviderLabels @(Compact-VisibleTasks @($claudeTask,$parent,$knownAssistant)))) 'Hidden agents incorrectly affected compact source labels.'
+Require ((Compact-HasHiddenAgentTasks @($knownAssistant)) -and -not (Compact-HasHiddenAgentTasks @($unknownKind))) 'A hidden assistant could be mistaken for proof that no task exists.'
 $stressTasks=New-Object 'Collections.Generic.List[object]';$stressLinks=@{};$stressTitles=@{}
 for($i=0;$i -lt 128;$i++){
  $root='40000000-0000-0000-0000-{0:D12}' -f $i;$stressTasks.Add((Task $root 'Parent' $true));$stressTitles[$root]='Parent'

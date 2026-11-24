@@ -1,0 +1,215 @@
+name: Windows compact interaction checks
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/windows-compact-ci-20261124]
+    paths:
+      - 'windows/app/CodexProgress.ps1'
+      - 'windows/app/CodexRecentEventObserver.cs'
+      - 'windows/app/Build-Installer-v2.ps1'
+      - 'windows/app/CodexProgressInstaller.cs'
+      - 'windows/app/Uninstall-Inventory.json'
+      - 'windows/msix/Build-StorePackage.ps1'
+      - 'windows/app/VersionInfo.cs'
+      - 'windows/tests/Test-Codex*.ps1'
+      - 'windows/tests/Test-CompactDotReuse.ps1'
+      - 'windows/tests/Test-ReleaseUpdates.ps1'
+      - 'windows/tests/Test-SourceAvailability.ps1'
+      - 'windows/tests/Test-DotnetPathSafety.py'
+      - '.github/workflows/windows-codex-passive-20261116.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-codex:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [screenshots-related, screenshots-showcase]
+    env:
+      AITM_TEST_PART: ${{ matrix.part }}
+      AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
+      DOTNET_ADD_GLOBAL_TOOLS_TO_PATH: '0'
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: '0'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    steps:
+      - name: Verify passive observation in isolated Windows
+        if: ${{ matrix.part == 'checks' || (!contains(github.event.head_commit.message, '[remaining-checks]') && !contains(github.event.head_commit.message, '[checks-only]')) }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          if($env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows' -or $env:DOTNET_ADD_GLOBAL_TOOLS_TO_PATH -cne '0'){throw 'Disposable hosted Windows is required.'}
+          function Read-PathState([string]$scope){
+            $key=if($scope -eq 'User'){[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment',$false)}else{[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment',$false)}
+            try{
+              $value=$key.GetValue('Path',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+              $kind=if($null -eq $value){'Missing'}else{[string]$key.GetValueKind('Path')}
+              return [PSCustomObject]@{Value=[string]$value;Kind=$kind}
+            }finally{if($null -ne $key){$key.Dispose()}}
+          }
+          $beforeUser=Read-PathState 'User';$beforeMachine=Read-PathState 'Machine'
+          $beforeProcess=[Environment]::GetEnvironmentVariable('Path','Process')
+          try{
+            $runnerTemp=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\')+'\'
+            $root=[IO.Path]::GetFullPath((Join-Path $runnerTemp ('aitm-codex-passive-ci-'+[Guid]::NewGuid().ToString('N'))))
+            if(-not $root.StartsWith($runnerTemp,[StringComparison]::OrdinalIgnoreCase) -or [IO.Directory]::Exists($root)){throw 'Unsafe synthetic root.'}
+            foreach($name in @('source','template','hooks','temp','profile','appdata','localappdata','screenshots')){[void][IO.Directory]::CreateDirectory((Join-Path $root $name))}
+            $source=Join-Path $root 'source';$hooks=Join-Path $root 'hooks';$template=Join-Path $root 'template'
+            $env:GIT_CONFIG_NOSYSTEM='1';$env:GIT_TERMINAL_PROMPT='0';$env:GIT_CONFIG_GLOBAL=Join-Path $root 'empty.gitconfig'
+            [IO.File]::WriteAllText($env:GIT_CONFIG_GLOBAL,'')
+            git -c credential.helper= -c core.hooksPath="$hooks" init --quiet --template="$template" "$source"
+            if($LASTEXITCODE -ne 0){throw 'Cannot initialize the synthetic checkout.'}
+            git -C "$source" -c credential.helper= -c core.hooksPath="$hooks" fetch --no-tags --depth=1 "https://github.com/$env:GITHUB_REPOSITORY.git" "$env:GITHUB_SHA"
+            if($LASTEXITCODE -ne 0){throw 'Cannot fetch the test revision.'}
+            git -C "$source" -c core.hooksPath="$hooks" checkout --quiet --detach FETCH_HEAD
+            if($LASTEXITCODE -ne 0 -or (git -C "$source" rev-parse HEAD).Trim() -cne $env:GITHUB_SHA){throw 'The test revision does not match.'}
+            if($env:AITM_TEST_PART -eq 'checks'){
+              $codexCommand=Get-Command -Name 'codex','codex.exe','codex.cmd' -All -ErrorAction SilentlyContinue | Select-Object -First 1
+              if($null -eq $codexCommand){Write-Output 'Real Codex CLI: not found on the hosted runner; no account or local model was used.'}
+              else{Write-Output ('Real Codex CLI: command detected ('+$codexCommand.CommandType+'); it was not launched because its provenance and an isolated model backend were not verified.')}
+              $pythonRoot=if($env:RUNNER_TOOL_CACHE){Join-Path $env:RUNNER_TOOL_CACHE 'Python'}else{''}
+              $candidate=if($pythonRoot -and [IO.Directory]::Exists($pythonRoot)){Get-ChildItem -LiteralPath $pythonRoot -Filter python.exe -File -Recurse -ErrorAction Stop | Where-Object {$_.FullName -match '\\x64\\python\.exe$'} | Sort-Object FullName -Descending | Select-Object -First 1}else{$null}
+              $verified=$false
+              if($null -ne $candidate){
+                $trusted=[IO.Path]::GetFullPath($pythonRoot).TrimEnd('\')+'\';$path=[IO.Path]::GetFullPath($candidate.FullName)
+                $verified=$path.StartsWith($trusted,[StringComparison]::OrdinalIgnoreCase) -and $path -notmatch '(?i)WindowsApps' -and ($candidate.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0 -and ($candidate.VersionInfo.ProductName -match '(?i)Python' -or $candidate.VersionInfo.FileDescription -match '(?i)Python')
+                $parent=$candidate.Directory
+                while($verified -and $null -ne $parent -and $parent.FullName.Length -ge $pythonRoot.Length){
+                  if(($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){$verified=$false;break};$parent=$parent.Parent
+                }
+              }
+              if($verified){
+                & $candidate.FullName -I -B (Join-Path $source 'windows/tests/Test-DotnetPathSafety.py')
+                if($LASTEXITCODE -ne 0){throw 'The PATH safety guard failed.'}
+                Write-Output 'PATH safety guard: passed using a verified hosted tool-cache interpreter.'
+              }else{Write-Warning 'PATH safety guard was not run: no verified hosted tool-cache Python was found.'}
+            }
+            function Invoke-Isolated([string]$executable,[string[]]$arguments){
+              foreach($argument in $arguments){if($argument.Contains('"') -or $argument.EndsWith('\')){throw 'Unsupported synthetic argument.'}}
+              $info=[Diagnostics.ProcessStartInfo]::new();$info.FileName=$executable
+              $info.Arguments=($arguments|ForEach-Object {'"'+$_+'"'}) -join ' '
+              $info.WorkingDirectory=$root;$info.UseShellExecute=$false;$info.CreateNoWindow=$true
+              $info.RedirectStandardOutput=$true;$info.RedirectStandardError=$true;$info.EnvironmentVariables.Clear()
+              $values=@{
+                SystemRoot=$env:SystemRoot;windir=$env:SystemRoot;PATH=((Join-Path $env:SystemRoot 'System32')+';'+$env:SystemRoot)
+                DOTNET_ADD_GLOBAL_TOOLS_TO_PATH='0';DOTNET_GENERATE_ASPNET_CERTIFICATE='0';DOTNET_CLI_TELEMETRY_OPTOUT='1'
+                USERPROFILE=(Join-Path $root 'profile');APPDATA=(Join-Path $root 'appdata');LOCALAPPDATA=(Join-Path $root 'localappdata')
+                TEMP=(Join-Path $root 'temp');TMP=(Join-Path $root 'temp');RUNNER_TEMP=$env:RUNNER_TEMP
+                CI=$env:CI;GITHUB_ACTIONS=$env:GITHUB_ACTIONS;RUNNER_ENVIRONMENT=$env:RUNNER_ENVIRONMENT;RUNNER_OS=$env:RUNNER_OS
+              }
+              foreach($name in @('ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData','ALLUSERSPROFILE','SystemDrive','ComSpec','PATHEXT')){$value=[Environment]::GetEnvironmentVariable($name);if(-not [string]::IsNullOrEmpty($value)){$values[$name]=$value}}
+              foreach($key in $values.Keys){$info.EnvironmentVariables[$key]=[string]$values[$key]}
+              $process=[Diagnostics.Process]::Start($info)
+              try{
+                $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+                if(-not $process.WaitForExit(180000)){$process.Kill($true);[void]$process.WaitForExit(5000);throw 'The synthetic check timed out.'}
+                if($process.ExitCode -ne 0){throw ('Synthetic check failed: '+$stdout.Result+$stderr.Result)}
+                if($stdout.Result){Write-Output $stdout.Result.TrimEnd()};if($stderr.Result){Write-Output $stderr.Result.TrimEnd()}
+              }finally{$process.Dispose()}
+            }
+            $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            if($env:AITM_TEST_PART -eq 'checks'){
+              $tests=if($env:AITM_REMAINING_ONLY -eq '1'){@('Test-CodexPassive.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}else{@('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexTitleLookup.ps1','Test-CodexRolloutReader.ps1','Test-CodexRolloutResolution.ps1','Test-CodexRecentEventObserver.ps1','Test-CodexRecentEventPackaging.ps1','Test-CodexTaskGrouping.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CompactDotReuse.ps1','Test-CompactSwitchUi.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}
+              foreach($test in $tests){
+                Write-Output ('Running '+$test)
+                Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
+              }
+              if($env:AITM_REMAINING_ONLY -ne '1'){
+                $installerOutput=Join-Path $root 'temp/observer-installer-output'
+                $installerWork=Join-Path $root 'temp/observer-installer-work'
+                Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/Build-Installer-v2.ps1'),'-OutputDirectory',$installerOutput,'-BuildTempDirectory',$installerWork)
+                Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/tests/Test-CodexRecentEventPackaging.ps1'),'-InstallerPath',(Join-Path $installerOutput 'AITaskMonitorSetup.exe'))
+                $installerPath=Join-Path $installerOutput 'AITaskMonitorSetup.exe'
+                $verifiedCommit=(git -C "$source" rev-parse HEAD).Trim()
+                if($LASTEXITCODE -ne 0 -or $verifiedCommit -cne $env:GITHUB_SHA){throw 'The installer source revision changed.'}
+                $installerHash=(Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+                [IO.File]::WriteAllText(($installerPath+'.sha256'),($installerHash+'  AITaskMonitorSetup.exe'+"`n"),[Text.UTF8Encoding]::new($false))
+                [IO.File]::WriteAllText((Join-Path $installerOutput 'source-commit.txt'),($verifiedCommit+"`n"),[Text.UTF8Encoding]::new($false))
+              }
+            }else{
+              $counts=if($env:AITM_TEST_PART -eq 'screenshots-active'){@(1)}elseif($env:AITM_TEST_PART -eq 'screenshots-empty'){@(0)}else{@()}
+              foreach($count in $counts){foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){foreach($warningCase in @('partial-data','partial-both')){
+                $stem="codex-$count-$theme-$language-$mode-$warningCase"
+                $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks',[string]$count,'-PreviewSourceWarning',$warningCase,'-PreviewWarningProvider','codex','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
+                if($count -eq 1){$arguments+=@('-PreviewUnconfirmed','-PreviewPlanUnconfirmed','-PreviewScenario','planned')}
+                if($mode -eq 'compact'){$arguments+='-CompactMode'}
+                Invoke-Isolated $powershell $arguments
+                if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Synthetic screenshot is missing.'}
+              }}}}}
+              if($env:AITM_TEST_PART -eq 'screenshots-active'){
+                foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){
+                  $stem="codex-2-$theme-$language-$mode"
+                  $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','2','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
+                  if($mode -eq 'compact'){$arguments+='-CompactMode'}
+                  Invoke-Isolated $powershell $arguments
+                  if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Two-task synthetic screenshot is missing.'}
+                }}}
+              }
+              if($env:AITM_TEST_PART -eq 'screenshots-related'){
+                foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($mode in @('expanded','compact')){foreach($list in @('closed','open')){
+                  $stem="related-agents-$theme-$language-$mode-$list"
+                  $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsUiTest','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
+                  if($mode -eq 'compact'){$arguments+='-CompactMode'}
+                  if($list -eq 'open'){$arguments+='-PreviewRelatedAgentsExpanded'}
+                  Invoke-Isolated $powershell $arguments
+                  if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Related-agent synthetic screenshot is missing.'}
+                }}}}
+                foreach($theme in @('dark','light')){foreach($mode in @('expanded','compact')){
+                  $stem="related-agents-named-$theme-$mode"
+                  $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsNamedTitle','-PreviewRelatedAgentsUiTest','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride','ru','-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
+                  if($mode -eq 'compact'){$arguments+='-CompactMode'}
+                  Invoke-Isolated $powershell $arguments
+                  if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Named-title synthetic screenshot is missing.'}
+                }}
+                foreach($theme in @('dark','light')){
+                  $stem="related-agents-long-activity-$theme"
+                  $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsLongActivity','-PreviewRelatedAgentsUiTest','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride','ru','-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
+                  Invoke-Isolated $powershell $arguments
+                  if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Long-activity synthetic screenshot is missing.'}
+                }
+              }
+              if($env:AITM_TEST_PART -eq 'screenshots-showcase'){
+                foreach($theme in @('dark','light')){foreach($language in @('ru','en')){foreach($frame in @('expanded-closed','expanded-open','compact-closed','compact-open','compact-claude')){
+                  $stem="showcase-$theme-$language-$frame"
+                  $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','2','-PreviewScenario','planned','-PreviewRelatedAgents','-PreviewRelatedAgentsShowcase','-PreviewOffscreen','-ThemeOverride',$theme,'-LanguageOverride',$language,'-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "screenshots/$stem.png"))
+                  if($frame.StartsWith('compact')){$arguments+=@('-CompactMode','-PreviewCompactSwitchUiTest')}
+                  if($frame.EndsWith('open')){$arguments+='-PreviewRelatedAgentsExpanded'}
+                  if($frame.EndsWith('claude')){$arguments+='-PreviewRelatedAgentsSelectClaude'}
+                  Invoke-Isolated $powershell $arguments
+                  if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Two-source showcase screenshot is missing.'}
+                }}}
+              }
+              if($env:AITM_TEST_PART -eq 'screenshots-related'){
+                foreach($theme in @('dark','light')){foreach($mode in @('expanded','compact')){
+                  $stem="related-agents-hint-$theme-$mode"
+                  $arguments=@('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/CodexProgress.ps1'),'-PreviewActiveTasks','1','-PreviewScenario','planned','-PreviewRelatedAgents','-ThemeOverride',$theme,'-LanguageOverride','ru','-DiagnosticDirectory',(Join-Path $root "temp/diagnostic-$stem"),'-PreferencesFile',(Join-Path $root "temp/preferences-$stem.json"),'-SnapshotFile',(Join-Path $root "temp/$stem-window.png"),'-HintSnapshotFile',(Join-Path $root "screenshots/$stem.png"))
+                  if($mode -eq 'compact'){$arguments+='-CompactMode'}
+                  Invoke-Isolated $powershell $arguments
+                  if(-not [IO.File]::Exists((Join-Path $root "screenshots/$stem.png"))){throw 'Related-agent title hint screenshot is missing.'}
+                }}
+              }
+            }
+          }finally{
+            foreach($scope in @('User','Machine')){$before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine};$after=Read-PathState $scope;if($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind){throw "$scope PATH changed."}}
+            if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}
+          }
+      - name: Preserve synthetic screenshots
+        if: always() && matrix.part != 'checks' && !contains(github.event.head_commit.message, '[remaining-checks]') && !contains(github.event.head_commit.message, '[checks-only]')
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-codex-passive-${{ matrix.part }}
+          path: ${{ runner.temp }}/aitm-codex-passive-ci-*/screenshots/*.png
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Preserve candidate installer
+        if: success() && matrix.part == 'checks' && !contains(github.event.head_commit.message, '[remaining-checks]')
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer-candidate
+          path: |
+            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/AITaskMonitorSetup.exe
+            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/AITaskMonitorSetup.exe.sha256
+            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/source-commit.txt
+          if-no-files-found: error
+          retention-days: 7
