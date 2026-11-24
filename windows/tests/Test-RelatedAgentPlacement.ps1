@@ -52,6 +52,7 @@ try {
     Require ($line.Tag -ceq 'related-agent-step') 'The expanded count is not attached to the active step.'
     $button = $script:relatedAgentButtons['expanded|synthetic-task']
     Require ($null -ne $button -and $button.Parent -eq $line -and $button.Content.Children[0].Text -ceq ' (3 агента)') 'The expanded count control is missing.'
+    Require ([Windows.Automation.AutomationProperties]::GetName($button).Contains('(3 агента)')) 'The agent count is missing from the accessible control name.'
     $button.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
     Require ($script:relatedAgentsExpanded.ContainsKey('synthetic-task')) 'The expanded agent list cannot be toggled from the step.'
 
@@ -64,6 +65,10 @@ try {
     Require (-not (Compact-AgentStepLabel $task)) 'A nonexistent active step received the count.'
     $task.Steps[1].status = 'active'; $task.PlanConfirmed = $false
     Require ((Active-PlanStepIndex $task) -eq -1 -and (New-TaskTitleLine $task 10 $false).Tag -ceq 'related-agent-title') 'An unconfirmed plan was shown as a current step.'
+    $task.PlanConfirmed = $null
+    Require ((Active-PlanStepIndex $task) -eq -1) 'A missing plan confirmation was treated as confirmed.'
+    $withoutConfirmation = $task | Select-Object * -ExcludeProperty PlanConfirmed
+    Require ((Active-PlanStepIndex $withoutConfirmation) -eq -1) 'An absent plan confirmation was treated as confirmed.'
     $task.PlanConfirmed = $true; $task.Steps[2].status = 'active'
     Require ((Active-PlanStepIndex $task) -eq -1 -and (New-TaskTitleLine $task 10 $false).Tag -ceq 'related-agent-title') 'Ambiguous active steps received a guessed count.'
     $task.Steps[2].status = 'pending'; $script:resolvedLanguage = 'en'; $task.RelatedAgentCount = 1; $task.ProgressBasis = 'steps'

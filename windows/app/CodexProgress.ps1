@@ -4148,7 +4148,7 @@ function Progress-Label($task) {
 }
 
 function Active-PlanStepIndex($task) {
- if(-not [bool](Prop $task 'PlanConfirmed' $true) -or [string](Prop $task 'Status' '') -eq 'Статус не подтверждён'){return -1}
+ if(-not [bool](Prop $task 'PlanConfirmed' $false) -or [string](Prop $task 'Status' '') -in @('Статус не подтверждён','Status unconfirmed')){return -1}
  $steps=@(Prop $task 'Steps' @());$active=-1
  for($index=0;$index -lt $steps.Count;$index++){
   $state=[string](Prop $steps[$index] 'status' '')
@@ -4400,7 +4400,7 @@ function New-RelatedAgentToggle($task,[double]$fontSize) {
  if($expanded){$arrow.RenderTransformOrigin=[Windows.Point]::new(0.5,0.5);$arrow.RenderTransform=[Windows.Media.ScaleTransform]::new(1,-1)}
  $buttonContent.Children.Add($count)|Out-Null;$buttonContent.Children.Add($arrow)|Out-Null;$button.Content=$buttonContent
  $action=if($script:resolvedLanguage -eq 'en'){if($expanded){'Hide agent actions'}else{'Show agent actions'}}else{if($expanded){'Скрыть действия агентов'}else{'Показать действия агентов'}}
- [Windows.Automation.AutomationProperties]::SetName($button,$action)
+ [Windows.Automation.AutomationProperties]::SetName($button,($action+' '+$suffix.Trim()))
  $button.Add_Click({param($sender,$eventArgs)
   $targetId=[string]$sender.Tag.Id;$targetMode=[string]$sender.Tag.Mode
   if($script:relatedAgentsExpanded.ContainsKey($targetId)){[void]$script:relatedAgentsExpanded.Remove($targetId)}else{$script:relatedAgentsExpanded[$targetId]=$true}
@@ -4548,12 +4548,13 @@ function Add-CompactTask($task) {
  $header.ColumnDefinitions.Add($c1); $header.ColumnDefinitions.Add($c2)
  $title=New-TaskTitleLine $task 10 $false
  $progressLabel=Compact-ProgressLabel $task
- $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.VerticalAlignment="Center"; if($task.ProgressKind -eq "approximate"){$percent.ToolTip=Tr "Приблизительная оценка"}
+ $percent=Text $progressLabel 16 $script:palette.Primary "SemiBold"; $percent.VerticalAlignment="Center"; $percent.TextWrapping='NoWrap';$percent.TextTrimming='CharacterEllipsis'
+ if($task.ProgressKind -eq "approximate" -and $progressLabel -match '^≈\s*\d+%$'){$percent.ToolTip=Tr "Приблизительная оценка"}elseif($progressLabel){Add-ConditionalHint $percent $progressLabel 'line'}
  $extraAgentStep=Compact-ExtraAgentStepLabel $task
  if($extraAgentStep){
   $progressView=New-Object Windows.Controls.StackPanel;$progressView.HorizontalAlignment='Right'
   $percent.HorizontalAlignment='Right';$progressView.Children.Add($percent)|Out-Null
-  $agentStep=Text $extraAgentStep 11.5 $script:palette.Activity;$agentStep.HorizontalAlignment='Right';$agentStep.Tag='related-agent-count';$progressView.Children.Add($agentStep)|Out-Null
+  $agentStep=Text $extraAgentStep 11.5 $script:palette.Activity;$agentStep.HorizontalAlignment='Right';$agentStep.TextWrapping='NoWrap';$agentStep.TextTrimming='CharacterEllipsis';Add-ConditionalHint $agentStep $extraAgentStep 'line';$agentStep.Tag='related-agent-count';$progressView.Children.Add($agentStep)|Out-Null
  }else{
   $progressView=$percent
   if((Compact-AgentStepLabel $task) -and $progressLabel -ceq (Compact-AgentStepLabel $task)){$percent.Tag='related-agent-count'}
