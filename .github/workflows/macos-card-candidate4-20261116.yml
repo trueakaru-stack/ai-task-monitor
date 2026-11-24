@@ -325,7 +325,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/swift" -e 'import Foundation; import Darwin; guard let root = ProcessInfo.processInfo.environment["AITM_SYNTHETIC_TEST_ROOT"] else { exit(1) }; let base = URL(fileURLWithPath: root).resolvingSymlinksInPath().path; let temp = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path; guard temp == base || temp.hasPrefix(base + "/") else { exit(2) }'
+          AITM_TEST_SANDBOX_POLICY="$AITM_TEST_CONTROL_ROOT/profile-offline.sb" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift" -e 'import Foundation; import Darwin; guard let root = ProcessInfo.processInfo.environment["AITM_SYNTHETIC_TEST_ROOT"] else { exit(1) }; let base = URL(fileURLWithPath: root).resolvingSymlinksInPath().path; let temp = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path; guard temp == base || temp.hasPrefix(base + "/") else { exit(2) }'
       - name: Verify isolated Claude socket
         id: socket_guard
         if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
@@ -387,7 +387,7 @@ jobs:
           if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/claude-channel.log"; then echo 'Claude channel test was skipped.' >&2; exit 1; fi
           grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/claude-channel.log"
       - name: Verify normal timer and compact selection
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -396,7 +396,7 @@ jobs:
           if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log"; then echo 'Timer tests skipped.' >&2; exit 1; fi
           grep -Eq 'Executed 2 tests?, with 0 failures' "$log"
       - name: Verify task identity across delayed reads
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -412,7 +412,7 @@ jobs:
           done
           if test -n "$failed"; then echo "Synthetic test failures:$failed" >&2; exit 1; fi
       - name: Verify source behavior offline
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -429,7 +429,7 @@ jobs:
           AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.CodexGroupingVisualTests/testAgentCountFollowsConfirmedStepAndPause "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/count-placement.log"
           grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/count-placement.log"
       - name: Verify offline Codex discovery
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -457,7 +457,7 @@ jobs:
             grep -Eq 'Executed [1-9][0-9]* tests?, with 0 failures' "$log"
           done
       - name: Verify Codex activity, task names and compact warnings
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -466,7 +466,7 @@ jobs:
           done
           "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ParserTests/testActivityReadsCurrentSummaryWithoutExposingRawReasoning "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"
       - name: Verify Codex rollout selection offline
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -483,7 +483,7 @@ jobs:
           if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"; then echo 'Existing rollout test was skipped.' >&2; exit 1; fi
           grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/rollout-existing-test.log"
       - name: Verify synthetic Codex grouping
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -499,7 +499,7 @@ jobs:
           done
       - name: Render synthetic grouping preview
         id: grouping_render
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -515,14 +515,14 @@ jobs:
           path: ${{ runner.temp }}/aitm-card-tests.*/temp/grouping-renders/*.png
           if-no-files-found: error
       - name: Check guard skips without hosted test fixture
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           "$AITM_TEST_CONTROL_ROOT/run-isolated" /usr/bin/env -u AITM_SYNTHETIC_REQUIRED -u AITM_SYNTHETIC_TEST_ROOT -u AITM_CI_DENIED_FILE "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testV2CapacityWarningSurvivesScopeRemovalReconnectAndRestart "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/expected-skip.log"
           grep -q 'skipped' "$AITM_TEST_TASK_ROOT/expected-skip.log"
       - name: Check required guard rejects missing marker
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -532,75 +532,75 @@ jobs:
           fi
           grep -q 'unsafeEnvironment' "$AITM_TEST_TASK_ROOT/expected-rejection.log"
       - name: Run synthetic Kimi capacity regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testVisibleKimiCardSurvivesCapacityAndLateTerminal "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Run synthetic V1 warning regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testV1CapacityWarningSurvivesUnavailableAndReconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Run synthetic V2 warning regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testV2CapacityWarningSurvivesScopeRemovalReconnectAndRestart "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Run synthetic TaskStore warning regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testTaskStoreKeepsCapacityWarningAfterPartialAndReconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Run synthetic scope isolation regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testCapacityLossInScopeADoesNotUnconfirmScopeB "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Run synthetic Hermes restart regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testHermesWaitsForAnObserverStartedAfterMonitoring "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Run synthetic Kimi temporary scan regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testKimiTemporaryInspectionFailureRetainsCardUntilExplicitDisconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Run synthetic partial scope retention regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testPartialScopeKeepsPriorCardAndHealthyNeighbourAfterReconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Run synthetic Hermes scope isolation regression
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testReclaimingHermesTerminalDoesNotDegradeOtherScope "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Check bounded V2 warning history
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testV2WarningHistoryStaysBoundedAndSignalsUntrackedScopes "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Check bounded visible task preservation
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testTaskStoreBoundKeepsVisibleNeighbourBeforeUnseenTasks "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Check full and partial warnings in both languages
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testFullAndPartialAvailabilityMessagesStayDistinctInBothLanguages "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Check Hermes late observer and terminal behavior
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testHermesLateEventAndConfirmedTerminalDoNotReviveOldCard "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Check DeepSeek warning attribution through reconnect
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testDeepSeekCapacityWarningFollowsAffectedScopeThroughDisableAndReconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Check partial loss with no visible tasks
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testConnectedScopeWithoutCardsStillReportsPartialLoss "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Check Kimi scope change and explicit disconnect
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testKimiScopeChangeRetainsObservedCardUntilExplicitDisconnect "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Check Hermes scope change and healthy neighbour
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testHermesScopeChangeKeepsHealthyNeighbourAndReportsUncertainty "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Check existing in-memory provider suites
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -609,7 +609,7 @@ jobs:
           done
       - name: Render synthetic availability states
         id: render
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && steps.temp_guard.outcome == 'success' }}
         shell: bash
         run: '"$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ExternalCapacityRegressionTests/testRenderExistingWarningForFullAndPartialSources "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest"'
       - name: Save synthetic availability renders
