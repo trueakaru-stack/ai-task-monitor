@@ -1,54 +1,70 @@
 {
-  "tag": "v0.3.12",
+  "tag": "v0.3.13",
   "platform_branch": "macos",
-  "production_commit": "a87284fdc0744fc6643cad3eed689155cf1efdb3",
-  "candidate_commit": "7489d44700563264582f90957f351d82d423afaa",
-  "workflow_run_id": 45260994339,
-  "artifact": "macos-0.3.12-candidate-7489d44700563264582f90957f351d82d423afaa",
-  "asset": "AITaskMonitor-macOS-0.3.12.dmg",
+  "production_commit": "ed57d8d336bfb2842dfd22e591359f0c559d7728",
+  "candidate_commit": "ab118d282b23cceeedc09dfda62817c50bd920e2",
+  "workflow_run_id": 45471419620,
+  "artifact": "macos-0.3.13-candidate-ab118d282b23cceeedc09dfda62817c50bd920e2",
+  "asset": "AITaskMonitor-macOS-0.3.13.dmg",
   "checksum": "SHA256SUMS-macOS.txt",
-  "title": "AI Task Monitor 0.3.12 for macOS",
-  "notes": "## Что изменилось\n\n- Улучшено обнаружение локальных задач Codex и отображение доступной активности.\n- Связанные помощники объединяются в карточке родительской задачи; их список и доступные действия можно раскрыть.\n- Неподтверждённое состояние отмечается отдельно. Неподтверждённый помощник может оставаться в счётчике после завершения, если источник не передал подтверждение.\n\n## Установка\n\nСкачайте DMG и проверьте SHA-256. Приложение подписано ad hoc и не нотарифицировано Apple; Gatekeeper может предупредить или заблокировать запуск. Сборка CI выполнена прямым компилятором Swift, а не стандартным способом SwiftPM.\n\n## English\n\nImproved local Codex task discovery and grouped related assistants under their parent task. Unconfirmed status is marked; an unconfirmed assistant may remain in the count after finishing if the source does not provide confirmation.\n\nVerify the SHA-256 checksum before installing. The application is ad-hoc signed and not notarized by Apple; Gatekeeper may warn or block it. The CI build uses the Swift compiler directly rather than the standard SwiftPM build.",
+  "title": "AI Task Monitor 0.3.13 for macOS",
+  "notes": "## Что изменилось\n\n- В полном окне список помощников Codex раскрывается под активным этапом плана. Пока активного этапа нет, число помощников показывается рядом с названием задачи.\n- В компактном окне отображается число помощников без их имён и действий. Неподтверждённое состояние отмечается; счётчик может сохраняться, если источник не подтвердил закрытие помощника.\n- Обновление данных локальных Codex и Claude Code выполняется отдельно от окна. Некоторые другие проверки источников и обслуживание журнала по-прежнему могут задерживать интерфейс.\n\n## Установка\n\nСкачайте DMG и проверьте SHA-256. Приложение подписано ad hoc и не нотарифицировано Apple; Gatekeeper может предупредить или заблокировать запуск.\n\n## English\n\nThe expanded view shows Codex assistants under the active plan step; when no step is active, their count appears next to the task title. The compact view shows only the count. Unconfirmed status is marked, and a count may persist if the source does not confirm closure.\n\nLocal Codex and Claude Code reads run separately from the window. Some other source checks and journal maintenance can still delay the interface.\n\nVerify the SHA-256 checksum before installing. The app is ad-hoc signed and not notarized by Apple; Gatekeeper may warn or block it.",
   "screenshots": {
     "screenshots/macos-expanded-dark.png": {
       "artifact_file": "grouped-ru-dark-expanded-closed-demo-codex.png",
-      "sha256": "cf7b09010b1af82fcdbdb1ccde9b09d038a569b816c0a16d27852c9a1ec0ff1d"
+      "sha256": "97a16c45317e2f44513a76975b0a9df83445eb68b50d7c6081eaa8c47cb7951c"
     },
     "screenshots/macos-expanded-light.png": {
       "artifact_file": "grouped-ru-light-expanded-closed-demo-codex.png",
-      "sha256": "8074296464317e7ef0f9e3c05f920e0f785df4c081871ce7458d5d1731592853"
+      "sha256": "06a70a4c02ea5aee6bc14515115c2e94e0779493dfcd248b3627804d8d2c7429"
     },
     "screenshots/macos-compact-dark.png": {
       "artifact_file": "grouped-ru-dark-compact-closed-demo-codex.png",
-      "sha256": "2df7ddaae3cae5f8e425feb483181bfb966dfb0b58d6094f606a5bb608f5aea7"
+      "sha256": "e81a49ac75ded6f352063f92e52bbfbe5b7a5a7b68835954af0b294925441c0c"
     },
     "screenshots/macos-compact-light.png": {
       "artifact_file": "grouped-ru-light-compact-closed-demo-codex.png",
-      "sha256": "0e9bcefac143aca4ff7575dcadf2897e0572250e2354bf4d81657004bf234577"
+      "sha256": "0cbf571a5e47e6e85651e464ec01f33e0c2a950f91bfd4e1805dae7fab2a0b28"
     },
     "screenshots/macos-agents-dark.png": {
       "artifact_file": "grouped-ru-dark-expanded-open-demo-codex.png",
-      "sha256": "6fc07465fa2539abd6ee9dc8491ebaa471e0df0aa316107154d4f1a9b3cc0432"
+      "sha256": "d8133fc68609efe16e4f2314112aab5923d39468f622949d8bbfd9c8112d1885"
     },
     "screenshots/macos-agents-light.png": {
       "artifact_file": "grouped-ru-light-expanded-open-demo-codex.png",
-      "sha256": "39fef1e6016bd83d3f02eced95181f19463e5aae0e6f2a56f99a1a523bbda4fd"
+      "sha256": "c31e1d1e22f8610daef34a273e65d9bb5d680db1c46f0195653cc0ea71a4b78b"
     },
     "screenshots/macos-compact-agents-dark.png": {
-      "artifact_file": "grouped-ru-dark-compact-open-demo-codex.png",
-      "sha256": "f79870eab21f8075a49d067f299dcec058dd12e1bc7e14d67c2bc761810d8a9b"
+      "artifact_file": "grouped-ru-dark-compact-closed-no-active-codex.png",
+      "sha256": "037e5383f31b9e87a290fce88ecc89fe94f426b1f79b3fc12b8e949fc5d0eb14"
     },
     "screenshots/macos-compact-agents-light.png": {
-      "artifact_file": "grouped-ru-light-compact-open-demo-codex.png",
-      "sha256": "abfc6d84a274945f3eb1418131db9d24c0ce0b86068a95fe504d2087ce0f07ee"
+      "artifact_file": "grouped-ru-light-compact-closed-no-active-codex.png",
+      "sha256": "a052cfb94848edb935849bcda1408c27e75b49f1d0233bba940274d42b34f4f9"
     },
     "screenshots/macos-compact-claude-dark.png": {
       "artifact_file": "grouped-ru-dark-compact-closed-demo-claude.png",
-      "sha256": "f4b2686da81f8fd3c111318f0f60bcd6cb67177c8cb3daf376b08dec1f4da101"
+      "sha256": "a6b49dd6aed33309f07c3d3c6680d97166b991f12a01c0f3b244ce3e90828826"
     },
     "screenshots/macos-compact-claude-light.png": {
       "artifact_file": "grouped-ru-light-compact-closed-demo-claude.png",
-      "sha256": "6a42131c0b158e946972560770cfcbcf57a4b1da9d4cb095dd8ab175f144cde4"
+      "sha256": "4f92d03af818b68f79924bf48d709ebe2f750935aa35932558a62def8daf8345"
+    },
+    "screenshots/macos-en-expanded-dark.png": {
+      "artifact_file": "grouped-en-dark-expanded-closed-demo-codex.png",
+      "sha256": "5582eef68e151fe90e2bcc55ac67185dbafb7413613dc932d43abd95a1ec2caf"
+    },
+    "screenshots/macos-en-expanded-light.png": {
+      "artifact_file": "grouped-en-light-expanded-closed-demo-codex.png",
+      "sha256": "9aa09cac5606dd7ca24ac3969baad4875aa16011bb2ce94395788674c8a8cee2"
+    },
+    "screenshots/macos-en-compact-dark.png": {
+      "artifact_file": "grouped-en-dark-compact-closed-demo-codex.png",
+      "sha256": "28796683417ed88034c85747741cd749a0c59a9442a405af969957b06c09b3b6"
+    },
+    "screenshots/macos-en-compact-light.png": {
+      "artifact_file": "grouped-en-light-compact-closed-demo-codex.png",
+      "sha256": "f9a0abd47013d0d63b0c74a41e121d85f5e278236b4437167f86f1d57852a603"
     }
   }
 }

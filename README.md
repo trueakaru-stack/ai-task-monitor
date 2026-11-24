@@ -70,7 +70,7 @@ The [project license](LICENSE) allows free use, including internal business use,
 | ![Windows assistants, dark](screenshots/windows-agents-dark.png) | ![Windows compact assistants, dark](screenshots/windows-compact-agents-dark.png) | ![Windows compact Claude Code, dark](screenshots/windows-compact-claude-dark.png) |
 | ![Windows assistants, light](screenshots/windows-agents-light.png) | ![Windows compact assistants, light](screenshots/windows-compact-agents-light.png) | ![Windows compact Claude Code, light](screenshots/windows-compact-claude-light.png) |
 
-### macOS 0.3.12
+### macOS 0.3.13
 
 | Развёрнуто / Expanded | Компактно / Compact | Настройки / Settings |
 | --- | --- | --- |
@@ -82,16 +82,10 @@ The [project license](LICENSE) allows free use, including internal business use,
 | ![macOS assistants, dark](screenshots/macos-agents-dark.png) | ![macOS compact assistants, dark](screenshots/macos-compact-agents-dark.png) | ![macOS compact Claude Code, dark](screenshots/macos-compact-claude-dark.png) |
 | ![macOS assistants, light](screenshots/macos-agents-light.png) | ![macOS compact assistants, light](screenshots/macos-compact-agents-light.png) | ![macOS compact Claude Code, light](screenshots/macos-compact-claude-light.png) |
 
-### Компактный режим в исходниках / Compact view in the source
-
-Эти превью показывают изменения в исходниках, которые ещё не входят в установщики версий выше. Названия и действия задач приведены для примера.
-
-These previews show source changes that are not yet included in the installers above. Task titles and activities are examples.
-
-| Windows | macOS |
+| macOS expanded (English) | macOS compact (English) |
 | --- | --- |
-| ![Windows source compact, dark](screenshots/windows-source-compact-dark.png) | ![macOS source compact, dark](screenshots/macos-source-compact-dark.png) |
-| ![Windows source compact, light](screenshots/windows-source-compact-light.png) | ![macOS source compact, light](screenshots/macos-source-compact-light.png) |
+| ![macOS expanded, English, dark](screenshots/macos-en-expanded-dark.png) | ![macOS compact, English, dark](screenshots/macos-en-compact-dark.png) |
+| ![macOS expanded, English, light](screenshots/macos-en-expanded-light.png) | ![macOS compact, English, light](screenshots/macos-en-compact-light.png) |
 
 Задачи показаны для примера. Снимки macOS — превью интерфейса; системное оформление окна может отличаться.
 
