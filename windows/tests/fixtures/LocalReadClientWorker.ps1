@@ -29,6 +29,11 @@ try{
   if($length -le 0 -or $length -gt 16777216){throw 'Invalid synthetic request.'}
   $bytes=$reader.ReadBytes($length);if($bytes.Length -ne $length){throw 'Incomplete synthetic request.'}
   $message=[Management.Automation.PSSerializer]::Deserialize([Text.UTF8Encoding]::new($false,$true).GetString($bytes))
+  $request=@($message.Request)
+  if($request.Count -eq 5 -and [string]$request[4] -ceq 'false'){
+   $ready=[Text.UTF8Encoding]::new($false,$true).GetBytes([Management.Automation.PSSerializer]::Serialize([PSCustomObject]@{InitialReady=$true},4))
+   $writer.Write([int]$ready.Length);$writer.Write($ready);$writer.Flush();continue
+  }
   $injectFailure=$false
   if($first){
    $first=$false;$start=[Threading.EventWaitHandle]::OpenExisting([string]$message.Configuration[0]);$release=[Threading.EventWaitHandle]::OpenExisting([string]$message.Configuration[1])
@@ -45,7 +50,7 @@ try{
     }
    }finally{$block.Dispose()}
   }
-  $request=@($message.Request);$language=[string]$request[3];$enabled=[string]$request[2] -ceq 'true'
+  $language=[string]$request[3];$enabled=[string]$request[2] -ceq 'true'
   $now=[DateTime]::UtcNow
   $codex=[PSCustomObject]@{Id='synthetic-codex';Provider='codex';ProviderName='Codex';Title='Codex '+$language;Active=$true;Paused=$false;Status='working';Activity='Working';Steps=@();Progress=$null;ProgressKind='none';Started=$now.AddMinutes(-3);Updated=$now;StartKey='first'}
   $claude=[PSCustomObject]@{Id='claude:synthetic';Provider='claude';ProviderName='Claude Code';Title='Claude '+$language;Active=$true;Paused=$false;Status='working';Activity='Working';Steps=@();Progress=$null;ProgressKind='none';Started=$now.AddMinutes(-2);Updated=$now;StartKey='second'}

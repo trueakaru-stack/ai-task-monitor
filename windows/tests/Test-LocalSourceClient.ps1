@@ -46,6 +46,9 @@ try{
  $client.TimeoutMilliseconds=350
  $clock=[Diagnostics.Stopwatch]::StartNew();$initial=Get-LocalSourceClientSnapshot $client 'ru' 0;$clock.Stop()
  Require ($clock.ElapsedMilliseconds -lt 1000 -and @($initial.Codex).Count -eq 0) 'The initial client poll waited for the source.'
+ $deadline=[Diagnostics.Stopwatch]::StartNew()
+ do{[void](Get-LocalSourceClientSnapshot $client 'ru' 0);if($client.WarmupReady){break};Start-Sleep -Milliseconds 10}while($deadline.ElapsedMilliseconds -lt 15000)
+ Require ($client.WarmupReady -and -not $client.Fresh) 'The synthetic source did not acknowledge initialization separately from a snapshot.'
  Wait-SyntheticGate $owner $started 'The synthetic source did not block.'
  $workerId=$owner.OwnedProcessId;Start-Sleep -Milliseconds 450
  $initialTimeout=Get-LocalSourceClientSnapshot $client 'ru' 0

@@ -33,8 +33,17 @@ try{
    $initialized=$true
   }
   $request=@($message.Request)
-  if($request.Count -ne 4 -or [string]$request[0] -cne 'poll' -or [string]$request[1] -cnotmatch '^[a-f0-9]{32}$' -or
-     [string]$request[2] -cnotin @('true','false') -or [string]$request[3] -cnotin @('ru','en')){throw 'Unsupported source request.'}
+  if($request.Count -notin @(4,5) -or [string]$request[0] -cne 'poll' -or [string]$request[1] -cnotmatch '^[a-f0-9]{32}$' -or
+     [string]$request[2] -cnotin @('true','false') -or [string]$request[3] -cnotin @('ru','en') -or
+     ($request.Count -eq 5 -and [string]$request[4] -cnotin @('true','false'))){throw 'Unsupported source request.'}
+  if($request.Count -eq 5 -and [string]$request[4] -ceq 'false'){
+   # This request does not read a source. The UI starts a separately timed
+   # poll only after it receives this initialization acknowledgement.
+   $ready=[PSCustomObject]@{InitialReady=$true}
+   $payload=[Text.UTF8Encoding]::new($false,$true).GetBytes([Management.Automation.PSSerializer]::Serialize($ready,4))
+   $writer.Write([int]$payload.Length);$writer.Write($payload);$writer.Flush()
+   continue
+  }
   $epoch=[string]$request[1];$enabled=[string]$request[2] -ceq 'true'
   $connection=if(-not $enabled){'disconnected'}elseif($script:ClaudeEventFile){'connected'}else{try{Claude-ConnectionState}catch{'error'}}
   $changed=($lastEpoch -and $epoch -cne $lastEpoch) -or ($null -ne $lastEnabled -and $enabled -ne $lastEnabled) -or

@@ -6,7 +6,7 @@ function New-LocalSourceClient($owner,[string]$language) {
   Owner=$owner;Epoch=[Guid]::NewGuid().ToString('N');Enabled=$true;Language=$language
   Snapshot=[PSCustomObject]@{Codex=@();Claude=@();Unavailable=@('Codex');PartialConnection=@();PartialData=@('Codex');CodexIncomplete=$false;ClaudeConnection='unknown'}
   Fresh=$false;HasRequestStamp=$false;RequestStamp=[long]0;Failed=$false
-  PendingStartedAt=[long]0;TimedOut=$false;TimeoutMilliseconds=6000
+  PendingStartedAt=[long]0;TimedOut=$false;TimeoutMilliseconds=6000;WarmupReady=$false;WarmupPending=$false
  }
 }
 
@@ -15,7 +15,7 @@ function Set-LocalSourceClientConnection($client,[bool]$enabled) {
  if($null -ne $client.Owner){$client.Owner.Invalidate()}
  $client.Epoch=[Guid]::NewGuid().ToString('N')
  $client.Enabled=$enabled;$client.Fresh=$false;$client.HasRequestStamp=$false
- $client.PendingStartedAt=[long]0;$client.TimedOut=$false
+ $client.PendingStartedAt=[long]0;$client.TimedOut=$false;$client.WarmupReady=$false;$client.WarmupPending=$false
  # The discarded response may contain the only observed ending or source
  # failure. Known cards are uncertain until a new read has completed.
  Set-LocalSourceClientUnavailable $client
@@ -52,7 +52,7 @@ function Get-LocalSourceClientSnapshot($client,[string]$language,[long]$selectio
  if($null -eq $client.Owner){Set-LocalSourceClientUnavailable $client;return $client.Snapshot}
  if($client.Language -cne $language){
   $client.Owner.Invalidate();$client.Language=$language
-  $client.PendingStartedAt=[long]0;$client.TimedOut=$false
+  $client.PendingStartedAt=[long]0;$client.TimedOut=$false;$client.WarmupReady=$false;$client.WarmupPending=$false
   Set-LocalSourceClientUnavailable $client
  }
  $now=[Diagnostics.Stopwatch]::GetTimestamp()
@@ -60,27 +60,36 @@ function Get-LocalSourceClientSnapshot($client,[string]$language,[long]$selectio
     ($now-$client.PendingStartedAt) -ge ([Diagnostics.Stopwatch]::Frequency * [double]$client.TimeoutMilliseconds / 1000)){
   # The result may already be waiting when the UI wakes up. Check its age
   # before receiving it, so a stale snapshot cannot regain confirmation.
-  $client.Owner.Invalidate();Set-LocalSourceClientUnavailable $client
+  if($client.WarmupReady){$client.Owner.Invalidate()}
+  Set-LocalSourceClientUnavailable $client
   $client.TimedOut=$true;$client.PendingStartedAt=$now
  }
  $result=$client.Owner.TryReceive()
  if($null -ne $result){
   $value=$result.Value
   $valid=$result.Success -and $result.Generation -eq $client.Owner.Generation -and $null -ne $value
-  foreach($field in @('Codex','Claude','Unavailable','PartialConnection','PartialData','CodexIncomplete','ClaudeConnection')){
-   if($null -eq $value -or $null -eq $value.PSObject.Properties[$field]){$valid=$false;break}
+  $readyOnly=$valid -and $null -ne $value.PSObject.Properties['InitialReady'] -and $value.InitialReady -is [bool] -and $value.InitialReady
+  if($readyOnly){
+   $client.WarmupReady=$true;$client.WarmupPending=$false;$client.PendingStartedAt=[long]0;$client.TimedOut=$false
+  }else{
+   foreach($field in @('Codex','Claude','Unavailable','PartialConnection','PartialData','CodexIncomplete','ClaudeConnection')){
+    if($null -eq $value -or $null -eq $value.PSObject.Properties[$field]){$valid=$false;break}
+   }
+   if(-not $client.WarmupReady){$valid=$false}
+   if($valid -and [string]$value.ClaudeConnection -notin @('connected','disconnected','partial','unknown','error')){$valid=$false}
+   if($valid){
+    [object[]]$claude=@()
+    if($client.Enabled){$claude=@($value.Claude|Where-Object {$null -ne $_})}
+    $client.Snapshot=[PSCustomObject]@{Codex=@($value.Codex|Where-Object {$null -ne $_});Claude=$claude;Unavailable=@($value.Unavailable|Where-Object {$null -ne $_});PartialConnection=@($value.PartialConnection|Where-Object {$null -ne $_});PartialData=@($value.PartialData|Where-Object {$null -ne $_});CodexIncomplete=[bool]$value.CodexIncomplete;ClaudeConnection=$(if($client.Enabled){[string]$value.ClaudeConnection}else{'disconnected'})}
+    $client.Fresh=$true;$client.HasRequestStamp=[bool]$result.HasRequestStamp;$client.RequestStamp=[long]$result.RequestStamp;$client.Failed=$false
+    $client.PendingStartedAt=[long]0;$client.TimedOut=$false
+   }else{Set-LocalSourceClientUnavailable $client;if(-not $client.WarmupReady){$client.WarmupPending=$false}}
   }
-  if($valid -and [string]$value.ClaudeConnection -notin @('connected','disconnected','partial','unknown','error')){$valid=$false}
-  if($valid){
-   [object[]]$claude=@()
-   if($client.Enabled){$claude=@($value.Claude|Where-Object {$null -ne $_})}
-   $client.Snapshot=[PSCustomObject]@{Codex=@($value.Codex|Where-Object {$null -ne $_});Claude=$claude;Unavailable=@($value.Unavailable|Where-Object {$null -ne $_});PartialConnection=@($value.PartialConnection|Where-Object {$null -ne $_});PartialData=@($value.PartialData|Where-Object {$null -ne $_});CodexIncomplete=[bool]$value.CodexIncomplete;ClaudeConnection=$(if($client.Enabled){[string]$value.ClaudeConnection}else{'disconnected'})}
-   $client.Fresh=$true;$client.HasRequestStamp=[bool]$result.HasRequestStamp;$client.RequestStamp=[long]$result.RequestStamp;$client.Failed=$false
-   $client.PendingStartedAt=[long]0;$client.TimedOut=$false
-  }else{Set-LocalSourceClientUnavailable $client}
  }
- $request=[string[]]@('poll',[string]$client.Epoch,$(if($client.Enabled){'true'}else{'false'}),$language)
- if(-not $client.Owner.Request($request,$selectionRevision)){Set-LocalSourceClientUnavailable $client}
- elseif($client.PendingStartedAt -eq 0){$client.PendingStartedAt=$now}
+ if($client.WarmupReady -or -not $client.WarmupPending){
+  $request=[string[]]@('poll',[string]$client.Epoch,$(if($client.Enabled){'true'}else{'false'}),$language,$(if($client.WarmupReady){'true'}else{'false'}))
+  if(-not $client.Owner.Request($request,$selectionRevision)){Set-LocalSourceClientUnavailable $client}
+  else{if(-not $client.WarmupReady){$client.WarmupPending=$true};if($client.PendingStartedAt -eq 0){$client.PendingStartedAt=$now}}
+ }
  return $client.Snapshot
 }

@@ -56,7 +56,10 @@ try{
  [void](Prioritize-Tasks $script:lastAllTasks @() $script:compactTaskId)
  Render-CompactTasks $script:lastAllTasks
  $cached=Source-Snapshot
- Require (@($cached.Tasks).Count -eq 2 -and $started.WaitOne(10000)) 'The production source path did not start a blocked background poll.'
+ Require (@($cached.Tasks).Count -eq 2) 'The initial background request changed cached tasks.'
+ $deadline=[Diagnostics.Stopwatch]::StartNew()
+ do{[void](Source-Snapshot);if($script:localSourceClient.WarmupReady){break};Start-Sleep -Milliseconds 10}while($deadline.ElapsedMilliseconds -lt 15000)
+ Require ($script:localSourceClient.WarmupReady -and $started.WaitOne(10000)) 'The production source path did not start a blocked background poll.'
  $dot=@($compactDotsPanel.Children|Where-Object {[string]$_.Tag -ceq $second.Id})[0]
  $clock=[Diagnostics.Stopwatch]::StartNew();$dot.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent));$clock.Stop()
  Require ($script:compactTaskId -ceq $second.Id -and $script:compactSelectionRevision -eq 1 -and
