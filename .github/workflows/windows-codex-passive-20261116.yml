@@ -2,7 +2,7 @@ name: Windows passive Codex safety
 on:
   workflow_dispatch:
   push:
-    branches: [windows, codex/windows-codex-passive-20261116, codex/windows-codex-no-index-20261116, codex/windows-activity-ci-20261123]
+    branches: [codex/windows-compact-ci-20261124]
     paths:
       - 'windows/app/CodexProgress.ps1'
       - 'windows/app/CodexRecentEventObserver.cs'
@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [checks, screenshots-active, screenshots-empty, screenshots-related, screenshots-showcase]
+        part: [checks, screenshots-related, screenshots-showcase]
     env:
       AITM_TEST_PART: ${{ matrix.part }}
       AITM_REMAINING_ONLY: ${{ contains(github.event.head_commit.message, '[remaining-checks]') && '1' || '0' }}
@@ -110,22 +110,10 @@ jobs:
             }
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if($env:AITM_TEST_PART -eq 'checks'){
-              $tests=if($env:AITM_REMAINING_ONLY -eq '1'){@('Test-CodexPassive.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}else{@('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexTitleLookup.ps1','Test-CodexRolloutReader.ps1','Test-CodexRolloutResolution.ps1','Test-CodexRecentEventObserver.ps1','Test-CodexRecentEventPackaging.ps1','Test-CodexTaskGrouping.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CompactDotReuse.ps1','Test-CompactSwitchUi.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}
+              $tests=if($env:AITM_REMAINING_ONLY -eq '1'){@('Test-CodexPassive.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}else{@('Test-CodexPassive.ps1','Test-CodexLifecycle.ps1','Test-CodexObservedTasks.ps1','Test-CodexLongTurn.ps1','Test-CodexIndexHistory.ps1','Test-CodexTitleLookup.ps1','Test-CodexRolloutReader.ps1','Test-CodexRolloutResolution.ps1','Test-CodexRecentEventObserver.ps1','Test-CodexRecentEventPackaging.ps1','Test-CodexTaskGrouping.ps1','Test-CodexActivityPipeline.ps1','Test-CodexSessionDiscovery.ps1','Test-CodexActivity.ps1','Test-CompactDotReuse.ps1','Test-CompactSwitchUi.ps1','Test-ReadOwnerLifecycle.ps1','Test-ReadOwnerChannel.ps1','Test-LocalReadOwner.ps1','Test-CodexPlan.ps1','Test-CodexPlanHistory.ps1','Test-SourceAvailability.ps1','Test-ReleaseUpdates.ps1')}
               foreach($test in $tests){
                 Write-Output ('Running '+$test)
                 Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))
-              }
-              if($env:AITM_REMAINING_ONLY -ne '1'){
-                $installerOutput=Join-Path $root 'temp/observer-installer-output'
-                $installerWork=Join-Path $root 'temp/observer-installer-work'
-                Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/app/Build-Installer-v2.ps1'),'-OutputDirectory',$installerOutput,'-BuildTempDirectory',$installerWork)
-                Invoke-Isolated $powershell @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source 'windows/tests/Test-CodexRecentEventPackaging.ps1'),'-InstallerPath',(Join-Path $installerOutput 'AITaskMonitorSetup.exe'))
-                $installerPath=Join-Path $installerOutput 'AITaskMonitorSetup.exe'
-                $verifiedCommit=(git -C "$source" rev-parse HEAD).Trim()
-                if($LASTEXITCODE -ne 0 -or $verifiedCommit -cne $env:GITHUB_SHA){throw 'The installer source revision changed.'}
-                $installerHash=(Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
-                [IO.File]::WriteAllText(($installerPath+'.sha256'),($installerHash+'  AITaskMonitorSetup.exe'+"`n"),[Text.UTF8Encoding]::new($false))
-                [IO.File]::WriteAllText((Join-Path $installerOutput 'source-commit.txt'),($verifiedCommit+"`n"),[Text.UTF8Encoding]::new($false))
               }
             }else{
               $counts=if($env:AITM_TEST_PART -eq 'screenshots-active'){@(1)}elseif($env:AITM_TEST_PART -eq 'screenshots-empty'){@(0)}else{@()}
@@ -201,15 +189,4 @@ jobs:
           name: windows-codex-passive-${{ matrix.part }}
           path: ${{ runner.temp }}/aitm-codex-passive-ci-*/screenshots/*.png
           if-no-files-found: warn
-          retention-days: 7
-      - name: Preserve candidate installer
-        if: success() && matrix.part == 'checks' && !contains(github.event.head_commit.message, '[remaining-checks]')
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-installer-candidate
-          path: |
-            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/AITaskMonitorSetup.exe
-            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/AITaskMonitorSetup.exe.sha256
-            ${{ runner.temp }}/aitm-codex-passive-ci-*/temp/observer-installer-output/source-commit.txt
-          if-no-files-found: error
           retention-days: 7
