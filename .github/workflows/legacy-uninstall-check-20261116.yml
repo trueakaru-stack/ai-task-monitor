@@ -58,8 +58,24 @@ jobs:
               if($LASTEXITCODE -ne 0){throw 'The PATH safety guard failed.'}
               Write-Output 'PATH safety guard: passed using a verified hosted tool-cache interpreter.'
             }else{throw 'No verified hosted tool-cache Python was found.'}
+          function Assert-SourceSnapshot {
+            $revision=(& git -C "$source" rev-parse HEAD).Trim()
+            if($LASTEXITCODE -ne 0 -or $revision -cne $env:GITHUB_SHA){throw 'Source revision changed during verification.'}
+            & git -C "$source" diff --quiet HEAD -- windows .github/legacy-uninstall-ci .github/workflows .github/safe-uninstall-ci
+            if($LASTEXITCODE -ne 0){throw 'Tracked source inputs changed during verification.'}
+            $unexpected=@(& git -C "$source" ls-files --others --exclude-standard -- windows .github/legacy-uninstall-ci .github/workflows .github/safe-uninstall-ci)
+            if($LASTEXITCODE -ne 0 -or $unexpected.Count -gt 0){throw 'Unexpected source inputs appeared during verification.'}
+          }
+          Assert-SourceSnapshot
           & (Join-Path $source '.github/legacy-uninstall-ci/Run.ps1')
+          Assert-SourceSnapshot
           & (Join-Path $source 'windows/tests/Test-UninstallPreservesData.ps1')
+          Assert-SourceSnapshot
+          $verifiedExe=Join-Path $env:RUNNER_TEMP ("aitm-verified-setup-"+$env:GITHUB_SHA+"\AITaskMonitorSetup.exe")
+          $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          & $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $source 'windows/tests/Test-CodexRecentEventPackaging.ps1') -InstallerPath $verifiedExe
+          if($LASTEXITCODE -ne 0){throw 'The verified installer failed the observer resource check.'}
+          Assert-SourceSnapshot
           }finally{
             foreach($scope in @('User','Machine')){$before=if($scope -eq 'User'){$beforeUser}else{$beforeMachine};$after=Read-PathState $scope;if($after.Value -cne $before.Value -or $after.Kind -cne $before.Kind){throw "$scope PATH changed."}}
             if([Environment]::GetEnvironmentVariable('Path','Process') -cne $beforeProcess){throw 'Process PATH changed.'}

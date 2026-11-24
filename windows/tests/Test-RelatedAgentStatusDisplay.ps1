@@ -5,7 +5,7 @@ try{
  Add-Type -AssemblyName PresentationFramework
  $tokens=$null;$errors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'),[ref]$tokens,[ref]$errors)
  if($errors.Count){throw 'The application source did not parse.'}
- $definitions=foreach($name in @('Prop','Related-AgentStatus','Related-AgentFingerprint','Add-RelatedAgentContent','Add-CompactTask')){
+ $definitions=foreach($name in @('Prop','Related-AgentStatus','Related-AgentFingerprint','Add-RelatedAgentList','Add-RelatedAgentContent','Add-CompactTask')){
   $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true)
   if($null -eq $node){throw "Missing production function: $name"};$node.Extent.Text
  }
