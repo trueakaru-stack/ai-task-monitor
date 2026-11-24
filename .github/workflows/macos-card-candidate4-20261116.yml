@@ -311,16 +311,16 @@ jobs:
           task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
           /bin/mkdir -m 700 "$AITM_TEST_TASK_ROOT/temp/claude-channel-profile"
           AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$AITM_TEST_PYTHON_BIN" -I -S -B -c 'import errno,socket
-for family, address in [(socket.AF_INET,("127.0.0.1",9)),(socket.AF_INET6,("::1",9))]:
- try:
-  s=socket.socket(family,socket.SOCK_STREAM)
-  s.settimeout(2)
-  s.connect(address)
- except OSError as e:
-  if e.errno not in (errno.EACCES,errno.EPERM,errno.EAFNOSUPPORT): raise
- else: raise RuntimeError("Network isolation failed")
- finally:
-  if "s" in locals(): s.close()'
+          for family, address in [(socket.AF_INET,("127.0.0.1",9)),(socket.AF_INET6,("::1",9))]:
+           try:
+            s=socket.socket(family,socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect(address)
+           except OSError as e:
+            if e.errno not in (errno.EACCES,errno.EPERM,errno.EAFNOSUPPORT): raise
+           else: raise RuntimeError("Network isolation failed")
+           finally:
+            if "s" in locals(): s.close()'
           AITM_TEST_SOCKET=1 AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ClaudeSourceChannelTests/testSyntheticSocketOverrideRejectsPathsOutsideVerifiedRoot "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/claude-channel-guard.log"
           grep -Eq 'Executed 1 tests?, with 0 failures' "$AITM_TEST_TASK_ROOT/claude-channel-guard.log"
           AITM_TEST_SOCKET=1 AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest AITaskMonitorTests.ClaudeSourceChannelTests "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$AITM_TEST_TASK_ROOT/claude-channel.log"
