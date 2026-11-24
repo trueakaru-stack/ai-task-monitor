@@ -62,16 +62,21 @@ final class CodexAgentReaderProofTests: XCTestCase {
         private let lock = NSLock()
         private var armed = false
         private var selections: [Set<String>] = []
-        func arm() { lock.lock(); armed = true; selections = []; lock.unlock() }
+        private var verified: [[String: CodexVerifiedAgentIdentity]] = []
+        func arm() { lock.lock(); armed = true; selections = []; verified = []; lock.unlock() }
         func observe(_ snapshot: CodexTaskSnapshot) {
             lock.lock()
             let shouldRecord = armed
-            if shouldRecord { selections.append(snapshot.selectedAgentProofIDs) }
+            if shouldRecord {
+                selections.append(snapshot.selectedAgentProofIDs)
+                verified.append(snapshot.verifiedAgentIdentities)
+            }
             let shouldWait = shouldRecord && selections.count == 1
             lock.unlock()
             if shouldWait { entered.signal(); _ = release.wait(timeout: .now() + 12) }
         }
         var recorded: [Set<String>] { lock.lock(); defer { lock.unlock() }; return selections }
+        var verifiedProofs: [[String: CodexVerifiedAgentIdentity]] { lock.lock(); defer { lock.unlock() }; return verified }
     }
 
     private final class Mutation {
@@ -204,15 +209,20 @@ final class CodexAgentReaderProofTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(selections.count, 2)
         if selections.count >= 2 { XCTAssertEqual(selections[0], selections[1]) }
         XCTAssertEqual(store.compactTasks[store.compactSelectedIndex].id, selected)
+        let verified = gate.verifiedProofs
+        let firstProofs = try XCTUnwrap(verified.first, "The first read must provide actual verified headers")
+        let secondProofs = try XCTUnwrap(verified.dropFirst().first, "The second read must provide actual verified headers")
         for parent in [rootID, secondRoot] {
+            let rootProof = try XCTUnwrap(firstProofs[parent], "The first read must verify each visible root")
+            XCTAssertTrue(rootProof.isRoot)
+            XCTAssertEqual(secondProofs[parent], rootProof, "The same root header must be verified again")
+            let matchingChild = try XCTUnwrap(firstProofs.first { id, proof in
+                proof.parentID == parent && !proof.isRoot && secondProofs[id] == proof
+            }, "Each visible group must have a child verified in both reads")
             XCTAssertEqual(store.tasks.filter { $0.id == parent }.count, 1)
             XCTAssertFalse(store.tasks.contains { $0.id == "codex-retained:" + parent })
-        }
-        if let last = selections.last {
-            let provenChildren = last.intersection(Set(ids))
-            XCTAssertFalse(provenChildren.isEmpty)
-            XCTAssertTrue(store.compactTasks.allSatisfy { !provenChildren.contains($0.id) },
-                          "A child with matching current proof must not become a separate compact card")
+            XCTAssertFalse(store.compactTasks.contains { $0.id == matchingChild.key },
+                           "A child with matching current proof must not become a separate compact card")
         }
     }
 
