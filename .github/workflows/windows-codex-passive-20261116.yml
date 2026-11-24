@@ -8,7 +8,7 @@ on:
       - 'windows/app/LocalReadOwner.cs'
       - 'windows/tests/Test-LocalReadOwner.ps1'
       - 'windows/tests/Test-ReadOwner*.ps1'
-      - 'windows/tests/fixtures/LocalReadSyntheticWorker.ps1'
+      - 'windows/tests/fixtures/LocalRead*.ps1'
       - 'windows/app/CodexRecentEventObserver.cs'
       - 'windows/app/Build-Installer-v2.ps1'
       - 'windows/app/CodexProgressInstaller.cs'

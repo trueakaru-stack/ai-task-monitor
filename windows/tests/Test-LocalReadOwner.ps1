@@ -32,6 +32,7 @@ function Wait-Exit($owner,[int]$milliseconds=10000){
  $clock=[Diagnostics.Stopwatch]::StartNew()
  while(-not $owner.HasExited -and $clock.ElapsedMilliseconds -lt $milliseconds){Start-Sleep -Milliseconds 10}
  Require $owner.HasExited 'The synthetic transport thread did not exit.'
+ Require (-not $owner.CleanupFailed) 'Cleanup could not confirm the synthetic worker exit.'
 }
 function Wait-ProcessGone([int]$id,[int]$milliseconds=5000){
  $clock=[Diagnostics.Stopwatch]::StartNew()
@@ -64,23 +65,34 @@ $source=Join-Path $PSScriptRoot '..\app\CodexProgress.ps1'
 $tokens=$null;$errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($source,[ref]$tokens,[ref]$errors)
 if($errors.Count){throw 'The production monitor source did not parse.'}
-$definitions=foreach($name in @('Add-CompactDot','Sync-CompactDots')){
+$definitions=foreach($name in @('Prop','Brush','Text','Localized-TaskTitle','Localized-TaskActivity','Localized-CompactTaskActivity',
+ 'Plan-StatusNote','Progress-Label','Get-LoopWarning','Add-LoopWarning','Add-ConditionalHint','New-ActivityIndicator','New-TaskTitleLine',
+ 'Compact-VisibleTasks','Compact-ShowProviderLabels','Compact-HasHiddenAgentTasks','Source-WarningText','Compact-Height',
+ 'Add-CompactTask','Add-CompactDot','Sync-CompactDots','Render-CompactTasks')){
  $node=$ast.Find({param($item) $item -is [Management.Automation.Language.FunctionDefinitionAst] -and $item.Name -eq $name},$true)
  if($null -eq $node){throw "Missing production function: $name"};$node.Extent.Text
 }
 . ([scriptblock]::Create(($definitions -join "`n")))
 function Tr([string]$value){return $value}
-function Brush([string]$value){return [Windows.Media.BrushConverter]::new().ConvertFromString($value)}
-function Localized-TaskTitle($task,[switch]$BaseOnly){return [string]$task.Title}
-# The click handler is production code. Rendering is stubbed so this test does
-# not open a window or access real sources; visual layout is not established.
-function Render-CompactTasks($tasks){$script:renderCount++;Sync-CompactDots $tasks}
-$window=[PSCustomObject]@{Resources=@{CompactDotStyle=[Windows.Style]::new([Windows.Controls.Button])}}
+function Move-CompactWindow {}
+# The click handler, compact rendering and WPF controls are production code.
+# The host is a synthetic in-memory object: no window is shown or laid out.
+$window=[PSCustomObject]@{Height=0.0;Resources=@{CompactDotStyle=[Windows.Style]::new([Windows.Controls.Button])}}
 $compactDotsPanel=[Windows.Controls.StackPanel]::new()
-$script:palette=[PSCustomObject]@{Scroll='#888888'};$script:accentHex='#0066CC';$script:renderCount=0
+$compactTasksPanel=[Windows.Controls.StackPanel]::new();$compactMoreText=[Windows.Controls.TextBlock]::new()
+$script:palette=[PSCustomObject]@{Scroll='#888888';Primary='#222222';Activity='#333333';Muted='#777777'};$script:accentHex='#0066CC'
+$script:resolvedLanguage='en';$script:isCompact=$true;$script:motionEnabled=$false
+$script:sourceErrors=@();$script:sourcePartialConnections=@();$script:sourcePartialData=@();$script:sourceCodexIncomplete=$false
+$script:diagnosticRuntime=$null;$script:claudeLoopStates=@{};$script:previewHintTarget=$null
+$PreviewRelatedAgents=$false;$CompactMode=$true;$PreviewActiveTasks=-1;$PreviewLoopWarning=$false
 $script:compactTaskId='first'
-$script:lastAllTasks=@([PSCustomObject]@{Id='first';Title='First'},[PSCustomObject]@{Id='second';Title='Second'})
-Sync-CompactDots $script:lastAllTasks
+$script:lastAllTasks=@(
+ [PSCustomObject]@{Id='first';Title='First';Provider='synthetic';ProviderName='Synthetic';Active=$true;Status='active';Activity='Checking';ProgressKind='none';Progress=$null;Steps=@()},
+ [PSCustomObject]@{Id='second';Title='Second';Provider='synthetic';ProviderName='Synthetic';Active=$true;Status='active';Activity='Working';ProgressKind='none';Progress=$null;Steps=@()}
+)
+Render-CompactTasks $script:lastAllTasks
+$initialCard=$compactTasksPanel.Children[0]
+Require ([Windows.Automation.AutomationProperties]::GetName($initialCard.Children[0].Children[0]) -ceq 'First') 'The initial real compact rendering is incorrect.'
 
 $gates=New-TestGates
 [LocalReadTestRelay]::Relay($gates.LocalRelease,$gates.Release)
@@ -98,7 +110,10 @@ try{
 
  $dot=@($compactDotsPanel.Children|Where-Object {[string]$_.Tag -ceq 'second'})[0]
  $dot.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
- Require ($script:compactTaskId -ceq 'second' -and $script:renderCount -eq 1 -and -not $gates.LocalRelease.IsSet -and $null -eq $owner.TryReceive()) 'The production task-dot handler did not respond before the synthetic read was released.'
+ $switchedCard=$compactTasksPanel.Children[0]
+ Require ($script:compactTaskId -ceq 'second' -and -not [object]::ReferenceEquals($initialCard,$switchedCard) -and
+  [Windows.Automation.AutomationProperties]::GetName($switchedCard.Children[0].Children[0]) -ceq 'Second' -and
+  -not $gates.LocalRelease.IsSet -and $null -eq $owner.TryReceive()) 'The real task-dot handler and compact rendering did not respond before the synthetic read was released.'
 
  $oldGeneration=$owner.Generation
  $owner.Invalidate()
@@ -140,6 +155,48 @@ try{
 }finally{$ordered.Dispose()}
 Wait-Exit $ordered
 Wait-ProcessGone $orderedId
+
+# Exercise the ACL and PID check on the actual owner, with an unrelated process
+# connecting before the intentionally delayed legitimate synthetic worker.
+$delayName='Local\AITaskMonitorSyntheticDelay-'+[Diagnostics.Process]::GetCurrentProcess().Id
+$delayGate=[Threading.EventWaitHandle]::new($false,[Threading.EventResetMode]::ManualReset,$delayName)
+$rogueGates=New-TestGates
+$delayedWorker=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'fixtures\LocalReadDelayedWorker.ps1'))
+$rogueScript=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'fixtures\LocalReadRogueClient.ps1'))
+$rogueOwner=[AITaskMonitor.LocalReadOwner.Owner]::new($delayedWorker,[string[]]@($rogueGates.StartedName,$rogueGates.ReleaseName))
+$rogue=$null
+try {
+ Require ($rogueOwner.Request([string[]]@('block','ru','true'))) 'The unauthorized-client test request was rejected.'
+ $fields=[Reflection.BindingFlags]'Instance,NonPublic'
+ $nameField=$rogueOwner.GetType().GetField('pipeName',$fields)
+ $pipeField=$rogueOwner.GetType().GetField('pipe',$fields)
+ $clock=[Diagnostics.Stopwatch]::StartNew()
+ while($clock.ElapsedMilliseconds -lt 5000 -and ($rogueOwner.OwnedProcessId -le 0 -or -not $nameField.GetValue($rogueOwner))){Start-Sleep -Milliseconds 10}
+ $pipeName=[string]$nameField.GetValue($rogueOwner)
+ $actualPipe=$pipeField.GetValue($rogueOwner)
+ Require ($pipeName -and $null -ne $actualPipe) 'The actual owner did not start its synthetic pipe.'
+ $rules=@($actualPipe.GetAccessControl().GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+ $current=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+ $network=[Security.Principal.SecurityIdentifier]::new([Security.Principal.WellKnownSidType]::NetworkSid,$null).Value
+ Require (@($rules|Where-Object {$_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -cne $current}).Count -eq 0 -and
+  @($rules|Where-Object {$_.AccessControlType -eq 'Allow' -and $_.IdentityReference.Value -ceq $current}).Count -eq 1 -and
+  @($rules|Where-Object {$_.AccessControlType -eq 'Deny' -and $_.IdentityReference.Value -ceq $network}).Count -eq 1) 'The actual owner pipe ACL grants unexpected principals.'
+ $exe=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'WindowsPowerShell\v1.0\powershell.exe'
+ $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$exe
+ $start.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$rogueScript+'" -PipeName "'+$pipeName+'"'
+ $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+ $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+ $rogue=[Diagnostics.Process]::Start($start)
+ $failure=Wait-Result $rogueOwner
+ Require (-not $failure.Success -and -not $rogueGates.Started.WaitOne(0)) 'An unrelated synthetic client was accepted or received source configuration.'
+ Require ($rogue.WaitForExit(5000) -and $rogue.ExitCode -eq 0 -and $rogue.StandardOutput.ReadToEnd().Trim() -ceq 'NO_DATA') 'The unrelated synthetic client was not cleanly rejected.'
+ $delayedId=$rogueOwner.OwnedProcessId
+}finally{
+ $rogueOwner.Dispose();$delayGate.Dispose()
+ if($null -ne $rogue){if(-not $rogue.HasExited){$rogue.Kill();[void]$rogue.WaitForExit(3000)};$rogue.Dispose()}
+}
+Wait-Exit $rogueOwner
+Wait-ProcessGone $delayedId
 
 # Fail closed when job assignment fails: the worker is not sent the synthetic
 # source configuration and is killed without ever reaching the blocked read.
@@ -196,4 +253,4 @@ try{
  $probe.Dispose()
 }
 
-Write-Output 'Local read owner: production dot handler with stub rendering, blocked read, coalescing, ordered terminal/error results, generation, language, disconnect, rejected job and nonblocking close passed on synthetic data.'
+Write-Output 'Local read owner: real dot handler and compact rendering on an in-memory WPF tree, blocked read, coalescing, ordered terminal/error results, actual ACL and unauthorized PID, generation, language, disconnect, rejected job and nonblocking close passed on synthetic data.'

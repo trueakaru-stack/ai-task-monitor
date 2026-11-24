@@ -38,7 +38,7 @@ namespace AITaskMonitor.LocalReadOwner {
         private Guid generation = Guid.NewGuid();
         private string[] pending;
         private PollResult latest;
-        private bool hasPending, busy, closed, exited, broken, cleanupStarted, cleanupFinished;
+        private bool hasPending, busy, closed, exited, broken, cleanupStarted, cleanupFinished, cleanupFailed;
         private string pipeName;
         private int ownedProcessId;
         private NamedPipeServerStream pipe;
@@ -94,6 +94,7 @@ namespace AITaskMonitor.LocalReadOwner {
         public bool IsPolling { get { lock (gate) return busy; } }
         public bool HasPendingRequest { get { lock (gate) return hasPending; } }
         public bool HasExited { get { lock (gate) return exited && cleanupFinished; } }
+        public bool CleanupFailed { get { lock (gate) return cleanupFailed; } }
         public bool HasResult { get { lock (gate) return latest != null; } }
         public int OwnedProcessId { get { lock (gate) return ownedProcessId; } }
         public Guid Generation { get { lock (gate) return generation; } }
@@ -255,13 +256,19 @@ namespace AITaskMonitor.LocalReadOwner {
                 cleanupStarted = true;
                 ownedPipe = pipe; pipe = null; ownedJob = job; job = null; ownedProcess = process; process = null;
             }
-            if (ownedJob != null) { try { ownedJob.Dispose(); } catch (Exception) { } }
-            if (ownedPipe != null) { try { ownedPipe.Dispose(); } catch (Exception) { } }
+            bool failed = false;
+            if (ownedJob != null) { try { ownedJob.Dispose(); } catch (Exception) { failed = true; } }
+            if (ownedPipe != null) { try { ownedPipe.Dispose(); } catch (Exception) { failed = true; } }
             if (ownedProcess != null) {
-                try { if (!ownedProcess.HasExited) ownedProcess.Kill(); } catch (Exception) { }
-                try { ownedProcess.Dispose(); } catch (Exception) { }
+                try {
+                    if (!ownedProcess.HasExited) ownedProcess.Kill();
+                    if (!ownedProcess.HasExited && !ownedProcess.WaitForExit(5000)) failed = true;
+                } catch (Exception) {
+                    try { if (!ownedProcess.HasExited) failed = true; } catch (Exception) { failed = true; }
+                }
+                try { ownedProcess.Dispose(); } catch (Exception) { failed = true; }
             }
-            lock (gate) { cleanupFinished = true; }
+            lock (gate) { cleanupFailed = failed; cleanupFinished = true; }
         }
 
         private static string[] CopyArguments(string[] values) {

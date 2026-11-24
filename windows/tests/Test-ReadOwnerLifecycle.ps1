@@ -1,5 +1,32 @@
-param([ValidateSet('test','owner','ownerreject','hold')][string]$Mode = 'test', [string]$Signal = '', [string]$AllowSignal = '')
+param([ValidateSet('test','owner','ownerreject','hold','preassign')][string]$Mode = 'test', [string]$Signal = '', [string]$AllowSignal = '')
 $ErrorActionPreference = 'Stop'
+
+if ($Mode -eq 'preassign') {
+ # Do not assign a job or send configuration. The driver kills this owner
+ # after the child connects, modelling process death in the startup gap.
+ $name='AITaskMonitorSyntheticPreassign-'+[Guid]::NewGuid().ToString('N')
+ $server=[IO.Pipes.NamedPipeServerStream]::new($name,[IO.Pipes.PipeDirection]::InOut,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::Asynchronous)
+ $worker=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'fixtures\LocalReadSyntheticWorker.ps1'))
+ $exe=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'WindowsPowerShell\v1.0\powershell.exe'
+ $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$exe
+ $start.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$worker+'" -PipeName "'+$name+'" -ParentId '+[Diagnostics.Process]::GetCurrentProcess().Id
+ $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
+ $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+ $child=[Diagnostics.Process]::Start($start)
+ try {
+  Write-Output ('CHILD:'+$child.Id)
+  $pending=$server.BeginWaitForConnection($null,$null)
+  if(-not $pending.AsyncWaitHandle.WaitOne(8000)){throw 'The pre-assignment worker did not connect.'}
+  $server.EndWaitForConnection($pending)
+  Write-Output 'CONNECTED'
+  [Threading.Thread]::Sleep([Threading.Timeout]::Infinite)
+ } finally {
+  $server.Dispose()
+  if(-not $child.HasExited){$child.Kill();[void]$child.WaitForExit(3000)}
+  $child.Dispose()
+ }
+ return
+}
 
 if ($Mode -eq 'hold') {
  $allow = [Threading.EventWaitHandle]::OpenExisting($AllowSignal)
@@ -142,4 +169,33 @@ try {
   throw 'The rejected-job probe failed.'
  }
 } finally { $rejected.Dispose() }
-Write-Output 'The blocked synthetic child was terminated on owner exit; rejected job assignment stopped the child before reading.'
+
+# Abrupt owner death before job assignment must close the pipe; the unassigned
+# child receives no configuration and exits on EOF without reading sources.
+$start.Arguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$PSCommandPath+'" -Mode preassign'
+$preassign=[Diagnostics.Process]::Start($start)
+$preassignChildId=0
+try {
+ $first=$preassign.StandardOutput.ReadLineAsync()
+ if(-not $first.Wait(10000)){throw 'The pre-assignment probe did not start its child.'}
+ $match=[regex]::Match([string]$first.Result,'^CHILD:(\d+)$')
+ if(-not $match.Success){throw 'The pre-assignment child identifier was not returned.'}
+ $preassignChildId=[int]$match.Groups[1].Value
+ $second=$preassign.StandardOutput.ReadLineAsync()
+ if(-not $second.Wait(10000) -or $second.Result -cne 'CONNECTED'){throw 'The pre-assignment child did not connect.'}
+ $preassign.Kill();[void]$preassign.WaitForExit(5000)
+ $clock=[Diagnostics.Stopwatch]::StartNew()
+ while($null -ne (Get-Process -Id $preassignChildId -ErrorAction SilentlyContinue) -and $clock.ElapsedMilliseconds -lt 6000){Start-Sleep -Milliseconds 20}
+ if($null -ne (Get-Process -Id $preassignChildId -ErrorAction SilentlyContinue)){throw 'The unassigned synthetic child survived owner death.'}
+} finally {
+ if(-not $preassign.HasExited){$preassign.Kill();[void]$preassign.WaitForExit(3000)}
+ if($preassignChildId -gt 0){
+  $entry=Get-CimInstance Win32_Process -Filter ('ProcessId='+$preassignChildId) -ErrorAction SilentlyContinue
+  if($null -ne $entry -and $entry.Name -ieq 'powershell.exe' -and $entry.CommandLine -like '*LocalReadSyntheticWorker.ps1*' -and $entry.CommandLine -like ('*-ParentId '+$preassign.Id+'*')){
+   $remaining=Get-Process -Id $preassignChildId -ErrorAction SilentlyContinue
+   if($null -ne $remaining){$remaining.Kill()}
+  }
+ }
+ $preassign.Dispose()
+}
+Write-Output 'The blocked synthetic child was terminated on owner exit; rejected assignment prevented reading; an unassigned child exited after abrupt owner death.'
