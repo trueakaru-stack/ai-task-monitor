@@ -1,7 +1,10 @@
 param([Parameter(Mandatory=$true)][string]$PipeName,[Parameter(Mandatory=$true)][int]$ParentId)
 Set-StrictMode -Version 2.0
 $ErrorActionPreference='Stop'
-Add-Type -TypeDefinition @'
+$pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut)
+try{
+ $pipe.Connect(5000)
+ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
@@ -10,9 +13,6 @@ public static class LocalSourceServerIdentity {
  public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
 }
 '@
-$pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut)
-try{
- $pipe.Connect(5000)
  $server=[uint32]0
  if(-not [LocalSourceServerIdentity]::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw 'Unexpected owner.'}
  $reader=[IO.BinaryReader]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)

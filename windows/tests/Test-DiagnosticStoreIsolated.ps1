@@ -1,4 +1,4 @@
-param([ValidateSet('store','worker','queue','restart','clear','timer')][string]$Target='store')
+param([ValidateSet('store','worker','queue','restart','clear','timer','link','identity','source','retention')][string]$Target='store')
 $ErrorActionPreference='Stop'
 $userPath=[Environment]::GetEnvironmentVariable('PATH','User');$machinePath=[Environment]::GetEnvironmentVariable('PATH','Machine')
 $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')+'\'
@@ -9,7 +9,7 @@ try{
  $profile=Join-Path $root 'profile';$roaming=Join-Path $root 'roaming';$local=Join-Path $root 'local';$scratch=Join-Path $root 'temp'
  foreach($path in @($profile,$roaming,$local,$scratch)){[void][IO.Directory]::CreateDirectory($path)}
  $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
- $test=Join-Path $PSScriptRoot $(switch($Target){'worker'{'Test-DiagnosticWorker.ps1'}'queue'{'Test-DiagnosticClientQueue.ps1'}'restart'{'Test-DiagnosticClientRestart.ps1'}'clear'{'Test-DiagnosticClearBoundary.ps1'}'timer'{'Test-DiagnosticTimer.ps1'}default{'Test-DiagnosticStore.ps1'}})
+ $test=Join-Path $PSScriptRoot $(switch($Target){'worker'{'Test-DiagnosticWorker.ps1'}'queue'{'Test-DiagnosticClientQueue.ps1'}'restart'{'Test-DiagnosticClientRestart.ps1'}'clear'{'Test-DiagnosticClearBoundary.ps1'}'timer'{'Test-DiagnosticTimer.ps1'}'link'{'Test-DiagnosticTemporaryLinkFeasibility.ps1'}'identity'{'Test-WorkerServerIdentity.ps1'}'source'{'Test-LocalSourceClient.ps1'}'retention'{'Test-ProductionCodexAgentRetention.ps1'}default{'Test-DiagnosticStore.ps1'}})
  $start.Arguments='-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File "'+$test+'"'
  $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.WindowStyle=[Diagnostics.ProcessWindowStyle]::Hidden
  $start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true

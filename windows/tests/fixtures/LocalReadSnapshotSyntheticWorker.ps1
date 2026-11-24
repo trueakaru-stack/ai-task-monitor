@@ -1,7 +1,11 @@
 param([Parameter(Mandatory=$true)][string]$PipeName,[Parameter(Mandatory=$true)][int]$ParentId)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version 2.0
-Add-Type -TypeDefinition @'
+$appRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\app'))
+$pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut)
+try{
+ $pipe.Connect(5000)
+ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
@@ -10,10 +14,6 @@ public static class SnapshotSyntheticServerIdentity {
  public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
 }
 '@
-$appRoot=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\app'))
-$pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut)
-try{
- $pipe.Connect(5000)
  $server=[uint32]0
  if(-not [SnapshotSyntheticServerIdentity]::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw 'Unexpected synthetic server.'}
  $reader=[IO.BinaryReader]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)

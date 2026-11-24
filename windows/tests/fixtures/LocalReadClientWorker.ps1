@@ -1,15 +1,5 @@
 param([Parameter(Mandatory=$true)][string]$PipeName,[Parameter(Mandatory=$true)][int]$ParentId)
 $ErrorActionPreference='Stop'
-try{Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-using Microsoft.Win32.SafeHandles;
-public static class SyntheticClientServerIdentity {
- [DllImport("kernel32.dll", SetLastError=true)]
- public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
-}
-'@
-}catch{exit 110}
 try{$pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut)}catch{exit 111}
 try{
  try{$pipe.Connect(5000)}catch{
@@ -19,6 +9,16 @@ try{
   if($failure -is [IO.IOException]){exit 114}
   exit 115
  }
+ try{Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class SyntheticClientServerIdentity {
+ [DllImport("kernel32.dll", SetLastError=true)]
+ public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
+}
+'@
+}catch{exit 110}
  $server=[uint32]0
  if(-not [SyntheticClientServerIdentity]::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw 'Unexpected synthetic owner.'}
  $reader=[IO.BinaryReader]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)
