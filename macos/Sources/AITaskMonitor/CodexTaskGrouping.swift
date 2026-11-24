@@ -7,6 +7,56 @@ enum CodexTaskGrouping {
         let displayIDBySourceID: [String: String]
     }
 
+    /// Only hide the exact file currently verified as an assistant. A title,
+    /// session ID or retained card on its own is never identity evidence.
+    static func compactVisibleIndices(_ tasks: [MonitoredTask], confirmedChildren: [String: CodexFileIdentity]) -> [Int] {
+        tasks.indices.filter { index in
+            let task = tasks[index]
+            guard task.provider == .codex, let file = task.lastActivityFileIdentity,
+                  let verified = confirmedChildren[task.id.lowercased()] else { return true }
+            return file != verified
+        }
+    }
+
+    static func compactSelectionSourceIndex(_ tasks: [MonitoredTask], confirmedChildren: [String: CodexFileIdentity],
+                                            chosenID: String?, previous: MonitoredTask?, previousVisibleIndex: Int?) -> Int? {
+        let visible = Array(compactVisibleIndices(tasks, confirmedChildren: confirmedChildren).prefix(3))
+        if let previous, previous.id == chosenID {
+            let identities = visible.filter { tasks[$0].compactSelectionKey == previous.compactSelectionKey }
+            if identities.count == 1 { return identities[0] }
+            let identical = identities.filter { tasks[$0] == previous }
+            if identical.count == 1 { return identical[0] }
+            if let previousVisibleIndex, visible.indices.contains(previousVisibleIndex),
+               tasks[visible[previousVisibleIndex]] == previous { return visible[previousVisibleIndex] }
+            if let file = previous.lastActivityFileIdentity {
+                let sameFile = visible.filter {
+                    tasks[$0].provider == previous.provider && tasks[$0].id == previous.id &&
+                    tasks[$0].lastActivityFileIdentity == file &&
+                    (tasks[$0].startKey.isEmpty || previous.startKey.isEmpty)
+                }
+                if sameFile.count == 1 { return sameFile[0] }
+            }
+        }
+        if let chosenID {
+            let matches = visible.filter { tasks[$0].id == chosenID }
+            if matches.count == 1 { return matches[0] }
+        }
+        return visible.first
+    }
+
+    static func compactSnapshotChanged(_ previous: [MonitoredTask], _ current: [MonitoredTask],
+                                       confirmedChildren: [String: CodexFileIdentity]) -> Bool {
+        let old = compactVisibleIndices(previous, confirmedChildren: confirmedChildren).prefix(3).map { previous[$0] }
+        let new = compactVisibleIndices(current, confirmedChildren: confirmedChildren).prefix(3).map { current[$0] }
+        let oldKeys = old.map(\.compactSelectionKey)
+        let newKeys = new.map(\.compactSelectionKey)
+        guard oldKeys == newKeys else { return true }
+        let counts = Dictionary(grouping: oldKeys, by: { $0 }).mapValues(\.count)
+        return old.indices.contains { index in
+            (counts[oldKeys[index]] ?? 0) > 1 && old[index] != new[index]
+        }
+    }
+
     static func project(_ source: [MonitoredTask], parents: [String: String], titles: [String: String],
                         confirmedRoots: Set<String> = []) -> [MonitoredTask] {
         makeProjection(source, parents: parents, titles: titles, confirmedRoots: confirmedRoots).tasks

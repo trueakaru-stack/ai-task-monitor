@@ -160,16 +160,17 @@ struct RootView: View {
 
     private var compactContent: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if store.tasks.isEmpty {
+            if store.compactTasks.isEmpty {
                 Text(store.compactEmptyMessage)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(MonitorTheme.secondary)
                     .frame(maxWidth: .infinity, alignment: .center)
             } else {
-                let index = min(store.compactIndex, store.tasks.count - 1)
-                let task = store.tasks[index]
+                let compactTasks = store.compactTasks
+                let index = min(store.compactSelectedIndex, compactTasks.count - 1)
+                let task = compactTasks[index]
                 VStack(alignment: .leading, spacing: 0) {
-                    if store.providers.count > 1 {
+                    if store.compactProviders.count > 1 {
                         Text(task.provider.displayName).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Color.accentColor)
                             .padding(.bottom, 6)
                     }
@@ -177,9 +178,6 @@ struct RootView: View {
                         HStack(alignment: .firstTextBaseline, spacing: 0) {
                             TruncatingText(text: task.title, font: .systemFont(ofSize: 16, weight: .semibold), color: .labelColor)
                                 .frame(maxWidth: .infinity, minHeight: 18, alignment: .leading)
-                            if task.codexAgentCountLabel != nil {
-                                CodexAgentDisclosureButton(task: task, compact: true)
-                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         if let label = task.progressLabel { Text(label).font(.system(size: 16, weight: .semibold)).monospacedDigit() }
@@ -187,13 +185,6 @@ struct RootView: View {
                     if !task.displayedActivity.isEmpty {
                         ActivityStatusRow(text: task.displayedActivity, isActive: task.isActive, fontSize: 11.5)
                             .padding(.top, 2)
-                    }
-                    if let status = task.codexAgentStatusLabel {
-                        Text(status).font(.system(size: 11.5)).foregroundStyle(MonitorTheme.secondary)
-                            .padding(.top, 4)
-                    }
-                    if let agents = task.codexAgents, !agents.isEmpty {
-                        CodexAgentList(task: task, agents: agents, compact: true)
                     }
                 }
                 if let planNote = task.planStatusNote {
@@ -207,13 +198,14 @@ struct RootView: View {
                         .foregroundStyle(MonitorTheme.secondary)
                         .lineLimit(2)
                 }
-                if store.tasks.count > 1 {
+                if compactTasks.count > 1 {
                     HStack(spacing: 7) {
-                        ForEach(Array(store.tasks.prefix(3).indices), id: \.self) { item in
-                            Button { store.compactIndex = item } label: {
+                        ForEach(Array(store.compactDots.enumerated()), id: \.element.id) { item, target in
+                            Button { store.selectCompactTask(dot: target) } label: {
                                 Circle().fill(item == index ? Color.accentColor : MonitorTheme.muted).frame(width: 6, height: 6)
                             }
                             .buttonStyle(.plain)
+                            .contentShape(Rectangle().inset(by: -3.5))
                             .modifier(PointingHandCursor())
                             .accessibilityLabel(tr("Задача \(item + 1)", "Task \(item + 1)"))
                         }
@@ -237,9 +229,10 @@ struct RootView: View {
     private var reduceMotion: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     private var compactHeight: CGFloat {
         if measuredCompactContentHeight > 0 { return ceil(58 + measuredCompactContentHeight) }
-        let base: CGFloat = store.tasks.count > 1 ? 182 : 156
-        let sourceExtra: CGFloat = !store.tasks.isEmpty && !store.compactUnavailableMessage.isEmpty ? 24 : 0
-        let selected = store.tasks.isEmpty ? nil : store.tasks[min(store.compactIndex, store.tasks.count - 1)]
+        let tasks = store.compactTasks
+        let base: CGFloat = tasks.count > 1 ? 182 : 156
+        let sourceExtra: CGFloat = !tasks.isEmpty && !store.compactUnavailableMessage.isEmpty ? 24 : 0
+        let selected = tasks.isEmpty ? nil : tasks[min(store.compactSelectedIndex, tasks.count - 1)]
         let loopExtra: CGFloat = selected?.loopWarning == nil ? 0 : 64
         let planExtra: CGFloat = selected?.planStatusNote == nil ? 0 : 22
         return base + sourceExtra + loopExtra + planExtra

@@ -53,7 +53,14 @@ final class TaskStore: ObservableObject {
         }
     }
 
-    @Published private(set) var tasks: [MonitoredTask] = []
+    private var compactSnapshotGeneration: UInt64 = 0
+    @Published private(set) var tasks: [MonitoredTask] = [] {
+        didSet {
+            if CodexTaskGrouping.compactSnapshotChanged(oldValue, tasks, confirmedChildren: confirmedCodexChildrenForCompact) {
+                compactSnapshotGeneration &+= 1
+            }
+        }
+    }
     @Published var selectedProvider: ProviderFilter = .all
     @Published var showsSettings = false
     @Published var showsAbout = false
@@ -133,6 +140,9 @@ final class TaskStore: ObservableObject {
     private var codexParentTitles: [String: String] = [:]
     private var codexParentsForDisplay: [String: String] = [:]
     private var codexRootsForDisplay: Set<String> = []
+    private var confirmedCodexChildrenForCompact: [String: CodexFileIdentity] = [:] {
+        didSet { if oldValue != confirmedCodexChildrenForCompact { compactSnapshotGeneration &+= 1 } }
+    }
     private var previousClaude: [MonitoredTask] = []
     private var claudeRetainedTitlesOverflow = false
     private var previousExternal: [MonitoredTask] = []
@@ -824,6 +834,42 @@ final class TaskStore: ObservableObject {
     }
 
     var providers: Set<TaskProvider> { Set(tasks.map(\.provider)) }
+    private var compactTaskIndices: [Int] {
+        CodexTaskGrouping.compactVisibleIndices(tasks, confirmedChildren: confirmedCodexChildrenForCompact)
+    }
+    var compactTasks: [MonitoredTask] { compactTaskIndices.map { tasks[$0] } }
+    var compactDots: [CompactTaskDot] {
+        let visible = Array(compactTasks.prefix(3))
+        let counts = Dictionary(grouping: visible, by: { $0.compactSelectionKey }).mapValues(\.count)
+        var occurrences: [CompactTaskSelectionKey: Int] = [:]
+        return visible.enumerated().map { index, task in
+            let key = task.compactSelectionKey
+            let occurrence = occurrences[key, default: 0]
+            occurrences[key] = occurrence + 1
+            return CompactTaskDot(task: task, occurrence: occurrence, visibleIndex: index,
+                                  generation: (counts[key] ?? 0) > 1 ? compactSnapshotGeneration : nil)
+        }
+    }
+    var compactSelectedIndex: Int {
+        guard let index = compactTaskIndices.firstIndex(of: compactIndex), index < 3 else { return 0 }
+        return index
+    }
+    var compactProviders: Set<TaskProvider> { Set(compactTasks.map(\.provider)) }
+
+    func selectCompactTask(dot: CompactTaskDot) {
+        let visible = Array(compactTaskIndices.prefix(3))
+        if let generation = dot.generation {
+            guard generation == compactSnapshotGeneration,
+                  visible.indices.contains(dot.visibleIndex),
+                  tasks[visible[dot.visibleIndex]].compactSelectionKey == dot.task.compactSelectionKey else { return }
+            compactIndex = visible[dot.visibleIndex]
+            return
+        }
+        let matches = visible.filter { tasks[$0].compactSelectionKey == dot.task.compactSelectionKey }
+        guard matches.count == 1, let index = matches.first else { return }
+        compactIndex = index
+    }
+
     var visibleProviderFilters: [ProviderFilter] {
         ProviderFilter.allCases.filter { filter in filter == .all || filter.provider.map { providers.contains($0) } == true }
     }
@@ -833,6 +879,9 @@ final class TaskStore: ObservableObject {
     var compactEmptyMessage: String {
         let warning = compactUnavailableMessage
         if !warning.isEmpty { return warning }
+        if !tasks.isEmpty && compactTasks.isEmpty {
+            return tr("Список задач Codex может быть неполным", "The Codex task list may be incomplete")
+        }
         if codexPartiallyUnavailable && !unavailableSources.contains(.codex) {
             return tr("Нет отображаемых задач", "No tasks to display")
         }
@@ -924,6 +973,9 @@ final class TaskStore: ObservableObject {
 
     func refresh() {
         let previousTasks = tasks
+        let previousCompact = compactTasks
+        let previousCompactIndex = previousCompact.isEmpty ? nil : compactSelectedIndex
+        let selectedTask = previousCompactIndex.map { previousCompact[$0] }
         let previousUnavailable = unavailableSources
         var unavailable: [TaskProvider] = []
         var codexPartial = false
@@ -946,8 +998,7 @@ final class TaskStore: ObservableObject {
             previousCodex = TaskSnapshotMerger.confirmCodexActivities(previousCodex, files: snapshot.verifiedActivityFiles)
         } catch {
             unavailable.append(.codex)
-            codexParentsForDisplay = [:]
-            codexRootsForDisplay = []
+            clearCodexDisplayEvidence()
             previousCodex = TaskSnapshotMerger.merge(previous: previousCodex, current: [], terminalIDs: [])
         }
         do {
@@ -1075,14 +1126,16 @@ final class TaskStore: ObservableObject {
                                                           parents: codexParentsForDisplay, titles: codexParentTitles,
                                                           confirmedRoots: codexRootsForDisplay)
         combined = projection.tasks + combined.filter { !isLocalCodex($0) }
-        let selectedID = previousTasks.indices.contains(compactIndex) ? previousTasks[compactIndex].id : nil
+        let selectedID = selectedTask?.id
         var mappedSelection = selectedID.flatMap { projection.displayIDBySourceID[$0.lowercased()] }
         if mappedSelection == nil, let selectedID, selectedID.hasPrefix("codex-group:") {
             let root = String(selectedID.dropFirst("codex-group:".count))
             mappedSelection = combined.first(where: { $0.provider == .codex && $0.id.lowercased() == root })?.id
         }
+        let selectable = Set(CodexTaskGrouping.compactVisibleIndices(combined, confirmedChildren: confirmedCodexChildrenForCompact).map { combined[$0].compactSelectionKey })
         let focus = taskFocus.reconcile(current: combined, previous: previousTasks,
-                                        selectedID: mappedSelection ?? selectedID, monitoringStartedAt: monitoringStartedAt)
+                                        selectedID: mappedSelection ?? selectedID, monitoringStartedAt: monitoringStartedAt,
+                                        selectableKeys: selectable)
         combined = focus.tasks
         var chosen = focus.selectedID
         if let mappedSelection, mappedSelection != selectedID,
@@ -1096,15 +1149,40 @@ final class TaskStore: ObservableObject {
             }
             chosen = mappedSelection
         }
+        let selectedSourceIndex = CodexTaskGrouping.compactSelectionSourceIndex(combined,
+            confirmedChildren: confirmedCodexChildrenForCompact, chosenID: chosen,
+            previous: selectedTask, previousVisibleIndex: previousCompactIndex)
         tasks = combined
-        compactIndex = chosen.flatMap { id in combined.firstIndex { $0.id == id } } ?? 0
+        compactIndex = selectedSourceIndex ?? 0
         if let provider = selectedProvider.provider, !providers.contains(provider) { selectedProvider = .all }
         recordChanges(previousTasks: previousDiagnosticTasks, previousUnavailable: previousUnavailable,
                       terminalIDs: terminalIDs, interruptedIDs: interruptedIDs, toolInputs: toolInputs)
     }
 
+    private func clearCodexDisplayEvidence() {
+        codexParentsForDisplay = [:]
+        codexRootsForDisplay = []
+        confirmedCodexChildrenForCompact = [:]
+    }
+
     private func updateCodexParentEvidence(_ snapshot: CodexTaskSnapshot) {
         codexRootsForDisplay = snapshot.confirmedSubagentRoots
+        let currentTasksByID = Dictionary(grouping: snapshot.tasks, by: { $0.id.lowercased() })
+        var confirmedChildren: [String: CodexFileIdentity] = [:]
+        var conflictingFiles: Set<String> = []
+        for id in snapshot.subagentParents.keys {
+            let key = id.lowercased()
+            guard !conflictingFiles.contains(key), let matches = currentTasksByID[key], matches.count == 1,
+                  let file = matches[0].lastActivityFileIdentity,
+                  let verified = snapshot.verifiedActivityFiles[id], file == verified else { continue }
+            if let previous = confirmedChildren[key], previous != file {
+                confirmedChildren.removeValue(forKey: key)
+                conflictingFiles.insert(key)
+            } else {
+                confirmedChildren[key] = file
+            }
+        }
+        confirmedCodexChildrenForCompact = confirmedChildren
         var current: [String: String] = [:]
         for (child, parent) in snapshot.subagentParents {
             let key = child.lowercased(), value = parent.lowercased()
@@ -1370,6 +1448,23 @@ final class TaskStore: ObservableObject {
     }
 
     #if DEBUG
+    func testReplacePreviewTasks(_ updated: [MonitoredTask]) {
+        precondition(diagnosticWorker == nil)
+        tasks = updated
+    }
+
+    func testSetCompactSnapshot(_ snapshot: CodexTaskSnapshot) {
+        precondition(diagnosticWorker == nil)
+        updateCodexParentEvidence(snapshot)
+    }
+
+    func testClearCompactSnapshot() {
+        precondition(diagnosticWorker == nil)
+        clearCodexDisplayEvidence()
+    }
+
+    func testGroupingParent(_ child: String) -> String? { codexParentsForDisplay[child.lowercased()] }
+
     func testSetExternalAvailability(previous: [MonitoredTask], unavailable: [TaskProvider],
                                      partiallyUnavailable: Set<TaskProvider> = []) {
         precondition(!externalProvidersEnabled && diagnosticWorker == nil)
