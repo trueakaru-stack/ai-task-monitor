@@ -240,6 +240,9 @@ final class TaskStore: ObservableObject {
     private var codexReadStartedAt: TimeInterval?
     private var codexReadGeneration: UInt64 = 0
     private var codexHasCompletedRead = false
+    #if DEBUG
+    private(set) var testPeriodicRefreshCount = 0
+    #endif
     private var codexTerminalGuard = CodexTerminalGuard()
     private var codexAgentRetention = CodexAgentRetention()
     private var codexAgentGroups: [CodexAgentRetention.Group] = []
@@ -1158,6 +1161,9 @@ final class TaskStore: ObservableObject {
     }
 
     private func periodicRefresh() {
+        #if DEBUG
+        testPeriodicRefreshCount += 1
+        #endif
         scheduleCodexRead(periodic: true)
         scheduleClaudeRead(periodic: true)
         refreshState(codexRead: nil)
