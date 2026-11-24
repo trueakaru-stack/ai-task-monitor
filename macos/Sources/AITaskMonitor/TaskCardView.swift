@@ -125,7 +125,7 @@ struct TaskCardView: View {
                             }
                         }
                     }
-                    .background(OverlayScrollerProbe().frame(width: 0, height: 0))
+                    .background(OverlayScrollerProbe(alwaysVisible: agentPlacement.isStep).frame(width: 0, height: 0))
                 }
                 .frame(height: 116 + (agentPlacement.isStep ? CodexAgentList.expandedHeight(for: task.codexAgents?.count ?? 0) : 0))
                 .padding(.top, 16)

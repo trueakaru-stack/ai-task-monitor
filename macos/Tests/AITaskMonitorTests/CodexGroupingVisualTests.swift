@@ -167,6 +167,12 @@ final class CodexGroupingVisualTests: XCTestCase {
         let views = scrollViews(in: hosting)
         XCTAssertEqual(views.count, 1, "The agent rows must share the plan's scroll view")
         let scroll = try XCTUnwrap(views.first)
+        XCTAssertEqual(scroll.scrollerStyle, .legacy, "An expanded plan with overflowing agents needs a visible scrollbar")
+        XCTAssertTrue(scroll.hasVerticalScroller)
+        let indicator = try XCTUnwrap(scroll.verticalScroller)
+        XCTAssertFalse(indicator.isHidden)
+        XCTAssertTrue(indicator.isEnabled)
+        XCTAssertLessThan(indicator.knobProportion, 1)
         let document = try XCTUnwrap(scroll.documentView)
         let clip = scroll.contentView
         let bottom = max(0, document.bounds.height - clip.bounds.height)
@@ -199,6 +205,31 @@ final class CodexGroupingVisualTests: XCTestCase {
         XCTAssertEqual(refreshedClip.bounds.origin.y, refreshedBottomY, accuracy: 1,
                        "Refreshing an equivalent plan must not move the open list away from the bottom")
         XCTAssertTrue(lastAgentIsVisible(in: refreshedScroll), "The last assistant must remain visible after refresh")
+        store.toggleCodexGroup(task.id)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        hosting.layoutSubtreeIfNeeded()
+        let collapsedViews = scrollViews(in: hosting)
+        XCTAssertEqual(collapsedViews.count, 1)
+        let collapsedScroll = try XCTUnwrap(collapsedViews.first)
+        XCTAssertEqual(collapsedScroll.scrollerStyle, .overlay, "Collapsing must restore the plan's existing scrollbar style")
+        if let collapsedDocument = collapsedScroll.documentView {
+            XCTAssertNil(findLastAgent(in: collapsedDocument))
+        }
+        var short = refreshed
+        short.codexAgents = Array(agents.prefix(1))
+        short.codexAgentCount = 1
+        store.testReplacePreviewTasks([short])
+        store.toggleCodexGroup(task.id)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+        hosting.layoutSubtreeIfNeeded()
+        let shortViews = scrollViews(in: hosting)
+        XCTAssertEqual(shortViews.count, 1)
+        let shortScroll = try XCTUnwrap(shortViews.first)
+        XCTAssertEqual(shortScroll.scrollerStyle, .legacy)
+        if let shortIndicator = shortScroll.verticalScroller {
+            XCTAssertFalse(!shortIndicator.isHidden && shortIndicator.isEnabled && shortIndicator.knobProportion < 1,
+                           "The scrollbar must not draw a knob when the content fits")
+        }
     }
     #endif
 
