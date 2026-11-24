@@ -192,6 +192,7 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
         cache.apply(capture([], terminalIDs: [.opencode: ["one", "two"]]),
                     quality: .delayed, providers: [.opencode])
         XCTAssertTrue(cache.capacityExceeded)
+        XCTAssertTrue(cache.quarantinedEvidence(for: .opencode).gap)
         cache.apply(capture([], complete: [.opencode]), quality: .current, providers: [.opencode])
         XCTAssertTrue(cache.capacityExceeded, "A roster cannot recover which terminal signal was dropped")
         XCTAssertTrue(cache.uncertainProviders.contains(.opencode))
@@ -466,6 +467,26 @@ final class ExternalProviderRefreshCacheTests: XCTestCase {
                             reconciled: [.opencode: evidence.revision]), quality: .current, providers: [.opencode])
         XCTAssertFalse(cache.quarantinedEvidence(for: .opencode).gap)
         XCTAssertFalse(cache.uncertainProviders.contains(.opencode))
+    }
+
+    func testQuarantineOverflowReportsGapAndCannotConfirmDiscardedTask() throws {
+        var cache = ExternalProviderRefreshCache(maximumTasks: 2)
+        let generation = try XCTUnwrap(cache.beginReconnection(.opencode))
+        let first = task("one", .opencode), discarded = task("two", .opencode)
+        cache.apply(capture([first, discarded]), quality: .invalidated, providers: [.opencode])
+        let evidence = cache.quarantinedEvidence(for: .opencode)
+        XCTAssertTrue(cache.capacityExceeded)
+        XCTAssertTrue(evidence.gap)
+        XCTAssertEqual(evidence.tasks.count, 1)
+        let proof = ExternalProviderVerifiedTurn(id: "two", startKey: "turn-1")
+        cache.apply(capture([discarded], active: [.opencode: [proof]], complete: [.opencode],
+                            generations: [.opencode: generation], reconciled: [.opencode: evidence.revision]),
+                    quality: .current, providers: [.opencode])
+        let shown = try XCTUnwrap(cache.tasks.first { $0.id == "two" })
+        XCTAssertTrue(shown.isUnconfirmed)
+        XCTAssertFalse(shown.isActive)
+        XCTAssertTrue(cache.uncertainProviders.contains(.opencode))
+        XCTAssertTrue(cache.quarantinedEvidence(for: .opencode).gap)
     }
 
     func testLaterTerminalInvalidatesEarlierOrderingProofForSameID() throws {

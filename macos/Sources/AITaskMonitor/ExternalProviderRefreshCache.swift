@@ -105,7 +105,8 @@ struct ExternalProviderRefreshCache {
             tasks: quarantined.filter { $0.key.provider == provider }.map(\.value),
             terminalIDs: cross, currentTerminalIDs: current,
             terminalRevisions: (terminalRevisions[provider] ?? [:]).filter { pending.contains($0.key) },
-            gap: quarantinedGaps.contains(provider))
+            gap: quarantinedGaps.contains(provider) || quarantinedCapacityLimitedProviders.contains(provider) ||
+                terminalCapacityLimitedProviders.contains(provider))
     }
 
     init(maximumTasks: Int = 512, maximumTerminals: Int = 2_048) {
@@ -280,6 +281,7 @@ struct ExternalProviderRefreshCache {
                 }
             }
             for key in Array(uncertainTasks) where providers.contains(key.provider) && !uncertain.contains(key.provider) &&
+                !quarantinedCapacityLimitedProviders.contains(key.provider) &&
                 !terminalCapacityLimitedProviders.contains(key.provider) {
                 guard let old = retained[key] else { continue }
                 let incoming = grouped[key].flatMap { $0.count == 1 ? $0.first : nil }
@@ -353,7 +355,7 @@ struct ExternalProviderRefreshCache {
             let hasQuarantinedEvent = quarantined.keys.contains { $0.provider == key.provider && $0.id == key.id }
             let mustRetain = uncertainTasks.contains(key) || uncertain.contains(key.provider) ||
                 (pendingTerminalIDs[key.provider] ?? []).contains(key.id) || unprovenReconnect || hasQuarantinedEvent ||
-                terminalCapacityLimitedProviders.contains(key.provider)
+                quarantinedCapacityLimitedProviders.contains(key.provider) || terminalCapacityLimitedProviders.contains(key.provider)
             if mustRetain {
                 // Reuse old content when a later capture may refer to another
                 // turn with the same ID; never guess which turn it belongs to.
@@ -423,7 +425,8 @@ struct ExternalProviderRefreshCache {
                     $0.key.startKey == task.startKey && $0.key.generation == generation
             }
             if matches.values.contains(task) { continue }
-            guard retained.count + quarantined.count < maximumTasks else {
+            let quarantineLimit = max(1, maximumTasks / 2)
+            guard quarantined.count < quarantineLimit, retained.count + quarantined.count < maximumTasks else {
                 quarantinedCapacityLimitedProviders.insert(task.provider)
                 continue
             }
