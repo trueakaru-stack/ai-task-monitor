@@ -114,7 +114,7 @@ jobs:
             }
             $powershell=Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             if($env:AITM_TEST_PART -eq 'checks'){
-              $tests=@('Test-LocalReadOwner.ps1')
+              $tests=@('Test-LocalReadStartupFailure.ps1','Test-LocalReadOwner.ps1','Test-LocalSourceClient.ps1')
               foreach($test in $tests){
                 Write-Output ('Running '+$test)
                 Invoke-Isolated $powershell @('-NoProfile','-STA','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $source ('windows/tests/'+$test)))

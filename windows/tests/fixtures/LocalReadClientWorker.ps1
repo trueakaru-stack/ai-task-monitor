@@ -1,6 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$PipeName,[Parameter(Mandatory=$true)][int]$ParentId)
 $ErrorActionPreference='Stop'
-Add-Type -TypeDefinition @'
+try{Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
@@ -9,9 +9,17 @@ public static class SyntheticClientServerIdentity {
  public static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
 }
 '@
-$pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut)
+}catch{exit 110}
+try{$pipe=[IO.Pipes.NamedPipeClientStream]::new('.',$PipeName,[IO.Pipes.PipeDirection]::InOut)}catch{exit 111}
 try{
- $pipe.Connect(5000);$server=[uint32]0
+ try{$pipe.Connect(5000)}catch{
+  $failure=$_.Exception.GetBaseException()
+  if($failure -is [TimeoutException]){exit 112}
+  if($failure -is [UnauthorizedAccessException]){exit 113}
+  if($failure -is [IO.IOException]){exit 114}
+  exit 115
+ }
+ $server=[uint32]0
  if(-not [SyntheticClientServerIdentity]::GetNamedPipeServerProcessId($pipe.SafePipeHandle,[ref]$server) -or $server -ne [uint32]$ParentId){throw 'Unexpected synthetic owner.'}
  $reader=[IO.BinaryReader]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)
  $writer=[IO.BinaryWriter]::new($pipe,[Text.UTF8Encoding]::new($false,$true),$true)

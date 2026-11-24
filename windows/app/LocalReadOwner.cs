@@ -24,8 +24,8 @@ namespace AITaskMonitor.LocalReadOwner {
         public bool HasRequestStamp { get; private set; }
     }
 
-    // This transport is not connected to production sources yet. Its worker
-    // must not write source data, spawn processes, or print source content.
+    // The worker must not write source data, spawn processes, or print source
+    // content. The UI never waits for process startup or source reads.
     // The UI owns this object; all process, pipe and serialization work stays
     // on a background thread. The protocol accepts only bounded string arrays;
     // the owner copies them before another thread can read them.
@@ -46,6 +46,8 @@ namespace AITaskMonitor.LocalReadOwner {
         private int cleanupFailureCode;
         private string stage = "initializing", failureStage = "", failureKind = "";
         private int failureHResult;
+        private bool hasStartupExitCode;
+        private uint startupExitCode;
         private string pipeName;
         private int ownedProcessId;
         private NamedPipeServerStream pipe;
@@ -118,6 +120,8 @@ namespace AITaskMonitor.LocalReadOwner {
         public string FailureStage { get { lock (gate) return failureStage; } }
         public string FailureKind { get { lock (gate) return failureKind; } }
         public int FailureHResult { get { lock (gate) return failureHResult; } }
+        public bool HasStartupExitCode { get { lock (gate) return hasStartupExitCode; } }
+        public uint StartupExitCode { get { lock (gate) return startupExitCode; } }
 
         private void MarkStage(string value) { lock (gate) { stage = value; } }
 
@@ -236,10 +240,28 @@ namespace AITaskMonitor.LocalReadOwner {
                 if (Native.ResumeThread(child.ThreadHandle) != 1)
                     throw new InvalidOperationException("Worker resume failed.");
                 lock (gate) { beforeResume = false; }
-                MarkStage("wait-connection");
+                MarkStage("begin-connection");
                 IAsyncResult wait = server.BeginWaitForConnection(null, null);
-                int ready = WaitHandle.WaitAny(new WaitHandle[] { closingSignal, wait.AsyncWaitHandle }, 10000);
-                if (ready != 1) throw new InvalidOperationException("Worker connection unavailable.");
+                MarkStage("wait-connection");
+                var clock = Stopwatch.StartNew();
+                bool connected = false;
+                while (clock.ElapsedMilliseconds < 10000) {
+                    int remaining = (int)Math.Min(100, Math.Max(0, 10000 - clock.ElapsedMilliseconds));
+                    int ready = WaitHandle.WaitAny(new WaitHandle[] { closingSignal, wait.AsyncWaitHandle }, remaining);
+                    if (ready == 1) { connected = true; break; }
+                    if (ready == 0) { MarkStage("connection-closed"); throw new InvalidOperationException("Owner closed during connection."); }
+                    uint state = Native.WaitForSingleObject(child.ProcessHandle, 0);
+                    if (state == 0) {
+                        uint code;
+                        if (Native.GetExitCodeProcess(child.ProcessHandle, out code))
+                            lock (gate) { hasStartupExitCode = true; startupExitCode = code; }
+                        MarkStage("worker-exited-before-connection");
+                        throw new InvalidOperationException("Worker exited before connection.");
+                    }
+                    if (state != 258) { MarkStage("worker-state-unavailable"); throw new InvalidOperationException("Worker state unavailable."); }
+                }
+                if (!connected) { MarkStage("connection-timeout"); throw new InvalidOperationException("Worker connection timed out."); }
+                MarkStage("complete-connection");
                 server.EndWaitForConnection(wait);
                 MarkStage("verify-peer");
                 uint client;
@@ -404,6 +426,8 @@ namespace AITaskMonitor.LocalReadOwner {
         internal static extern uint ResumeThread(SafeFileHandle thread);
         [DllImport("kernel32.dll", SetLastError=true)]
         internal static extern uint WaitForSingleObject(SafeFileHandle handle, uint milliseconds);
+        [DllImport("kernel32.dll", SetLastError=true)]
+        internal static extern bool GetExitCodeProcess(SafeFileHandle handle, out uint exitCode);
         [DllImport("kernel32.dll", SetLastError=true)]
         private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
         [DllImport("kernel32.dll", SetLastError=true)]

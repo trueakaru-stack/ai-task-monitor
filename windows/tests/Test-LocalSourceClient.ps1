@@ -19,7 +19,8 @@ function Wait-SyntheticGate($owner,$gate,[string]$message){
  }
  throw ($message+'; stage='+$owner.Stage+'; failed_at='+$owner.FailureStage+'; kind='+$owner.FailureKind+
   '; hresult='+$owner.FailureHResult+'; polling='+$owner.IsPolling+'; pending='+$owner.HasPendingRequest+
-  '; worker_started='+($owner.OwnedProcessId -gt 0)+'; exited='+$owner.HasExited+'; cleanup_failed='+$owner.CleanupFailed)
+  '; worker_started='+($owner.OwnedProcessId -gt 0)+'; exited='+$owner.HasExited+
+  '; startup_exit_known='+$owner.HasStartupExitCode+'; startup_exit_code='+$owner.StartupExitCode+'; cleanup_failed='+$owner.CleanupFailed)
 }
 function Wait-Idle($owner){
  $deadline=[Diagnostics.Stopwatch]::StartNew()

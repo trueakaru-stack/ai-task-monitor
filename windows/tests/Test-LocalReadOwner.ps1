@@ -28,6 +28,7 @@ function Owner-Diagnostics($owner){
  return ('stage='+$owner.Stage+'; failed_at='+$owner.FailureStage+'; kind='+$owner.FailureKind+
   '; hresult='+$owner.FailureHResult+'; polling='+$owner.IsPolling+'; pending='+$owner.HasPendingRequest+
   '; has_result='+$owner.HasResult+'; worker='+$workerState+'; exited='+$owner.HasExited+
+  '; startup_exit_known='+$owner.HasStartupExitCode+'; startup_exit_code='+$owner.StartupExitCode+
   '; cleanup_failed='+$owner.CleanupFailed+'; cleanup_code='+$owner.CleanupFailureCode)
 }
 function Wait-SyntheticGate($owner,$gate,[string]$message,[int]$milliseconds=10000){
