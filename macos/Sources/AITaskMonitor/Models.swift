@@ -59,9 +59,35 @@ struct CodexAgentDetail: Identifiable, Codable, Equatable {
     var loopWarning: LoopWarning?
 }
 
-struct CodexFileIdentity: Codable, Equatable {
+struct CodexFileIdentity: Codable, Hashable {
     let device: UInt64
     let inode: UInt64
+}
+
+struct CompactTaskSelectionKey: Hashable {
+    let provider: TaskProvider
+    let id: String
+    let file: CodexFileIdentity?
+    let startKey: String
+}
+
+private struct CompactTaskSourceKey: Hashable {
+    let provider: TaskProvider
+    let id: String
+}
+
+struct CompactTaskDot: Identifiable {
+    struct ID: Hashable {
+        let key: CompactTaskSelectionKey
+        let occurrence: Int
+        let generation: UInt64?
+    }
+
+    let task: MonitoredTask
+    let occurrence: Int
+    let visibleIndex: Int
+    let generation: UInt64?
+    var id: ID { ID(key: task.compactSelectionKey, occurrence: occurrence, generation: generation) }
 }
 
 struct MonitoredTask: Identifiable, Codable, Equatable {
@@ -88,6 +114,10 @@ struct MonitoredTask: Identifiable, Codable, Equatable {
     var lastActivityIdentityConfirmed: Bool? = nil
     var lastActivityFileIdentity: CodexFileIdentity? = nil
     var usesDerivedCodexParentTitle: Bool? = nil
+
+    var compactSelectionKey: CompactTaskSelectionKey {
+        CompactTaskSelectionKey(provider: provider, id: id, file: lastActivityFileIdentity, startKey: startKey)
+    }
 
     func codexAgentCountLabel(includingStatus: Bool) -> String? {
         guard let count = codexAgentCount, count > 0 else { return nil }
@@ -179,23 +209,29 @@ struct TaskFocusTracker {
         priorities[id] = nextPriority
     }
 
-    mutating func reconcile(current: [MonitoredTask], previous: [MonitoredTask], selectedID: String?, monitoringStartedAt: Date = .distantFuture) -> (tasks: [MonitoredTask], selectedID: String?) {
-        let previousByID = Dictionary(previous.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+    mutating func reconcile(current: [MonitoredTask], previous: [MonitoredTask], selectedID: String?, monitoringStartedAt: Date = .distantFuture,
+                            selectableKeys: Set<CompactTaskSelectionKey>? = nil) -> (tasks: [MonitoredTask], selectedID: String?) {
+        let previousBySource = Dictionary(grouping: previous, by: { CompactTaskSourceKey(provider: $0.provider, id: $0.id) })
         let present = Set(current.map(\.id))
         priorities = priorities.filter { present.contains($0.key) }
         let activated = current.filter { task in
             let recentlyObserved = (task.isUnconfirmed || task.isWaiting) && !task.startKey.isEmpty && task.startedAt >= monitoringStartedAt
             guard task.isActive || recentlyObserved else { return false }
-            guard let old = previousByID[task.id] else { return true }
-            let newTurn = !task.startKey.isEmpty && task.startKey != old.startKey
-            let becameActive = task.isActive && !old.isActive && (task.startKey.isEmpty || old.startKey.isEmpty)
-            return newTurn || becameActive
+            guard let sameSource = previousBySource[CompactTaskSourceKey(provider: task.provider, id: task.id)] else { return true }
+            let sameFile = task.lastActivityFileIdentity.map { file in
+                sameSource.filter { $0.lastActivityFileIdentity == file }
+            } ?? []
+            let candidates = sameFile.isEmpty ? sameSource : sameFile
+            if task.startKey.isEmpty {
+                return task.isActive && candidates.allSatisfy { !$0.isActive }
+            }
+            return !candidates.contains { $0.startKey == task.startKey }
         }.sorted { left, right in
             let leftStart = left.startedAt == .distantPast ? left.updatedAt : left.startedAt
             let rightStart = right.startedAt == .distantPast ? right.updatedAt : right.startedAt
             return leftStart == rightStart ? left.id < right.id : leftStart < rightStart
         }
-        for task in activated {
+        for task in activated where selectableKeys?.contains(task.compactSelectionKey) ?? true {
             nextPriority += 1
             priorities[task.id] = nextPriority
         }
@@ -207,8 +243,8 @@ struct TaskFocusTracker {
             if left.updatedAt != right.updatedAt { return left.updatedAt > right.updatedAt }
             return left.id < right.id
         }
-        let visible = ordered.prefix(3)
-        let requested = activated.last?.id ?? selectedID
+        let visible = ordered.filter { selectableKeys?.contains($0.compactSelectionKey) ?? true }.prefix(3)
+        let requested = activated.last(where: { selectableKeys?.contains($0.compactSelectionKey) ?? true })?.id ?? selectedID
         let selected = requested.flatMap { id in visible.contains { $0.id == id } ? id : nil } ?? visible.first?.id
         return (ordered, selected)
     }

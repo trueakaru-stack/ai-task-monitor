@@ -103,7 +103,7 @@ final class CodexGroupingVisualTests: XCTestCase {
                     XCTAssertEqual(store.isCodexGroupExpanded(rootID), disclosureOpen)
                     XCTAssertEqual(store.count(for: .all), demo ? 2 : 1)
                     XCTAssertEqual(store.tasks[selected].provider, selected == 1 ? .claude : .codex)
-                    let size = compact ? NSSize(width: 372, height: disclosureOpen ? 340 : 182) : NSSize(width: 560, height: 700)
+                    let size = compact ? NSSize(width: 372, height: 182) : NSSize(width: 560, height: 700)
                     let view = RootView().environmentObject(store).environment(\.colorScheme, dark ? .dark : .light)
                     let hosting = NSHostingView(rootView: view)
                     hosting.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
