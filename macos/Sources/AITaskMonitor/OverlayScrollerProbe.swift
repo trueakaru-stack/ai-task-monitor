@@ -17,7 +17,7 @@ struct OverlayScrollerProbe: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ view: Probe, coordinator: ()) {
-        view.restoreSavedScroller()
+        view.stopObservingAndRestore()
     }
 
     final class TracklessScroller: NSScroller {
@@ -35,6 +35,7 @@ struct OverlayScrollerProbe: NSViewRepresentable {
         private var scrollerStyleObservation: NSKeyValueObservation?
         private weak var savedScrollView: NSScrollView?
         private var savedScroller: ScrollerState?
+        private var dismantled = false
 
         private struct ScrollerState {
             let scroller: NSScroller?
@@ -67,6 +68,7 @@ struct OverlayScrollerProbe: NSViewRepresentable {
         }
 
         func configure() {
+            guard !dismantled else { return }
             guard let scrollView = enclosingScrollView else {
                 restoreSavedScroller()
                 scrollerStyleObservation = nil
@@ -97,6 +99,13 @@ struct OverlayScrollerProbe: NSViewRepresentable {
                 restoreSavedScroller()
                 if scrollView.scrollerStyle != .overlay { scrollView.scrollerStyle = .overlay }
             }
+        }
+
+        func stopObservingAndRestore() {
+            dismantled = true
+            scrollerStyleObservation = nil
+            observedScrollView = nil
+            restoreSavedScroller()
         }
 
         func restoreSavedScroller() {

@@ -253,6 +253,46 @@ final class CodexGroupingVisualTests: XCTestCase {
                            "The scrollbar must not draw a knob when the content fits")
         }
     }
+
+    @MainActor
+    func testScrollerDismantleDoesNotReapplyQueuedStyleChange() throws {
+        guard ProcessInfo.processInfo.environment["AITM_SYNTHETIC_REQUIRED"] == "1" else {
+            throw XCTSkip("Requires the isolated hosted runner")
+        }
+        _ = try claudeSyntheticDirectory(prefix: "aitm-agent-detach-")
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 320, height: 120))
+        let document = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 500))
+        scroll.documentView = document
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = false
+        scroll.scrollerStyle = .overlay
+        let probe = OverlayScrollerProbe.Probe(frame: .zero, alwaysVisible: false, restoresOriginalScroller: true)
+        document.addSubview(probe)
+        probe.configure()
+        let original = try XCTUnwrap(scroll.verticalScroller)
+        let originalStyle = scroll.scrollerStyle
+        let originalHasScroller = scroll.hasVerticalScroller
+        let originalAutohides = scroll.autohidesScrollers
+        XCTAssertEqual(originalStyle, .overlay)
+        probe.alwaysVisible = true
+        probe.configure()
+        XCTAssertEqual(scroll.scrollerStyle, .legacy)
+        XCTAssertTrue(scroll.verticalScroller is OverlayScrollerProbe.TracklessScroller)
+        OverlayScrollerProbe.dismantleNSView(probe, coordinator: ())
+        let queueDrained = expectation(description: "queued scroller observation has run")
+        DispatchQueue.main.async { queueDrained.fulfill() }
+        wait(for: [queueDrained], timeout: 3)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertTrue(scroll.verticalScroller === original)
+        XCTAssertEqual(scroll.scrollerStyle, originalStyle)
+        XCTAssertEqual(scroll.hasVerticalScroller, originalHasScroller)
+        XCTAssertEqual(scroll.autohidesScrollers, originalAutohides)
+        probe.removeFromSuperview()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertTrue(scroll.verticalScroller === original)
+        XCTAssertEqual(scroll.scrollerStyle, originalStyle)
+    }
     #endif
 
     @MainActor

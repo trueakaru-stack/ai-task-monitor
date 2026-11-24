@@ -509,7 +509,7 @@ jobs:
         run: |
           set -euo pipefail
           task_policy="$AITM_TEST_CONTROL_ROOT/profile-offline.sb"
-          for test in testExpandedAgentsFollowStepAndReturnToTitleWhenPlanCannotBeConfirmed testExpandedAgentsSharePlanScrollerAndCanReachTheEnd; do
+          for test in testExpandedAgentsFollowStepAndReturnToTitleWhenPlanCannotBeConfirmed testExpandedAgentsSharePlanScrollerAndCanReachTheEnd testScrollerDismantleDoesNotReapplyQueuedStyleChange; do
             log="$AITM_TEST_TASK_ROOT/agent-placement-$test.log"
             AITM_TEST_UI_EVENT=1 AITM_TEST_SANDBOX_POLICY="$task_policy" "$AITM_TEST_CONTROL_ROOT/run-isolated" "$DEVELOPER_DIR/usr/bin/xctest" -XCTest "AITaskMonitorTests.CodexGroupingVisualTests/$test" "$AITM_TEST_BIN/AITaskMonitorPackageTests.xctest" 2>&1 | tee "$log"
             if grep -Eiq 'Test Case .* skipped|[1-9][0-9]* tests? skipped' "$log"; then echo "Agent placement test skipped: $test" >&2; exit 1; fi
